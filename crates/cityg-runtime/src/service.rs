@@ -6,7 +6,7 @@ use std::{
 use ciborium::ser::into_writer;
 use cityg_client::{CityGError, ClientEpochBundle};
 use cityg_server::{
-    BarrierJoinLeafRecord, BarrierPublicTreeSnapshot, CityGServer,
+    BarrierJoinLeafRecord, BarrierPublicTreeSnapshot, BarrierRevokedLeafRecord, CityGServer,
     JoinProvisioningAuthorityArtifacts, JoinTicketBundle, MergeAcceptanceRecord, MergeTicketBundle,
     MergeTicketIntent, ResolvedJoins, ResolvedRevokedLeaves, ServerOutcome,
 };
@@ -382,7 +382,7 @@ impl RoomBarrierHelperPreparationError {
 #[derive(Clone, Debug)]
 pub struct PreparedResolvedRevokedLeaves {
     pub resolved: ResolvedRevokedLeaves,
-    pub page: BarrierPage<u32>,
+    pub page: BarrierPage<BarrierRevokedLeafRecord>,
     pub helper_completeness_attestation: Vec<u8>,
     pub barrier: PreparedBarrierEnvelope,
 }
@@ -1206,18 +1206,19 @@ pub fn prepare_resolved_revoked_leaves(
 ) -> Result<PreparedResolvedRevokedLeaves, RoomBarrierHelperPreparationError> {
     let resolved = server.resolve_revoked_leaf_indices(gid, revocation_roots_hash)?;
     let page = paginate_barrier_helper_slice(
-        resolved.leaf_indices.as_slice(),
+        resolved.records.as_slice(),
         page_offset,
         max_entries,
         max_page_entries,
     )?;
-    let helper_completeness_attestation = server.helper_completeness_attestation_revoked_bytes(
-        &resolved.history_commitment,
-        revocation_roots_hash,
-        page.page_offset,
-        page.total_entries,
-        page.items.as_slice(),
-    )?;
+    let helper_completeness_attestation =
+        server.helper_completeness_attestation_revoked_records_bytes(
+            &resolved.history_commitment,
+            revocation_roots_hash,
+            page.page_offset,
+            page.total_entries,
+            page.items.as_slice(),
+        )?;
     let barrier = prepare_current_barrier_envelope(
         server,
         gid,

@@ -1,7 +1,8 @@
 use std::error::Error as StdError;
 
 use cityg_api_client::{
-    BarrierJoinRecord, GlobalHistoryAttestation, HelperCompletenessAttestation,
+    BarrierJoinRecord, BarrierRevokedLeafRecord, GlobalHistoryAttestation,
+    HelperCompletenessAttestation,
     HistoryAuthorityDescriptor, HistoryCommitment,
     parse_fetch_public_tree_completeness_attestation_bytes, parse_global_history_attestation_bytes,
     parse_history_authority_descriptor_bytes, parse_joins_since_completeness_attestation_bytes,
@@ -79,7 +80,7 @@ struct HelperCompletenessSignedPayload<'a, T> {
 struct RevokedLeavesSelector<'a> {
     #[serde(with = "serde_bytes")]
     revocation_roots_hash: &'a [u8; 32],
-    leaf_indices: &'a [u32],
+    records: &'a [BarrierRevokedLeafRecord],
 }
 
 #[derive(Serialize)]
@@ -245,7 +246,16 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         2,
         RevokedLeavesSelector {
             revocation_roots_hash: &[0xDD; 32],
-            leaf_indices: &[1, 7],
+            records: &[
+                BarrierRevokedLeafRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                },
+                BarrierRevokedLeafRecord {
+                    leaf_index: 7,
+                    slot_generation: 2,
+                },
+            ],
         },
     )?;
     let revoked_attestation =
@@ -266,7 +276,16 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         &[0xDD; 32],
         0,
         2,
-        &[1, 7],
+        &[
+            BarrierRevokedLeafRecord {
+                leaf_index: 1,
+                slot_generation: 0,
+            },
+            BarrierRevokedLeafRecord {
+                leaf_index: 7,
+                slot_generation: 2,
+            },
+        ],
     )?;
 
     let join_record = BarrierJoinRecord {

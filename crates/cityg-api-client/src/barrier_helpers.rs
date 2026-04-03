@@ -327,7 +327,7 @@ impl CitygApiClient {
         let mut expected_authority: Option<HistoryAuthorityDescriptor> = None;
         let mut expected_global_attestation: Option<GlobalHistoryAttestation> = None;
         let mut expected_deployment_profile_manifest: Option<Vec<u8>> = None;
-        let mut leaf_indices = Vec::new();
+        let mut records = Vec::new();
 
         loop {
             let request = BarrierResolveRevokedLeavesRequest {
@@ -344,7 +344,7 @@ impl CitygApiClient {
                     "barrier helper pagination page_offset mismatch".to_string(),
                 ));
             }
-            if response.leaf_indices.len() > MAX_BARRIER_HELPER_PAGE_ENTRIES as usize {
+            if response.records.len() > MAX_BARRIER_HELPER_PAGE_ENTRIES as usize {
                 return Err(Error::Parse(
                     "barrier helper pagination page too large".to_string(),
                 ));
@@ -375,6 +375,23 @@ impl CitygApiClient {
                 &history_authority,
                 "revoked leaves response",
             )?;
+            let page_records = response
+                .records
+                .iter()
+                .map(|record| BarrierRevokedLeafRecord {
+                    leaf_index: record.leaf_index,
+                    slot_generation: record.slot_generation,
+                })
+                .collect::<Vec<_>>();
+            let page_leaf_indices = page_records
+                .iter()
+                .map(|record| record.leaf_index)
+                .collect::<Vec<_>>();
+            if !response.leaf_indices.is_empty() && response.leaf_indices != page_leaf_indices {
+                return Err(Error::Parse(
+                    "revoked leaves response leaf_indices mismatch with records".to_string(),
+                ));
+            }
             let global_history_attestation = match history_authority.as_ref() {
                 Some(authority) => {
                     let attestation = parse_global_history_attestation_bytes(
@@ -445,7 +462,7 @@ impl CitygApiClient {
                     revocation_roots_hash,
                     response.page_offset,
                     response.total_entries,
-                    response.leaf_indices.as_slice(),
+                    page_records.as_slice(),
                 )?;
             }
             let total_entries = parse_barrier_helper_total_entries(response.total_entries)?;
@@ -500,7 +517,7 @@ impl CitygApiClient {
                 }
                 _ => {}
             }
-            leaf_indices.extend(response.leaf_indices);
+            records.extend(page_records);
             match response.next_page_offset {
                 Some(next_page_offset) => {
                     if next_page_offset <= page_offset
@@ -508,7 +525,7 @@ impl CitygApiClient {
                             Error::Parse(
                                 "barrier helper pagination next_page_offset overflow".to_string(),
                             )
-                        })? != leaf_indices.len()
+                        })? != records.len()
                     {
                         return Err(Error::Parse(
                             "barrier helper pagination next_page_offset mismatch".to_string(),
@@ -524,17 +541,20 @@ impl CitygApiClient {
             expected_history.ok_or_else(|| {
                 Error::Parse("barrier helper pagination missing first page".to_string())
             })?;
-        if leaf_indices.len() != total_entries {
+        if records.len() != total_entries {
             return Err(Error::Parse(
                 "barrier helper pagination truncated revoked leaves".to_string(),
             ));
         }
+        let mut leaf_indices = records.iter().map(|record| record.leaf_index).collect::<Vec<_>>();
+        leaf_indices.dedup();
         Ok(BarrierResolvedRevokedLeaves {
             history_view_id,
             history_commitment,
             history_authority_extension: expected_extension,
             history_authority: expected_authority,
             global_history_attestation: expected_global_attestation,
+            records,
             leaf_indices,
         })
     }

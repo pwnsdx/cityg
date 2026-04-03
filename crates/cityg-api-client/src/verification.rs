@@ -10,8 +10,9 @@ use pqcrypto_dilithium::dilithium5;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BarrierJoinRecord, EXPECTED_MSPHF_CRS_ID, EXPECTED_MSPHF_PARAMS_ID, EXPECTED_PROFILE_VERSION,
-    EXPECTED_PROOF_MODE, EXPECTED_VRF_ID, Error, FsForwardLeapPolicy, FullVerificationWitness,
+    BarrierJoinRecord, BarrierRevokedLeafRecord, EXPECTED_MSPHF_CRS_ID,
+    EXPECTED_MSPHF_PARAMS_ID, EXPECTED_PROFILE_VERSION, EXPECTED_PROOF_MODE, EXPECTED_VRF_ID,
+    Error, FsForwardLeapPolicy, FullVerificationWitness,
     GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND, GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
     GlobalHistoryAttestation, HELPER_KIND_FETCH_PUBLIC_TREE, HELPER_KIND_JOINS_SINCE,
     HELPER_KIND_REVOKED_LEAVES, HelperCompletenessAttestation, HistoryAuthorityDescriptor,
@@ -411,7 +412,7 @@ pub(crate) struct HelperCompletenessSignedPayload<'a, T> {
 pub(crate) struct RevokedLeavesSelector<'a> {
     #[serde(with = "serde_bytes")]
     pub(crate) revocation_roots_hash: &'a [u8; 32],
-    pub(crate) leaf_indices: &'a [u32],
+    pub(crate) records: &'a [BarrierRevokedLeafRecord],
 }
 
 #[derive(Serialize)]
@@ -1345,7 +1346,7 @@ pub fn verify_revoked_leaves_completeness_attestation(
     revocation_roots_hash: &[u8; 32],
     page_offset: u32,
     total_entries: u32,
-    leaf_indices: &[u32],
+    records: &[BarrierRevokedLeafRecord],
 ) -> Result<(), Error> {
     let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
         label: "cityg/helper-completeness-attestation-v1",
@@ -1357,7 +1358,7 @@ pub fn verify_revoked_leaves_completeness_attestation(
         total_entries,
         selector: RevokedLeavesSelector {
             revocation_roots_hash,
-            leaf_indices,
+            records,
         },
     })?;
     verify_ml_dsa_signature(

@@ -493,10 +493,18 @@ struct HistoryAuthorityState {
 }
 
 /// Revoked leaf enumeration bound to one authenticated history commitment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BarrierRevokedLeafRecord {
+    pub leaf_index: u32,
+    pub slot_generation: u64,
+}
+
+/// Revoked leaf enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRevokedLeaves {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub records: Vec<BarrierRevokedLeafRecord>,
     pub leaf_indices: Vec<u32>,
 }
 
@@ -2895,14 +2903,33 @@ impl CityGServer {
             ));
         }
         let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
-        let mut indices: Vec<u32> = committed_revoked_cover_leaf_indices(state)
-            .into_iter()
-            .collect();
+        let mut records: Vec<BarrierRevokedLeafRecord> = if !state.revoked_slot_leases.is_empty() {
+            state.revoked_slot_leases
+                .values()
+                .map(|lease| BarrierRevokedLeafRecord {
+                    leaf_index: lease.slot_index,
+                    slot_generation: lease.slot_generation,
+                })
+                .collect()
+        } else {
+            state
+                .revoked
+                .iter()
+                .map(|leaf| BarrierRevokedLeafRecord {
+                    leaf_index: revoked_cover_leaf_index(state, leaf),
+                    slot_generation: 0,
+                })
+                .collect()
+        };
+        records.sort_by_key(|record| (record.leaf_index, record.slot_generation));
+        records.dedup();
+        let mut indices: Vec<u32> = records.iter().map(|record| record.leaf_index).collect();
         indices.sort_unstable();
         indices.dedup();
         Ok(ResolvedRevokedLeaves {
             history_view_id: history_commitment.history_view_id,
             history_commitment,
+            records,
             leaf_indices: indices,
         })
     }
@@ -3214,6 +3241,27 @@ impl CityGServer {
             page_offset,
             total_entries,
             leaf_indices,
+        )
+    }
+
+    pub fn helper_completeness_attestation_revoked_records_bytes(
+        &self,
+        history_commitment: &HistoryCommitment,
+        revocation_roots_hash: &[u8; 32],
+        page_offset: u32,
+        total_entries: u32,
+        records: &[BarrierRevokedLeafRecord],
+    ) -> Result<Vec<u8>, CityGError> {
+        let Some(authority) = self.history_authority.as_ref() else {
+            return Ok(Vec::new());
+        };
+        encode_helper_completeness_attestation_revoked_records(
+            authority,
+            history_commitment,
+            revocation_roots_hash,
+            page_offset,
+            total_entries,
+            records,
         )
     }
 
@@ -3958,6 +4006,13 @@ struct RevokedLeavesSelector<'a> {
 }
 
 #[derive(Serialize)]
+struct RevokedLeafRecordsSelector<'a> {
+    #[serde(with = "serde_bytes")]
+    revocation_roots_hash: &'a [u8; 32],
+    records: &'a [BarrierRevokedLeafRecord],
+}
+
+#[derive(Serialize)]
 struct JoinsSinceSelector<'a> {
     prev_barrier_version: u64,
     records: &'a [BarrierJoinLeafRecord],
@@ -4631,6 +4686,36 @@ fn encode_helper_completeness_attestation_revoked(
         selector: RevokedLeavesSelector {
             revocation_roots_hash,
             leaf_indices,
+        },
+    })?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&HelperCompletenessAttestationWire(
+        state.descriptor.scope_id.to_vec(),
+        helper_kind.to_string(),
+        signature,
+    ))?)
+}
+
+fn encode_helper_completeness_attestation_revoked_records(
+    state: &HistoryAuthorityState,
+    history_commitment: &HistoryCommitment,
+    revocation_roots_hash: &[u8; 32],
+    page_offset: u32,
+    total_entries: u32,
+    records: &[BarrierRevokedLeafRecord],
+) -> Result<Vec<u8>, CityGError> {
+    let helper_kind = "resolve_revoked_leaves";
+    let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
+        label: "cityg/helper-completeness-attestation-v1",
+        scope_id: &state.descriptor.scope_id,
+        helper_kind,
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        page_offset,
+        total_entries,
+        selector: RevokedLeafRecordsSelector {
+            revocation_roots_hash,
+            records,
         },
     })?;
     let signature = sign_history_authority_message(state, payload.as_slice())?;

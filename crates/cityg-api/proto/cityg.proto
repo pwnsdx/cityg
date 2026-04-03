@@ -355,6 +355,13 @@ message BarrierResolveRevokedLeavesResponse {
   uint64 max_barrier_update_bytes = 13;
   optional FsForwardLeapPolicy fs_forward_leap_policy = 14;
   bytes deployment_profile_manifest = 15;
+  repeated BarrierRevokedLeafRecord records = 16;
+}
+
+message BarrierRevokedLeafRecord {
+  reserved 1000 to 1999;
+  uint32 leaf_index = 1;
+  uint64 slot_generation = 2;
 }
 
 message BarrierJoinLeafRecord {

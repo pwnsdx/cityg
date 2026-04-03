@@ -534,6 +534,13 @@ pub fn to_core_join_snapshot_records(
         .collect()
 }
 
+/// Revoked slot occupancy returned by barrier revocation enumeration endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BarrierRevokedLeafRecord {
+    pub leaf_index: u32,
+    pub slot_generation: u64,
+}
+
 /// Revoked-leaf response bound to a specific authenticated history view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierResolvedRevokedLeaves {
@@ -542,6 +549,7 @@ pub struct BarrierResolvedRevokedLeaves {
     pub history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
+    pub records: Vec<BarrierRevokedLeafRecord>,
     pub leaf_indices: Vec<u32>,
 }
 
@@ -2492,7 +2500,16 @@ mod tests {
             "/v1/barrier/resolve_revoked_leaves" => {
                 let request = BarrierResolveRevokedLeavesRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveRevokedLeavesRequest::default());
-                let all = [1u32, 7u32];
+                let all = [
+                    pb::BarrierRevokedLeafRecord {
+                        leaf_index: 1,
+                        slot_generation: 0,
+                    },
+                    pb::BarrierRevokedLeafRecord {
+                        leaf_index: 7,
+                        slot_generation: 3,
+                    },
+                ];
                 let (start, end, next_page_offset) = page_bounds(request.page_offset, all.len(), 1);
                 let history_commitment = HistoryCommitment {
                     history_view_id: [0xD1; 32],
@@ -2512,7 +2529,14 @@ mod tests {
                     1_048_576,
                     &fs_forward_leap_policy,
                 );
-                let page_leaf_indices = all[start..end].to_vec();
+                let page_records = all[start..end].to_vec();
+                let page_records_core = page_records
+                    .iter()
+                    .map(|record| BarrierRevokedLeafRecord {
+                        leaf_index: record.leaf_index,
+                        slot_generation: record.slot_generation,
+                    })
+                    .collect::<Vec<_>>();
                 let helper_completeness_attestation = build_test_helper_completeness_attestation(
                     &authority,
                     HELPER_KIND_REVOKED_LEAVES,
@@ -2521,11 +2545,12 @@ mod tests {
                     u32::try_from(all.len()).unwrap_or(u32::MAX),
                     RevokedLeavesSelector {
                         revocation_roots_hash: &[0xCC; 32],
-                        leaf_indices: page_leaf_indices.as_slice(),
+                        records: page_records_core.as_slice(),
                     },
                 );
                 encode_proto(BarrierResolveRevokedLeavesResponse {
-                    leaf_indices: page_leaf_indices,
+                    leaf_indices: page_records.iter().map(|record| record.leaf_index).collect(),
+                    records: page_records,
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
                     history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
@@ -3659,6 +3684,19 @@ mod tests {
             .await?;
         assert_eq!(revoked.history_view_id, [0xD1; 32]);
         assert_eq!(revoked.history_commitment.history_commitment_id, [0xE1; 32]);
+        assert_eq!(
+            revoked.records,
+            vec![
+                BarrierRevokedLeafRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                },
+                BarrierRevokedLeafRecord {
+                    leaf_index: 7,
+                    slot_generation: 3,
+                }
+            ]
+        );
         assert_eq!(revoked.leaf_indices, vec![1, 7]);
         let joins = client
             .barrier_resolve_joins_since(
@@ -4568,6 +4606,16 @@ mod tests {
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
                         leaf_indices: vec![1, 2],
+                        records: vec![
+                            pb::BarrierRevokedLeafRecord {
+                                leaf_index: 1,
+                                slot_generation: 0,
+                            },
+                            pb::BarrierRevokedLeafRecord {
+                                leaf_index: 2,
+                                slot_generation: 0,
+                            },
+                        ],
                         history_view_id: vec![0xD1; 32],
                         history_commitment: Some(history_commitment_ok_payload(
                             0xD1, 0xE1, 0x00, 7,
@@ -4717,6 +4765,16 @@ mod tests {
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
                         leaf_indices: vec![1, 2],
+                        records: vec![
+                            pb::BarrierRevokedLeafRecord {
+                                leaf_index: 1,
+                                slot_generation: 0,
+                            },
+                            pb::BarrierRevokedLeafRecord {
+                                leaf_index: 2,
+                                slot_generation: 0,
+                            },
+                        ],
                         history_view_id: vec![0xD1; 32],
                         history_commitment: Some(history_commitment_ok_payload(
                             0xD1, 0xE1, 0x00, 7,
@@ -4794,6 +4852,16 @@ mod tests {
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
                         leaf_indices: vec![1, 2],
+                        records: vec![
+                            pb::BarrierRevokedLeafRecord {
+                                leaf_index: 1,
+                                slot_generation: 0,
+                            },
+                            pb::BarrierRevokedLeafRecord {
+                                leaf_index: 2,
+                                slot_generation: 0,
+                            },
+                        ],
                         history_view_id: vec![0xD1; 32],
                         history_commitment: Some(history_commitment_ok_payload(
                             0xD1, 0xE1, 0x00, 7,
@@ -4880,7 +4948,10 @@ mod tests {
             2,
             RevokedLeavesSelector {
                 revocation_roots_hash: &[0xCC; 32],
-                leaf_indices: &[1],
+                records: &[BarrierRevokedLeafRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                }],
             },
         );
         let helper_attestation_page_1 = build_test_helper_completeness_attestation(
@@ -4891,7 +4962,10 @@ mod tests {
             2,
             RevokedLeavesSelector {
                 revocation_roots_hash: &[0xCC; 32],
-                leaf_indices: &[2],
+                records: &[BarrierRevokedLeafRecord {
+                    leaf_index: 2,
+                    slot_generation: 0,
+                }],
             },
         );
         let page = Arc::new(AtomicUsize::new(0));
@@ -4909,6 +4983,7 @@ mod tests {
                 async move {
                     let call_index = page.fetch_add(1, Ordering::SeqCst);
                     let (
+                        records,
                         leaf_indices,
                         page_offset,
                         next_page_offset,
@@ -4917,6 +4992,10 @@ mod tests {
                         helper_completeness_attestation,
                     ) = if call_index == 0 {
                         (
+                            vec![pb::BarrierRevokedLeafRecord {
+                                leaf_index: 1,
+                                slot_generation: 0,
+                            }],
                             vec![1],
                             0,
                             Some(1),
@@ -4926,6 +5005,10 @@ mod tests {
                         )
                     } else {
                         (
+                            vec![pb::BarrierRevokedLeafRecord {
+                                leaf_index: 2,
+                                slot_generation: 0,
+                            }],
                             vec![2],
                             1,
                             None,
@@ -4936,6 +5019,7 @@ mod tests {
                     };
                     encode_proto(BarrierResolveRevokedLeavesResponse {
                         leaf_indices,
+                        records,
                         history_view_id: vec![0xD1; 32],
                         history_commitment: Some(history_commitment_ok_payload(
                             0xD1, 0xE1, 0x00, 7,

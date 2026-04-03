@@ -22,6 +22,7 @@ use cityg_runtime::{
 };
 use cityg_server::{
     BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord,
+    BarrierRevokedLeafRecord as ServerBarrierRevokedLeafRecord,
     FsForwardLeapPolicy as ServerFsForwardLeapPolicy, HistoryCommitment as ServerHistoryCommitment,
     MergeAcceptanceStatus as ServerMergeAcceptanceStatus,
 };
@@ -255,7 +256,12 @@ pub fn encode_prepared_resolved_revoked_leaves_response(
     } = barrier;
 
     let response = pb::BarrierResolveRevokedLeavesResponse {
-        leaf_indices: page.items,
+        leaf_indices: page.items.iter().map(|record| record.leaf_index).collect(),
+        records: page
+            .items
+            .into_iter()
+            .map(pb_barrier_revoked_leaf_record)
+            .collect(),
         history_view_id: resolved.history_view_id.to_vec(),
         history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
         page_offset: page.page_offset,
@@ -504,6 +510,15 @@ fn pb_barrier_join_leaf_record(record: ServerBarrierJoinLeafRecord) -> pb::Barri
         device_pk: record.device_pk,
         leaf_index: record.leaf_index,
         ek_leaf: record.ek_leaf,
+        slot_generation: record.slot_generation,
+    }
+}
+
+fn pb_barrier_revoked_leaf_record(
+    record: ServerBarrierRevokedLeafRecord,
+) -> pb::BarrierRevokedLeafRecord {
+    pb::BarrierRevokedLeafRecord {
+        leaf_index: record.leaf_index,
         slot_generation: record.slot_generation,
     }
 }
@@ -2754,6 +2769,70 @@ mod tests {
         assert_eq!(merge.pending_barrier_version, 31);
         assert_eq!(merge.pending_barrier_update_digest, [0x32; 32]);
         assert_eq!(merge.pending_we_epoch_id, [0x33; 32]);
+    }
+
+    #[test]
+    fn encode_resolved_revoked_leaves_response_carries_versioned_records() {
+        let history_commitment = cityg_server::HistoryCommitment {
+            history_view_id: [0x11; 32],
+            history_commitment_id: [0x12; 32],
+            prev_history_commitment_id: [0x13; 32],
+            history_seq: 14,
+        };
+        let encoded = encode_prepared_resolved_revoked_leaves_response(
+            PreparedResolvedRevokedLeaves {
+                resolved: cityg_server::ResolvedRevokedLeaves {
+                    history_view_id: [0x11; 32],
+                    history_commitment,
+                    records: vec![
+                        cityg_server::BarrierRevokedLeafRecord {
+                            leaf_index: 5,
+                            slot_generation: 2,
+                        },
+                        cityg_server::BarrierRevokedLeafRecord {
+                            leaf_index: 7,
+                            slot_generation: 4,
+                        },
+                    ],
+                    leaf_indices: vec![5, 7],
+                },
+                page: cityg_runtime::BarrierPage {
+                    items: vec![cityg_server::BarrierRevokedLeafRecord {
+                        leaf_index: 7,
+                        slot_generation: 4,
+                    }],
+                    page_offset: 1,
+                    next_page_offset: None,
+                    total_entries: 2,
+                },
+                helper_completeness_attestation: vec![0x31, 0x32],
+                barrier: PreparedBarrierEnvelope {
+                    history_authority_descriptor: vec![0x41],
+                    global_history_attestation: vec![0x42],
+                    history_authority_extension: "global-history-authority-v1".to_string(),
+                    n_max: 8,
+                    max_barrier_update_bytes: 1_048_576,
+                    fs_forward_leap_policy: cityg_server::FsForwardLeapPolicy {
+                        h: 300,
+                        checkpoint_interval: 3600,
+                        slack_anchor: 10,
+                        slack_first_device: 20,
+                        slack_device: 30,
+                    },
+                    deployment_profile_manifest: vec![0x43],
+                },
+            },
+        );
+        let decoded = pb::BarrierResolveRevokedLeavesResponse::decode(encoded.as_slice())
+            .expect("decode revoked helper response");
+
+        assert_eq!(decoded.leaf_indices, vec![7]);
+        assert_eq!(decoded.records.len(), 1);
+        assert_eq!(decoded.records[0].leaf_index, 7);
+        assert_eq!(decoded.records[0].slot_generation, 4);
+        assert_eq!(decoded.page_offset, 1);
+        assert_eq!(decoded.total_entries, 2);
+        assert_eq!(decoded.helper_completeness_attestation, vec![0x31, 0x32]);
     }
 
     #[test]
