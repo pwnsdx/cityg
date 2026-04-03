@@ -217,21 +217,6 @@ pub(super) async fn expect_message_event(
     .await?
 }
 
-pub(super) fn websocket_url(server_url: &str, gid: &[u8; 32], leaf_id: &[u8; 32]) -> String {
-    let base = if let Some(rest) = server_url.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = server_url.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else {
-        format!("ws://{server_url}")
-    };
-    format!(
-        "{base}/v1/ws?gid={}&leaf_id={}",
-        hex::encode(gid),
-        hex::encode(leaf_id)
-    )
-}
-
 impl Notification {
     pub(super) fn from_json(value: &JsonValue) -> Option<Self> {
         let event_type = value.get("type")?.as_str()?;

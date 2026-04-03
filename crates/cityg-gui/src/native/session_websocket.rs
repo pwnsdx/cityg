@@ -2,6 +2,7 @@ use futures::{StreamExt, channel::mpsc as futures_mpsc};
 
 use super::websocket::{WebSocketEvent, run_websocket_worker};
 use super::*;
+use crate::websocket_replay::websocket_room_url;
 
 impl AppModel {
     pub(super) fn ensure_websocket_task(&mut self, cx: &mut ViewContext<Self>) {
@@ -33,16 +34,7 @@ impl AppModel {
             return;
         };
 
-        let ws_url = session
-            .server_url
-            .replace("http://", "ws://")
-            .replace("https://", "wss://");
-        let ws_url = format!(
-            "{}/v1/ws?gid={}&leaf_id={}",
-            ws_url,
-            hex_encode(session.gid),
-            hex_encode(session.leaf_id)
-        );
+        let ws_url = websocket_room_url(&session.server_url, &session.gid, &session.leaf_id);
         let reconnect_delay = self.config.client.websocket_reconnect_delay();
 
         info!("Starting WebSocket connection to {}", ws_url);

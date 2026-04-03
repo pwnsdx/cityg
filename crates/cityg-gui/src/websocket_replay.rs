@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use hex::encode as hex_encode;
 use serde_json::Value as JsonValue;
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest,
@@ -45,6 +46,25 @@ pub(crate) fn websocket_request(
         request.headers_mut().insert(header_name, token);
     }
     Ok(request)
+}
+
+pub(crate) fn websocket_server_url(server_url: &str) -> String {
+    if let Some(rest) = server_url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = server_url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        format!("ws://{server_url}")
+    }
+}
+
+pub(crate) fn websocket_room_url(server_url: &str, gid: &[u8; 32], leaf_id: &[u8; 32]) -> String {
+    format!(
+        "{}/v1/ws?gid={}&leaf_id={}",
+        websocket_server_url(server_url),
+        hex_encode(gid),
+        hex_encode(leaf_id)
+    )
 }
 
 pub(crate) fn websocket_notification_sequence(notification: &JsonValue) -> Option<u64> {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::websocket_replay::websocket_room_url;
 
 #[tokio::test]
 async fn watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications()
@@ -52,14 +53,7 @@ async fn watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications(
         synced
     };
 
-    let ws_url = format!(
-        "{}/v1/ws?gid={}&leaf_id={}",
-        server_url
-            .replace("http://", "ws://")
-            .replace("https://", "wss://"),
-        hex_encode(alice.gid),
-        hex_encode(alice.leaf_id)
-    );
+    let ws_url = websocket_room_url(&server_url, &alice.gid, &alice.leaf_id);
 
     let (first_tx, mut first_rx) = futures_mpsc::unbounded::<WebSocketEvent>();
     let first_worker = tokio::spawn(run_websocket_worker(
@@ -313,22 +307,9 @@ async fn dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notificat
         .await?;
     }
 
-    let alice_ws_url = format!(
-        "{}/v1/ws?gid={}&leaf_id={}",
-        server_url
-            .replace("http://", "ws://")
-            .replace("https://", "wss://"),
-        hex_encode(restarted_alice.gid),
-        hex_encode(restarted_alice.leaf_id)
-    );
-    let bob_ws_url = format!(
-        "{}/v1/ws?gid={}&leaf_id={}",
-        server_url
-            .replace("http://", "ws://")
-            .replace("https://", "wss://"),
-        hex_encode(restarted_bob.gid),
-        hex_encode(restarted_bob.leaf_id)
-    );
+    let alice_ws_url =
+        websocket_room_url(&server_url, &restarted_alice.gid, &restarted_alice.leaf_id);
+    let bob_ws_url = websocket_room_url(&server_url, &restarted_bob.gid, &restarted_bob.leaf_id);
 
     let (alice_tx, mut alice_rx) = futures_mpsc::unbounded::<WebSocketEvent>();
     let alice_worker = tokio::spawn(run_websocket_worker(

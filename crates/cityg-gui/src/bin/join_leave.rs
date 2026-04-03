@@ -98,7 +98,6 @@ use msphf_orchestrator::{ForwardSecrecyState, PivotParity, hdr};
 use notifications::parse_hex32_field;
 use notifications::{
     Notification, expect_membership_event, expect_message_event, spawn_notification_listener,
-    websocket_url,
 };
 #[cfg(test)]
 use reqwest::header::CONTENT_TYPE;
@@ -120,7 +119,7 @@ use watch_mode::{send_dummy_message, send_text_message};
 use websocket_replay::{
     WebSocketReplayCursor, websocket_ack_message, websocket_lag_notice,
     websocket_notification_replayed, websocket_notification_sequence, websocket_request,
-    websocket_resume_message, websocket_sync_required_notice,
+    websocket_resume_message, websocket_room_url as websocket_url, websocket_sync_required_notice,
 };
 
 fn random_room_id() -> String {
