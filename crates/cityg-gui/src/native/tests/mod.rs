@@ -289,7 +289,10 @@ fn build_test_history_authority(
     barrier_version: u64,
     kem_tree_hash_after: [u8; 32],
 ) -> Result<TestHistoryAuthority, Box<dyn std::error::Error>> {
-    let (public_key, secret_key) = dilithium5::keypair();
+    let (public_key_bytes, secret_key_bytes) =
+        cityg_client::message_auth::generate_message_signing_keypair();
+    let public_key = dilithium5::PublicKey::from_bytes(&public_key_bytes)?;
+    let secret_key = dilithium5::SecretKey::from_bytes(&secret_key_bytes)?;
     let descriptor = HistoryAuthorityDescriptor {
         scope_id: [0xA1; 32],
         public_key: public_key.as_bytes().to_vec(),
