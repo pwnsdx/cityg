@@ -2,6 +2,7 @@ use super::*;
 use futures::SinkExt;
 use gpui::{EmptyView, Modifiers, TestAppContext};
 use msphf_rlwe::CapssBranchWitness;
+use pqcrypto_traits::sign::SecretKey as _;
 use prost::Message;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::sync::{Arc, Once, atomic::AtomicU16};
@@ -243,6 +244,21 @@ fn session_gid_from_room_id(session: &AppSession) -> [u8; 32] {
         .ok()
         .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
         .unwrap_or(session.gid)
+}
+
+fn install_test_barrier_leaf_keypair(
+    session: &mut AppSession,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let (public_key, secret_key, pkhash) =
+        cityg_client::barrier_crypto::generate_barrier_leaf_keypair()?;
+    session.barrier_state.dk_leaf = Zeroizing::new(secret_key);
+    session.barrier_state.pkhash_leaf = pkhash;
+    Ok(public_key)
+}
+
+fn test_new_public_key_wire(node: u64) -> Result<NewPublicKeyWire, Box<dyn std::error::Error>> {
+    let (public_key, _, _) = cityg_client::barrier_crypto::generate_barrier_leaf_keypair()?;
+    Ok(NewPublicKeyWire(node, public_key))
 }
 
 fn install_valid_message_identities(
@@ -1250,17 +1266,15 @@ fn try_recover_barrier_from_header_returns_none_without_matches()
     session.barrier_state.barrier_version = 4;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
-    let (leaf_ek, leaf_dk) = kyber768::keypair();
-    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
-    session.barrier_state.pkhash_leaf = compute_barrier_pkhash(KemPublicKey::as_bytes(&leaf_ek))?;
+    let _ = install_test_barrier_leaf_keypair(&mut session)?;
 
     let revoked_since_root = [0x11; 32];
     let revoked_root = [0x22; 32];
     let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
     let new_public_keys = vec![
-        NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        test_new_public_key_wire(0)?,
+        test_new_public_key_wire(1)?,
+        test_new_public_key_wire(4)?,
     ];
     let cover = KemTreeCoverPayloadWire(3, vec![10, 4, 1, 0], None, Vec::new(), new_public_keys);
     let cover_bytes = to_cbor_vec(&cover)?;
@@ -1313,9 +1327,9 @@ fn try_recover_barrier_from_header_rejects_oversized_update()
     let revoked_root = [0x22; 32];
     let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
     let new_public_keys = vec![
-        NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        test_new_public_key_wire(0)?,
+        test_new_public_key_wire(1)?,
+        test_new_public_key_wire(4)?,
     ];
     let cover = KemTreeCoverPayloadWire(3, vec![10, 4, 1, 0], None, Vec::new(), new_public_keys);
     let cover_bytes = to_cbor_vec(&cover)?;
@@ -1374,10 +1388,7 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
     let fs_ec = 31;
 
-    let (leaf_ek, leaf_dk) = kyber768::keypair();
-    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
-    session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+    let leaf_ek_bytes = install_test_barrier_leaf_keypair(&mut session)?;
 
     let revoked_since_root = [0x31; 32];
     let revoked_root = [0x32; 32];
@@ -1537,10 +1548,7 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
     session.barrier_state.barrier_version = 8;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
-    let (leaf_ek, leaf_dk) = kyber768::keypair();
-    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
-    session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+    let leaf_ek_bytes = install_test_barrier_leaf_keypair(&mut session)?;
 
     let revoked_since_root = [0x31; 32];
     let revoked_root = [0x32; 32];
@@ -1682,11 +1690,8 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
     session.barrier_state.barrier_version = 8;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
-    let (leaf_ek, leaf_dk) = kyber768::keypair();
-    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
-    let correct_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
-    session.barrier_state.pkhash_leaf = correct_pkhash;
+    let leaf_ek_bytes = install_test_barrier_leaf_keypair(&mut session)?;
+    let correct_pkhash = session.barrier_state.pkhash_leaf;
 
     let revoked_since_root = [0x31; 32];
     let revoked_root = [0x32; 32];
@@ -1830,11 +1835,8 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
     session.barrier_state.barrier_version = 8;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
-    let (leaf_ek, leaf_dk) = kyber768::keypair();
-    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
-    let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
-    session.barrier_state.pkhash_leaf = target_pkhash;
+    let leaf_ek_bytes = install_test_barrier_leaf_keypair(&mut session)?;
+    let target_pkhash = session.barrier_state.pkhash_leaf;
 
     let revoked_since_root = [0x31; 32];
     let revoked_root = [0x32; 32];
@@ -1886,9 +1888,9 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
         wrapped_ps,
     )];
     let new_public_keys = vec![
-        NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        test_new_public_key_wire(0)?,
+        test_new_public_key_wire(1)?,
+        test_new_public_key_wire(4)?,
     ];
     let cover = KemTreeCoverPayloadWire(
         3,
@@ -1951,9 +1953,9 @@ fn try_recover_barrier_from_header_rejects_reason_mismatch_for_local_roots()
     let revoked_root = [0x42; 32];
     let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
     let new_public_keys = vec![
-        NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        test_new_public_key_wire(0)?,
+        test_new_public_key_wire(1)?,
+        test_new_public_key_wire(4)?,
     ];
     let update_bytes = to_cbor_vec(&BarrierUpdateWire(
         "barrier-v1".to_string(),
@@ -2013,9 +2015,9 @@ fn try_recover_barrier_from_header_rejects_local_barrier_version_mismatch()
     let revoked_root = [0x52; 32];
     let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
     let new_public_keys = vec![
-        NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        test_new_public_key_wire(0)?,
+        test_new_public_key_wire(1)?,
+        test_new_public_key_wire(4)?,
     ];
     let update_bytes = to_cbor_vec(&BarrierUpdateWire(
         "barrier-v1".to_string(),
@@ -2078,10 +2080,7 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
     let fs_ec = 31;
 
-    let (leaf_ek, leaf_dk) = kyber768::keypair();
-    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
-    session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+    let leaf_ek_bytes = install_test_barrier_leaf_keypair(&mut session)?;
 
     let revoked_since_root = [0x71; 32];
     let revoked_root = [0x72; 32];
@@ -2245,10 +2244,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad(
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
-    let (leaf_ek, leaf_dk) = kyber768::keypair();
-    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
-    session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+    let leaf_ek_bytes = install_test_barrier_leaf_keypair(&mut session)?;
 
     let revoked_since_root = [0x71; 32];
     let revoked_root = [0x72; 32];
@@ -2390,10 +2386,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad()
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
-    let (leaf_ek, leaf_dk) = kyber768::keypair();
-    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
-    session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+    let leaf_ek_bytes = install_test_barrier_leaf_keypair(&mut session)?;
 
     let revoked_since_root = [0x71; 32];
     let revoked_root = [0x72; 32];
@@ -2593,9 +2586,9 @@ fn try_recover_barrier_from_header_rejects_stale_genesis_after_local_init()
     let revoked_root = [0x62; 32];
     let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
     let new_public_keys = vec![
-        NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
-        NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        test_new_public_key_wire(0)?,
+        test_new_public_key_wire(1)?,
+        test_new_public_key_wire(4)?,
     ];
     let update_bytes = to_cbor_vec(&BarrierUpdateWire(
         "barrier-v1".to_string(),

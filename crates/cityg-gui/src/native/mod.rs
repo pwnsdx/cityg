@@ -81,8 +81,6 @@ use pqcrypto_kyber::kyber768;
 #[cfg(test)]
 use pqcrypto_traits::kem::Ciphertext as KemCiphertext;
 #[cfg(test)]
-use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
-#[cfg(test)]
 use pqcrypto_traits::sign::DetachedSignature;
 #[cfg(test)]
 use pqcrypto_traits::sign::PublicKey as DilithiumPublicKey;
