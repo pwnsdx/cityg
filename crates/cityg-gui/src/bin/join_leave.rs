@@ -11,6 +11,8 @@ use std::{
 #[allow(dead_code)]
 #[path = "../barrier_shared.rs"]
 mod barrier_shared;
+#[path = "../client_env.rs"]
+mod client_env;
 #[path = "join_leave/message_auth.rs"]
 mod message_auth;
 #[allow(dead_code)]
@@ -41,7 +43,7 @@ use cityg_api_client::BarrierJoinRecord;
 #[cfg(test)]
 use cityg_api_client::RoomAdminOperation;
 use cityg_api_client::{
-    CitygApiClient, Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
+    Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
     PrepareOriginMergeTicketInput, PrepareRevocationMergeTicketInput, PreparedBarrierSnapshot,
     ensure_supported_attested_current_state_extension, is_fs_forward_jump_group_http_error,
 };
@@ -71,6 +73,11 @@ use cityg_client::{
     },
 };
 use cityg_config::CityGConfig;
+use client_env::{
+    MESSAGE_AUTH_HEADER,
+    configured_client_message_token_with_server_fallback as configured_client_message_token,
+    new_api_client_with_server_fallback as new_api_client,
+};
 use futures::{SinkExt, StreamExt};
 use hex::decode as hex_decode;
 #[cfg(test)]
@@ -124,40 +131,8 @@ fn random_room_id() -> String {
     hex::encode(bytes)
 }
 
-const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
-const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
-const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 const LEAVE_ACCEPT_RETRY_MAX_ATTEMPTS: u32 = 2;
-
-fn read_nonempty_env(var: &str) -> Option<String> {
-    std::env::var(var)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn configured_client_admin_token() -> Option<String> {
-    read_nonempty_env(CLIENT_ADMIN_TOKEN_ENV)
-        .or_else(|| read_nonempty_env("CITYG_SERVER_ROOMS_ADMIN_TOKEN"))
-        .or_else(|| read_nonempty_env("CITYG_SERVER_WINDOW_ADMIN_TOKEN"))
-}
-
-fn configured_client_message_token() -> Option<String> {
-    read_nonempty_env(CLIENT_MESSAGE_TOKEN_ENV)
-        .or_else(|| read_nonempty_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
-}
-
-fn new_api_client(server_url: &str) -> CitygApiClient {
-    let mut client = CitygApiClient::new(server_url);
-    if let Some(token) = configured_client_admin_token() {
-        client = client.with_admin_token(token);
-    }
-    if let Some(token) = configured_client_message_token() {
-        client = client.with_message_auth_token(token);
-    }
-    client
-}
 
 struct BarrierUpdateBuildResult {
     #[cfg(test)]

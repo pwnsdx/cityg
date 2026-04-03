@@ -3,6 +3,7 @@ use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 
 use super::*;
+use crate::client_env::MESSAGE_AUTH_HEADER;
 use crate::websocket_replay::{
     WebSocketReplayCursor, websocket_ack_message, websocket_lag_notice,
     websocket_notification_replayed, websocket_notification_sequence, websocket_request,
@@ -60,8 +61,7 @@ pub(super) async fn run_websocket_worker(
     loop {
         debug!("Attempting WebSocket connection to {}", ws_url);
 
-        let request =
-            websocket_request(&ws_url, "x-cityg-message-token", message_token.as_deref())?;
+        let request = websocket_request(&ws_url, MESSAGE_AUTH_HEADER, message_token.as_deref())?;
         match connect_async(request).await {
             Ok((ws_stream, _)) => {
                 info!("WebSocket connected successfully");
