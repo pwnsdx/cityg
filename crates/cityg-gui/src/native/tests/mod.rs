@@ -258,9 +258,9 @@ fn install_valid_message_identities(
     session.pop_public_key = identity.pop_public_key;
     session.pop_secret_key = identity.pop_secret_key;
 
-    let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
-    session.msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
-    session.msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
+    let (msg_sign_pk, msg_sign_sk) = cityg_client::message_auth::generate_message_signing_keypair();
+    session.msg_sign_public_key = msg_sign_pk;
+    session.msg_sign_secret_key = msg_sign_sk;
     Ok(())
 }
 

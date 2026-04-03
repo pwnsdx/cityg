@@ -74,8 +74,8 @@ use futures::{SinkExt, StreamExt};
 use hex::decode as hex_decode;
 #[cfg(test)]
 use message_auth::{
-    MESSAGE_PREFIX, decode_authenticated_message, verify_message_signature,
-    verify_sender_leaf_binding,
+    MESSAGE_PREFIX, decode_authenticated_message, generate_message_signing_keypair,
+    verify_message_signature, verify_sender_leaf_binding,
 };
 use message_auth::{encode_authenticated_message, sign_message};
 use message_crypto::{MessageCryptoContext, encrypt_message_v2};
@@ -93,13 +93,9 @@ use notifications::{
     Notification, expect_membership_event, expect_message_event, spawn_notification_listener,
     websocket_url,
 };
-#[cfg(test)]
-use pqcrypto_dilithium::dilithium5;
 use pqcrypto_dilithium::dilithium5::SecretKey as MlDsaSecretKey;
 #[cfg(test)]
 use pqcrypto_kyber::kyber768;
-#[cfg(test)]
-use pqcrypto_traits::sign::PublicKey as DilithiumPublicKeyTrait;
 use pqcrypto_traits::sign::SecretKey as DilithiumSecretKeyTrait;
 use rand::{RngExt, rng};
 #[cfg(test)]
@@ -1660,7 +1656,8 @@ mod tests {
     }
 
     fn sample_session(server_url: &str) -> Session {
-        let (_pop_pk, pop_sk) = dilithium5::keypair();
+        let identity = cityg_api_client::generate_room_admin_identity();
+        let pop_sk = MlDsaSecretKey::from_bytes(&identity.pop_secret_key).expect("valid POP key");
         Session {
             server_url: server_url.to_string(),
             room_id: hex::encode([0xAA; 32]),
@@ -1670,7 +1667,7 @@ mod tests {
             epoch_key: [0x24; 32],
             barrier_version: 1,
             k_barrier: [0x25; 32],
-            pop_public_key: vec![0x33; 32],
+            pop_public_key: identity.pop_public_key,
             pop_secret: Box::new(pop_sk),
             vrf_secret_key: vec![0x44; 32],
             vrf_public_key: vec![0x55; 32],
@@ -3288,26 +3285,18 @@ mod tests {
         let leaf_id = [0x44; 32];
         let timestamp_ms = 123_456u64;
         let plaintext = b"hello world";
-        let (public_key, secret_key) = dilithium5::keypair();
-        let signature = sign_message(
-            &leaf_id,
-            timestamp_ms,
-            plaintext,
-            DilithiumSecretKeyTrait::as_bytes(&secret_key),
-        )?;
+        let (public_key, secret_key) = generate_message_signing_keypair();
+        let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &secret_key)?;
         let encoded = encode_authenticated_message(
             timestamp_ms,
             plaintext,
-            DilithiumPublicKeyTrait::as_bytes(&public_key),
+            &public_key,
             signature.as_slice(),
         );
         let decoded = decode_authenticated_message(encoded.as_slice())?;
         assert_eq!(decoded.timestamp_ms, timestamp_ms);
         assert_eq!(decoded.plaintext, plaintext);
-        assert_eq!(
-            decoded.public_key,
-            DilithiumPublicKeyTrait::as_bytes(&public_key)
-        );
+        assert_eq!(decoded.public_key, public_key.as_slice());
         assert_eq!(decoded.signature, signature.as_slice());
         verify_message_signature(
             &leaf_id,
@@ -3339,7 +3328,7 @@ mod tests {
 
         let plaintext_len = plaintext.len();
         let public_len_offset = MESSAGE_PREFIX.len() + 8 + 4 + plaintext_len;
-        let public_key_len = DilithiumPublicKeyTrait::as_bytes(&public_key).len();
+        let public_key_len = public_key.len();
         let truncated_public = &encoded[..public_len_offset + 4 + public_key_len - 1];
         assert!(
             decode_authenticated_message(truncated_public)
@@ -3364,7 +3353,7 @@ mod tests {
                 timestamp_ms,
                 tampered_plaintext.as_slice(),
                 signature.as_slice(),
-                DilithiumPublicKeyTrait::as_bytes(&public_key),
+                &public_key,
             )
             .is_err()
         );
@@ -3374,7 +3363,7 @@ mod tests {
                 timestamp_ms,
                 plaintext,
                 &signature[..signature.len() - 1],
-                DilithiumPublicKeyTrait::as_bytes(&public_key),
+                &public_key,
             )
             .is_err()
         );
@@ -3384,7 +3373,7 @@ mod tests {
                 timestamp_ms,
                 plaintext,
                 signature.as_slice(),
-                &DilithiumPublicKeyTrait::as_bytes(&public_key)[..8],
+                &public_key[..8],
             )
             .is_err()
         );
@@ -3945,7 +3934,8 @@ mod tests {
 
     #[test]
     fn log_helpers_cover_none_fingerprint_and_non_integer_fs_ec() {
-        let (_pk, sk) = dilithium5::keypair();
+        let identity = cityg_api_client::generate_room_admin_identity();
+        let sk = MlDsaSecretKey::from_bytes(&identity.pop_secret_key).expect("valid POP key");
         let session = Session {
             server_url: "http://127.0.0.1:18080".to_string(),
             room_id: hex::encode([0xAA; 32]),
@@ -3955,7 +3945,7 @@ mod tests {
             epoch_key: [0x04; 32],
             barrier_version: 1,
             k_barrier: [0x05; 32],
-            pop_public_key: vec![0x11],
+            pop_public_key: identity.pop_public_key,
             pop_secret: Box::new(sk),
             vrf_secret_key: vec![0x22],
             vrf_public_key: vec![0x33],
