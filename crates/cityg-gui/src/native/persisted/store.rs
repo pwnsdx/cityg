@@ -60,9 +60,9 @@ impl PersistedRoomIdentity {
             ));
         }
 
-        Ok(RoomIdentity {
-            pop_public_key: decode_hex_vec("pop_public_hex", &self.pop_public_hex)?,
-            pop_secret_key: decode_hex_vec("pop_secret_hex", &self.pop_secret_hex)?,
-        })
+        Ok(RoomIdentity::new(
+            decode_hex_vec("pop_public_hex", &self.pop_public_hex)?,
+            decode_hex_vec("pop_secret_hex", &self.pop_secret_hex)?,
+        ))
     }
 }

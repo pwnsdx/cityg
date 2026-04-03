@@ -40,18 +40,12 @@ async fn room_admin_grant_and_revoke_flow_preserves_authorization_boundaries()
         .await?
     };
     let client = new_api_client(&server_url);
-    let bootstrap_admin = RoomIdentity {
-        pop_public_key: bootstrap_admin_pop_public_key.clone(),
-        pop_secret_key: bootstrap_admin_pop_secret_key.clone(),
-    };
-    let alice_admin = RoomIdentity {
-        pop_public_key: alice.pop_public_key.clone(),
-        pop_secret_key: alice.pop_secret_key.clone(),
-    };
-    let bob_admin = RoomIdentity {
-        pop_public_key: bob.pop_public_key.clone(),
-        pop_secret_key: bob.pop_secret_key.clone(),
-    };
+    let bootstrap_admin = RoomIdentity::new(
+        bootstrap_admin_pop_public_key.clone(),
+        bootstrap_admin_pop_secret_key.clone(),
+    );
+    let alice_admin = RoomIdentity::new(alice.pop_public_key.clone(), alice.pop_secret_key.clone());
+    let bob_admin = RoomIdentity::new(bob.pop_public_key.clone(), bob.pop_secret_key.clone());
 
     let bootstrap_grant_alice = bootstrap_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
@@ -182,14 +176,11 @@ async fn admin_expel_removes_member_and_preserves_survivor_messaging()
     };
 
     let client = new_api_client(&server_url);
-    let bootstrap_admin = RoomIdentity {
-        pop_public_key: bootstrap_admin_pop_public_key.clone(),
-        pop_secret_key: bootstrap_admin_pop_secret_key.clone(),
-    };
-    let alice_admin = RoomIdentity {
-        pop_public_key: alice.pop_public_key.clone(),
-        pop_secret_key: alice.pop_secret_key.clone(),
-    };
+    let bootstrap_admin = RoomIdentity::new(
+        bootstrap_admin_pop_public_key.clone(),
+        bootstrap_admin_pop_secret_key.clone(),
+    );
+    let alice_admin = RoomIdentity::new(alice.pop_public_key.clone(), alice.pop_secret_key.clone());
     let grant_proof = bootstrap_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
         &room_id,
@@ -394,10 +385,10 @@ async fn restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messa
     };
 
     let client = new_api_client(&server_url);
-    let bootstrap_admin = RoomIdentity {
-        pop_public_key: bootstrap_admin_pop_public_key.clone(),
-        pop_secret_key: bootstrap_admin_pop_secret_key.clone(),
-    };
+    let bootstrap_admin = RoomIdentity::new(
+        bootstrap_admin_pop_public_key.clone(),
+        bootstrap_admin_pop_secret_key.clone(),
+    );
     let grant_proof = bootstrap_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
         &room_id,
@@ -556,10 +547,10 @@ async fn admin_expel_then_survivor_refresh_preserves_room_and_new_joiner_messagi
     };
 
     let client = new_api_client(&server_url);
-    let bootstrap_admin = RoomIdentity {
-        pop_public_key: bootstrap_admin_pop_public_key.clone(),
-        pop_secret_key: bootstrap_admin_pop_secret_key.clone(),
-    };
+    let bootstrap_admin = RoomIdentity::new(
+        bootstrap_admin_pop_public_key.clone(),
+        bootstrap_admin_pop_secret_key.clone(),
+    );
     let grant_proof = bootstrap_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
         &room_id,

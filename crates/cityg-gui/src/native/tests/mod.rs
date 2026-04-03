@@ -6023,10 +6023,8 @@ async fn sequential_member_leaves_succeed() -> Result<(), Box<dyn std::error::Er
 
     // Membership changes require KBROAD rotation before the next merge ticket.
     let (rotated_kbroad_public, _) = generate_kbroad_keypair();
-    let admin_identity = RoomIdentity {
-        pop_public_key: admin_pop_public_key.clone(),
-        pop_secret_key: admin_pop_secret_key.clone(),
-    };
+    let admin_identity =
+        RoomIdentity::new(admin_pop_public_key.clone(), admin_pop_secret_key.clone());
     let admin_proof = admin_identity.build_kbroad_proof(
         RoomAdminOperation::RotateKbroad,
         &room_id,
@@ -6099,10 +6097,8 @@ async fn rejoin_with_same_persisted_identity_succeeds_after_room_becomes_empty()
     }
 
     let (rotated_kbroad_public, _) = generate_kbroad_keypair();
-    let admin_identity = RoomIdentity {
-        pop_public_key: admin_pop_public_key.clone(),
-        pop_secret_key: admin_pop_secret_key.clone(),
-    };
+    let admin_identity =
+        RoomIdentity::new(admin_pop_public_key.clone(), admin_pop_secret_key.clone());
     let admin_proof = admin_identity.build_kbroad_proof(
         RoomAdminOperation::RotateKbroad,
         &room_id,
@@ -8197,10 +8193,10 @@ async fn epoch_sync_survives_multi_version_barrier_gap_after_refresh_and_leave()
     );
 
     let (rotated_kbroad_public, _) = generate_kbroad_keypair();
-    let admin_identity = RoomIdentity {
-        pop_public_key: refreshed_alice.pop_public_key.clone(),
-        pop_secret_key: refreshed_alice.pop_secret_key.clone(),
-    };
+    let admin_identity = RoomIdentity::new(
+        refreshed_alice.pop_public_key.clone(),
+        refreshed_alice.pop_secret_key.clone(),
+    );
     let admin_proof = admin_identity.build_kbroad_proof(
         RoomAdminOperation::RotateKbroad,
         &room_id,
