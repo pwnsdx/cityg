@@ -4,10 +4,10 @@ pub(super) async fn perform_fetch_room_admins(
     params: RoomAdminQueryParams,
 ) -> Result<Vec<Vec<u8>>> {
     let client = new_api_client(&params.server_url);
-    let identity = cityg_api_client::RoomAdminIdentity {
-        pop_public_key: params.pop_public_key.clone(),
-        pop_secret_key: params.pop_secret_key.clone(),
-    };
+    let identity = cityg_api_client::RoomAdminIdentity::new(
+        params.pop_public_key.clone(),
+        params.pop_secret_key.clone(),
+    );
     let admin_proof = identity
         .build_listing_proof(&params.room_id)
         .context("build room admin listing proof")?;
@@ -22,10 +22,10 @@ pub(super) async fn perform_room_admin_mutation(
     params: RoomAdminMutationParams,
 ) -> Result<RoomAdminMutationOutcome> {
     let client = new_api_client(&params.query.server_url);
-    let identity = cityg_api_client::RoomAdminIdentity {
-        pop_public_key: params.query.pop_public_key.clone(),
-        pop_secret_key: params.query.pop_secret_key.clone(),
-    };
+    let identity = cityg_api_client::RoomAdminIdentity::new(
+        params.query.pop_public_key.clone(),
+        params.query.pop_secret_key.clone(),
+    );
     let admin_proof = identity
         .build_target_proof(
             params.kind.operation(),

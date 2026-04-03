@@ -49,6 +49,17 @@ pub struct RoomAdminIdentity {
 }
 
 impl RoomAdminIdentity {
+    pub fn new(pop_public_key: Vec<u8>, pop_secret_key: Vec<u8>) -> Self {
+        Self {
+            pop_public_key,
+            pop_secret_key,
+        }
+    }
+
+    pub fn from_slices(pop_public_key: &[u8], pop_secret_key: &[u8]) -> Self {
+        Self::new(pop_public_key.to_vec(), pop_secret_key.to_vec())
+    }
+
     pub fn build_identity_binding(&self, alias: &str) -> Result<IdentityBinding, Error> {
         crate::build_identity_binding(alias, &self.pop_public_key, &self.pop_secret_key)
     }
@@ -135,10 +146,7 @@ pub fn generate_room_admin_keypair() -> (Vec<u8>, Vec<u8>) {
 
 pub fn generate_room_admin_identity() -> RoomAdminIdentity {
     let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
-    RoomAdminIdentity {
-        pop_public_key,
-        pop_secret_key,
-    }
+    RoomAdminIdentity::new(pop_public_key, pop_secret_key)
 }
 
 pub fn build_room_admin_proof(

@@ -226,10 +226,10 @@ async fn perform_room_admin_expel_inner(
     let client = new_api_client(&request.server_url);
     let room_id = request.room_id.clone();
     let author_leaf_id = request.leaf_id;
-    let identity = cityg_api_client::RoomAdminIdentity {
-        pop_public_key: request.pop_public_key.clone(),
-        pop_secret_key: request.pop_secret_key.clone(),
-    };
+    let identity = cityg_api_client::RoomAdminIdentity::new(
+        request.pop_public_key.clone(),
+        request.pop_secret_key.clone(),
+    );
     let admin_proof = identity
         .build_leaf_pair_proof(
             RoomAdminOperation::ExpelMember,

@@ -915,10 +915,7 @@ async fn perform_join_with_identity(
         server_url,
         room_id,
         alias,
-        cityg_api_client::RoomAdminIdentity {
-            pop_public_key: pop_public_key.to_vec(),
-            pop_secret_key: pop_secret_key.to_vec(),
-        },
+        cityg_api_client::RoomAdminIdentity::from_slices(pop_public_key, pop_secret_key),
     )
     .await?;
     perform_join_finalize(session).await
