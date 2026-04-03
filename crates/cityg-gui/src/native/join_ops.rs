@@ -7,11 +7,7 @@ use cityg_client::join_runtime::generate_join_runtime_material;
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 
 fn generate_room_identity() -> RoomIdentity {
-    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
-    RoomIdentity {
-        pop_public_key,
-        pop_secret_key,
-    }
+    cityg_api_client::generate_room_admin_identity()
 }
 
 fn rotate_room_identity(server_url: &str, room_id: &str) -> Result<RoomIdentity> {
@@ -50,11 +46,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let ticket = loop {
         let pop_public_key = room_identity.pop_public_key.clone();
         let pop_secret_key = room_identity.pop_secret_key.clone();
-        let identity_binding = Some(cityg_api_client::build_identity_binding(
-            &alias,
-            &pop_public_key,
-            &pop_secret_key,
-        )?);
+        let identity_binding = Some(room_identity.build_identity_binding(&alias)?);
         match client.join_ticket(&room_id, &alias, identity_binding).await {
             Ok(ticket) => break ticket,
             Err(ApiClientError::HttpStatus {

@@ -38,8 +38,8 @@ use cityg_api_client::build_room_admin_proof;
 use cityg_api_client::{
     BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError,
     HistoryAuthorityExtension, HistoryCommitment, MergeAcceptanceStatus, MergeTicket,
-    RoomAdminOperation, build_room_admin_leaf_pair_proof, build_room_admin_listing_proof,
-    build_room_admin_target_proof,
+    RoomAdminIdentity as RoomIdentity, RoomAdminOperation, build_room_admin_leaf_pair_proof,
+    build_room_admin_listing_proof, build_room_admin_target_proof,
 };
 use cityg_client::ClientEpochBundle;
 #[cfg(test)]

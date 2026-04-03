@@ -857,9 +857,15 @@ async fn prepare_join_session_with_identity(
 }
 
 async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
-    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
-    prepare_join_session_with_identity(server_url, room_id, alias, pop_public_key, pop_secret_key)
-        .await
+    let identity = cityg_api_client::generate_room_admin_identity();
+    prepare_join_session_with_identity(
+        server_url,
+        room_id,
+        alias,
+        identity.pop_public_key,
+        identity.pop_secret_key,
+    )
+    .await
 }
 
 fn is_cover_leaf_index_collision_error(err: &anyhow::Error) -> bool {
@@ -1599,6 +1605,7 @@ mod tests {
         response::{IntoResponse, Response},
         routing::{get, post},
     };
+    use cityg_client::vrf::generate_vrf_keys;
     use cityg_config::CityGConfig;
     use futures::SinkExt;
     use prost::Message;

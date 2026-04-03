@@ -69,9 +69,3 @@ pub(super) struct AliasBindingRecord {
     pub(super) pop_public_key: Vec<u8>,
     pub(super) leaf_id: [u8; 32],
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct RoomIdentity {
-    pub(super) pop_public_key: Vec<u8>,
-    pub(super) pop_secret_key: Vec<u8>,
-}

@@ -232,11 +232,7 @@ pub(super) fn load_or_create_room_identity(
         return Ok(identity);
     }
 
-    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
-    let identity = RoomIdentity {
-        pop_public_key,
-        pop_secret_key,
-    };
+    let identity = cityg_api_client::generate_room_admin_identity();
     persist_room_identity(server_url, room_id, &identity)?;
     Ok(identity)
 }

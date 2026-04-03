@@ -10,8 +10,8 @@ use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as
 use serde_bytes::ByteBuf;
 
 use crate::{
-    CitygApiClient, DeploymentProfileManifestContext, Error, MergeTicket, RoomAdminProof, array32,
-    ensure_profile_version, parse_global_history_attestation_bytes,
+    CitygApiClient, DeploymentProfileManifestContext, Error, IdentityBinding, MergeTicket,
+    RoomAdminProof, array32, ensure_profile_version, parse_global_history_attestation_bytes,
     parse_history_authority_descriptor_bytes, parse_history_commitment,
     require_base_profile_global_history_authority_extension,
     require_history_authority_descriptor_for_extension, retry_ticket_request,
@@ -42,6 +42,18 @@ impl RoomAdminOperation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomAdminIdentity {
+    pub pop_public_key: Vec<u8>,
+    pub pop_secret_key: Vec<u8>,
+}
+
+impl RoomAdminIdentity {
+    pub fn build_identity_binding(&self, alias: &str) -> Result<IdentityBinding, Error> {
+        crate::build_identity_binding(alias, &self.pop_public_key, &self.pop_secret_key)
+    }
+}
+
 fn build_room_admin_proof_payload(
     operation: RoomAdminOperation,
     room_id: &str,
@@ -68,6 +80,14 @@ pub fn generate_room_admin_keypair() -> (Vec<u8>, Vec<u8>) {
         public_key.as_bytes().to_vec(),
         secret_key.as_bytes().to_vec(),
     )
+}
+
+pub fn generate_room_admin_identity() -> RoomAdminIdentity {
+    let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+    RoomAdminIdentity {
+        pop_public_key,
+        pop_secret_key,
+    }
 }
 
 pub fn build_room_admin_proof(
