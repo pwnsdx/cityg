@@ -33,12 +33,19 @@ use anyhow::{Context as AnyhowContext, Result, anyhow};
 #[cfg(test)]
 use ciborium::value::Integer;
 use ciborium::value::Value;
+#[cfg(test)]
+use cityg_api_client::room_admin_public_key_bytes;
 use cityg_api_client::{
     BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError,
     HistoryAuthorityExtension, HistoryCommitment, MergeAcceptanceStatus, MergeTicket,
     RoomAdminIdentity as RoomIdentity, RoomAdminOperation,
 };
 use cityg_client::ClientEpochBundle;
+#[cfg(test)]
+use cityg_client::message_auth::{
+    message_signature_bytes as ml_dsa_signature_bytes,
+    message_signing_public_key_bytes as ml_dsa_public_key_bytes,
+};
 #[cfg(test)]
 use cityg_client::vrf::generate_vrf_keys;
 use cityg_config::CityGConfig;
@@ -70,11 +77,6 @@ use msphf_orchestrator::CapssWitnessBundle;
 use msphf_orchestrator::compute_fs_dev_commit_v2;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, OrchestrationParams, PivotParity, hdr,
-};
-use pqcrypto_dilithium::dilithium5;
-#[cfg(test)]
-use pqcrypto_dilithium::dilithium5::{
-    public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;

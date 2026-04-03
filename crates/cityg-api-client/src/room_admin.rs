@@ -148,6 +148,10 @@ pub fn generate_room_admin_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+pub fn room_admin_public_key_bytes() -> usize {
+    dilithium5::public_key_bytes()
+}
+
 pub fn generate_room_admin_identity() -> RoomAdminIdentity {
     let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
     RoomAdminIdentity::new(pop_public_key, pop_secret_key)

@@ -113,6 +113,14 @@ pub fn generate_message_signing_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+pub fn message_signing_public_key_bytes() -> usize {
+    dilithium5::public_key_bytes()
+}
+
+pub fn message_signature_bytes() -> usize {
+    dilithium5::signature_bytes()
+}
+
 pub fn detached_sign_payload(payload: &[u8], secret_key: &[u8]) -> Result<Vec<u8>> {
     let sk = dilithium5::SecretKey::from_bytes(secret_key)
         .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;

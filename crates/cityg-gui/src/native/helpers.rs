@@ -90,7 +90,7 @@ pub(super) fn decode_room_admin_target_hex(input: &str) -> Result<Vec<u8>> {
         .or_else(|| trimmed.strip_prefix("0X"))
         .unwrap_or(trimmed);
     let bytes = hex_decode(normalized).context("room admin target must be valid hex")?;
-    let expected_len = dilithium5::public_key_bytes();
+    let expected_len = cityg_api_client::room_admin_public_key_bytes();
     if bytes.len() != expected_len {
         return Err(anyhow!(
             "room admin target must be {} bytes (got {})",

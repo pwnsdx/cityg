@@ -3285,8 +3285,8 @@ fn gpui_render_panels_cover_conditional_branches(cx: &mut TestAppContext) {
             model.room_admin_target.focus();
             model
                 .room_admin_target
-                .set_value(hex_encode(vec![0xAA; dilithium5::public_key_bytes()]));
-            model.room_admin_revoke_confirmation = Some(vec![0xAA; dilithium5::public_key_bytes()]);
+                .set_value(hex_encode(vec![0xAA; room_admin_public_key_bytes()]));
+            model.room_admin_revoke_confirmation = Some(vec![0xAA; room_admin_public_key_bytes()]);
             let _ = model.render_room_admin_panel(window, &panel_session, view_cx);
             let mut other_admin = panel_session.pop_public_key.clone();
             other_admin[0] ^= 0xFF;
@@ -3295,7 +3295,7 @@ fn gpui_render_panels_cover_conditional_branches(cx: &mut TestAppContext) {
             model.members = vec![MemberEntry {
                 leaf_id: [0x11; 32],
                 alias: Some("alice".to_string()),
-                pop_public_key: Some(vec![0xAA; dilithium5::public_key_bytes()]),
+                pop_public_key: Some(vec![0xAA; room_admin_public_key_bytes()]),
                 join_timestamp_ms: Some(1),
                 last_seen_timestamp_ms: Some(2),
             }];
@@ -3395,7 +3395,7 @@ fn gpui_render_material_shells_with_inactive_window(cx: &mut TestAppContext) {
             model.members = vec![MemberEntry {
                 leaf_id: [0x22; 32],
                 alias: Some("inactive".to_string()),
-                pop_public_key: Some(vec![0xBB; dilithium5::public_key_bytes()]),
+                pop_public_key: Some(vec![0xBB; room_admin_public_key_bytes()]),
                 join_timestamp_ms: Some(10),
                 last_seen_timestamp_ms: Some(11),
             }];
@@ -3450,7 +3450,7 @@ fn gpui_room_admin_controls_block_local_mutation_when_device_is_not_admin(cx: &m
         model.room_admins_loaded = true;
         model
             .room_admin_target
-            .set_value(hex_encode(vec![0x33; dilithium5::public_key_bytes()]));
+            .set_value(hex_encode(vec![0x33; room_admin_public_key_bytes()]));
 
         model.start_room_admin_mutation_from_input(RoomAdminMutationKind::Grant, view_cx);
 
@@ -3482,8 +3482,8 @@ fn gpui_room_admin_revoke_requires_confirmation_and_clears_on_target_change(
     .expect("build session");
 
     view.update(cx, |model, view_cx| {
-        let first_target = vec![0x44; dilithium5::public_key_bytes()];
-        let second_target = vec![0x55; dilithium5::public_key_bytes()];
+        let first_target = vec![0x44; room_admin_public_key_bytes()];
+        let second_target = vec![0x55; room_admin_public_key_bytes()];
         model.session = Some(session.clone());
         model.room_admins = vec![session.pop_public_key.clone(), second_target.clone()];
         model.room_admins_loaded = true;
@@ -3899,15 +3899,15 @@ fn header_helpers_and_label_formatting() -> Result<(), Box<dyn std::error::Error
     assert_eq!(hex_encode_prefix(&[0xBB; 32], 8), "bbbbbbbb…");
     assert_eq!(hex_encode_prefix(&[0xBB; 32], 128), hex_encode([0xBB; 32]));
     assert_eq!(
-        room_admin_identity_preview(&vec![0x11; dilithium5::public_key_bytes()]),
+        room_admin_identity_preview(&vec![0x11; room_admin_public_key_bytes()]),
         format!("{}…{}", "11".repeat(6), "11".repeat(6))
     );
     assert_eq!(decode_hex_32(&hex_encode([0xCD; 32])), Some([0xCD; 32]));
     assert!(decode_hex_32("bad").is_none());
     assert!(decode_hex_32("aa").is_none());
     assert_eq!(
-        decode_room_admin_target_hex(&hex_encode(vec![0x22; dilithium5::public_key_bytes()]))?,
-        vec![0x22; dilithium5::public_key_bytes()]
+        decode_room_admin_target_hex(&hex_encode(vec![0x22; room_admin_public_key_bytes()]))?,
+        vec![0x22; room_admin_public_key_bytes()]
     );
     assert!(decode_room_admin_target_hex("aa").is_err());
     assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");

@@ -1,10 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
 
-use pqcrypto_dilithium::dilithium5::{
-    public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
-};
-
 use crate::message_crypto::{
     MessageCryptoContext, decrypt_message_v2_with_index, derive_msg_replay_context_id,
     derive_msg_replay_tuple_tag, encrypt_message_v2,
@@ -177,16 +173,16 @@ async fn perform_fetch_inner(params: FetchParams) -> Result<FetchOutcome> {
             continue;
         }
 
-        const MLDSA65_PUBKEY_SIZE: usize = ml_dsa_public_key_bytes();
-        const MLDSA65_SIG_SIZE: usize = ml_dsa_signature_bytes();
-        const MIN_MSG_SIZE: usize =
-            MESSAGE_PREFIX.len() + 8 + 4 + 4 + MLDSA65_PUBKEY_SIZE + 4 + MLDSA65_SIG_SIZE;
+        let ml_dsa_public_key_size = message_signing_public_key_bytes();
+        let ml_dsa_signature_size = message_signature_bytes();
+        let min_msg_size =
+            MESSAGE_PREFIX.len() + 8 + 4 + 4 + ml_dsa_public_key_size + 4 + ml_dsa_signature_size;
 
-        if authenticated_msg.len() < MIN_MSG_SIZE {
+        if authenticated_msg.len() < min_msg_size {
             tracing::warn!(
                 "message too small for authenticated format: {} bytes < {} bytes minimum",
                 authenticated_msg.len(),
-                MIN_MSG_SIZE
+                min_msg_size
             );
             continue;
         }
@@ -199,19 +195,19 @@ async fn perform_fetch_inner(params: FetchParams) -> Result<FetchOutcome> {
             }
         };
 
-        if envelope.public_key.len() != MLDSA65_PUBKEY_SIZE {
+        if envelope.public_key.len() != ml_dsa_public_key_size {
             tracing::warn!(
                 "unexpected public key length: {} (expected {})",
                 envelope.public_key.len(),
-                MLDSA65_PUBKEY_SIZE
+                ml_dsa_public_key_size
             );
             continue;
         }
-        if envelope.signature.len() != MLDSA65_SIG_SIZE {
+        if envelope.signature.len() != ml_dsa_signature_size {
             tracing::warn!(
                 "unexpected signature length: {} (expected {})",
                 envelope.signature.len(),
-                MLDSA65_SIG_SIZE
+                ml_dsa_signature_size
             );
             continue;
         }
