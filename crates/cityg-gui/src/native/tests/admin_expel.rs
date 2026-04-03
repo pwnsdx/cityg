@@ -40,20 +40,29 @@ async fn room_admin_grant_and_revoke_flow_preserves_authorization_boundaries()
         .await?
     };
     let client = new_api_client(&server_url);
+    let bootstrap_admin = RoomIdentity {
+        pop_public_key: bootstrap_admin_pop_public_key.clone(),
+        pop_secret_key: bootstrap_admin_pop_secret_key.clone(),
+    };
+    let alice_admin = RoomIdentity {
+        pop_public_key: alice.pop_public_key.clone(),
+        pop_secret_key: alice.pop_secret_key.clone(),
+    };
+    let bob_admin = RoomIdentity {
+        pop_public_key: bob.pop_public_key.clone(),
+        pop_secret_key: bob.pop_secret_key.clone(),
+    };
 
-    let bootstrap_grant_alice = build_room_admin_target_proof(
+    let bootstrap_grant_alice = bootstrap_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
         &room_id,
         &alice.pop_public_key,
-        &bootstrap_admin_pop_public_key,
-        &bootstrap_admin_pop_secret_key,
     )?;
     client
         .grant_room_admin(&room_id, &alice.pop_public_key, bootstrap_grant_alice)
         .await?;
 
-    let alice_listing =
-        build_room_admin_listing_proof(&room_id, &alice.pop_public_key, &alice.pop_secret_key)?;
+    let alice_listing = alice_admin.build_listing_proof(&room_id)?;
     let admins_after_alice = client.list_room_admins(&room_id, alice_listing).await?;
     assert!(
         admins_after_alice
@@ -70,19 +79,16 @@ async fn room_admin_grant_and_revoke_flow_preserves_authorization_boundaries()
         "alice must appear in the ACL after grant"
     );
 
-    let alice_grant_bob = build_room_admin_target_proof(
+    let alice_grant_bob = alice_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
         &room_id,
         &bob.pop_public_key,
-        &alice.pop_public_key,
-        &alice.pop_secret_key,
     )?;
     client
         .grant_room_admin(&room_id, &bob.pop_public_key, alice_grant_bob)
         .await?;
 
-    let bob_listing =
-        build_room_admin_listing_proof(&room_id, &bob.pop_public_key, &bob.pop_secret_key)?;
+    let bob_listing = bob_admin.build_listing_proof(&room_id)?;
     let admins_after_bob = client.list_room_admins(&room_id, bob_listing).await?;
     assert!(
         admins_after_bob
@@ -92,19 +98,16 @@ async fn room_admin_grant_and_revoke_flow_preserves_authorization_boundaries()
         "bob must appear in the ACL after alice grants admin"
     );
 
-    let alice_revoke_bob = build_room_admin_target_proof(
+    let alice_revoke_bob = alice_admin.build_target_proof(
         RoomAdminOperation::RevokeAdmin,
         &room_id,
         &bob.pop_public_key,
-        &alice.pop_public_key,
-        &alice.pop_secret_key,
     )?;
     client
         .revoke_room_admin(&room_id, &bob.pop_public_key, alice_revoke_bob)
         .await?;
 
-    let alice_listing_after_revoke =
-        build_room_admin_listing_proof(&room_id, &alice.pop_public_key, &alice.pop_secret_key)?;
+    let alice_listing_after_revoke = alice_admin.build_listing_proof(&room_id)?;
     let admins_after_revoke = client
         .list_room_admins(&room_id, alice_listing_after_revoke)
         .await?;
@@ -116,8 +119,7 @@ async fn room_admin_grant_and_revoke_flow_preserves_authorization_boundaries()
         "bob must disappear from the ACL after revoke"
     );
 
-    let bob_listing_after_revoke =
-        build_room_admin_listing_proof(&room_id, &bob.pop_public_key, &bob.pop_secret_key)?;
+    let bob_listing_after_revoke = bob_admin.build_listing_proof(&room_id)?;
     let err = client
         .list_room_admins(&room_id, bob_listing_after_revoke)
         .await
@@ -180,19 +182,24 @@ async fn admin_expel_removes_member_and_preserves_survivor_messaging()
     };
 
     let client = new_api_client(&server_url);
-    let grant_proof = build_room_admin_target_proof(
+    let bootstrap_admin = RoomIdentity {
+        pop_public_key: bootstrap_admin_pop_public_key.clone(),
+        pop_secret_key: bootstrap_admin_pop_secret_key.clone(),
+    };
+    let alice_admin = RoomIdentity {
+        pop_public_key: alice.pop_public_key.clone(),
+        pop_secret_key: alice.pop_secret_key.clone(),
+    };
+    let grant_proof = bootstrap_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
         &room_id,
         &alice.pop_public_key,
-        &bootstrap_admin_pop_public_key,
-        &bootstrap_admin_pop_secret_key,
     )?;
     client
         .grant_room_admin(&room_id, &alice.pop_public_key, grant_proof)
         .await?;
 
-    let alice_admin_listing_proof =
-        build_room_admin_listing_proof(&room_id, &alice.pop_public_key, &alice.pop_secret_key)?;
+    let alice_admin_listing_proof = alice_admin.build_listing_proof(&room_id)?;
     let admins = client
         .list_room_admins(&room_id, alice_admin_listing_proof)
         .await?;
@@ -387,12 +394,14 @@ async fn restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messa
     };
 
     let client = new_api_client(&server_url);
-    let grant_proof = build_room_admin_target_proof(
+    let bootstrap_admin = RoomIdentity {
+        pop_public_key: bootstrap_admin_pop_public_key.clone(),
+        pop_secret_key: bootstrap_admin_pop_secret_key.clone(),
+    };
+    let grant_proof = bootstrap_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
         &room_id,
         &alice.pop_public_key,
-        &bootstrap_admin_pop_public_key,
-        &bootstrap_admin_pop_secret_key,
     )?;
     client
         .grant_room_admin(&room_id, &alice.pop_public_key, grant_proof)
@@ -547,12 +556,14 @@ async fn admin_expel_then_survivor_refresh_preserves_room_and_new_joiner_messagi
     };
 
     let client = new_api_client(&server_url);
-    let grant_proof = build_room_admin_target_proof(
+    let bootstrap_admin = RoomIdentity {
+        pop_public_key: bootstrap_admin_pop_public_key.clone(),
+        pop_secret_key: bootstrap_admin_pop_secret_key.clone(),
+    };
+    let grant_proof = bootstrap_admin.build_target_proof(
         RoomAdminOperation::GrantAdmin,
         &room_id,
         &alice.pop_public_key,
-        &bootstrap_admin_pop_public_key,
-        &bootstrap_admin_pop_secret_key,
     )?;
     client
         .grant_room_admin(&room_id, &alice.pop_public_key, grant_proof)
