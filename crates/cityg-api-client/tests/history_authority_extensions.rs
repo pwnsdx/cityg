@@ -272,6 +272,7 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
     let join_record = BarrierJoinRecord {
         device_pk: vec![0xAA; 32],
         leaf_index: 9,
+        slot_generation: 0,
         ek_leaf: vec![0xBB; 1184],
     };
     let joins_bytes = sign_helper_completeness_attestation(

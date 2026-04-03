@@ -135,6 +135,7 @@ pub fn encode_prepared_join_ticket_response(
                 device_pk: record.device_pk,
                 leaf_index: record.leaf_index,
                 ek_leaf: record.ek_leaf,
+                slot_generation: record.slot_generation,
             })
             .collect(),
         current_revoked_leaf_indices: ticket.current_revoked_leaf_indices,
@@ -503,6 +504,7 @@ fn pb_barrier_join_leaf_record(record: ServerBarrierJoinLeafRecord) -> pb::Barri
         device_pk: record.device_pk,
         leaf_index: record.leaf_index,
         ek_leaf: record.ek_leaf,
+        slot_generation: record.slot_generation,
     }
 }
 
@@ -941,6 +943,7 @@ pub fn decode_full_verification_witness_request(
         .map(|record| ServerBarrierJoinLeafRecord {
             device_pk: record.device_pk,
             leaf_index: record.leaf_index,
+            slot_generation: record.slot_generation,
             ek_leaf: record.ek_leaf,
         })
         .collect();
@@ -2203,6 +2206,7 @@ mod tests {
                     device_pk: vec![0x51],
                     leaf_index: 52,
                     ek_leaf: vec![0x53],
+                    slot_generation: 54,
                 }],
                 revoked_leaf_indices: vec![61],
                 barrier_update: vec![0x62],

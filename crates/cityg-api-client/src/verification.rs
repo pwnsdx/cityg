@@ -825,6 +825,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         .map(|record| BarrierJoinRecord {
             device_pk: record.device_pk.clone(),
             leaf_index: record.leaf_index,
+            slot_generation: record.slot_generation,
             ek_leaf: record.ek_leaf.clone(),
         })
         .collect::<Vec<_>>();

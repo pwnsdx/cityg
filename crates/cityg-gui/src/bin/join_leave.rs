@@ -3130,6 +3130,7 @@ mod tests {
             &[BarrierJoinRecord {
                 device_pk: vec![0x01],
                 leaf_index: 2,
+                slot_generation: 0,
                 ek_leaf: vec![0xFE, 0xED],
             }],
         )?;
@@ -3154,6 +3155,7 @@ mod tests {
                 &[BarrierJoinRecord {
                     device_pk: vec![0x01],
                     leaf_index: 7,
+                    slot_generation: 0,
                     ek_leaf: vec![0xFF],
                 }],
             )

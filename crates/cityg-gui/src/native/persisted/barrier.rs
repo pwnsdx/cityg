@@ -90,6 +90,8 @@ pub(in crate::native) struct PersistedBarrierJoinRecord {
     #[serde(default)]
     pub(in crate::native) leaf_index: u32,
     #[serde(default)]
+    pub(in crate::native) slot_generation: u64,
+    #[serde(default)]
     pub(in crate::native) ek_leaf_hex: String,
 }
 
@@ -226,6 +228,7 @@ impl PersistedBarrierJoinRecord {
         Self {
             device_pk_hex: hex_encode(record.device_pk.as_slice()),
             leaf_index: record.leaf_index,
+            slot_generation: record.slot_generation,
             ek_leaf_hex: hex_encode(record.ek_leaf.as_slice()),
         }
     }
@@ -237,6 +240,7 @@ impl PersistedBarrierJoinRecord {
                 &self.device_pk_hex,
             )?,
             leaf_index: self.leaf_index,
+            slot_generation: self.slot_generation,
             ek_leaf: decode_hex_vec(
                 "barrier_state.bootstrap_join_records[].ek_leaf_hex",
                 &self.ek_leaf_hex,

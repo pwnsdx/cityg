@@ -511,6 +511,7 @@ impl CitygApiClient {
 pub struct BarrierJoinRecord {
     pub device_pk: Vec<u8>,
     pub leaf_index: u32,
+    pub slot_generation: u64,
     pub ek_leaf: Vec<u8>,
 }
 
@@ -519,6 +520,7 @@ fn to_core_join_snapshot_record(
 ) -> cityg_client::barrier::BarrierJoinSnapshotRecord {
     cityg_client::barrier::BarrierJoinSnapshotRecord {
         leaf_index: record.leaf_index,
+        slot_generation: record.slot_generation,
         ek_leaf: record.ek_leaf.clone(),
     }
 }
@@ -1904,6 +1906,7 @@ mod tests {
             .map(|record| BarrierJoinRecord {
                 device_pk: record.device_pk.clone(),
                 leaf_index: record.leaf_index,
+                slot_generation: record.slot_generation,
                 ek_leaf: record.ek_leaf.clone(),
             })
             .collect::<Vec<_>>();
@@ -2546,11 +2549,13 @@ mod tests {
                     pb::BarrierJoinLeafRecord {
                         device_pk: vec![0xAA; 32],
                         leaf_index: 9,
+                        slot_generation: 0,
                         ek_leaf: vec![0xBB; 1184],
                     },
                     pb::BarrierJoinLeafRecord {
                         device_pk: vec![0xAB; 32],
                         leaf_index: 10,
+                        slot_generation: 0,
                         ek_leaf: vec![0xBC; 1184],
                     },
                 ];
@@ -2579,6 +2584,7 @@ mod tests {
                     .map(|record| BarrierJoinRecord {
                         device_pk: record.device_pk.clone(),
                         leaf_index: record.leaf_index,
+                        slot_generation: record.slot_generation,
                         ek_leaf: record.ek_leaf.clone(),
                     })
                     .collect::<Vec<_>>();
@@ -4641,6 +4647,7 @@ mod tests {
                         records: vec![pb::BarrierJoinLeafRecord {
                             device_pk: vec![0xAA; 32],
                             leaf_index: 9,
+                            slot_generation: 0,
                             ek_leaf: vec![0xBB; 1184],
                         }],
                         history_view_id: vec![0xD1; 32],
@@ -4998,6 +5005,7 @@ mod tests {
                         records: vec![pb::BarrierJoinLeafRecord {
                             device_pk: vec![0xAA; 32],
                             leaf_index: 9,
+                            slot_generation: 0,
                             ek_leaf: vec![0xBB; 1184],
                         }],
                         history_view_id: vec![0xD1; 32],
@@ -5079,6 +5087,7 @@ mod tests {
                         records: vec![pb::BarrierJoinLeafRecord {
                             device_pk: vec![0xAA; 32],
                             leaf_index: 9,
+                            slot_generation: 0,
                             ek_leaf: vec![0xBB; 1184],
                         }],
                         history_view_id: vec![0xD1; 32],
@@ -5165,6 +5174,7 @@ mod tests {
                 records: &[BarrierJoinRecord {
                     device_pk: vec![0xAA; 32],
                     leaf_index: 9,
+                    slot_generation: 0,
                     ek_leaf: vec![0xBB; 1184],
                 }],
             },
@@ -5180,6 +5190,7 @@ mod tests {
                 records: &[BarrierJoinRecord {
                     device_pk: vec![0xAB; 32],
                     leaf_index: 10,
+                    slot_generation: 0,
                     ek_leaf: vec![0xBC; 1184],
                 }],
             },
@@ -5209,6 +5220,7 @@ mod tests {
                             vec![pb::BarrierJoinLeafRecord {
                                 device_pk: vec![0xAA; 32],
                                 leaf_index: 9,
+                                slot_generation: 0,
                                 ek_leaf: vec![0xBB; 1184],
                             }],
                             0,
@@ -5221,6 +5233,7 @@ mod tests {
                             vec![pb::BarrierJoinLeafRecord {
                                 device_pk: vec![0xAB; 32],
                                 leaf_index: 10,
+                                slot_generation: 0,
                                 ek_leaf: vec![0xBC; 1184],
                             }],
                             1,

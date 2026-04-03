@@ -60,6 +60,7 @@ mod tests {
         let snapshot_base_entries = vec![Vec::new(); blank_len];
         let join_records = vec![BarrierJoinSnapshotRecord {
             leaf_index: 1,
+            slot_generation: 0,
             ek_leaf: vec![0x11; kyber768::public_key_bytes()],
         }];
         let internal_pk = vec![0x22; kyber768::public_key_bytes()];

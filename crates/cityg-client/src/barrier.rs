@@ -29,6 +29,7 @@ pub struct BarrierHistoryCommitment {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BarrierJoinSnapshotRecord {
     pub leaf_index: u32,
+    pub slot_generation: u64,
     #[serde(with = "serde_bytes")]
     pub ek_leaf: Vec<u8>,
 }
@@ -669,6 +670,7 @@ mod tests {
             4,
             &[BarrierJoinSnapshotRecord {
                 leaf_index: 1,
+                slot_generation: 0,
                 ek_leaf: vec![0xCC; 8],
             }],
         )?;
@@ -682,6 +684,7 @@ mod tests {
     fn expected_same_rrh_barrier_reason_tracks_joiner_vs_refresh() {
         let join_records = vec![BarrierJoinSnapshotRecord {
             leaf_index: 3,
+            slot_generation: 0,
             ek_leaf: vec![0xAA; 8],
         }];
         assert_eq!(

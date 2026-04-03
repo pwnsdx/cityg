@@ -362,6 +362,7 @@ message BarrierJoinLeafRecord {
   bytes device_pk = 1;
   uint32 leaf_index = 2;
   bytes ek_leaf = 3;
+  uint64 slot_generation = 4;
 }
 
 message BarrierResolveJoinsSinceRequest {

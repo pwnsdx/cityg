@@ -574,6 +574,8 @@ pub struct BarrierJoinLeafRecord {
     pub device_pk: Vec<u8>,
     /// Cover leaf index (0-based) for the member.
     pub leaf_index: u32,
+    /// Lease generation for this slot occupancy.
+    pub slot_generation: u64,
     /// Barrier leaf ML-KEM public key (ek, 1184 bytes when provisioned).
     pub ek_leaf: Vec<u8>,
 }
@@ -1917,6 +1919,7 @@ impl CityGServer {
                     leaf_id: *leaf,
                     barrier_version: barrier_version.saturating_add(1),
                     leaf_index: lease.slot_index,
+                    slot_generation: lease.slot_generation,
                     device_pk: device_pk.clone(),
                     ek_leaf: ek_leaf.clone(),
                 });
@@ -2939,6 +2942,11 @@ impl CityGServer {
                             .cloned()
                             .unwrap_or_else(|| leaf.to_vec()),
                         leaf_index,
+                        slot_generation: state
+                            .leaf_slot_leases
+                            .get(leaf)
+                            .map(|lease| lease.slot_generation)
+                            .unwrap_or(0),
                         ek_leaf: state
                             .leaf_barrier_public
                             .get(leaf)
@@ -2964,6 +2972,7 @@ impl CityGServer {
                     BarrierJoinLeafRecord {
                         device_pk: record.device_pk.clone(),
                         leaf_index: record.leaf_index,
+                        slot_generation: record.slot_generation,
                         ek_leaf: record.ek_leaf.clone(),
                     },
                     DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,

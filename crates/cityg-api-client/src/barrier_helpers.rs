@@ -276,6 +276,7 @@ impl CitygApiClient {
                 .map(|record| pb::BarrierJoinLeafRecord {
                     device_pk: record.device_pk.clone(),
                     leaf_index: record.leaf_index,
+                    slot_generation: record.slot_generation,
                     ek_leaf: record.ek_leaf.clone(),
                 })
                 .collect(),
@@ -605,6 +606,7 @@ impl CitygApiClient {
                 .map(|record| BarrierJoinRecord {
                     device_pk: record.device_pk.clone(),
                     leaf_index: record.leaf_index,
+                    slot_generation: record.slot_generation,
                     ek_leaf: record.ek_leaf.clone(),
                 })
                 .collect::<Vec<_>>();
