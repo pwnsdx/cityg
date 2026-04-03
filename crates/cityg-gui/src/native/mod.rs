@@ -46,8 +46,6 @@ use cityg_client::message_auth::{
     message_signature_bytes as ml_dsa_signature_bytes,
     message_signing_public_key_bytes as ml_dsa_public_key_bytes,
 };
-#[cfg(test)]
-use cityg_client::vrf::generate_vrf_keys;
 use cityg_config::CityGConfig;
 #[cfg(not(test))]
 use gpui::Application;

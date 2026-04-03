@@ -179,7 +179,7 @@ cargo test --locked -p cityg-api --test integration \
   - [`../../scripts/run_large_group_chaos.sh`](../../scripts/run_large_group_chaos.sh)
   - [`../../scripts/run_restart_traffic_chaos.sh`](../../scripts/run_restart_traffic_chaos.sh)
 
-## Next Useful E2E TODO
+## Next Useful E2E Work
 
 - No blocking checklist todo remains for the current profile.
 - Useful future work is now optional scale-up on top of the named runners above:

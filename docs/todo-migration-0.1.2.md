@@ -1,4 +1,4 @@
-# Migration TODO: 0.1.0 -> 0.1.2
+# Migration Tracker: 0.1.0 -> 0.1.2
 
 > [!IMPORTANT]
 > Historical migration tracker retained for audit traceability.

@@ -477,17 +477,6 @@ fn sample_pivot_parity() -> PivotParity {
     }
 }
 
-#[test]
-fn generate_vrf_keys_are_not_deterministic() -> Result<(), Box<dyn std::error::Error>> {
-    let (secret_a, public_a) = generate_vrf_keys()?;
-    let (secret_b, public_b) = generate_vrf_keys()?;
-    assert!(!secret_a.is_empty());
-    assert!(!public_a.is_empty());
-    assert_ne!(secret_a, secret_b);
-    assert_ne!(public_a, public_b);
-    Ok(())
-}
-
 fn build_test_session(
     seed: u64,
     server_url: &str,

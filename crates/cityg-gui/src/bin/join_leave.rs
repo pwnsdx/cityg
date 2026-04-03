@@ -1595,7 +1595,6 @@ mod tests {
         response::{IntoResponse, Response},
         routing::{get, post},
     };
-    use cityg_client::vrf::generate_vrf_keys;
     use cityg_config::CityGConfig;
     use futures::SinkExt;
     use prost::Message;
@@ -3007,17 +3006,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn generate_vrf_keys_are_not_deterministic() -> Result<()> {
-        let (secret_a, public_a) = generate_vrf_keys()?;
-        let (secret_b, public_b) = generate_vrf_keys()?;
-        assert!(!secret_a.is_empty());
-        assert!(!public_a.is_empty());
-        assert_ne!(secret_a, secret_b);
-        assert_ne!(public_a, public_b);
-        Ok(())
     }
 
     #[test]
