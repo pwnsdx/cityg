@@ -48,6 +48,8 @@ use cityg_api_client::{
     ensure_supported_attested_current_state_extension, is_fs_forward_jump_group_http_error,
 };
 #[cfg(test)]
+use cityg_client::barrier_build::BarrierUpdateBuildResult;
+#[cfg(test)]
 use cityg_client::demo;
 use cityg_client::{
     ClientEpochBundle,
@@ -125,31 +127,6 @@ use websocket_replay::{
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 const LEAVE_ACCEPT_RETRY_MAX_ATTEMPTS: u32 = 2;
 
-struct BarrierUpdateBuildResult {
-    #[cfg(test)]
-    raw_update: Vec<u8>,
-    kem_tree_hash_after: [u8; 32],
-    k_barrier_new: [u8; 32],
-}
-
-impl BarrierUpdateBuildResult {
-    fn from_core(core: cityg_client::barrier_build::BarrierUpdateBuildResult) -> Self {
-        #[cfg(test)]
-        let raw_update = core.raw_update.clone();
-        let cityg_client::barrier_build::BarrierUpdateBuildResult {
-            kem_tree_hash_after,
-            k_barrier_new,
-            ..
-        } = core;
-        Self {
-            #[cfg(test)]
-            raw_update,
-            kem_tree_hash_after,
-            k_barrier_new: *k_barrier_new,
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_barrier_update_bytes(
@@ -163,7 +140,7 @@ fn build_barrier_update_bytes(
     snapshot_pre: &[Vec<u8>],
 ) -> Result<BarrierUpdateBuildResult> {
     let gid = bytes32("gid", gid)?;
-    let built = cityg_client::barrier_build::build_barrier_update_bytes(
+    cityg_client::barrier_build::build_barrier_update_bytes(
         &gid,
         n_max,
         updater_leaf,
@@ -172,8 +149,7 @@ fn build_barrier_update_bytes(
         revocation_roots_hash,
         kem_tree_hash_before,
         snapshot_pre,
-    )?;
-    Ok(BarrierUpdateBuildResult::from_core(built))
+    )
 }
 
 fn log_fingerprints(session: &Session) {
@@ -308,7 +284,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
     }
 
     let server_url = server_url.unwrap_or_else(default_cli_server_url);
-    let room_id = room_id.unwrap_or_else(random_room_id);
+    let room_id = room_id.unwrap_or_else(random_hex_32);
     let alias_base = alias.unwrap_or_else(|| "cli-joiner".to_string());
 
     if !batch_mode && !watch_mode && leave_order_raw.is_some() {
@@ -917,7 +893,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         .await
         .context("prepare join finalize barrier snapshot")?;
     let next_barrier_version = prepared_runtime.barrier_version.saturating_add(1);
-    let barrier_update = BarrierUpdateBuildResult::from_core(barrier_update);
     let pop_secret_key =
         cityg_api_client::parse_room_admin_secret_key(session.pop_secret.as_slice())
             .context("invalid POP key")?;
@@ -1143,7 +1118,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             .await
             .context("prepare leave barrier snapshot")?;
         let next_barrier_version = prepared_runtime.barrier_version.saturating_add(1);
-        let barrier_update = BarrierUpdateBuildResult::from_core(barrier_update);
         let pop_secret_key =
             cityg_api_client::parse_room_admin_secret_key(session.pop_secret.as_slice())
                 .context("invalid POP key")?;
@@ -1545,6 +1519,7 @@ mod tests {
         routing::{get, post},
     };
     use cityg_config::CityGConfig;
+    use client_env::read_nonempty_env;
     use futures::SinkExt;
     use prost::Message;
     use serde_json::json;

@@ -2,6 +2,7 @@ use super::message_auth::build_authenticated_message;
 #[cfg(test)]
 use super::message_auth::decode_verified_authenticated_message;
 use super::*;
+use rand::{RngExt, rng};
 
 pub(super) async fn run_watch_mode(params: WatchModeParams<'_>) -> Result<()> {
     let WatchModeParams {

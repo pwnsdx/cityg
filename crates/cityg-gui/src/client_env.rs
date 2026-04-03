@@ -4,7 +4,7 @@ pub(crate) const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 pub(crate) const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
 pub(crate) const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 
-fn read_nonempty_env(var: &str) -> Option<String> {
+pub(crate) fn read_nonempty_env(var: &str) -> Option<String> {
     std::env::var(var)
         .ok()
         .map(|value| value.trim().to_string())
@@ -45,6 +45,7 @@ fn new_api_client_with_tokens(
     client
 }
 
+#[allow(dead_code)]
 pub(crate) fn new_api_client(server_url: &str) -> CitygApiClient {
     new_api_client_with_tokens(
         server_url,
