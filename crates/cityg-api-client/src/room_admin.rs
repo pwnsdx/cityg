@@ -52,6 +52,57 @@ impl RoomAdminIdentity {
     pub fn build_identity_binding(&self, alias: &str) -> Result<IdentityBinding, Error> {
         crate::build_identity_binding(alias, &self.pop_public_key, &self.pop_secret_key)
     }
+
+    pub fn build_kbroad_proof(
+        &self,
+        operation: RoomAdminOperation,
+        room_id: &str,
+        kbroad_public: &[u8],
+    ) -> Result<RoomAdminProof, Error> {
+        build_room_admin_proof(
+            operation,
+            room_id,
+            kbroad_public,
+            &self.pop_public_key,
+            &self.pop_secret_key,
+        )
+    }
+
+    pub fn build_target_proof(
+        &self,
+        operation: RoomAdminOperation,
+        room_id: &str,
+        target_pop_public_key: &[u8],
+    ) -> Result<RoomAdminProof, Error> {
+        build_room_admin_target_proof(
+            operation,
+            room_id,
+            target_pop_public_key,
+            &self.pop_public_key,
+            &self.pop_secret_key,
+        )
+    }
+
+    pub fn build_listing_proof(&self, room_id: &str) -> Result<RoomAdminProof, Error> {
+        build_room_admin_listing_proof(room_id, &self.pop_public_key, &self.pop_secret_key)
+    }
+
+    pub fn build_leaf_pair_proof(
+        &self,
+        operation: RoomAdminOperation,
+        room_id: &str,
+        author_leaf_id: &[u8; 32],
+        target_leaf_id: &[u8; 32],
+    ) -> Result<RoomAdminProof, Error> {
+        build_room_admin_leaf_pair_proof(
+            operation,
+            room_id,
+            author_leaf_id,
+            target_leaf_id,
+            &self.pop_public_key,
+            &self.pop_secret_key,
+        )
+    }
 }
 
 fn build_room_admin_proof_payload(

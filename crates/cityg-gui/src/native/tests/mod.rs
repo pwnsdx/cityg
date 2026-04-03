@@ -2753,19 +2753,17 @@ async fn bootstrap_test_room_with_admin_identity(
     server_url: &str,
     room_id: &str,
 ) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
-    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
-    let admin_proof = build_room_admin_proof(
+    let identity = cityg_api_client::generate_room_admin_identity();
+    let admin_proof = identity.build_kbroad_proof(
         RoomAdminOperation::Bootstrap,
         room_id,
         demo::kbroad_public(),
-        &pop_public_key,
-        &pop_secret_key,
     )?;
     new_api_client(server_url)
         .bootstrap_room_as_admin(room_id, demo::kbroad_public(), admin_proof)
         .await
         .map_err(anyhow::Error::from)?;
-    Ok((pop_public_key, pop_secret_key))
+    Ok((identity.pop_public_key, identity.pop_secret_key))
 }
 
 async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<(), anyhow::Error> {

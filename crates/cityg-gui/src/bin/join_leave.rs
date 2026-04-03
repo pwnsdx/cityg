@@ -38,13 +38,13 @@ use ciborium::value::Integer;
 use ciborium::value::Value;
 #[cfg(test)]
 use cityg_api_client::BarrierJoinRecord;
+#[cfg(test)]
+use cityg_api_client::RoomAdminOperation;
 use cityg_api_client::{
     CitygApiClient, Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
     PrepareOriginMergeTicketInput, PrepareRevocationMergeTicketInput, PreparedBarrierSnapshot,
     ensure_supported_attested_current_state_extension, is_fs_forward_jump_group_http_error,
 };
-#[cfg(test)]
-use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 #[cfg(test)]
 use cityg_client::demo;
 use cityg_client::{
@@ -1719,13 +1719,11 @@ mod tests {
 
     async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<()> {
         ensure_test_auth_env();
-        let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
-        let admin_proof = build_room_admin_proof(
+        let identity = cityg_api_client::generate_room_admin_identity();
+        let admin_proof = identity.build_kbroad_proof(
             RoomAdminOperation::Bootstrap,
             room_id,
             demo::kbroad_public(),
-            &pop_public_key,
-            &pop_secret_key,
         )?;
         new_api_client(server_url)
             .bootstrap_room_as_admin(room_id, demo::kbroad_public(), admin_proof)
@@ -4083,14 +4081,11 @@ mod tests {
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex::encode([0x93u8; 32]);
         ensure_test_auth_env();
-        let (alice_pop_public_key, alice_pop_secret_key) =
-            cityg_api_client::generate_room_admin_keypair();
-        let admin_proof = build_room_admin_proof(
+        let alice_identity = cityg_api_client::generate_room_admin_identity();
+        let admin_proof = alice_identity.build_kbroad_proof(
             RoomAdminOperation::Bootstrap,
             &room_id,
             demo::kbroad_public(),
-            &alice_pop_public_key,
-            &alice_pop_secret_key,
         )?;
         new_api_client(&server_url)
             .bootstrap_room_as_admin(&room_id, demo::kbroad_public(), admin_proof)
@@ -4100,8 +4095,8 @@ mod tests {
             &server_url,
             &room_id,
             "alice",
-            &alice_pop_public_key,
-            &alice_pop_secret_key,
+            &alice_identity.pop_public_key,
+            &alice_identity.pop_secret_key,
         )
         .await?;
         let bob = perform_join(&server_url, &room_id, "bob").await?;
@@ -4118,8 +4113,8 @@ mod tests {
             &server_url,
             &room_id,
             "alice",
-            &alice_pop_public_key,
-            &alice_pop_secret_key,
+            &alice_identity.pop_public_key,
+            &alice_identity.pop_secret_key,
         )
         .await?;
 
