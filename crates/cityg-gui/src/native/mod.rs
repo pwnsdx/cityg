@@ -76,11 +76,6 @@ use pqcrypto_dilithium::dilithium5;
 use pqcrypto_dilithium::dilithium5::{
     public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
 };
-#[cfg(test)]
-use pqcrypto_traits::sign::DetachedSignature;
-#[cfg(test)]
-use pqcrypto_traits::sign::PublicKey as DilithiumPublicKey;
-use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;
 #[cfg(test)]

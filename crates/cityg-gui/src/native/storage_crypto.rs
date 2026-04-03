@@ -1,4 +1,5 @@
 use super::*;
+use rand::{RngExt, rng};
 use std::{fs, io::Write, path::PathBuf, time::Duration};
 
 use blake3::hash as blake3_hash;

@@ -1,5 +1,6 @@
 use super::endpoint_mode::EndpointMode;
 use super::*;
+use rand::{RngExt, rng};
 
 #[cfg(not(test))]
 pub(super) fn run_native_app() {

@@ -1,6 +1,7 @@
 #[cfg(test)]
 use super::fault_injection::{FaultInjectionCutPoint, trigger_fault};
 use super::*;
+use rand::{RngExt, rng};
 use std::{fs, io::Write};
 
 pub(super) fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<()> {

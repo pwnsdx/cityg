@@ -1,4 +1,5 @@
 use super::*;
+use rand::{RngExt, rng};
 
 impl AppModel {
     pub(super) fn start_join(&mut self, cx: &mut ViewContext<Self>) {

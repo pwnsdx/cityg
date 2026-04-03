@@ -2,7 +2,6 @@ use super::*;
 use futures::SinkExt;
 use gpui::{EmptyView, Modifiers, TestAppContext};
 use msphf_rlwe::CapssBranchWitness;
-use pqcrypto_traits::sign::SecretKey as _;
 use prost::Message;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::sync::{Arc, Once, atomic::AtomicU16};
@@ -231,7 +230,7 @@ struct TestDeploymentProfileManifestSignedPayload<'a> {
 struct TestHistoryAuthority {
     descriptor: HistoryAuthorityDescriptor,
     descriptor_bytes: Vec<u8>,
-    secret_key: dilithium5::SecretKey,
+    secret_key: Vec<u8>,
     attestation_bytes: Vec<u8>,
 }
 
@@ -307,11 +306,9 @@ fn build_test_history_authority(
 ) -> Result<TestHistoryAuthority, Box<dyn std::error::Error>> {
     let (public_key_bytes, secret_key_bytes) =
         cityg_client::message_auth::generate_message_signing_keypair();
-    let public_key = dilithium5::PublicKey::from_bytes(&public_key_bytes)?;
-    let secret_key = dilithium5::SecretKey::from_bytes(&secret_key_bytes)?;
     let descriptor = HistoryAuthorityDescriptor {
         scope_id: [0xA1; 32],
-        public_key: public_key.as_bytes().to_vec(),
+        public_key: public_key_bytes,
     };
     let descriptor_bytes = encode_test_cbor_det(&TestHistoryAuthorityDescriptorWire(
         descriptor.scope_id.to_vec(),
@@ -331,9 +328,10 @@ fn build_test_history_authority(
         &parent_attestation_id,
         TEST_GLOBAL_HISTORY_FINALITY_KIND,
     ))?;
-    let signature = dilithium5::detached_sign(payload.as_slice(), &secret_key)
-        .as_bytes()
-        .to_vec();
+    let signature = cityg_client::message_auth::detached_sign_payload(
+        payload.as_slice(),
+        secret_key_bytes.as_slice(),
+    )?;
     let attestation_bytes = encode_test_cbor_det(&TestGlobalHistoryAttestationWire(
         descriptor.scope_id.to_vec(),
         gid.to_vec(),
@@ -350,7 +348,7 @@ fn build_test_history_authority(
     Ok(TestHistoryAuthority {
         descriptor,
         descriptor_bytes,
-        secret_key,
+        secret_key: secret_key_bytes,
         attestation_bytes,
     })
 }
@@ -376,9 +374,10 @@ fn build_test_deployment_profile_manifest(
         fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
         fs_forward_leap_slack_device: fs_policy.slack_device,
     })?;
-    let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
-        .as_bytes()
-        .to_vec();
+    let signature = cityg_client::message_auth::detached_sign_payload(
+        payload.as_slice(),
+        authority.secret_key.as_slice(),
+    )?;
     encode_test_cbor_det(&TestDeploymentProfileManifestWire {
         scope_id: authority.descriptor.scope_id.to_vec(),
         history_authority_extension: TEST_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),

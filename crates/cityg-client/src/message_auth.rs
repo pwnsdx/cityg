@@ -113,6 +113,12 @@ pub fn generate_message_signing_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+pub fn detached_sign_payload(payload: &[u8], secret_key: &[u8]) -> Result<Vec<u8>> {
+    let sk = dilithium5::SecretKey::from_bytes(secret_key)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
+    Ok(dilithium5::detached_sign(payload, &sk).as_bytes().to_vec())
+}
+
 pub fn sign_message(
     leaf_id: &[u8; 32],
     timestamp_ms: u64,
