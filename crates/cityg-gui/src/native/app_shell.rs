@@ -1,6 +1,6 @@
 use super::endpoint_mode::EndpointMode;
 use super::*;
-use rand::{RngExt, rng};
+use cityg_client::binary::random_hex_32;
 
 #[cfg(not(test))]
 pub(super) fn run_native_app() {
@@ -299,8 +299,6 @@ impl Render for AppModel {
 
 impl AppModel {
     pub(super) fn random_room_id() -> String {
-        let mut bytes = [0u8; 32];
-        rng().fill(&mut bytes);
-        hex_encode(bytes)
+        random_hex_32()
     }
 }

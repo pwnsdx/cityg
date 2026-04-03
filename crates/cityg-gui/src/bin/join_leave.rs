@@ -55,7 +55,7 @@ use cityg_client::{
         BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
         build_barrier_merge_bundle as build_barrier_merge_bundle_core,
     },
-    binary::{fingerprint_full_hex, fingerprint_preview_hex},
+    binary::{fingerprint_full_hex, fingerprint_preview_hex, random_hex_32},
     bundle_headers::recompute_proofs_commit,
     join_bundle::{
         JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
@@ -100,7 +100,6 @@ use notifications::{
     Notification, expect_membership_event, expect_message_event, spawn_notification_listener,
     websocket_url,
 };
-use rand::{RngExt, rng};
 #[cfg(test)]
 use reqwest::header::CONTENT_TYPE;
 use serde::Serialize;
@@ -125,10 +124,7 @@ use websocket_replay::{
 };
 
 fn random_room_id() -> String {
-    let mut rng = rng();
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
-    hex::encode(bytes)
+    random_hex_32()
 }
 
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;

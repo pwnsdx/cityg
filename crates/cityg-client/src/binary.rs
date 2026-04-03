@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, convert::TryInto};
 use anyhow::{Result, anyhow};
 use ciborium::value::Value;
 use hex::{decode as hex_decode, encode as hex_encode};
+use rand::{Rng, rng};
 
 pub fn header_bytes32(header: &BTreeMap<u64, Value>, key: u64) -> Option<[u8; 32]> {
     match header.get(&key)? {
@@ -43,6 +44,12 @@ pub fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
     )
 }
 
+pub fn random_hex_32() -> String {
+    let mut bytes = [0u8; 32];
+    rng().fill(&mut bytes);
+    hex_encode(bytes)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -64,5 +71,12 @@ mod tests {
         let data = [0xAB; 32];
         assert_eq!(fingerprint_full_hex(&data), "ab".repeat(32));
         assert_eq!(fingerprint_preview_hex(&data), "abab-abab abab-abab …");
+    }
+
+    #[test]
+    fn random_hex_32_returns_64_hex_chars() {
+        let room_id = random_hex_32();
+        assert_eq!(room_id.len(), 64);
+        assert!(room_id.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 }
