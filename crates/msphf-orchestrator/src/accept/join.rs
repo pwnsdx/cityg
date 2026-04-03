@@ -272,7 +272,8 @@ impl AcceptanceContext {
             seq
         };
 
-        let is_genesis = is_all_zero(parts.parent_root)
+        let is_genesis = barrier_version == 0
+            && is_all_zero(parts.parent_root)
             && is_all_zero(parts.revoked_since_prev_root)
             && is_all_zero(parts.revoked_root);
 

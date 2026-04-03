@@ -13,6 +13,7 @@ pub(super) struct LeaveRequest {
     pub(super) gid: [u8; 32],
     pub(super) leaf_id: [u8; 32],
     pub(super) barrier_version: u64,
+    pub(super) barrier_roots_hash: [u8; 32],
     pub(super) kem_tree_hash_after: [u8; 32],
     pub(super) current_history_commitment: Option<HistoryCommitment>,
     pub(super) current_history_authority_extension: Option<HistoryAuthorityExtension>,
@@ -106,6 +107,7 @@ impl LeaveRequest {
             gid: session.gid,
             leaf_id: session.leaf_id,
             barrier_version: session.barrier_state.barrier_version,
+            barrier_roots_hash: session.barrier_state.barrier_roots_hash,
             kem_tree_hash_after: session.barrier_state.kem_tree_hash_after,
             current_history_commitment: session.barrier_state.current_history_commitment,
             current_history_authority_extension: session

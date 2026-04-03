@@ -452,11 +452,17 @@ impl AcceptanceContext {
                     Some(Arc::from(bytes.into_boxed_slice()))
                 }
             });
+        let is_reclaim_join_finalize = header_map.contains_key(&HDR_JOIN_FINALIZE_AUTH)
+            && matches!(
+                header_map.get(&HDR_BARRIER_UPDATE_REASON),
+                Some(Value::Integer(int)) if u64::try_from(*int).ok() == Some(0)
+            );
         let srx_required_for_merge = revoked_since_root_arr != pivot_record.revoked_since_root
             || revoked_root_arr != pivot_record.revoked_root;
-        ensure_merge_srx_keys(header_map, srx_required_for_merge)?;
+        let effective_srx_required_for_merge = srx_required_for_merge && !is_reclaim_join_finalize;
+        ensure_merge_srx_keys(header_map, effective_srx_required_for_merge)?;
         let srx_root_sw_before = self.ensure_group_srx_root_sw(parts.gid)?;
-        if srx_required_for_merge {
+        if effective_srx_required_for_merge {
             ensure_srx_relations(
                 header_map,
                 &parent_root,
@@ -641,7 +647,7 @@ impl AcceptanceContext {
             header_value_bytes(header_map, HDR_CRS_ID, FREEZE_MSPHF_CRS_INVALID)?.into_owned();
         let params_id =
             header_value_bytes(header_map, HDR_PARAMS_ID, FREEZE_PARAMS_ID_INVALID)?.into_owned();
-        let srx_commit = if srx_required_for_merge {
+        let srx_commit = if effective_srx_required_for_merge {
             let bytes = header_bytes32_or_freeze(
                 header_map,
                 HDR_SRX_COMMIT,
@@ -652,7 +658,7 @@ impl AcceptanceContext {
         } else {
             None
         };
-        let srx_root_sw = if srx_required_for_merge {
+        let srx_root_sw = if effective_srx_required_for_merge {
             let bytes = header_bytes32_or_freeze(
                 header_map,
                 HDR_SRX_ROOT_SW,
@@ -701,7 +707,7 @@ impl AcceptanceContext {
             fs_ec: Some(fs_ec),
             fs_dev_commit: Some(fs_dev_commit),
         };
-        if srx_required_for_merge {
+        if effective_srx_required_for_merge {
             if self.group_srx_root_sw(parts.gid) != Some(srx_root_sw_before) {
                 return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
             }

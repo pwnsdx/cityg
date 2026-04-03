@@ -463,6 +463,8 @@ fn apply_persisted_kbroad_state_rebuilds_current_snapshot_when_history_is_invali
             current_accepted_barrier_update: Vec::new(),
             current_accepted_barrier_predecessor_hash: [0u8; 32],
             pending_join_finalize_auth: Vec::new(),
+            active_slot_leases: Vec::new(),
+            revoked_slot_leases: Vec::new(),
             device_chain_states: Vec::new(),
         },
     )]);
@@ -541,6 +543,8 @@ fn apply_persisted_kbroad_state_keeps_history_and_adds_missing_current_snapshot(
             current_accepted_barrier_update: Vec::new(),
             current_accepted_barrier_predecessor_hash: [0u8; 32],
             pending_join_finalize_auth: Vec::new(),
+            active_slot_leases: Vec::new(),
+            revoked_slot_leases: Vec::new(),
             device_chain_states: Vec::new(),
         },
     )]);

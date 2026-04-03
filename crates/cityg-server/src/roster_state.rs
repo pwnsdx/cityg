@@ -147,6 +147,10 @@ pub(crate) struct GroupState {
     pub(crate) snapshots: BTreeMap<[u8; 32], GroupMembership>,
     pub(crate) revoked: BTreeSet<[u8; 32]>,
     pub(crate) next_index: u32,
+    pub(crate) free_slots: BTreeSet<u32>,
+    pub(crate) slot_generations: BTreeMap<u32, u64>,
+    pub(crate) leaf_slot_leases: BTreeMap<[u8; 32], SlotLease>,
+    pub(crate) revoked_slot_leases: BTreeMap<[u8; 32], SlotLease>,
     pub(crate) kbroad_generation: u64,
     pub(crate) rotation_required: bool,
     pub(crate) barrier_initialized: bool,
@@ -186,6 +190,10 @@ impl Default for GroupState {
             snapshots: BTreeMap::new(),
             revoked: BTreeSet::new(),
             next_index: 0,
+            free_slots: BTreeSet::new(),
+            slot_generations: BTreeMap::new(),
+            leaf_slot_leases: BTreeMap::new(),
+            revoked_slot_leases: BTreeMap::new(),
             kbroad_generation: 0,
             rotation_required: false,
             barrier_initialized: false,
@@ -230,6 +238,12 @@ pub(crate) struct JoinLeafHistoryRecord {
     pub(crate) ek_leaf: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct SlotLease {
+    pub(crate) slot_index: u32,
+    pub(crate) slot_generation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AcceptedBarrierMergeRecord {
     pub(crate) barrier_version: u64,
@@ -242,7 +256,7 @@ pub(crate) struct AcceptedBarrierMergeRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct JoinFinalizeAuthRecord {
     pub(crate) leaf_id: [u8; 32],
-    pub(crate) cover_leaf_index: u32,
+    pub(crate) lease: SlotLease,
     pub(crate) token: [u8; 32],
 }
 
@@ -257,6 +271,112 @@ pub(crate) struct BarrierPublicTreeSnapshotRef {
 }
 
 impl GroupState {
+    pub(crate) fn slot_capacity(&self) -> u32 {
+        self.n_max.max(1).min(u32::MAX as u64) as u32
+    }
+
+    fn ensure_slot_allocator_initialized(&mut self) {
+        let slot_capacity = self.slot_capacity();
+        if self.slot_generations.is_empty() {
+            for slot_index in 0..slot_capacity {
+                self.slot_generations.insert(slot_index, 0);
+            }
+        }
+        if self.free_slots.is_empty() && self.slot_generations.len() == slot_capacity as usize {
+            self.free_slots = (0..slot_capacity).collect();
+            for lease in self.leaf_slot_leases.values() {
+                self.free_slots.remove(&lease.slot_index);
+            }
+            for record in self.pending_join_finalize_auth.values() {
+                self.free_slots.remove(&record.lease.slot_index);
+            }
+        }
+    }
+
+    pub(crate) fn allocate_slot_lease(
+        &mut self,
+        leaf_id: [u8; 32],
+    ) -> Result<SlotLease, CityGError> {
+        if let Some(existing) = self.leaf_slot_leases.get(&leaf_id) {
+            return Ok(*existing);
+        }
+        if let Some(existing) = self.pending_join_finalize_auth.get(&leaf_id) {
+            return Ok(existing.lease);
+        }
+        self.ensure_slot_allocator_initialized();
+        let slot_index = *self
+            .free_slots
+            .iter()
+            .next()
+            .ok_or(CityGError::InvalidInput("slot allocator exhausted"))?;
+        self.free_slots.remove(&slot_index);
+        let slot_generation = *self.slot_generations.get(&slot_index).unwrap_or(&0);
+        let lease = SlotLease {
+            slot_index,
+            slot_generation,
+        };
+        Ok(lease)
+    }
+
+    pub(crate) fn reserve_slot_lease(
+        &mut self,
+        leaf_id: [u8; 32],
+        lease: SlotLease,
+    ) -> Result<(), CityGError> {
+        if lease.slot_index >= self.slot_capacity() {
+            return Err(CityGError::InvalidInput("slot lease index out of range"));
+        }
+        self.ensure_slot_allocator_initialized();
+        let generation = self.slot_generations.entry(lease.slot_index).or_insert(0);
+        if *generation != lease.slot_generation {
+            return Err(CityGError::InvalidInput("slot lease generation mismatch"));
+        }
+        if let Some(existing) = self.leaf_slot_leases.get(&leaf_id) {
+            if *existing != lease {
+                return Err(CityGError::InvalidInput(
+                    "leaf already bound to another slot lease",
+                ));
+            }
+            return Ok(());
+        }
+        self.free_slots.remove(&lease.slot_index);
+        self.leaf_slot_leases.insert(leaf_id, lease);
+        Ok(())
+    }
+
+    pub(crate) fn release_slot_lease(&mut self, leaf_id: &[u8; 32]) -> Option<SlotLease> {
+        self.ensure_slot_allocator_initialized();
+        let lease = self.leaf_slot_leases.remove(leaf_id)?;
+        self.slot_generations
+            .insert(lease.slot_index, lease.slot_generation.saturating_add(1));
+        self.free_slots.insert(lease.slot_index);
+        Some(lease)
+    }
+
+    pub(crate) fn activate_slot_lease(
+        &mut self,
+        leaf_id: [u8; 32],
+        lease: SlotLease,
+    ) -> Result<(), CityGError> {
+        self.reserve_slot_lease(leaf_id, lease)?;
+        self.revoked.remove(&leaf_id);
+        self.revoked_slot_leases.remove(&leaf_id);
+        Ok(())
+    }
+
+    pub(crate) fn finalize_slot_reclaim(&mut self, lease: SlotLease) {
+        let superseded: Vec<[u8; 32]> = self
+            .revoked_slot_leases
+            .iter()
+            .filter(|(_, revoked_lease)| revoked_lease.slot_index == lease.slot_index)
+            .map(|(revoked_leaf, _)| *revoked_leaf)
+            .collect();
+        for revoked_leaf in superseded {
+            self.revoked.remove(&revoked_leaf);
+            self.revoked_slot_leases.remove(&revoked_leaf);
+        }
+    }
+
     pub(crate) fn latest_snapshot(&self) -> Option<&GroupMembership> {
         self.latest_root.and_then(|root| self.snapshots.get(&root))
     }
@@ -379,6 +499,10 @@ pub(crate) struct PersistedKbroadRoomState {
     #[serde(default)]
     pub(crate) pending_join_finalize_auth: Vec<PersistedJoinFinalizeAuthRecord>,
     #[serde(default)]
+    pub(crate) active_slot_leases: Vec<PersistedLeafSlotLeaseRecord>,
+    #[serde(default)]
+    pub(crate) revoked_slot_leases: Vec<PersistedLeafSlotLeaseRecord>,
+    #[serde(default)]
     pub(crate) device_chain_states: Vec<PersistedDeviceChainState>,
 }
 
@@ -412,6 +536,8 @@ impl Default for PersistedKbroadRoomState {
             current_accepted_barrier_update: Vec::new(),
             current_accepted_barrier_predecessor_hash: [0u8; 32],
             pending_join_finalize_auth: Vec::new(),
+            active_slot_leases: Vec::new(),
+            revoked_slot_leases: Vec::new(),
             device_chain_states: Vec::new(),
         }
     }
@@ -449,7 +575,19 @@ pub(crate) struct PersistedJoinFinalizeAuthRecord {
     #[serde(default)]
     pub(crate) cover_leaf_index: u32,
     #[serde(default)]
+    pub(crate) slot_generation: u64,
+    #[serde(default)]
     pub(crate) token_hex: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct PersistedLeafSlotLeaseRecord {
+    #[serde(default)]
+    pub(crate) leaf_id_hex: String,
+    #[serde(default)]
+    pub(crate) slot_index: u32,
+    #[serde(default)]
+    pub(crate) slot_generation: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -497,4 +635,113 @@ pub(crate) fn leaf_index(leaf: &[u8; 32]) -> u32 {
 pub(crate) fn cover_leaf_index(leaf: &[u8; 32], n_max: u64) -> u32 {
     let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
     leaf_index(leaf) % n_max
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_lease_allocator_reuses_released_slot_with_incremented_generation() {
+        let mut state = GroupState {
+            n_max: 4,
+            ..GroupState::default()
+        };
+        let lease_a = state.allocate_slot_lease([0x11; 32]).expect("lease a");
+        state
+            .reserve_slot_lease([0x11; 32], lease_a)
+            .expect("reserve a");
+        let lease_b = state.allocate_slot_lease([0x22; 32]).expect("lease b");
+        state
+            .reserve_slot_lease([0x22; 32], lease_b)
+            .expect("reserve b");
+        assert_eq!(lease_a.slot_index, 0);
+        assert_eq!(lease_a.slot_generation, 0);
+        assert_eq!(lease_b.slot_index, 1);
+        assert_eq!(lease_b.slot_generation, 0);
+
+        let released = state.release_slot_lease(&[0x11; 32]).expect("release a");
+        assert_eq!(released, lease_a);
+
+        let lease_c = state.allocate_slot_lease([0x33; 32]).expect("lease c");
+        assert_eq!(lease_c.slot_index, lease_a.slot_index);
+        assert_eq!(lease_c.slot_generation, lease_a.slot_generation + 1);
+    }
+
+    #[test]
+    fn reserve_slot_lease_rejects_generation_mismatch() {
+        let mut state = GroupState {
+            n_max: 2,
+            ..GroupState::default()
+        };
+        let lease = state.allocate_slot_lease([0x41; 32]).expect("lease");
+        state
+            .reserve_slot_lease([0x41; 32], lease)
+            .expect("reserve");
+        state.release_slot_lease(&[0x41; 32]).expect("release");
+
+        let err = state
+            .reserve_slot_lease([0x42; 32], lease)
+            .expect_err("stale generation must be rejected");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("slot lease generation mismatch")
+        ));
+    }
+
+    #[test]
+    fn allocate_slot_lease_reuses_existing_pending_reservation() {
+        let mut state = GroupState {
+            n_max: 2,
+            ..GroupState::default()
+        };
+        let lease = state.allocate_slot_lease([0x51; 32]).expect("lease");
+        state.pending_join_finalize_auth.insert(
+            [0x51; 32],
+            JoinFinalizeAuthRecord {
+                leaf_id: [0x51; 32],
+                lease,
+                token: [0x77; 32],
+            },
+        );
+
+        let reused = state
+            .allocate_slot_lease([0x51; 32])
+            .expect("reuse pending lease");
+        assert_eq!(reused, lease);
+    }
+
+    #[test]
+    fn finalize_slot_reclaim_clears_only_matching_revoked_slot() {
+        let mut state = GroupState {
+            n_max: 4,
+            ..GroupState::default()
+        };
+        state.revoked.insert([0x11; 32]);
+        state.revoked.insert([0x22; 32]);
+        state.revoked_slot_leases.insert(
+            [0x11; 32],
+            SlotLease {
+                slot_index: 1,
+                slot_generation: 0,
+            },
+        );
+        state.revoked_slot_leases.insert(
+            [0x22; 32],
+            SlotLease {
+                slot_index: 2,
+                slot_generation: 0,
+            },
+        );
+
+        state.finalize_slot_reclaim(SlotLease {
+            slot_index: 1,
+            slot_generation: 1,
+        });
+
+        assert!(!state.revoked.contains(&[0x11; 32]));
+        assert!(!state.revoked_slot_leases.contains_key(&[0x11; 32]));
+        assert!(state.revoked.contains(&[0x22; 32]));
+        assert!(state.revoked_slot_leases.contains_key(&[0x22; 32]));
+    }
 }

@@ -753,51 +753,6 @@ impl CityGServer {
         Ok(())
     }
 
-    fn reset_empty_room_membership_state(&mut self, gid: &[u8; 32]) -> Result<(), CityGError> {
-        let Some(state) = self.roster.groups.get_mut(gid.as_slice()) else {
-            return Ok(());
-        };
-
-        let zero = [0u8; 32];
-        let n_max = state.n_max.max(1);
-        let blank_entries = build_all_blank_pk_entries(n_max)?;
-        let blank_tree_hash = compute_barrier_tree_hash(n_max, blank_entries.as_slice())?;
-
-        state.revoked.clear();
-        state.leaf_device_pk.clear();
-        state.leaf_barrier_public.clear();
-        state.barrier_initialized = true;
-        state.barrier_version = 0;
-        state.barrier_roots_hash = compute_revocation_roots_hash(&zero, &zero)?;
-        state.kem_tree_hash_after = blank_tree_hash;
-        state.current_accepted_barrier_update.clear();
-        state.current_accepted_barrier_predecessor_hash = [0u8; 32];
-        state.pending_join_finalize_auth.clear();
-        state.last_checkpoint_ec = 0;
-        state.last_accepted_ec = 0;
-        state.srx_root_sw = None;
-        state.last_pcs_refresh_ec = None;
-        state.join_history.clear();
-        state.barrier_pk_entries = blank_entries;
-        state.barrier_hash_cache = None;
-        record_barrier_public_tree_snapshot(gid.as_slice(), state)?;
-
-        let ctx_state = self.ctx.barrier_group_state_entry_mut(gid.as_slice());
-        ctx_state.barrier_initialized = state.barrier_initialized;
-        ctx_state.barrier_version = state.barrier_version;
-        ctx_state.barrier_roots_hash = state.barrier_roots_hash;
-        ctx_state.kem_tree_hash_after = state.kem_tree_hash_after;
-        ctx_state.last_checkpoint_ec = state.last_checkpoint_ec;
-        ctx_state.last_accepted_ec = state.last_accepted_ec;
-        ctx_state.srx_root_sw = state.srx_root_sw;
-        ctx_state.n_max = state.n_max.max(1);
-        ctx_state.last_pcs_refresh_ec = state.last_pcs_refresh_ec;
-        self.ctx.clear_device_chains_for_gid(gid.as_slice());
-        self.ctx.clear_pivot_parities_for_gid(gid.as_slice());
-
-        Ok(())
-    }
-
     pub fn register_group(
         &mut self,
         gid: &[u8; 32],
@@ -1242,7 +1197,7 @@ impl CityGServer {
         let pox_r_commit = witness::demo_pox_commit();
         let barrier_leaf_capacity_refusal_percent = self.barrier_leaf_capacity_refusal_percent;
 
-        let (parent_root, leaf_id, parent_leaves) = {
+        let (parent_root, leaf_id, lease, parent_leaves) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
             let mut parent_leaves: Vec<[u8; 32]> = state
                 .latest_snapshot()
@@ -1263,7 +1218,6 @@ impl CityGServer {
                 )?;
                 next_available_join_leaf(state)?
             };
-            ensure_join_cover_leaf_indices_available(state, std::slice::from_ref(&leaf_id))?;
             if leaf_id_override.is_some() {
                 ensure_join_capacity_allows_existing_leaf_reservation(
                     state,
@@ -1271,25 +1225,18 @@ impl CityGServer {
                     barrier_leaf_capacity_refusal_percent,
                 )?;
             }
+            let lease = state.allocate_slot_lease(leaf_id)?;
 
             let parent_root = if parent_leaves.is_empty() {
                 [0u8; 32]
             } else {
                 canonical_set_root(&parent_leaves)?
             };
-            (parent_root, leaf_id, parent_leaves)
+            (parent_root, leaf_id, lease, parent_leaves)
         };
         let mut revoked_all = self.roster.revoked(gid);
         revoked_all.sort();
         revoked_all.dedup();
-        if parent_leaves.is_empty() {
-            // Once a room has no live members, the next join should behave like a
-            // fresh admission for membership purposes even if the roster still
-            // remembers prior self-revocations. This preserves rejoin-from-same-
-            // identity flows after the room becomes empty while leaving admin ACLs
-            // and other room-scoped state intact.
-            revoked_all.clear();
-        }
         let (revoked_since_root, revoked_root) = if revoked_all.is_empty() {
             ([0u8; 32], [0u8; 32])
         } else {
@@ -1339,7 +1286,7 @@ impl CityGServer {
         let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
         let current_history_view_id = current_history_commitment.history_view_id;
         let barrier_version = barrier_state.barrier_version;
-        let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_n_max));
+        let cover_leaf_index = u64::from(lease.slot_index);
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
         let requires_current_barrier_update = parent_root != [0u8; 32] || barrier_version > 0;
@@ -1392,7 +1339,7 @@ impl CityGServer {
                 leaf_id,
                 JoinFinalizeAuthRecord {
                     leaf_id,
-                    cover_leaf_index: cover_leaf_index as u32,
+                    lease,
                     token: join_finalize_auth_token,
                 },
             );
@@ -1554,10 +1501,39 @@ impl CityGServer {
         }
 
         let mut revoked_all = self.roster.revoked(gid);
+        let (
+            author_cover_leaf_index,
+            pending_join_finalize_reclaim,
+            current_history_commitment,
+            cover_leaf_index,
+        ) = {
+            let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            let author_cover_leaf_index = pending_or_active_cover_leaf_index(state, author_leaf_id);
+            let pending_join_finalize_reclaim = revoked_leaf_id.is_none()
+                && state
+                    .pending_join_finalize_auth
+                    .contains_key(author_leaf_id)
+                && has_committed_revoked_cover_leaf_index(state, author_cover_leaf_index);
+            let current_history_commitment = ensure_current_history_commitment(gid, state)?;
+            let target_leaf = revoked_leaf_id.as_ref().unwrap_or(author_leaf_id);
+            let cover_leaf_index =
+                u64::from(pending_or_active_cover_leaf_index(state, target_leaf));
+            (
+                author_cover_leaf_index,
+                pending_join_finalize_reclaim,
+                current_history_commitment,
+                cover_leaf_index,
+            )
+        };
         if let Some(target_leaf_id) = revoked_leaf_id
             && !revoked_all.iter().any(|leaf| leaf == &target_leaf_id)
         {
             revoked_all.push(target_leaf_id);
+        }
+        if pending_join_finalize_reclaim {
+            let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            revoked_all
+                .retain(|leaf| revoked_cover_leaf_index(state, leaf) != author_cover_leaf_index);
         }
         revoked_all.sort();
         revoked_all.dedup();
@@ -1685,14 +1661,6 @@ impl CityGServer {
             .unwrap_or_default();
         let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
         let barrier_version = barrier_state.barrier_version;
-        let current_history_commitment = {
-            let state = self.roster.groups.entry(gid.to_vec()).or_default();
-            ensure_current_history_commitment(gid, state)?
-        };
-        let cover_leaf_index = u64::from(cover_leaf_index(
-            revoked_leaf_id.as_ref().unwrap_or(author_leaf_id),
-            barrier_n_max,
-        ));
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
 
@@ -1904,7 +1872,8 @@ impl CityGServer {
             .get(&hdr::HDR_BARRIER_LEAF_PK)
             .and_then(Value::as_bytes)
             .map(ToOwned::to_owned);
-        let barrier_update_reason = parse_barrier_update_reason(&bundle.header_map)?;
+        let _barrier_update_reason = parse_barrier_update_reason(&bundle.header_map)?;
+        let join_finalize_auth_token = parse_join_finalize_auth_token(&bundle.header_map)?;
         let required_join_barrier_leaf_pk = if delta.joined.is_empty() {
             None
         } else {
@@ -1927,7 +1896,16 @@ impl CityGServer {
         if !delta.joined.is_empty() || !delta.revoked.is_empty() {
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
             for leaf in &delta.joined {
-                let leaf_index = cover_leaf_index(leaf, state.n_max);
+                let lease = state
+                    .pending_join_finalize_auth
+                    .get(leaf)
+                    .map(|record| record.lease)
+                    .or_else(|| state.leaf_slot_leases.get(leaf).copied())
+                    .unwrap_or(SlotLease {
+                        slot_index: cover_leaf_index(leaf, state.n_max),
+                        slot_generation: 0,
+                    });
+                state.activate_slot_lease(*leaf, lease)?;
                 let device_pk = maybe_device_pk.clone().unwrap_or_else(|| leaf.to_vec());
                 let ek_leaf =
                     required_join_barrier_leaf_pk
@@ -1938,7 +1916,7 @@ impl CityGServer {
                 state.join_history.push(JoinLeafHistoryRecord {
                     leaf_id: *leaf,
                     barrier_version: barrier_version.saturating_add(1),
-                    leaf_index,
+                    leaf_index: lease.slot_index,
                     device_pk: device_pk.clone(),
                     ek_leaf: ek_leaf.clone(),
                 });
@@ -1948,14 +1926,19 @@ impl CityGServer {
                 }
             }
             for leaf in &delta.revoked {
+                let released_lease = state.release_slot_lease(leaf).unwrap_or(SlotLease {
+                    slot_index: active_cover_leaf_index(state, leaf),
+                    slot_generation: 0,
+                });
                 state.leaf_device_pk.remove(leaf);
                 state.leaf_barrier_public.remove(leaf);
                 state.pending_join_finalize_auth.remove(leaf);
+                state.revoked_slot_leases.insert(*leaf, released_lease);
             }
             prune_join_history(state)?;
         }
         if let Some(state) = roster.groups.get_mut(bundle.gid())
-            && matches!(barrier_update_reason, Some(2))
+            && join_finalize_auth_token.is_some()
             && let Some(pop_pk) = maybe_device_pk.as_deref()
             && let Some(author_leaf_id) = state
                 .leaf_device_pk
@@ -1963,7 +1946,9 @@ impl CityGServer {
                 .find(|(_, device_pk)| device_pk.as_slice() == pop_pk)
                 .map(|(leaf_id, _)| *leaf_id)
         {
-            state.pending_join_finalize_auth.remove(&author_leaf_id);
+            if let Some(record) = state.pending_join_finalize_auth.remove(&author_leaf_id) {
+                state.finalize_slot_reclaim(record.lease);
+            }
         }
         if let Some(validation) = barrier_validation.as_ref() {
             let predecessor_hash = compute_barrier_tree_hash(
@@ -2057,29 +2042,6 @@ impl CityGServer {
         self.ctx = staged_ctx;
         self.receiver = staged_receiver;
         self.roster = staged_roster;
-        let empty_gids: Vec<[u8; 32]> = self
-            .roster
-            .groups
-            .iter()
-            .filter_map(|(gid, state)| {
-                let is_empty = state
-                    .latest_snapshot()
-                    .map(|snapshot| snapshot.members().next().is_none())
-                    .unwrap_or(false);
-                if !is_empty {
-                    return None;
-                }
-                gid.as_slice().try_into().ok()
-            })
-            .collect();
-        for gid in empty_gids {
-            if let Err(err) = self.reset_empty_room_membership_state(&gid) {
-                eprintln!(
-                    "cityg-server: failed to reset empty-room membership state for {}: {err:?}",
-                    hex::encode(gid)
-                );
-            }
-        }
     }
 
     fn apply_persisted_kbroad_state(
@@ -2130,6 +2092,10 @@ impl CityGServer {
                 room_state.current_accepted_barrier_predecessor_hash;
             group.pending_join_finalize_auth =
                 decode_persisted_join_finalize_auth(&room_state.pending_join_finalize_auth);
+            group.leaf_slot_leases =
+                decode_persisted_leaf_slot_leases(&room_state.active_slot_leases);
+            group.revoked_slot_leases =
+                decode_persisted_leaf_slot_leases(&room_state.revoked_slot_leases);
             rebuild_barrier_public_tree_blob_index(group)?;
             group.barrier_public_tree_history.clear();
             for snapshot in &room_state.barrier_public_tree_history {
@@ -2348,6 +2314,10 @@ impl CityGServer {
                     room_state.current_accepted_barrier_predecessor_hash;
                 group.pending_join_finalize_auth =
                     decode_persisted_join_finalize_auth(&room_state.pending_join_finalize_auth);
+                group.leaf_slot_leases =
+                    decode_persisted_leaf_slot_leases(&room_state.active_slot_leases);
+                group.revoked_slot_leases =
+                    decode_persisted_leaf_slot_leases(&room_state.revoked_slot_leases);
             }
             group.last_pcs_refresh_ec =
                 merge_optional_u64_max(group.last_pcs_refresh_ec, room_state.last_pcs_refresh_ec);
@@ -2395,6 +2365,19 @@ impl CityGServer {
             {
                 group.pending_join_finalize_auth =
                     decode_persisted_join_finalize_auth(&room_state.pending_join_finalize_auth);
+            }
+            if prefer_persisted_barrier_state
+                || (group.leaf_slot_leases.is_empty() && !room_state.active_slot_leases.is_empty())
+            {
+                group.leaf_slot_leases =
+                    decode_persisted_leaf_slot_leases(&room_state.active_slot_leases);
+            }
+            if prefer_persisted_barrier_state
+                || (group.revoked_slot_leases.is_empty()
+                    && !room_state.revoked_slot_leases.is_empty())
+            {
+                group.revoked_slot_leases =
+                    decode_persisted_leaf_slot_leases(&room_state.revoked_slot_leases);
             }
             let prefer_persisted_tree_history =
                 prefer_persisted_barrier_state || group.barrier_public_tree_history.is_empty();
@@ -2909,10 +2892,8 @@ impl CityGServer {
             ));
         }
         let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
-        let mut indices: Vec<u32> = state
-            .revoked
-            .iter()
-            .map(|leaf| cover_leaf_index(leaf, state.n_max))
+        let mut indices: Vec<u32> = committed_revoked_cover_leaf_indices(state)
+            .into_iter()
             .collect();
         indices.sort_unstable();
         indices.dedup();
@@ -2947,7 +2928,7 @@ impl CityGServer {
                 genesis_provisioning_artifact_missing_error,
             )?;
             for leaf in snapshot.members() {
-                let leaf_index = cover_leaf_index(leaf, state.n_max);
+                let leaf_index = active_cover_leaf_index(state, leaf);
                 checked_insert_unique(
                     &mut by_leaf,
                     leaf_index,
@@ -5328,7 +5309,7 @@ fn active_cover_leaf_allocations(
     let mut by_index = BTreeMap::new();
     if let Some(snapshot) = state.latest_snapshot() {
         for leaf in snapshot.members() {
-            let leaf_index = cover_leaf_index(leaf, state.n_max);
+            let leaf_index = active_cover_leaf_index(state, leaf);
             checked_insert_unique(
                 &mut by_index,
                 leaf_index,
@@ -5340,13 +5321,59 @@ fn active_cover_leaf_allocations(
     Ok(by_index)
 }
 
+fn active_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
+    state
+        .leaf_slot_leases
+        .get(leaf)
+        .map(|lease| lease.slot_index)
+        .unwrap_or_else(|| cover_leaf_index(leaf, state.n_max))
+}
+
+fn revoked_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
+    state
+        .revoked_slot_leases
+        .get(leaf)
+        .map(|lease| lease.slot_index)
+        .unwrap_or_else(|| cover_leaf_index(leaf, state.n_max))
+}
+
+fn pending_or_active_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
+    state
+        .pending_join_finalize_auth
+        .get(leaf)
+        .map(|record| record.lease.slot_index)
+        .or_else(|| {
+            state
+                .leaf_slot_leases
+                .get(leaf)
+                .map(|lease| lease.slot_index)
+        })
+        .unwrap_or_else(|| cover_leaf_index(leaf, state.n_max))
+}
+
+fn committed_revoked_cover_leaf_indices(state: &GroupState) -> BTreeSet<u32> {
+    if !state.revoked_slot_leases.is_empty() {
+        return state
+            .revoked_slot_leases
+            .values()
+            .map(|lease| lease.slot_index)
+            .collect();
+    }
+    state
+        .revoked
+        .iter()
+        .map(|leaf| revoked_cover_leaf_index(state, leaf))
+        .collect()
+}
+
+fn has_committed_revoked_cover_leaf_index(state: &GroupState, slot_index: u32) -> bool {
+    committed_revoked_cover_leaf_indices(state).contains(&slot_index)
+}
+
 fn reserved_cover_leaf_indices(state: &GroupState) -> Result<BTreeSet<u32>, CityGError> {
     let mut reserved: BTreeSet<u32> = active_cover_leaf_allocations(state)?.into_keys().collect();
-    for leaf in &state.revoked {
-        reserved.insert(cover_leaf_index(leaf, state.n_max));
-    }
     for record in state.pending_join_finalize_auth.values() {
-        reserved.insert(record.cover_leaf_index);
+        reserved.insert(record.lease.slot_index);
     }
     Ok(reserved)
 }
@@ -5357,7 +5384,8 @@ fn barrier_leaf_capacity(state: &GroupState) -> Result<BarrierLeafCapacity, City
         .latest_snapshot()
         .map(|snapshot| u64::try_from(snapshot.members().count()).unwrap_or(u64::MAX))
         .unwrap_or(0);
-    let revoked_leaf_count = u64::try_from(state.revoked.len()).unwrap_or(u64::MAX);
+    let revoked_leaf_count =
+        u64::try_from(committed_revoked_cover_leaf_indices(state).len()).unwrap_or(u64::MAX);
     let pending_join_ticket_count =
         u64::try_from(state.pending_join_finalize_auth.len()).unwrap_or(u64::MAX);
     let reserved_cover_leaf_count =
@@ -5418,20 +5446,8 @@ fn next_available_join_leaf(state: &mut GroupState) -> Result<[u8; 32], CityGErr
         ));
     }
 
-    let reserved = reserved_cover_leaf_indices(state)?;
     state.sync_next_index();
-    let attempts = usize::try_from(capacity.n_max)
-        .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
-    for _ in 0..attempts {
-        let leaf = witness::sequential_leaf(state.allocate_leaf());
-        if !reserved.contains(&cover_leaf_index(&leaf, capacity.n_max)) {
-            return Ok(leaf);
-        }
-    }
-
-    Err(CityGError::InvalidInput(
-        BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR,
-    ))
+    Ok(witness::sequential_leaf(state.allocate_leaf()))
 }
 
 fn ensure_distinct_active_cover_leaf_indices(state: &GroupState) -> Result<(), CityGError> {
@@ -5445,16 +5461,13 @@ fn ensure_join_cover_leaf_indices_available(
 ) -> Result<(), CityGError> {
     let joined_leaf_ids: BTreeSet<[u8; 32]> = joined.iter().copied().collect();
     let mut reserved: BTreeSet<u32> = active_cover_leaf_allocations(state)?.into_keys().collect();
-    for leaf in &state.revoked {
-        reserved.insert(cover_leaf_index(leaf, state.n_max));
-    }
     for record in state.pending_join_finalize_auth.values() {
         if !joined_leaf_ids.contains(&record.leaf_id) {
-            reserved.insert(record.cover_leaf_index);
+            reserved.insert(record.lease.slot_index);
         }
     }
     for leaf in joined {
-        let leaf_index = cover_leaf_index(leaf, state.n_max);
+        let leaf_index = pending_or_active_cover_leaf_index(state, leaf);
         if !reserved.insert(leaf_index) {
             return Err(CityGError::InvalidInput(
                 COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR,
@@ -5478,7 +5491,7 @@ where
     let mut pk_entries = vec![empty; expected_len];
     if let Some(snapshot) = state.latest_snapshot() {
         for leaf in snapshot.members() {
-            let index = cover_leaf_index(leaf, state.n_max) as usize;
+            let index = active_cover_leaf_index(state, leaf) as usize;
             if index >= n_max {
                 continue;
             }
@@ -5629,7 +5642,8 @@ fn rehydrate_replay_join_finalize_auth(
     state_before: &mut GroupState,
     header: &BTreeMap<u64, Value>,
 ) -> Result<(), CityGError> {
-    if !matches!(parse_barrier_update_reason(header)?, Some(2)) {
+    let barrier_update_reason = parse_barrier_update_reason(header)?;
+    if !matches!(barrier_update_reason, Some(0 | 2)) {
         return Ok(());
     }
     let Some(token) = parse_join_finalize_auth_token(header)? else {
@@ -5653,21 +5667,37 @@ fn rehydrate_replay_join_finalize_auth(
         return Ok(());
     }
     let expected_cover_leaf_index =
-        u64::from(cover_leaf_index(&author_leaf_id, state_before.n_max));
+        u64::from(active_cover_leaf_index(state_before, &author_leaf_id));
     if expected_cover_leaf_index != parsed.updater_leaf {
         return Ok(());
     }
-    let cover_leaf_index = u32::try_from(expected_cover_leaf_index)
-        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+    if matches!(barrier_update_reason, Some(0))
+        && !has_committed_revoked_cover_leaf_index(
+            state_before,
+            u32::try_from(expected_cover_leaf_index)
+                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
+        )
+    {
+        return Ok(());
+    }
+    let lease = state_before
+        .leaf_slot_leases
+        .get(&author_leaf_id)
+        .copied()
+        .unwrap_or(SlotLease {
+            slot_index: u32::try_from(expected_cover_leaf_index)
+                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
+            slot_generation: 0,
+        });
     // Journal replay does not reconstruct server-issued join-ticket side effects.
     // Rehydrate the accepted join_finalize capability from the already-admitted
-    // author binding so historical reason-2 merges validate exactly once on replay.
+    // author binding so historical join_finalize merges validate exactly once on replay.
     state_before
         .pending_join_finalize_auth
         .entry(author_leaf_id)
         .or_insert(JoinFinalizeAuthRecord {
             leaf_id: author_leaf_id,
-            cover_leaf_index,
+            lease,
             token,
         });
     Ok(())
@@ -5952,7 +5982,7 @@ fn validate_barrier_update_against_roster(
                 barrier_genesis_required_freeze_error,
             )?;
             for leaf in snapshot.members() {
-                let leaf_index = cover_leaf_index(leaf, tree_n_max);
+                let leaf_index = active_cover_leaf_index(state_before, leaf);
                 let ek_leaf = state_before
                     .leaf_barrier_public
                     .get(leaf)
@@ -5985,7 +6015,7 @@ fn validate_barrier_update_against_roster(
             .map(ToOwned::to_owned)
             .unwrap_or_default();
         for leaf in &delta.joined {
-            let leaf_index = cover_leaf_index(leaf, tree_n_max);
+            let leaf_index = pending_or_active_cover_leaf_index(state_before, leaf);
             checked_insert_unique(
                 &mut by_leaf,
                 leaf_index,
@@ -5995,13 +6025,13 @@ fn validate_barrier_update_against_roster(
         }
 
         // RevokedLeafSet for snapshot construction: committed revoked set plus current delta.
-        let mut revoked_set = state_before.revoked.clone();
+        let mut revoked_indices: BTreeSet<usize> =
+            committed_revoked_cover_leaf_indices(state_before)
+                .into_iter()
+                .map(|leaf_index| leaf_index as usize)
+                .collect();
         for leaf in &delta.revoked {
-            revoked_set.insert(*leaf);
-        }
-        let mut revoked_indices = BTreeSet::new();
-        for leaf in revoked_set {
-            revoked_indices.insert(cover_leaf_index(&leaf, tree_n_max) as usize);
+            revoked_indices.insert(active_cover_leaf_index(state_before, leaf) as usize);
         }
 
         let expected_len = usize::try_from(tree_n_max)
@@ -6009,13 +6039,14 @@ fn validate_barrier_update_against_roster(
             .checked_mul(2)
             .and_then(|v| v.checked_sub(1))
             .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
-        let can_borrow_snapshot_base = state_before.barrier_initialized
+        let by_leaf_for_snapshot = by_leaf.clone();
+        let mut can_borrow_snapshot_base = state_before.barrier_initialized
             && state_before.barrier_pk_entries.len() == expected_len
-            && by_leaf.is_empty()
+            && by_leaf_for_snapshot.is_empty()
             && revoked_indices.is_empty();
 
         let unresolved_join_leaf_set: BTreeSet<u32> = by_leaf.keys().copied().collect();
-        let snapshot_base_owned = if can_borrow_snapshot_base {
+        let mut snapshot_base_owned = if can_borrow_snapshot_base {
             None
         } else {
             let mut snapshot_base = if state_before.barrier_initialized {
@@ -6023,10 +6054,10 @@ fn validate_barrier_update_against_roster(
             } else {
                 build_all_blank_pk_entries_cow(tree_n_max)?
             };
-            for (leaf_index, ek_leaf) in by_leaf {
-                let leaf_node = leaf_base.saturating_add(leaf_index as usize);
+            for (leaf_index, ek_leaf) in &by_leaf_for_snapshot {
+                let leaf_node = leaf_base.saturating_add(*leaf_index as usize);
                 if let Some(slot) = snapshot_base.get_mut(leaf_node) {
-                    *slot = Cow::Owned(ek_leaf);
+                    *slot = Cow::Owned(ek_leaf.clone());
                 }
                 blank_internal_path_from_leaf_cow(&mut snapshot_base, leaf_node);
             }
@@ -6038,10 +6069,11 @@ fn validate_barrier_update_against_roster(
         };
 
         // Updater cannot be a previously revoked member; allow self-revocation merges.
-        let mut committed_revoked_indices = BTreeSet::new();
-        for leaf in &state_before.revoked {
-            committed_revoked_indices.insert(cover_leaf_index(leaf, tree_n_max) as usize);
-        }
+        let committed_revoked_indices: BTreeSet<usize> =
+            committed_revoked_cover_leaf_indices(state_before)
+                .into_iter()
+                .map(|leaf_index| leaf_index as usize)
+                .collect();
 
         let author_pop_pk = header
             .get(&hdr::HDR_POP_PK)
@@ -6055,7 +6087,7 @@ fn validate_barrier_update_against_roster(
         let mut author_leaf_ids = Vec::new();
         for (leaf, device_pk) in &state_before.leaf_device_pk {
             if device_pk.as_slice() == author_pop_pk {
-                author_cover_indices.insert(u64::from(cover_leaf_index(leaf, tree_n_max)));
+                author_cover_indices.insert(u64::from(active_cover_leaf_index(state_before, leaf)));
                 author_leaf_ids.push(*leaf);
             }
         }
@@ -6070,14 +6102,18 @@ fn validate_barrier_update_against_roster(
         let targeted_admin_revocation = matches!(barrier_update_reason, Some(0))
             && delta.revoked.iter().any(|leaf| {
                 *leaf != author_leaf_ids.first().copied().unwrap_or([0u8; 32])
-                    && u64::from(cover_leaf_index(leaf, tree_n_max)) == parsed.updater_leaf
+                    && u64::from(active_cover_leaf_index(state_before, leaf)) == parsed.updater_leaf
             })
             && has_full_verification_witness
             && author_is_room_admin;
+        let join_finalize_auth_token = parse_join_finalize_auth_token(header)?;
+        let candidate_reclaim_join =
+            matches!(barrier_update_reason, Some(0)) && join_finalize_auth_token.is_some();
         if author_cover_indices.len() != 1
             || (!author_cover_indices.contains(&parsed.updater_leaf) && !targeted_admin_revocation)
             || author_leaf_ids.len() != 1
-            || committed_revoked_indices.contains(&parsed_updater_leaf_usize)
+            || (committed_revoked_indices.contains(&parsed_updater_leaf_usize)
+                && !candidate_reclaim_join)
         {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
@@ -6086,7 +6122,36 @@ fn validate_barrier_update_against_roster(
             ));
         }
         let author_leaf_id = author_leaf_ids[0];
-        let join_finalize_auth_token = parse_join_finalize_auth_token(header)?;
+        let author_reclaims_committed_revoked_slot =
+            committed_revoked_indices.contains(&parsed_updater_leaf_usize);
+        if candidate_reclaim_join && author_reclaims_committed_revoked_slot {
+            revoked_indices.remove(&parsed_updater_leaf_usize);
+            can_borrow_snapshot_base = state_before.barrier_initialized
+                && state_before.barrier_pk_entries.len() == expected_len
+                && by_leaf_for_snapshot.is_empty()
+                && revoked_indices.is_empty();
+            snapshot_base_owned = if can_borrow_snapshot_base {
+                None
+            } else {
+                let mut snapshot_base = if state_before.barrier_initialized {
+                    build_pk_entries_cow(state_before)?
+                } else {
+                    build_all_blank_pk_entries_cow(tree_n_max)?
+                };
+                for (leaf_index, ek_leaf) in &by_leaf_for_snapshot {
+                    let leaf_node = leaf_base.saturating_add(*leaf_index as usize);
+                    if let Some(slot) = snapshot_base.get_mut(leaf_node) {
+                        *slot = Cow::Owned(ek_leaf.clone());
+                    }
+                    blank_internal_path_from_leaf_cow(&mut snapshot_base, leaf_node);
+                }
+                for revoked_index in &revoked_indices {
+                    let leaf_node = leaf_base.saturating_add(*revoked_index);
+                    blank_leaf_and_path_cow(&mut snapshot_base, leaf_node);
+                }
+                Some(snapshot_base)
+            };
+        }
 
         let author_is_unresolved_joiner = unresolved_join_leaf_set.contains(
             &u32::try_from(parsed.updater_leaf)
@@ -6137,7 +6202,34 @@ fn validate_barrier_update_against_roster(
                         ),
                     ))?;
                 if record.token != supplied
-                    || u64::from(record.cover_leaf_index) != parsed.updater_leaf
+                    || u64::from(record.lease.slot_index) != parsed.updater_leaf
+                {
+                    return Err(CityGError::Acceptance(
+                        msphf_orchestrator::AcceptanceError::Freeze(
+                            msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+                        ),
+                    ));
+                }
+            }
+            Some(0) if join_finalize_auth_token.is_some() => {
+                let supplied = join_finalize_auth_token.ok_or(CityGError::Acceptance(
+                    msphf_orchestrator::AcceptanceError::Freeze(
+                        msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+                    ),
+                ))?;
+                let record = state_before
+                    .pending_join_finalize_auth
+                    .get(&author_leaf_id)
+                    .ok_or(CityGError::Acceptance(
+                        msphf_orchestrator::AcceptanceError::Freeze(
+                            msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+                        ),
+                    ))?;
+                if !author_is_unresolved_joiner
+                    || !revocation_changed
+                    || !author_reclaims_committed_revoked_slot
+                    || record.token != supplied
+                    || u64::from(record.lease.slot_index) != parsed.updater_leaf
                 {
                     return Err(CityGError::Acceptance(
                         msphf_orchestrator::AcceptanceError::Freeze(
@@ -6545,8 +6637,8 @@ mod tests {
     use super::{
         BarrierUpdateWire, CityGError, CityGServer, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
         GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, GlobalHistoryAttestationSignedPayload, GroupState,
-        KemTreeCoverPayloadWire, NewPublicKeyWire, NodeCiphertextWire,
-        PersistedBarrierPublicTreeSnapshot, PersistedKbroadRoomState, ServerConfig,
+        JoinFinalizeAuthRecord, KemTreeCoverPayloadWire, NewPublicKeyWire, NodeCiphertextWire,
+        PersistedBarrierPublicTreeSnapshot, PersistedKbroadRoomState, ServerConfig, SlotLease,
         blank_internal_path_from_leaf, build_all_blank_pk_entries, build_pk_entries,
         collect_expected_pairs, compute_barrier_pkhash, compute_barrier_tree_hash,
         compute_group_barrier_tree_hash, compute_revocation_roots_hash, cover_leaf_index,
@@ -6719,7 +6811,10 @@ mod tests {
             leaf_id,
             super::JoinFinalizeAuthRecord {
                 leaf_id,
-                cover_leaf_index: super::cover_leaf_index(&leaf_id, state.n_max),
+                lease: super::SlotLease {
+                    slot_index: super::cover_leaf_index(&leaf_id, state.n_max),
+                    slot_generation: 0,
+                },
                 token,
             },
         );
@@ -6860,16 +6955,34 @@ mod tests {
         label_seed: u8,
         disable_autonomic_evolve: bool,
     ) -> Result<GeneratedMemberBundle, CityGError> {
+        build_join_member_from_server_ticket_with_leaf(
+            server,
+            gid,
+            label_seed,
+            disable_autonomic_evolve,
+            None,
+        )
+    }
+
+    fn build_join_member_from_server_ticket_with_leaf(
+        server: &mut CityGServer,
+        gid: &[u8; 32],
+        label_seed: u8,
+        disable_autonomic_evolve: bool,
+        requested_leaf_id: Option<[u8; 32]>,
+    ) -> Result<GeneratedMemberBundle, CityGError> {
         let (pop_pk, pop_sk) = ml_dsa_keypair();
         let pop_public_key = pop_pk.as_bytes().to_vec();
         let pop_secret_key = pop_sk;
-        let leaf_id = compute_leaf_id(
-            LeafIdMode::PerGroup,
-            gid,
-            "ML-DSA-65",
-            pop_public_key.as_slice(),
-        )
-        .map_err(|_| CityGError::InvalidInput("leaf id derivation"))?;
+        let leaf_id = requested_leaf_id.unwrap_or(
+            compute_leaf_id(
+                LeafIdMode::PerGroup,
+                gid,
+                "ML-DSA-65",
+                pop_public_key.as_slice(),
+            )
+            .map_err(|_| CityGError::InvalidInput("leaf id derivation"))?,
+        );
         let ticket = server.build_join_ticket_with_leaf(gid, Some(leaf_id))?;
         let srx_inputs = witness::SrxInputsOwned::from_cbor(&ticket.srx_cbor)
             .map_err(|_| CityGError::InvalidInput("decode SRX inputs"))?
@@ -7242,6 +7355,23 @@ mod tests {
         Ok(super::to_cbor_vec(&update)?)
     }
 
+    fn test_barrier_key() -> [u8; 32] {
+        [0x77; 32]
+    }
+
+    fn finalize_test_merge_bundle_transport(
+        bundle: &mut ClientEpochBundle,
+        barrier_update_reason: u64,
+    ) -> Result<(), CityGError> {
+        let barrier_key = test_barrier_key();
+        if barrier_update_reason == 2 {
+            bundle.seal_local_hp_header_with_barrier_key(&barrier_key)?;
+        } else {
+            bundle.rebind_local_hp_envelope_with_barrier_key(&barrier_key)?;
+        }
+        Ok(())
+    }
+
     fn build_refresh_bundle_for_member(
         server: &mut CityGServer,
         generated: &GeneratedMemberBundle,
@@ -7277,14 +7407,30 @@ mod tests {
             .iter()
             .map(|record| record.leaf_index)
             .collect();
-        let barrier_update_reason = if unresolved_join_leaf_indices
-            .contains(&super::cover_leaf_index(&generated.leaf_id, ticket.n_max))
-        {
+        let updater_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
+            .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
+        let reclaims_revoked_slot = generated.join_finalize_auth_token != [0u8; 32]
+            && ticket_roots_hash != committed_roots_hash
+            && unresolved_join_leaf_indices.contains(&updater_cover_leaf_index);
+        let barrier_update_reason = if reclaims_revoked_slot {
+            0u64
+        } else if unresolved_join_leaf_indices.contains(&updater_cover_leaf_index) {
             2u64
         } else {
             1u64
         };
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        let mut witness_revoked_leaf_indices = committed_revoked.leaf_indices.clone();
+        if barrier_update_reason == 0 {
+            if reclaims_revoked_slot {
+                witness_revoked_leaf_indices
+                    .retain(|leaf_index| *leaf_index != updater_cover_leaf_index);
+            } else if let Err(insert_at) =
+                witness_revoked_leaf_indices.binary_search(&updater_cover_leaf_index)
+            {
+                witness_revoked_leaf_indices.insert(insert_at, updater_cover_leaf_index);
+            }
+        }
         apply_join_records_to_snapshot(
             snapshot_pre.as_mut_slice(),
             ticket.n_max,
@@ -7293,7 +7439,7 @@ mod tests {
         apply_revoked_indices_to_snapshot(
             snapshot_pre.as_mut_slice(),
             ticket.n_max,
-            committed_revoked.leaf_indices.as_slice(),
+            witness_revoked_leaf_indices.as_slice(),
         )?;
         let kem_tree_hash_before =
             super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
@@ -7326,7 +7472,9 @@ mod tests {
             hdr::HDR_BARRIER_HISTORY_COMMITMENT,
             Value::Bytes(history_commitment_header.clone()),
         );
-        if barrier_update_reason == 2 && generated.join_finalize_auth_token != [0u8; 32] {
+        if generated.join_finalize_auth_token != [0u8; 32]
+            && (barrier_update_reason == 2 || reclaims_revoked_slot)
+        {
             header.insert(
                 hdr::HDR_JOIN_FINALIZE_AUTH,
                 Value::Bytes(generated.join_finalize_auth_token.to_vec()),
@@ -7387,6 +7535,7 @@ mod tests {
         )?;
         strip_rollup_metadata(&mut refresh_bundle.header_map);
         apply_pivot_alignment(&mut refresh_bundle.header_map, pivot);
+        finalize_test_merge_bundle_transport(&mut refresh_bundle, barrier_update_reason)?;
         if let Some(authority) = server.history_authority.as_ref() {
             let raw_history_commitment = match refresh_bundle
                 .header_map
@@ -7459,8 +7608,12 @@ mod tests {
                         raw_barrier_update.as_slice(),
                         ticket.barrier_version,
                         join_records.records.as_slice(),
-                        &committed_roots_hash,
-                        committed_revoked.leaf_indices.as_slice(),
+                        if reclaims_revoked_slot {
+                            &ticket_roots_hash
+                        } else {
+                            &committed_roots_hash
+                        },
+                        witness_revoked_leaf_indices.as_slice(),
                         deployment_profile_manifest.as_slice(),
                     )?),
                 );
@@ -7677,6 +7830,7 @@ mod tests {
         )?;
         strip_rollup_metadata(&mut bundle.header_map);
         apply_pivot_alignment(&mut bundle.header_map, pivot);
+        finalize_test_merge_bundle_transport(&mut bundle, 0)?;
         Ok(bundle)
     }
 
@@ -7894,6 +8048,7 @@ mod tests {
         )?;
         strip_rollup_metadata(&mut bundle.header_map);
         apply_pivot_alignment(&mut bundle.header_map, pivot);
+        finalize_test_merge_bundle_transport(&mut bundle, 0)?;
         Ok(bundle)
     }
 
@@ -8018,6 +8173,241 @@ mod tests {
         assert_eq!(
             header_hp_commit, bundle.hp_binding.hp_commit,
             "join_finalize bundle must remain self-consistent on hp_commit before acceptance"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn slot_reuse_join_finalize_reclaim_clears_committed_revocation() -> Result<(), CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let mut server = super::demo::demo_server();
+        let alice = build_genesis_member_bundle(0x75)?;
+        server.accept_epoch(&alice.bundle)?;
+        let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+        let alice_slot = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .and_then(|state| state.leaf_slot_leases.get(&alice.leaf_id))
+            .map(|lease| lease.slot_index)
+            .ok_or(CityGError::InvalidInput(
+                "missing active slot lease for genesis member",
+            ))?;
+
+        let leave_bundle = build_leave_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+        server.accept_epoch(&leave_bundle)?;
+        {
+            let state_after_leave = server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("missing roster state after leave"))?;
+            assert!(
+                server.members(&gid).is_empty(),
+                "accepted leave must remove the member from the live membership snapshot"
+            );
+            assert!(
+                !state_after_leave
+                    .pending_join_finalize_auth
+                    .contains_key(&alice.leaf_id),
+                "accepted leave must clear pending join_finalize auth for the revoked member"
+            );
+            assert!(
+                !state_after_leave
+                    .leaf_slot_leases
+                    .contains_key(&alice.leaf_id),
+                "accepted leave must clear the active slot lease"
+            );
+            assert_eq!(
+                state_after_leave
+                    .revoked_slot_leases
+                    .get(&alice.leaf_id)
+                    .map(|lease| lease.slot_index),
+                Some(alice_slot),
+                "accepted leave must preserve the revoked slot lease until reclaim finalize"
+            );
+        }
+        {
+            let state = server
+                .roster
+                .groups
+                .get_mut(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("missing roster state after leave"))?;
+            for slot_index in 0..alice_slot {
+                let mut reserved_leaf = [0u8; 32];
+                reserved_leaf[24..28]
+                    .copy_from_slice(&(slot_index.saturating_add(1)).to_be_bytes());
+                reserved_leaf[28..32].copy_from_slice(&slot_index.to_be_bytes());
+                state.free_slots.remove(&slot_index);
+                state.pending_join_finalize_auth.insert(
+                    reserved_leaf,
+                    JoinFinalizeAuthRecord {
+                        leaf_id: reserved_leaf,
+                        lease: SlotLease {
+                            slot_index,
+                            slot_generation: 0,
+                        },
+                        token: [0x44; 32],
+                    },
+                );
+            }
+        }
+
+        let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x76, false)?;
+        let bob_barrier_version =
+            u64_from_header(&bob.bundle.header_map, hdr::HDR_BARRIER_VERSION)?;
+        assert!(
+            bob_barrier_version > 0,
+            "joining an emptied but existing group must retain non-genesis barrier_version"
+        );
+        assert!(
+            !bob.bundle.header_map.contains_key(&hdr::HDR_BOOTSTRAP_ALG),
+            "rejoin into an existing emptied group must not emit bootstrap headers"
+        );
+        assert!(
+            !bob.bundle.header_map.contains_key(&hdr::HDR_BOOTSTRAP_SIG),
+            "rejoin into an existing emptied group must not emit bootstrap headers"
+        );
+        let bob_delta = bob
+            .bundle
+            .membership_delta()
+            .map_err(|_| CityGError::InvalidInput("bob join bundle missing membership delta"))?;
+        assert_eq!(
+            bob_delta.joined,
+            vec![bob.leaf_id],
+            "server-issued join ticket must bind the generated join bundle to the leased leaf id"
+        );
+        {
+            let state_before_bob_accept =
+                server
+                    .roster
+                    .groups
+                    .get(gid.as_slice())
+                    .ok_or(CityGError::InvalidInput(
+                        "missing roster state before bob accept",
+                    ))?;
+            let bob_pending = state_before_bob_accept
+                .pending_join_finalize_auth
+                .get(&bob.leaf_id)
+                .ok_or(CityGError::InvalidInput("missing pending lease for bob"))?;
+            let reserved_other_slots: BTreeSet<u32> = state_before_bob_accept
+                .pending_join_finalize_auth
+                .values()
+                .filter(|record| record.leaf_id != bob.leaf_id)
+                .map(|record| record.lease.slot_index)
+                .collect();
+            let conflicting_pending: Vec<([u8; 32], SlotLease)> = state_before_bob_accept
+                .pending_join_finalize_auth
+                .values()
+                .filter(|record| {
+                    record.leaf_id != bob.leaf_id
+                        && record.lease.slot_index == bob_pending.lease.slot_index
+                })
+                .map(|record| (record.leaf_id, record.lease))
+                .collect();
+            assert!(
+                !reserved_other_slots.contains(&bob_pending.lease.slot_index),
+                "no other pending lease may reserve bob's leased slot before acceptance: {conflicting_pending:?}"
+            );
+        }
+        server.accept_epoch(&bob.bundle)?;
+
+        let state_before_reclaim =
+            server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput(
+                    "missing roster state before reclaim",
+                ))?;
+        assert_eq!(
+            state_before_reclaim
+                .leaf_slot_leases
+                .get(&bob.leaf_id)
+                .map(|lease| lease.slot_index),
+            Some(alice_slot),
+            "new joiner must be assigned the reclaimed slot before join_finalize"
+        );
+        assert_eq!(
+            state_before_reclaim
+                .revoked_slot_leases
+                .get(&alice.leaf_id)
+                .map(|lease| lease.slot_index),
+            Some(alice_slot),
+            "committed revoked slot must remain until reclaim join_finalize is accepted"
+        );
+
+        let (reclaim_bundle, _) = build_refresh_bundle_for_member(&mut server, &bob, &bob.bundle)?;
+        assert_eq!(
+            u64_from_header(&reclaim_bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?,
+            0,
+            "reclaiming a revoked slot must publish a revocation-changing barrier update"
+        );
+        assert!(
+            reclaim_bundle
+                .header_map
+                .contains_key(&hdr::HDR_JOIN_FINALIZE_AUTH),
+            "slot reclaim join_finalize must remain bound to the server-issued capability"
+        );
+        let reclaim_delta = reclaim_bundle
+            .membership_delta()
+            .map_err(|_| CityGError::InvalidInput("reclaim bundle missing membership delta"))?;
+        let state_before_reclaim_accept =
+            server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput(
+                    "missing roster state before reclaim validation",
+                ))?;
+        assert!(
+            validate_barrier_update_against_roster(
+                state_before_reclaim_accept,
+                &reclaim_bundle.header_map,
+                &reclaim_delta
+            )?
+            .is_some(),
+            "reclaim bundle must pass server-side barrier validation before acceptance"
+        );
+
+        server.accept_epoch(&reclaim_bundle)?;
+
+        let state_after_reclaim =
+            server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput(
+                    "missing roster state after reclaim",
+                ))?;
+        assert_eq!(
+            state_after_reclaim
+                .leaf_slot_leases
+                .get(&bob.leaf_id)
+                .map(|lease| lease.slot_index),
+            Some(alice_slot)
+        );
+        assert!(
+            !state_after_reclaim
+                .pending_join_finalize_auth
+                .contains_key(&bob.leaf_id),
+            "accepted reclaim join_finalize must clear the pending capability"
+        );
+        assert!(
+            state_after_reclaim.revoked_slot_leases.is_empty(),
+            "accepted reclaim join_finalize must clear superseded revoked-slot leases"
+        );
+
+        let committed_roots_hash =
+            server
+                .barrier_roots_hash(&gid)
+                .ok_or(CityGError::InvalidInput(
+                    "missing committed barrier roots hash",
+                ))?;
+        let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        assert!(
+            committed_revoked.leaf_indices.is_empty(),
+            "reclaimed slot must no longer appear in the committed revoked helper set"
         );
         Ok(())
     }
@@ -8506,10 +8896,123 @@ mod tests {
                     "replay rehydration must synthesize pending join_finalize auth",
                 ))?;
         assert_eq!(record.token, join_finalize_auth_token);
-        assert_eq!(record.cover_leaf_index, updater_leaf);
+        assert_eq!(record.lease.slot_index, updater_leaf);
         assert!(
             super::validate_barrier_update_against_roster(&state, &header, &delta)?.is_some(),
             "rehydrated replay state must validate the historical reason-2 merge"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replay_rehydrates_missing_join_finalize_auth_for_reclaim_join() -> Result<(), CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let mut server = super::demo::demo_server();
+        let alice = build_genesis_member_bundle(0x79)?;
+        server.accept_epoch(&alice.bundle)?;
+        let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+        let alice_slot = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .and_then(|state| state.leaf_slot_leases.get(&alice.leaf_id))
+            .map(|lease| lease.slot_index)
+            .ok_or(CityGError::InvalidInput(
+                "missing active slot lease for genesis member",
+            ))?;
+
+        let leave_bundle = build_leave_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+        server.accept_epoch(&leave_bundle)?;
+        {
+            let state = server
+                .roster
+                .groups
+                .get_mut(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("missing roster state after leave"))?;
+            for slot_index in 0..alice_slot {
+                let mut reserved_leaf = [0u8; 32];
+                reserved_leaf[24..28]
+                    .copy_from_slice(&(slot_index.saturating_add(1)).to_be_bytes());
+                reserved_leaf[28..32].copy_from_slice(&slot_index.to_be_bytes());
+                state.free_slots.remove(&slot_index);
+                state.pending_join_finalize_auth.insert(
+                    reserved_leaf,
+                    JoinFinalizeAuthRecord {
+                        leaf_id: reserved_leaf,
+                        lease: SlotLease {
+                            slot_index,
+                            slot_generation: 0,
+                        },
+                        token: [0x54; 32],
+                    },
+                );
+            }
+        }
+
+        let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x7A, false)?;
+        server.accept_epoch(&bob.bundle)?;
+        let (reclaim_bundle, _) = build_refresh_bundle_for_member(&mut server, &bob, &bob.bundle)?;
+        assert_eq!(
+            u64_from_header(&reclaim_bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?,
+            0,
+            "expected reclaim join_finalize to publish as reason=0"
+        );
+        let reclaim_delta = reclaim_bundle
+            .membership_delta()
+            .map_err(|_| CityGError::InvalidInput("reclaim bundle missing membership delta"))?;
+
+        let mut replay_state =
+            server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .cloned()
+                .ok_or(CityGError::InvalidInput(
+                    "missing roster state before reclaim replay validation",
+                ))?;
+        replay_state.pending_join_finalize_auth.remove(&bob.leaf_id);
+
+        let err = match super::validate_barrier_update_against_roster(
+            &replay_state,
+            &reclaim_bundle.header_map,
+            &reclaim_delta,
+        ) {
+            Ok(_) => {
+                return Err(CityGError::InvalidInput(
+                    "missing pending reclaim join_finalize auth must fail live validation",
+                ));
+            }
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+        ));
+
+        super::rehydrate_replay_join_finalize_auth(&mut replay_state, &reclaim_bundle.header_map)?;
+        let record = replay_state
+            .pending_join_finalize_auth
+            .get(&bob.leaf_id)
+            .ok_or(CityGError::InvalidInput(
+                "reclaim replay rehydration must synthesize pending join_finalize auth",
+            ))?;
+        assert_eq!(record.token, bob.join_finalize_auth_token);
+        assert_eq!(record.lease.slot_index, alice_slot);
+        assert_eq!(
+            Some(record.lease),
+            replay_state.leaf_slot_leases.get(&bob.leaf_id).copied(),
+            "replay rehydration must reuse the active slot lease for reclaim joins"
+        );
+        assert!(
+            super::validate_barrier_update_against_roster(
+                &replay_state,
+                &reclaim_bundle.header_map,
+                &reclaim_delta,
+            )?
+            .is_some(),
+            "rehydrated replay state must validate the historical reclaim join_finalize"
         );
         Ok(())
     }

@@ -3294,13 +3294,20 @@ pub fn joiner_kgen_merge_or_with_state<'a>(
         .header_map
         .insert(HDR_ROLLUP_VCK_COMMIT, Value::Bytes(vck_commit.to_vec()));
 
+    let barrier_update_reason = match result.header_map.get(&HDR_BARRIER_UPDATE_REASON) {
+        Some(Value::Integer(int)) => u64::try_from(*int).ok(),
+        _ => None,
+    };
+    let is_reclaim_join_finalize =
+        barrier_update_reason == Some(0) && result.header_map.contains_key(&HDR_JOIN_FINALIZE_AUTH);
+
     let revoked_since_root_new =
         to_array32("revoked_since_prev_root", parts.revoked_since_prev_root)?;
     let revoked_root_new = to_array32("revoked_root", parts.revoked_root)?;
     let requires_srx = revoked_since_root_new != pivot.revoked_since_root
         || revoked_root_new != pivot.revoked_root;
     let srx_root_sw_before = pivot.srx_root_sw.unwrap_or_else(default_srx_empty_root_sw);
-    if requires_srx {
+    if requires_srx && !is_reclaim_join_finalize {
         populate_merge_srx(&mut result.header_map, &parts, &params, &srx_root_sw_before)?;
     } else {
         for key in [
@@ -3317,6 +3324,7 @@ pub fn joiner_kgen_merge_or_with_state<'a>(
         }
     }
     if requires_srx
+        && !is_reclaim_join_finalize
         && ![
             HDR_SRX_COMMIT,
             HDR_SRX_PAYLOAD,

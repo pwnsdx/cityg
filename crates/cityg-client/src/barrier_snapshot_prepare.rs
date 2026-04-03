@@ -104,13 +104,16 @@ pub fn derive_barrier_snapshot_witness_selection(
     resolved_revoked_leaf_indices: &[u32],
     revocation_roots_hash: [u8; 32],
     committed_revocation_roots_hash: [u8; 32],
+    include_updater_in_revoked_set: bool,
 ) -> Result<BarrierSnapshotWitnessSelection> {
     let mut witness_revoked_leaf_indices = resolved_revoked_leaf_indices.to_vec();
     let witness_revocation_roots_hash = if barrier_update_reason == 0 {
-        let updater_leaf =
-            u32::try_from(updater_leaf).map_err(|_| anyhow!("cover_leaf_index out of range"))?;
-        if let Err(insert_at) = witness_revoked_leaf_indices.binary_search(&updater_leaf) {
-            witness_revoked_leaf_indices.insert(insert_at, updater_leaf);
+        if include_updater_in_revoked_set {
+            let updater_leaf = u32::try_from(updater_leaf)
+                .map_err(|_| anyhow!("cover_leaf_index out of range"))?;
+            if let Err(insert_at) = witness_revoked_leaf_indices.binary_search(&updater_leaf) {
+                witness_revoked_leaf_indices.insert(insert_at, updater_leaf);
+            }
         }
         revocation_roots_hash
     } else {
@@ -324,6 +327,7 @@ mod tests {
             &[1, 7],
             fields.revocation_roots_hash,
             fields.committed_revocation_roots_hash,
+            true,
         )?;
         assert_eq!(selection.witness_revoked_leaf_indices, vec![1, 4, 7]);
         assert_eq!(
@@ -376,6 +380,21 @@ mod tests {
                 .contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
         );
         assert!(!prepared.barrier_update.raw_update.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn derive_barrier_snapshot_witness_selection_skips_updater_for_reclaim_join() -> Result<()> {
+        let selection = derive_barrier_snapshot_witness_selection(
+            0,
+            4,
+            &[1, 4, 7],
+            [0x44; 32],
+            [0x55; 32],
+            false,
+        )?;
+        assert_eq!(selection.witness_revoked_leaf_indices, vec![1, 4, 7]);
+        assert_eq!(selection.witness_revocation_roots_hash, [0x44; 32]);
         Ok(())
     }
 

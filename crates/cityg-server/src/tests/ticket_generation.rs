@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR, BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR,
-    COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR, GroupState, demo, leaf_index,
+    GroupState, SlotLease, demo, leaf_index,
 };
 
 #[test]
@@ -67,30 +67,35 @@ fn build_join_ticket_with_leaf_uses_requested_leaf_and_rejects_duplicates() -> R
 }
 
 #[test]
-fn build_join_ticket_with_leaf_rejects_cover_index_collisions() -> Result<(), CityGError> {
+fn build_join_ticket_with_leaf_assigns_first_free_slot_even_when_leaf_ids_collide()
+-> Result<(), CityGError> {
     let mut server = demo::demo_server();
     let gid = cityg_client::demo::DEMO_GID;
-    let active_leaf = colliding_cover_leaf(5);
-    let colliding_leaf = colliding_cover_leaf(1029);
+    let active_member = build_genesis_member_bundle(0x61)?;
+    server.accept_epoch(&active_member.bundle)?;
+    let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
 
-    let mut membership = cityg_client::GroupMembership::default();
-    membership.apply_delta(&cityg_client::MembershipDelta {
-        joined: vec![active_leaf],
-        revoked: Vec::new(),
-    });
-    let root = msphf_core::merkle::canonical_set_root(&[active_leaf])?;
-    let mut state = GroupState::default();
-    state.snapshots.insert(root, membership);
-    state.latest_root = Some(root);
-    server.roster.groups.insert(gid.to_vec(), state);
+    let active_leaf = active_member.leaf_id;
+    let colliding_leaf = colliding_cover_leaf(3);
 
-    let err = server
-        .build_join_ticket_with_leaf(&gid, Some(colliding_leaf))
-        .expect_err("colliding cover index must be rejected");
-    assert!(matches!(
-        err,
-        CityGError::InvalidInput(COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR)
-    ));
+    let state = server.roster.groups.get_mut(gid.as_slice()).expect("group");
+    state.n_max = 2;
+    state.leaf_slot_leases.clear();
+    state.leaf_slot_leases.insert(
+        active_leaf,
+        SlotLease {
+            slot_index: 1,
+            slot_generation: 0,
+        },
+    );
+    server
+        .context_mut()
+        .barrier_group_state_entry_mut(&gid)
+        .n_max = 2;
+
+    let ticket = server.build_join_ticket_with_leaf(&gid, Some(colliding_leaf))?;
+    assert_eq!(ticket.leaf_id, colliding_leaf);
+    assert_eq!(ticket.cover_leaf_index, 0);
     Ok(())
 }
 
@@ -103,7 +108,28 @@ fn build_join_ticket_rejects_when_barrier_leaf_capacity_is_exhausted() -> Result
     {
         let state = server.roster.groups.entry(gid.to_vec()).or_default();
         state.n_max = 4;
-        state.revoked = (0..4).map(colliding_cover_leaf).collect();
+        let active_leaves: Vec<[u8; 32]> = (0..4).map(colliding_cover_leaf).collect();
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: active_leaves.clone(),
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(active_leaves.as_slice())?;
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        state.leaf_slot_leases = active_leaves
+            .into_iter()
+            .enumerate()
+            .map(|(slot_index, leaf)| {
+                (
+                    leaf,
+                    SlotLease {
+                        slot_index: slot_index as u32,
+                        slot_generation: 0,
+                    },
+                )
+            })
+            .collect();
     }
     {
         let ctx_state = server.context_mut().barrier_group_state_entry_mut(&gid);
@@ -114,7 +140,8 @@ fn build_join_ticket_rejects_when_barrier_leaf_capacity_is_exhausted() -> Result
         .barrier_leaf_capacity(&gid)
         .expect("registered group should expose barrier capacity");
     assert_eq!(capacity.n_max, 4);
-    assert_eq!(capacity.revoked_leaf_count, 4);
+    assert_eq!(capacity.active_leaf_count, 4);
+    assert_eq!(capacity.revoked_leaf_count, 0);
     assert_eq!(capacity.reserved_cover_leaf_count, 4);
     assert_eq!(capacity.remaining_cover_leaf_slots, 0);
 
@@ -125,6 +152,42 @@ fn build_join_ticket_rejects_when_barrier_leaf_capacity_is_exhausted() -> Result
         err,
         CityGError::InvalidInput(BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR)
     ));
+    Ok(())
+}
+
+#[test]
+fn build_join_ticket_reuses_revoked_slot_capacity() -> Result<(), CityGError> {
+    let mut server = CityGServer::new(ServerConfig::new());
+    let gid = [0x6Cu8; 32];
+    server.register_group(&gid, vec![0x44; 16])?;
+
+    {
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.n_max = 2;
+        state.revoked.insert([0xA1; 32]);
+        state.revoked_slot_leases.insert(
+            [0xA1; 32],
+            SlotLease {
+                slot_index: 0,
+                slot_generation: 0,
+            },
+        );
+    }
+    server
+        .context_mut()
+        .barrier_group_state_entry_mut(&gid)
+        .n_max = 2;
+
+    let ticket = server.build_join_ticket(&gid)?;
+    assert_eq!(ticket.cover_leaf_index, 0);
+
+    let capacity = server
+        .barrier_leaf_capacity(&gid)
+        .expect("registered group should expose barrier capacity");
+    assert_eq!(capacity.revoked_leaf_count, 1);
+    assert_eq!(capacity.pending_join_ticket_count, 1);
+    assert_eq!(capacity.reserved_cover_leaf_count, 1);
+    assert_eq!(capacity.remaining_cover_leaf_slots, 1);
     Ok(())
 }
 

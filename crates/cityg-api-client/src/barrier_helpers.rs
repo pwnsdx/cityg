@@ -134,12 +134,15 @@ impl CitygApiClient {
         )
         .map_err(|err| Error::Parse(err.to_string()))?;
 
+        let reclaims_cover_leaf_index = barrier_update_reason == 0
+            && header.contains_key(&msphf_orchestrator::hdr::HDR_JOIN_FINALIZE_AUTH);
         let witness_selection = derive_barrier_snapshot_witness_selection(
             barrier_update_reason,
             cover_leaf_index,
             revoked_resolution.leaf_indices.as_slice(),
             ticket_fields.revocation_roots_hash,
             ticket_fields.committed_revocation_roots_hash,
+            !reclaims_cover_leaf_index,
         )
         .map_err(|err| Error::Parse(err.to_string()))?;
         let ticket_history_commitment_core = to_core_history_commitment(ticket_history_commitment);

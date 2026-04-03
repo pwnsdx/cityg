@@ -106,8 +106,42 @@ pub(crate) fn persisted_join_finalize_auth(
         .values()
         .map(|record| PersistedJoinFinalizeAuthRecord {
             leaf_id_hex: hex::encode(record.leaf_id),
-            cover_leaf_index: record.cover_leaf_index,
+            cover_leaf_index: record.lease.slot_index,
+            slot_generation: record.lease.slot_generation,
             token_hex: hex::encode(record.token),
+        })
+        .collect()
+}
+
+pub(crate) fn persisted_leaf_slot_leases(
+    leases: &BTreeMap<[u8; 32], SlotLease>,
+) -> Vec<PersistedLeafSlotLeaseRecord> {
+    leases
+        .iter()
+        .map(|(leaf_id, lease)| PersistedLeafSlotLeaseRecord {
+            leaf_id_hex: hex::encode(leaf_id),
+            slot_index: lease.slot_index,
+            slot_generation: lease.slot_generation,
+        })
+        .collect()
+}
+
+pub(crate) fn decode_persisted_leaf_slot_leases(
+    records: &[PersistedLeafSlotLeaseRecord],
+) -> BTreeMap<[u8; 32], SlotLease> {
+    records
+        .iter()
+        .filter_map(|record| {
+            let leaf_id = hex::decode(&record.leaf_id_hex)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())?;
+            Some((
+                leaf_id,
+                SlotLease {
+                    slot_index: record.slot_index,
+                    slot_generation: record.slot_generation,
+                },
+            ))
         })
         .collect()
 }
@@ -128,7 +162,10 @@ pub(crate) fn decode_persisted_join_finalize_auth(
                 leaf_id,
                 JoinFinalizeAuthRecord {
                     leaf_id,
-                    cover_leaf_index: record.cover_leaf_index,
+                    lease: SlotLease {
+                        slot_index: record.cover_leaf_index,
+                        slot_generation: record.slot_generation,
+                    },
                     token,
                 },
             ))
@@ -188,6 +225,8 @@ pub(crate) fn persisted_kbroad_room_state(
         room.current_accepted_barrier_predecessor_hash =
             state.current_accepted_barrier_predecessor_hash;
         room.pending_join_finalize_auth = persisted_join_finalize_auth(state);
+        room.active_slot_leases = persisted_leaf_slot_leases(&state.leaf_slot_leases);
+        room.revoked_slot_leases = persisted_leaf_slot_leases(&state.revoked_slot_leases);
     }
     room
 }

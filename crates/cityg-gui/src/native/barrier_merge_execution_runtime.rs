@@ -17,6 +17,8 @@ pub(super) async fn perform_barrier_merge_inner(
         gid,
         barrier_version,
         next_barrier_version,
+        protocol_barrier_update_reason,
+        build_barrier_update_reason,
         fs_ec,
         fs_epoch_commit,
         fs_dev_prev_commit,
@@ -57,8 +59,8 @@ pub(super) async fn perform_barrier_merge_inner(
 
     publish_barrier_merge(BarrierMergePublishInputs {
         policy: BarrierMergePublishPolicy {
-            pending_barrier_update_reason: mode.reason(),
-            build_barrier_update_reason: mode.reason(),
+            pending_barrier_update_reason: protocol_barrier_update_reason,
+            build_barrier_update_reason,
             current_k_fs: mode.reseeds_k_fs().then_some(&k_fs_current),
             build_bundle_context: mode.build_bundle_context(),
             accept_bundle_context: mode.accept_bundle_context(),
