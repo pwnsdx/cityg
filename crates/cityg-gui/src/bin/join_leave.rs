@@ -690,16 +690,15 @@ async fn prepare_join_session_with_identity(
     server_url: &str,
     room_id: &str,
     alias: &str,
-    pop_public_key: Vec<u8>,
-    pop_secret_key: Vec<u8>,
+    identity: cityg_api_client::RoomAdminIdentity,
 ) -> Result<Session> {
     let client = new_api_client(server_url);
     let pop_secret =
-        Box::new(MlDsaSecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
+        Box::new(MlDsaSecretKey::from_bytes(&identity.pop_secret_key).context("invalid POP key")?);
 
-    let identity_binding =
-        cityg_api_client::build_identity_binding(alias, &pop_public_key, &pop_secret_key)
-            .context("build identity binding")?;
+    let identity_binding = identity
+        .build_identity_binding(alias)
+        .context("build identity binding")?;
 
     let ticket = match client
         .join_ticket_with_retry(room_id, alias, Some(identity_binding.clone()))
@@ -751,7 +750,7 @@ async fn prepare_join_session_with_identity(
     let vrf_public_key = join_runtime.vrf_public_key;
 
     let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
-        pop_public_key.as_slice(),
+        identity.pop_public_key.as_slice(),
         pop_secret.as_ref(),
         vrf_secret_key.as_slice(),
         vrf_public_key.as_slice(),
@@ -829,7 +828,7 @@ async fn prepare_join_session_with_identity(
         epoch_key: bundle.epoch_key,
         barrier_version: prepared_runtime.barrier_version,
         k_barrier: [0u8; 32],
-        pop_public_key,
+        pop_public_key: identity.pop_public_key,
         pop_secret,
         vrf_secret_key,
         vrf_public_key,
@@ -858,14 +857,7 @@ async fn prepare_join_session_with_identity(
 
 async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
     let identity = cityg_api_client::generate_room_admin_identity();
-    prepare_join_session_with_identity(
-        server_url,
-        room_id,
-        alias,
-        identity.pop_public_key,
-        identity.pop_secret_key,
-    )
-    .await
+    prepare_join_session_with_identity(server_url, room_id, alias, identity).await
 }
 
 fn is_cover_leaf_index_collision_error(err: &anyhow::Error) -> bool {
@@ -923,8 +915,10 @@ async fn perform_join_with_identity(
         server_url,
         room_id,
         alias,
-        pop_public_key.to_vec(),
-        pop_secret_key.to_vec(),
+        cityg_api_client::RoomAdminIdentity {
+            pop_public_key: pop_public_key.to_vec(),
+            pop_secret_key: pop_secret_key.to_vec(),
+        },
     )
     .await?;
     perform_join_finalize(session).await
