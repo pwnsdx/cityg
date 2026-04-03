@@ -122,10 +122,6 @@ use websocket_replay::{
     websocket_resume_message, websocket_room_url as websocket_url, websocket_sync_required_notice,
 };
 
-fn random_room_id() -> String {
-    random_hex_32()
-}
-
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 const LEAVE_ACCEPT_RETRY_MAX_ATTEMPTS: u32 = 2;
 
@@ -2384,7 +2380,7 @@ mod tests {
         sleep(Duration::from_millis(250)).await;
 
         let server_url = format!("http://127.0.0.1:{port}");
-        let room_id = random_room_id();
+        let room_id = random_hex_32();
         bootstrap_test_room(&server_url, &room_id).await?;
         let session = perform_join(&server_url, &room_id, "leave-mock-alice").await?;
         let _peer = perform_join(&server_url, &room_id, "leave-mock-bob").await?;
@@ -2448,7 +2444,7 @@ mod tests {
         sleep(Duration::from_millis(250)).await;
 
         let server_url = format!("http://127.0.0.1:{port}");
-        let room_id = random_room_id();
+        let room_id = random_hex_32();
         bootstrap_test_room(&server_url, &room_id).await?;
         let session = prepare_join_session(&server_url, &room_id, "join-finalize-mock").await?;
 
@@ -2686,7 +2682,7 @@ mod tests {
 
     #[test]
     fn random_room_id_and_bytes32_validation() -> Result<()> {
-        let room_id = random_room_id();
+        let room_id = random_hex_32();
         assert_eq!(room_id.len(), 64, "room id must be 32-byte hex");
         let decoded = hex::decode(&room_id)?;
         assert_eq!(decoded.len(), 32);
