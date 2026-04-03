@@ -269,10 +269,13 @@ pub(crate) struct JoinProvisioningArtifactSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     pub(crate) current_join_records_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
+    pub(crate) current_revoked_records_completeness_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
     pub(crate) current_revoked_leaf_indices_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
     pub(crate) current_barrier_update: &'a [u8],
     pub(crate) current_join_records: &'a [BarrierJoinRecord],
+    pub(crate) current_revoked_records: &'a [BarrierRevokedLeafRecord],
     pub(crate) current_revoked_leaf_indices: &'a [u32],
 }
 
@@ -830,6 +833,14 @@ pub(crate) fn verify_join_provisioning_artifact(
             ek_leaf: record.ek_leaf.clone(),
         })
         .collect::<Vec<_>>();
+    let revoked_records = response
+        .current_revoked_records
+        .iter()
+        .map(|record| BarrierRevokedLeafRecord {
+            leaf_index: record.leaf_index,
+            slot_generation: record.slot_generation,
+        })
+        .collect::<Vec<_>>();
     let payload = encode_cbor_det(&JoinProvisioningArtifactSignedPayload {
         label: "cityg/join-provisioning-artifact-v1",
         scope_id: &authority.scope_id,
@@ -862,11 +873,15 @@ pub(crate) fn verify_join_provisioning_artifact(
         current_join_records_completeness_attestation: response
             .current_join_records_completeness_attestation
             .as_slice(),
+        current_revoked_records_completeness_attestation: response
+            .current_revoked_records_completeness_attestation
+            .as_slice(),
         current_revoked_leaf_indices_completeness_attestation: response
             .current_revoked_leaf_indices_completeness_attestation
             .as_slice(),
         current_barrier_update: response.current_barrier_update.as_slice(),
         current_join_records: join_records.as_slice(),
+        current_revoked_records: revoked_records.as_slice(),
         current_revoked_leaf_indices: response.current_revoked_leaf_indices.as_slice(),
     })?;
     verify_ml_dsa_signature(

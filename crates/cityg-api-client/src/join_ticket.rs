@@ -3,6 +3,16 @@ use cityg_api_schema::pb::{JoinTicketRequest, JoinTicketResponse};
 use cityg_client::barrier::DEFAULT_BARRIER_N_MAX;
 use cityg_client::witness::SrxInputsOwned;
 
+fn derive_current_revoked_leaf_indices(records: &[BarrierRevokedLeafRecord]) -> Vec<u32> {
+    let mut leaf_indices = records
+        .iter()
+        .map(|record| record.leaf_index)
+        .collect::<Vec<_>>();
+    leaf_indices.sort_unstable();
+    leaf_indices.dedup();
+    leaf_indices
+}
+
 impl CitygApiClient {
     /// Requests a join ticket for a new member.
     pub async fn join_ticket(
@@ -46,6 +56,9 @@ impl CitygApiClient {
                     || !response.current_global_history_attestation.is_empty()
                     || !response
                         .current_join_records_completeness_attestation
+                        .is_empty()
+                    || !response
+                        .current_revoked_records_completeness_attestation
                         .is_empty()
                     || !response
                         .current_revoked_leaf_indices_completeness_attestation
@@ -208,22 +221,61 @@ impl CitygApiClient {
                 )?;
                 let revoked_attestation = parse_helper_completeness_attestation_bytes(
                     response
-                        .current_revoked_leaf_indices_completeness_attestation
+                        .current_revoked_records_completeness_attestation
                         .as_slice(),
                     authority,
                     HELPER_KIND_REVOKED_LEAVES,
                 )?
                 .ok_or_else(|| {
                     Error::Parse(
-                        "join ticket missing current_revoked_leaf_indices_completeness_attestation"
+                        "join ticket missing current_revoked_records_completeness_attestation"
                             .to_string(),
                     )
                 })?;
-                let _ = revoked_attestation;
+                let revoked_records = response
+                    .current_revoked_records
+                    .iter()
+                    .map(|record| BarrierRevokedLeafRecord {
+                        leaf_index: record.leaf_index,
+                        slot_generation: record.slot_generation,
+                    })
+                    .collect::<Vec<_>>();
+                let derived_revoked_leaf_indices =
+                    derive_current_revoked_leaf_indices(revoked_records.as_slice());
+                if !response.current_revoked_leaf_indices.is_empty()
+                    && response.current_revoked_leaf_indices != derived_revoked_leaf_indices
+                {
+                    return Err(Error::Parse(
+                        "join ticket current_revoked_leaf_indices mismatch with current_revoked_records"
+                            .to_string(),
+                    ));
+                }
+                verify_revoked_leaves_completeness_attestation(
+                    &revoked_attestation,
+                    authority,
+                    commitment,
+                    &compute_revocation_roots_hash(
+                        &array32(&response.revoked_since_root)?,
+                        &array32(&response.revoked_root)?,
+                    )
+                    .map_err(|err| {
+                        Error::Parse(format!("join ticket compute revocation roots hash: {err}"))
+                    })?,
+                    0,
+                    u32::try_from(revoked_records.len()).map_err(|_| {
+                        Error::Parse(
+                            "join ticket current_revoked_records length overflow".to_string(),
+                        )
+                    })?,
+                    revoked_records.as_slice(),
+                )?;
             }
         } else if !response.current_global_history_attestation.is_empty()
             || !response
                 .current_join_records_completeness_attestation
+                .is_empty()
+            || !response
+                .current_revoked_records_completeness_attestation
                 .is_empty()
             || !response
                 .current_revoked_leaf_indices_completeness_attestation
@@ -321,6 +373,14 @@ pub fn prepare_runtime_join_ticket(
             "join ticket missing kbroad_public".to_string(),
         ));
     }
+    let current_revoked_records = response
+        .current_revoked_records
+        .iter()
+        .map(|record| BarrierRevokedLeafRecord {
+            leaf_index: record.leaf_index,
+            slot_generation: record.slot_generation,
+        })
+        .collect::<Vec<_>>();
 
     Ok(PreparedRuntimeJoinTicket {
         gid,
@@ -392,7 +452,10 @@ pub fn prepare_runtime_join_ticket(
                 ek_leaf: record.ek_leaf.clone(),
             })
             .collect(),
-        current_revoked_leaf_indices: response.current_revoked_leaf_indices.clone(),
+        current_revoked_leaf_indices: derive_current_revoked_leaf_indices(
+            current_revoked_records.as_slice(),
+        ),
+        current_revoked_records,
         current_barrier_update: response.current_barrier_update.clone(),
         last_accepted_ec: response.last_accepted_ec,
     })

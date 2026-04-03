@@ -975,6 +975,7 @@ pub struct PreparedRuntimeJoinTicket {
     pub kem_tree_hash_after: [u8; 32],
     pub current_predecessor_kem_tree_hash_after: [u8; 32],
     pub current_join_records: Vec<BarrierJoinRecord>,
+    pub current_revoked_records: Vec<BarrierRevokedLeafRecord>,
     pub current_revoked_leaf_indices: Vec<u32>,
     pub current_barrier_update: Vec<u8>,
     pub last_accepted_ec: u64,
@@ -1918,6 +1919,14 @@ mod tests {
                 ek_leaf: record.ek_leaf.clone(),
             })
             .collect::<Vec<_>>();
+        let revoked_records = response
+            .current_revoked_records
+            .iter()
+            .map(|record| BarrierRevokedLeafRecord {
+                leaf_index: record.leaf_index,
+                slot_generation: record.slot_generation,
+            })
+            .collect::<Vec<_>>();
         let payload = encode_cbor_det(&JoinProvisioningArtifactSignedPayload {
             label: "cityg/join-provisioning-artifact-v1",
             scope_id: &authority.descriptor.scope_id,
@@ -1952,11 +1961,15 @@ mod tests {
             current_join_records_completeness_attestation: response
                 .current_join_records_completeness_attestation
                 .as_slice(),
+            current_revoked_records_completeness_attestation: response
+                .current_revoked_records_completeness_attestation
+                .as_slice(),
             current_revoked_leaf_indices_completeness_attestation: response
                 .current_revoked_leaf_indices_completeness_attestation
                 .as_slice(),
             current_barrier_update: response.current_barrier_update.as_slice(),
             current_join_records: join_records.as_slice(),
+            current_revoked_records: revoked_records.as_slice(),
             current_revoked_leaf_indices: response.current_revoked_leaf_indices.as_slice(),
         });
         let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
@@ -2346,6 +2359,7 @@ mod tests {
         };
         let authority = build_test_history_authority(history_commitment, [0x41; 32], 0, [0xCC; 32]);
         let join_records = Vec::<BarrierJoinRecord>::new();
+        let revoked_records = Vec::<BarrierRevokedLeafRecord>::new();
         let revoked_leaf_indices = Vec::<u32>::new();
         let join_helper_attestation = build_test_helper_completeness_attestation(
             &authority,
@@ -2358,11 +2372,17 @@ mod tests {
                 records: join_records.as_slice(),
             },
         );
-        let revoked_helper_attestation = encode_cbor_det(&HelperCompletenessAttestationWire(
-            authority.descriptor.scope_id.to_vec(),
-            HELPER_KIND_REVOKED_LEAVES.to_string(),
-            vec![0xAB; 32],
-        ));
+        let revoked_records_helper_attestation = build_test_helper_completeness_attestation(
+            &authority,
+            HELPER_KIND_REVOKED_LEAVES,
+            &history_commitment,
+            0,
+            0,
+            RevokedLeavesSelector {
+                revocation_roots_hash: &[0x00; 32],
+                records: revoked_records.as_slice(),
+            },
+        );
         finalize_join_ticket_payload(JoinTicketResponse {
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
             gid: vec![0x41; 32],
@@ -2401,9 +2421,11 @@ mod tests {
             history_authority_descriptor: authority.descriptor_bytes,
             current_global_history_attestation: authority.attestation_bytes,
             current_join_records: Vec::new(),
+            current_revoked_records: Vec::new(),
             current_revoked_leaf_indices: revoked_leaf_indices,
             current_join_records_completeness_attestation: join_helper_attestation,
-            current_revoked_leaf_indices_completeness_attestation: revoked_helper_attestation,
+            current_revoked_records_completeness_attestation: revoked_records_helper_attestation,
+            current_revoked_leaf_indices_completeness_attestation: Vec::new(),
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
             last_accepted_ec: 21,
             ..JoinTicketResponse::default()
@@ -3491,6 +3513,48 @@ mod tests {
     }
 
     #[test]
+    fn prepare_runtime_join_ticket_derives_unique_revoked_leaf_indices_from_records() {
+        let mut ticket = runtime_join_ticket_payload();
+        ticket.current_revoked_records = vec![
+            pb::BarrierRevokedLeafRecord {
+                leaf_index: 7,
+                slot_generation: 3,
+            },
+            pb::BarrierRevokedLeafRecord {
+                leaf_index: 1,
+                slot_generation: 0,
+            },
+            pb::BarrierRevokedLeafRecord {
+                leaf_index: 7,
+                slot_generation: 1,
+            },
+        ];
+        ticket.current_revoked_leaf_indices.clear();
+
+        let prepared = prepare_runtime_join_ticket(&ticket)
+            .expect("join ticket runtime preparation must succeed");
+
+        assert_eq!(
+            prepared.current_revoked_records,
+            vec![
+                BarrierRevokedLeafRecord {
+                    leaf_index: 7,
+                    slot_generation: 3,
+                },
+                BarrierRevokedLeafRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                },
+                BarrierRevokedLeafRecord {
+                    leaf_index: 7,
+                    slot_generation: 1,
+                },
+            ]
+        );
+        assert_eq!(prepared.current_revoked_leaf_indices, vec![1, 7]);
+    }
+
+    #[test]
     fn ensure_supported_attested_current_state_extension_requires_matching_presence() {
         ensure_supported_attested_current_state_extension("join ticket", None, &[])
             .expect("empty attestation without extension must be allowed");
@@ -4019,6 +4083,70 @@ mod tests {
                 .contains("join ticket missing provisioning_artifact"),
             "unexpected error: {err}"
         );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_revoked_record_index_mismatch() -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_with_mismatched_revoked_indices() -> impl IntoResponse {
+            let history_commitment = HistoryCommitment {
+                history_view_id: [0xD0; 32],
+                history_commitment_id: [0xD1; 32],
+                prev_history_commitment_id: [0x00; 32],
+                history_seq: 1,
+            };
+            let authority =
+                build_test_history_authority(history_commitment, [0x41; 32], 0, [0xCC; 32]);
+            let revoked_records = vec![BarrierRevokedLeafRecord {
+                leaf_index: 5,
+                slot_generation: 2,
+            }];
+            let mut response = join_ticket_ok_payload();
+            response.current_revoked_records = vec![pb::BarrierRevokedLeafRecord {
+                leaf_index: 5,
+                slot_generation: 2,
+            }];
+            response.current_revoked_leaf_indices = vec![6];
+            response.current_revoked_records_completeness_attestation =
+                build_test_helper_completeness_attestation(
+                    &authority,
+                    HELPER_KIND_REVOKED_LEAVES,
+                    &history_commitment,
+                    0,
+                    1,
+                    RevokedLeavesSelector {
+                        revocation_roots_hash: &[0x00; 32],
+                        records: revoked_records.as_slice(),
+                    },
+                );
+            response.current_revoked_leaf_indices_completeness_attestation = Vec::new();
+            encode_proto(finalize_join_ticket_payload(response))
+        }
+
+        let app = Router::new().route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_with_mismatched_revoked_indices),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("mismatched revoked index projection must fail");
+
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("current_revoked_leaf_indices mismatch with current_revoked_records")
+        ));
+
         handle.abort();
         Ok(())
     }
