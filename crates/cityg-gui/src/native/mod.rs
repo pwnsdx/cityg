@@ -77,10 +77,6 @@ use pqcrypto_dilithium::dilithium5::{
     public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
 };
 #[cfg(test)]
-use pqcrypto_kyber::kyber768;
-#[cfg(test)]
-use pqcrypto_traits::kem::Ciphertext as KemCiphertext;
-#[cfg(test)]
 use pqcrypto_traits::sign::DetachedSignature;
 #[cfg(test)]
 use pqcrypto_traits::sign::PublicKey as DilithiumPublicKey;

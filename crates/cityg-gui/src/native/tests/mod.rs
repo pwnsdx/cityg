@@ -1411,8 +1411,8 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
         &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
     )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
-    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
-    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let (ss, ct) =
+        cityg_client::barrier_crypto::encapsulate_barrier_public_key(leaf_ek_bytes.as_slice())?;
     let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
@@ -1433,7 +1433,7 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
     )?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_full[..12]);
-    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let cipher = ChaCha20Poly1305::new((&ss).into());
     let wrapped_ps = cipher.encrypt(
         (&nonce).into(),
         Payload {
@@ -1448,7 +1448,7 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
         source_node,
         target_node,
         target_prefix.to_vec(),
-        KemCiphertext::as_bytes(&ct).to_vec(),
+        ct,
         wrapped_ps,
     )];
     let (_, _, ek_0) =
@@ -1571,8 +1571,8 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
         &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
     )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
-    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
-    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let (ss, ct) =
+        cityg_client::barrier_crypto::encapsulate_barrier_public_key(leaf_ek_bytes.as_slice())?;
     let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
@@ -1593,7 +1593,7 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
     )?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_full[..12]);
-    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let cipher = ChaCha20Poly1305::new((&ss).into());
     let wrapped_ps = cipher.encrypt(
         (&nonce).into(),
         Payload {
@@ -1608,7 +1608,7 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
         source_node,
         target_node,
         target_prefix.to_vec(),
-        KemCiphertext::as_bytes(&ct).to_vec(),
+        ct,
         wrapped_ps,
     )];
     let (_, _, ek_0) =
@@ -1714,8 +1714,8 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
         &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
     )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
-    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
-    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let (ss, ct) =
+        cityg_client::barrier_crypto::encapsulate_barrier_public_key(leaf_ek_bytes.as_slice())?;
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
         9,
@@ -1735,7 +1735,7 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
     )?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_full[..12]);
-    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let cipher = ChaCha20Poly1305::new((&ss).into());
     let wrapped_ps = cipher.encrypt(
         (&nonce).into(),
         Payload {
@@ -1750,7 +1750,7 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
         source_node,
         target_node,
         target_prefix.to_vec(),
-        KemCiphertext::as_bytes(&ct).to_vec(),
+        ct,
         wrapped_ps,
     )];
     let (_, _, ek_0) =
@@ -1849,8 +1849,8 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
     let source_node = 4u64;
     let target_node = 10u64;
     let path_secret_source = [0x44; 32];
-    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
-    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let (ss, ct) =
+        cityg_client::barrier_crypto::encapsulate_barrier_public_key(leaf_ek_bytes.as_slice())?;
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
         9,
@@ -1870,7 +1870,7 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
     )?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_full[..12]);
-    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let cipher = ChaCha20Poly1305::new((&ss).into());
     let wrapped_ps = cipher.encrypt(
         (&nonce).into(),
         Payload {
@@ -1885,7 +1885,7 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
         source_node,
         target_node,
         target_prefix.to_vec(),
-        KemCiphertext::as_bytes(&ct).to_vec(),
+        ct,
         wrapped_ps,
     )];
     let new_public_keys = vec![
@@ -2103,8 +2103,8 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
         &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
     )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
-    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
-    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let (ss, ct) =
+        cityg_client::barrier_crypto::encapsulate_barrier_public_key(leaf_ek_bytes.as_slice())?;
     let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
@@ -2125,7 +2125,7 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     )?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_full[..12]);
-    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let cipher = ChaCha20Poly1305::new((&ss).into());
     let wrapped_ps = cipher.encrypt(
         (&nonce).into(),
         Payload {
@@ -2140,7 +2140,7 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
         source_node,
         target_node,
         target_prefix.to_vec(),
-        KemCiphertext::as_bytes(&ct).to_vec(),
+        ct,
         wrapped_ps,
     )];
     let (_, _, ek_0) =
@@ -2267,8 +2267,8 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad(
         &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
     )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
-    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
-    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let (ss, ct) =
+        cityg_client::barrier_crypto::encapsulate_barrier_public_key(leaf_ek_bytes.as_slice())?;
     let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
@@ -2289,7 +2289,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad(
     )?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_full[..12]);
-    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let cipher = ChaCha20Poly1305::new((&ss).into());
     let wrapped_ps = cipher.encrypt(
         (&nonce).into(),
         Payload {
@@ -2304,7 +2304,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad(
         source_node,
         target_node,
         target_prefix.to_vec(),
-        KemCiphertext::as_bytes(&ct).to_vec(),
+        ct,
         wrapped_ps,
     )];
     let (_, _, ek_0) =
@@ -2409,8 +2409,8 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad()
         &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
     )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
-    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
-    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let (ss, ct) =
+        cityg_client::barrier_crypto::encapsulate_barrier_public_key(leaf_ek_bytes.as_slice())?;
     let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
@@ -2431,7 +2431,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad()
     )?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&nonce_full[..12]);
-    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let cipher = ChaCha20Poly1305::new((&ss).into());
     let wrapped_ps = cipher.encrypt(
         (&nonce).into(),
         Payload {
@@ -2446,7 +2446,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad()
         source_node,
         target_node,
         target_prefix.to_vec(),
-        KemCiphertext::as_bytes(&ct).to_vec(),
+        ct,
         wrapped_ps,
     )];
     let (_, _, ek_0) =

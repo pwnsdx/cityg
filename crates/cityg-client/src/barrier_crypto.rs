@@ -7,7 +7,9 @@ use ml_kem::{
 };
 use msphf_core::{hash::h_l, hkdf::hkdf_blake3};
 use pqcrypto_kyber::kyber768;
-use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
+use pqcrypto_traits::kem::{
+    Ciphertext as KemCiphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey,
+};
 use serde::Serialize;
 
 use crate::barrier::compute_barrier_pkhash;
@@ -70,6 +72,15 @@ pub fn generate_barrier_leaf_keypair() -> Result<(Vec<u8>, Vec<u8>, [u8; 32])> {
     let secret_key = KemSecretKey::as_bytes(&secret).to_vec();
     let pkhash = compute_barrier_pkhash(public_key.as_slice())?;
     Ok((public_key, secret_key, pkhash))
+}
+
+pub fn encapsulate_barrier_public_key(public_key_bytes: &[u8]) -> Result<([u8; 32], Vec<u8>)> {
+    let public_key = kyber768::PublicKey::from_bytes(public_key_bytes)
+        .map_err(|_| anyhow!("invalid barrier leaf public key"))?;
+    let (shared_secret, ciphertext) = kyber768::encapsulate(&public_key);
+    let mut ss = [0u8; 32];
+    ss.copy_from_slice(shared_secret.as_bytes());
+    Ok((ss, KemCiphertext::as_bytes(&ciphertext).to_vec()))
 }
 
 pub fn derive_internal_node_key_material(
