@@ -1,11 +1,13 @@
 use std::{collections::BTreeMap, convert::TryInto, fs, path::Path};
 
 #[cfg(test)]
+use cityg_runtime::EpochScope;
+#[cfg(test)]
 use cityg_runtime::StoredBundle;
 #[cfg(test)]
 use cityg_runtime::ensure_leaf_member_for_epoch as runtime_ensure_leaf_member_for_epoch;
 use cityg_runtime::{
-    AcceptedRoomEpoch, AppliedBundleIndexes, BundleIndexUpdate, EpochScope, PreparedAcceptedBundle,
+    AcceptedRoomEpoch, AppliedBundleIndexes, BundleIndexUpdate, PreparedAcceptedBundle,
     RoomAcceptEpochError, RoomAuthorizationError, RoomBundleMaterializationError,
     RoomRetentionPolicy, RoomServiceError, apply_bundle_indexes, lane_state_path,
     materialize_replayed_bundle as runtime_materialize_replayed_bundle,

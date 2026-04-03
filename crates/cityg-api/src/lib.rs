@@ -17,9 +17,10 @@ mod proof_validation;
 mod ticket_routes;
 mod websocket_routes;
 
+#[cfg(test)]
+use std::convert::TryInto;
 use std::{
     collections::BTreeMap,
-    convert::TryInto,
     hash::{Hash, Hasher},
     net::SocketAddr,
     sync::Arc,
@@ -30,15 +31,14 @@ use ahash::{AHashMap, AHasher};
 
 use axum::{
     Router,
-    body::Bytes,
-    extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    extract::DefaultBodyLimit,
+    http::HeaderMap,
     middleware as axum_middleware,
-    response::{IntoResponse, Response},
     routing::{get, post},
 };
+#[cfg(test)]
+use cityg_api_schema::{API_PROFILE_VERSION, MAX_BARRIER_HELPER_PAGE_ENTRIES};
 use cityg_api_schema::{
-    API_PROFILE_VERSION, MAX_BARRIER_HELPER_PAGE_ENTRIES,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request, pb,
     validate_fetch_messages_request as schema_validate_fetch_messages_request,
     validate_send_message_request as schema_validate_send_message_request,
@@ -52,19 +52,19 @@ use pb::MergeTicketResponse;
 use pb::{
     AcceptEpochRequest, BarrierFetchPublicTreeRequest, BarrierIssueFullVerificationWitnessRequest,
     BarrierLookupMergeAcceptanceRequest, BarrierResolveJoinsSinceRequest,
-    BarrierResolveRevokedLeavesRequest, BootstrapRoomRequest, ChatMessage, ConfigureWindowRequest,
-    ConfigureWindowResponse, ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse,
-    GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetWindowRequest, HealthResponse,
-    JoinTicketRequest, ListRoomAdminsRequest, MembersRequest, MergeTicketIntent,
+    BarrierResolveRevokedLeavesRequest, BootstrapRoomRequest, ChatMessage,
+    ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest,
+    GetBundleResponse, JoinTicketRequest, ListRoomAdminsRequest, MembersRequest, MergeTicketIntent,
     MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
-    RoomAdminProof, RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
+    RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
 };
 #[cfg(test)]
 use pb::{
     BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceResponse,
     BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse, BootstrapRoomResponse,
-    GetTelemetryResponse, GetWindowResponse, ListRoomAdminsResponse, MembersResponse,
-    MergeAcceptanceStatus, RoomAdminMutationResponse, RotateRoomKbroadResponse,
+    ConfigureWindowRequest, ConfigureWindowResponse, GetTelemetryRequest, GetTelemetryResponse,
+    GetWindowRequest, GetWindowResponse, HealthResponse, ListRoomAdminsResponse, MembersResponse,
+    MergeAcceptanceStatus, RoomAdminMutationResponse, RoomAdminProof, RotateRoomKbroadResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -72,7 +72,16 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use cityg_client::{CityGError as ClientError, ClientEpochBundle};
+#[cfg(test)]
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+};
+#[cfg(test)]
+use cityg_client::CityGError as ClientError;
+use cityg_client::ClientEpochBundle;
 #[cfg(test)]
 use cityg_runtime::MAX_MESSAGE_CIPHERTEXT_BYTES;
 #[cfg(test)]
@@ -88,7 +97,9 @@ use cityg_runtime::{
     prepare_accepted_bundle as runtime_prepare_accepted_bundle, server_from_cityg_config_for_lane,
 };
 use cityg_server::CityGServer;
-use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
+#[cfg(test)]
+use msphf_orchestrator::AcceptanceError;
+use msphf_orchestrator::mhw::FreezeError;
 #[cfg(test)]
 use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::Deserialize;

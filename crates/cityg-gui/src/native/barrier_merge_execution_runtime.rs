@@ -38,8 +38,10 @@ pub(super) async fn perform_barrier_merge_inner(
         barrier_update,
     } = prepare_barrier_merge_execution(request, mode, allow_pending_recovery).await?;
 
-    let pop_secret =
-        Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
+    let pop_secret = Box::new(
+        cityg_api_client::parse_room_admin_secret_key(&pop_secret_key)
+            .context("invalid POP key")?,
+    );
 
     let prepared_orchestration = prepared_origin.prepare_barrier_orchestration(
         &gid,

@@ -64,6 +64,10 @@ impl RoomAdminIdentity {
         crate::build_identity_binding(alias, &self.pop_public_key, &self.pop_secret_key)
     }
 
+    pub fn parse_secret_key(&self) -> Result<dilithium5::SecretKey, Error> {
+        parse_room_admin_secret_key(&self.pop_secret_key)
+    }
+
     pub fn build_kbroad_proof(
         &self,
         operation: RoomAdminOperation,
@@ -147,6 +151,11 @@ pub fn generate_room_admin_keypair() -> (Vec<u8>, Vec<u8>) {
 pub fn generate_room_admin_identity() -> RoomAdminIdentity {
     let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
     RoomAdminIdentity::new(pop_public_key, pop_secret_key)
+}
+
+pub fn parse_room_admin_secret_key(bytes: &[u8]) -> Result<dilithium5::SecretKey, Error> {
+    dilithium5::SecretKey::from_bytes(bytes)
+        .map_err(|_| Error::Parse("invalid room admin secret key".to_string()))
 }
 
 pub fn build_room_admin_proof(

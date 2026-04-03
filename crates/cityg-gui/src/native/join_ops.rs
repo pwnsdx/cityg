@@ -141,7 +141,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
 
         let mut fs_state = join_runtime.forward_state;
         let pop_secret = Box::new(
-            dilithium5::SecretKey::from_bytes(&room_identity.pop_secret_key)
+            room_identity
+                .parse_secret_key()
                 .context("invalid POP key")?,
         );
 

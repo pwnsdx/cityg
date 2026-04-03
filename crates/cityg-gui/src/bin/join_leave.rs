@@ -689,8 +689,7 @@ async fn prepare_join_session_with_identity(
     identity: cityg_api_client::RoomAdminIdentity,
 ) -> Result<Session> {
     let client = new_api_client(server_url);
-    let pop_secret =
-        Box::new(MlDsaSecretKey::from_bytes(&identity.pop_secret_key).context("invalid POP key")?);
+    let pop_secret = Box::new(identity.parse_secret_key().context("invalid POP key")?);
 
     let identity_binding = identity
         .build_identity_binding(alias)
@@ -1657,7 +1656,7 @@ mod tests {
 
     fn sample_session(server_url: &str) -> Session {
         let identity = cityg_api_client::generate_room_admin_identity();
-        let pop_sk = MlDsaSecretKey::from_bytes(&identity.pop_secret_key).expect("valid POP key");
+        let pop_sk = identity.parse_secret_key().expect("valid POP key");
         Session {
             server_url: server_url.to_string(),
             room_id: hex::encode([0xAA; 32]),
@@ -3935,7 +3934,7 @@ mod tests {
     #[test]
     fn log_helpers_cover_none_fingerprint_and_non_integer_fs_ec() {
         let identity = cityg_api_client::generate_room_admin_identity();
-        let sk = MlDsaSecretKey::from_bytes(&identity.pop_secret_key).expect("valid POP key");
+        let sk = identity.parse_secret_key().expect("valid POP key");
         let session = Session {
             server_url: "http://127.0.0.1:18080".to_string(),
             room_id: hex::encode([0xAA; 32]),

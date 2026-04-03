@@ -86,7 +86,6 @@ use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey}
 use pqcrypto_traits::sign::DetachedSignature;
 #[cfg(test)]
 use pqcrypto_traits::sign::PublicKey as DilithiumPublicKey;
-use pqcrypto_traits::sign::SecretKey as DilithiumSecretKey;
 use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;

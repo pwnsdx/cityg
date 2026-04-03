@@ -85,8 +85,10 @@ async fn publish_revocation_merge_from_ticket_inner(
         })
         .map_err(anyhow::Error::from)?;
     let client = new_api_client(&server_url);
-    let pop_secret =
-        Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
+    let pop_secret = Box::new(
+        cityg_api_client::parse_room_admin_secret_key(&pop_secret_key)
+            .context("invalid POP key")?,
+    );
     let PreparedBarrierSnapshot {
         header,
         cat: cat_arr,
