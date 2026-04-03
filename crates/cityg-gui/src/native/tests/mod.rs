@@ -4202,15 +4202,15 @@ fn signing_helpers_reject_invalid_key_material() -> Result<(), Box<dyn std::erro
         "invalid secret key bytes should fail"
     );
 
-    let (pk, sk) = dilithium5::keypair();
-    let signature = sign_message(&leaf, ts, payload, sk.as_bytes())?;
+    let (pk, sk) = cityg_client::message_auth::generate_message_signing_keypair();
+    let signature = sign_message(&leaf, ts, payload, &sk)?;
 
     assert!(
         verify_message_signature(&leaf, ts, payload, &signature, &[0u8; 8]).is_err(),
         "invalid public key bytes should fail"
     );
     assert!(
-        verify_message_signature(&leaf, ts, payload, &[0u8; 8], pk.as_bytes()).is_err(),
+        verify_message_signature(&leaf, ts, payload, &[0u8; 8], &pk).is_err(),
         "invalid signature bytes should fail"
     );
     Ok(())
@@ -9283,9 +9283,8 @@ fn categorize_error_case_insensitive() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn encode_decode_authenticated_message_empty_plaintext() -> Result<(), Box<dyn std::error::Error>> {
-    let (pk, sk) = dilithium5::keypair();
-    let msg_sign_public_key = pk.as_bytes().to_vec();
-    let msg_sign_secret_key = sk.as_bytes().to_vec();
+    let (msg_sign_public_key, msg_sign_secret_key) =
+        cityg_client::message_auth::generate_message_signing_keypair();
 
     let leaf_id = [0x42u8; 32];
     let plaintext = b"";
@@ -9305,9 +9304,8 @@ fn encode_decode_authenticated_message_empty_plaintext() -> Result<(), Box<dyn s
 
 #[test]
 fn encode_decode_authenticated_message_large_plaintext() -> Result<(), Box<dyn std::error::Error>> {
-    let (pk, sk) = dilithium5::keypair();
-    let msg_sign_public_key = pk.as_bytes().to_vec();
-    let msg_sign_secret_key = sk.as_bytes().to_vec();
+    let (msg_sign_public_key, msg_sign_secret_key) =
+        cityg_client::message_auth::generate_message_signing_keypair();
 
     let leaf_id = [0x42u8; 32];
     let plaintext = vec![b'A'; 5000]; // 5KB message
@@ -9341,9 +9339,8 @@ fn decode_authenticated_message_too_short() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn decode_authenticated_message_wrong_prefix() -> Result<(), Box<dyn std::error::Error>> {
-    let (pk, sk) = dilithium5::keypair();
-    let msg_sign_public_key = pk.as_bytes().to_vec();
-    let msg_sign_secret_key = sk.as_bytes().to_vec();
+    let (msg_sign_public_key, msg_sign_secret_key) =
+        cityg_client::message_auth::generate_message_signing_keypair();
 
     let leaf_id = [0x42u8; 32];
     let plaintext = b"test";
