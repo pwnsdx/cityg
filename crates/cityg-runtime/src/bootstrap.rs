@@ -14,6 +14,10 @@ pub fn server_config_from_cityg_config(cfg: &cityg_config::CityGConfig) -> Serve
     server_cfg.h_max = Some(cfg.protocol.max_concurrent_heads);
     server_cfg.window_ttl = Some(Duration::from_secs(cfg.server.window_ttl_secs));
     server_cfg.state_path = cfg.server.state_path.clone();
+    server_cfg.barrier_leaf_capacity_warning_percent =
+        Some(cfg.server.barrier_leaf_capacity_warning_percent);
+    server_cfg.barrier_leaf_capacity_refusal_percent =
+        Some(cfg.server.barrier_leaf_capacity_refusal_percent);
 
     let mut acceptance = AcceptanceOptions {
         srx_max_bytes: cfg.protocol.default_srx_max_bytes,
@@ -136,6 +140,14 @@ mod tests {
         let config = cityg_config::CityGConfig::default();
         let server = server_from_cityg_config(&config);
         assert!(server.context().fs_base_ts().is_none());
+        assert_eq!(
+            server.barrier_leaf_capacity_warning_percent(),
+            config.server.barrier_leaf_capacity_warning_percent
+        );
+        assert_eq!(
+            server.barrier_leaf_capacity_refusal_percent(),
+            config.server.barrier_leaf_capacity_refusal_percent
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

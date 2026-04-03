@@ -95,6 +95,12 @@ pub struct ServerConfig {
     /// Window TTL in seconds (default: 24 hours)
     pub window_ttl_secs: u64,
 
+    /// Warning threshold for barrier leaf-capacity utilization, in percent.
+    pub barrier_leaf_capacity_warning_percent: u8,
+
+    /// Hard refusal threshold for new barrier leaf reservations, in percent.
+    pub barrier_leaf_capacity_refusal_percent: u8,
+
     /// Whether to seed the demo room (preloads KBROAD + bootstrap keys)
     pub seed_demo_room: bool,
 }
@@ -219,6 +225,8 @@ impl Default for ServerConfig {
             state_path: None,
             websocket_capacity: 1000,
             window_ttl_secs: 120, // 2 minutes default TTL
+            barrier_leaf_capacity_warning_percent: 80,
+            barrier_leaf_capacity_refusal_percent: 100,
             seed_demo_room: false,
         }
     }
@@ -420,6 +428,18 @@ impl CityGConfig {
         );
         env_parse!(
             get_var,
+            "CITYG_SERVER_BARRIER_LEAF_CAPACITY_WARNING_PERCENT",
+            self.server.barrier_leaf_capacity_warning_percent,
+            "barrier_leaf_capacity_warning_percent"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_SERVER_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT",
+            self.server.barrier_leaf_capacity_refusal_percent,
+            "barrier_leaf_capacity_refusal_percent"
+        );
+        env_parse!(
+            get_var,
             "CITYG_SERVER_SEED_DEMO_ROOM",
             self.server.seed_demo_room,
             "seed_demo_room flag"
@@ -603,6 +623,28 @@ impl CityGConfig {
         if self.server.window_ttl_secs == 0 {
             return Err(ConfigError::Validation(
                 "window_ttl_secs must be > 0".to_string(),
+            ));
+        }
+        if self.server.barrier_leaf_capacity_warning_percent == 0
+            || self.server.barrier_leaf_capacity_warning_percent > 100
+        {
+            return Err(ConfigError::Validation(
+                "barrier_leaf_capacity_warning_percent must be in 1..=100".to_string(),
+            ));
+        }
+        if self.server.barrier_leaf_capacity_refusal_percent == 0
+            || self.server.barrier_leaf_capacity_refusal_percent > 100
+        {
+            return Err(ConfigError::Validation(
+                "barrier_leaf_capacity_refusal_percent must be in 1..=100".to_string(),
+            ));
+        }
+        if self.server.barrier_leaf_capacity_warning_percent
+            > self.server.barrier_leaf_capacity_refusal_percent
+        {
+            return Err(ConfigError::Validation(
+                "barrier_leaf_capacity_warning_percent must be <= barrier_leaf_capacity_refusal_percent"
+                    .to_string(),
             ));
         }
 
@@ -888,6 +930,8 @@ default_window_height = 1080.0
     {
         let server = ServerConfig::default();
         assert_eq!(server.window_ttl(), Duration::from_secs(120));
+        assert_eq!(server.barrier_leaf_capacity_warning_percent, 80);
+        assert_eq!(server.barrier_leaf_capacity_refusal_percent, 100);
 
         let custom_server = ServerConfig {
             window_ttl_secs: 3600,
@@ -991,6 +1035,27 @@ default_window_height = 1080.0
 
         config = CityGConfig::default();
         config.server.window_ttl_secs = 0;
+        assert!(config.validate().is_err());
+
+        config = CityGConfig::default();
+        config.server.barrier_leaf_capacity_warning_percent = 0;
+        assert!(config.validate().is_err());
+
+        config = CityGConfig::default();
+        config.server.barrier_leaf_capacity_warning_percent = 101;
+        assert!(config.validate().is_err());
+
+        config = CityGConfig::default();
+        config.server.barrier_leaf_capacity_refusal_percent = 0;
+        assert!(config.validate().is_err());
+
+        config = CityGConfig::default();
+        config.server.barrier_leaf_capacity_refusal_percent = 101;
+        assert!(config.validate().is_err());
+
+        config = CityGConfig::default();
+        config.server.barrier_leaf_capacity_warning_percent = 91;
+        config.server.barrier_leaf_capacity_refusal_percent = 90;
         assert!(config.validate().is_err());
         Ok(())
     }
@@ -1108,6 +1173,14 @@ default_window_height = 1080.0
         );
         overrides.insert("CITYG_SERVER_WEBSOCKET_CAPACITY", "5000".to_string());
         overrides.insert("CITYG_SERVER_WINDOW_TTL_SECS", "7200".to_string());
+        overrides.insert(
+            "CITYG_SERVER_BARRIER_LEAF_CAPACITY_WARNING_PERCENT",
+            "91".to_string(),
+        );
+        overrides.insert(
+            "CITYG_SERVER_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT",
+            "93".to_string(),
+        );
         overrides.insert("CITYG_SERVER_SEED_DEMO_ROOM", "false".to_string());
 
         // Client overrides
@@ -1184,6 +1257,8 @@ default_window_height = 1080.0
         );
         assert_eq!(config.server.websocket_capacity, 5000);
         assert_eq!(config.server.window_ttl_secs, 7200);
+        assert_eq!(config.server.barrier_leaf_capacity_warning_percent, 91);
+        assert_eq!(config.server.barrier_leaf_capacity_refusal_percent, 93);
         assert!(!config.server.seed_demo_room);
 
         assert_eq!(config.client.default_server_url, "http://test.com");

@@ -4519,6 +4519,21 @@ mod tests {
         .expect("telemetry snapshot should succeed");
         let telemetry: GetTelemetryResponse = decode_proto_response(telemetry_response).await;
         assert!(!telemetry.entries.is_empty());
+        assert!(telemetry.entries[0].barrier_n_max > 0);
+        assert!(telemetry.entries[0].barrier_reserved_cover_leaf_count >= 1);
+        assert!(
+            telemetry.entries[0].barrier_remaining_cover_leaf_slots
+                < telemetry.entries[0].barrier_n_max
+        );
+        assert!(telemetry.entries[0].barrier_leaf_utilization_basis_points > 0);
+        assert_eq!(
+            telemetry.entries[0].barrier_leaf_capacity_warning_percent,
+            80
+        );
+        assert_eq!(
+            telemetry.entries[0].barrier_leaf_capacity_refusal_percent,
+            100
+        );
         assert!(
             telemetry.freeze_stats.iter().any(|stat| stat.code == 4242
                 && stat.reason == "unit_test_freeze"

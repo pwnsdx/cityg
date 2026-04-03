@@ -165,6 +165,15 @@ message TelemetryEntry {
   uint64 freeze_window_full = 5;
   uint64 freeze_rho_replay = 6;
   uint64 last_active_heads = 7;
+  uint64 barrier_n_max = 8;
+  uint64 barrier_active_leaf_count = 9;
+  uint64 barrier_revoked_leaf_count = 10;
+  uint64 barrier_pending_join_ticket_count = 11;
+  uint64 barrier_reserved_cover_leaf_count = 12;
+  uint64 barrier_remaining_cover_leaf_slots = 13;
+  uint64 barrier_leaf_utilization_basis_points = 14;
+  uint64 barrier_leaf_capacity_warning_percent = 15;
+  uint64 barrier_leaf_capacity_refusal_percent = 16;
 }
 
 message FreezeStat {

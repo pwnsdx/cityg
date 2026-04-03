@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, SystemTime},
+};
 
 use ciborium::ser::into_writer;
 use cityg_client::{CityGError, ClientEpochBundle};
@@ -171,6 +174,15 @@ pub struct RoomTelemetrySnapshotEntry {
     pub freeze_window_full: u64,
     pub freeze_rho_replay: u64,
     pub last_active_heads: u64,
+    pub barrier_n_max: u64,
+    pub barrier_active_leaf_count: u64,
+    pub barrier_revoked_leaf_count: u64,
+    pub barrier_pending_join_ticket_count: u64,
+    pub barrier_reserved_cover_leaf_count: u64,
+    pub barrier_remaining_cover_leaf_slots: u64,
+    pub barrier_leaf_utilization_basis_points: u64,
+    pub barrier_leaf_capacity_warning_percent: u64,
+    pub barrier_leaf_capacity_refusal_percent: u64,
 }
 
 /// Shared pagination result for room-member listings.
@@ -1436,20 +1448,108 @@ pub fn snapshot_room_window(server: &CityGServer) -> Vec<RoomWindowEntrySnapshot
 /// Snapshot the current acceptance telemetry rows for one room engine.
 #[must_use]
 pub fn snapshot_room_telemetry(server: &CityGServer) -> Vec<RoomTelemetrySnapshotEntry> {
-    server
-        .context()
-        .telemetry_report()
-        .into_iter()
-        .map(|(key, counters)| RoomTelemetrySnapshotEntry {
-            gid: key.gid.as_slice().to_vec(),
-            parent_root: key.parent_root,
-            head_attempts: counters.head_attempts,
-            head_insertions: counters.head_insertions,
-            freeze_window_full: counters.freeze_window_full,
-            freeze_rho_replay: counters.freeze_rho_replay,
-            last_active_heads: counters.last_active_heads as u64,
-        })
-        .collect()
+    let mut entries = BTreeMap::new();
+    let mut gids_with_acceptance_telemetry = BTreeSet::new();
+    let barrier_leaf_capacity_warning_percent =
+        u64::from(server.barrier_leaf_capacity_warning_percent());
+    let barrier_leaf_capacity_refusal_percent =
+        u64::from(server.barrier_leaf_capacity_refusal_percent());
+
+    for (key, counters) in server.context().telemetry_report() {
+        let gid = key.gid.as_slice().to_vec();
+        gids_with_acceptance_telemetry.insert(gid.clone());
+        let capacity = <[u8; 32]>::try_from(gid.as_slice())
+            .ok()
+            .and_then(|gid32| server.barrier_leaf_capacity(&gid32));
+        let utilization_basis_points = capacity
+            .map(|capacity| {
+                if capacity.n_max == 0 {
+                    0
+                } else {
+                    capacity
+                        .reserved_cover_leaf_count
+                        .saturating_mul(10_000)
+                        .saturating_div(capacity.n_max)
+                }
+            })
+            .unwrap_or(0);
+        let entry =
+            entries
+                .entry((gid.clone(), key.parent_root))
+                .or_insert(RoomTelemetrySnapshotEntry {
+                    gid,
+                    parent_root: key.parent_root,
+                    head_attempts: 0,
+                    head_insertions: 0,
+                    freeze_window_full: 0,
+                    freeze_rho_replay: 0,
+                    last_active_heads: 0,
+                    barrier_n_max: capacity.map(|value| value.n_max).unwrap_or(0),
+                    barrier_active_leaf_count: capacity
+                        .map(|value| value.active_leaf_count)
+                        .unwrap_or(0),
+                    barrier_revoked_leaf_count: capacity
+                        .map(|value| value.revoked_leaf_count)
+                        .unwrap_or(0),
+                    barrier_pending_join_ticket_count: capacity
+                        .map(|value| value.pending_join_ticket_count)
+                        .unwrap_or(0),
+                    barrier_reserved_cover_leaf_count: capacity
+                        .map(|value| value.reserved_cover_leaf_count)
+                        .unwrap_or(0),
+                    barrier_remaining_cover_leaf_slots: capacity
+                        .map(|value| value.remaining_cover_leaf_slots)
+                        .unwrap_or(0),
+                    barrier_leaf_utilization_basis_points: utilization_basis_points,
+                    barrier_leaf_capacity_warning_percent,
+                    barrier_leaf_capacity_refusal_percent,
+                });
+        entry.head_attempts = counters.head_attempts;
+        entry.head_insertions = counters.head_insertions;
+        entry.freeze_window_full = counters.freeze_window_full;
+        entry.freeze_rho_replay = counters.freeze_rho_replay;
+        entry.last_active_heads = counters.last_active_heads as u64;
+    }
+
+    for (gid, capacity) in server.barrier_leaf_capacity_report() {
+        if gids_with_acceptance_telemetry.contains(&gid) {
+            continue;
+        }
+        let parent_root = server
+            .latest_parent_root(gid.as_slice())
+            .unwrap_or([0u8; 32]);
+        let utilization_basis_points = if capacity.n_max == 0 {
+            0
+        } else {
+            capacity
+                .reserved_cover_leaf_count
+                .saturating_mul(10_000)
+                .saturating_div(capacity.n_max)
+        };
+        entries.insert(
+            (gid.clone(), parent_root),
+            RoomTelemetrySnapshotEntry {
+                gid,
+                parent_root,
+                head_attempts: 0,
+                head_insertions: 0,
+                freeze_window_full: 0,
+                freeze_rho_replay: 0,
+                last_active_heads: 0,
+                barrier_n_max: capacity.n_max,
+                barrier_active_leaf_count: capacity.active_leaf_count,
+                barrier_revoked_leaf_count: capacity.revoked_leaf_count,
+                barrier_pending_join_ticket_count: capacity.pending_join_ticket_count,
+                barrier_reserved_cover_leaf_count: capacity.reserved_cover_leaf_count,
+                barrier_remaining_cover_leaf_slots: capacity.remaining_cover_leaf_slots,
+                barrier_leaf_utilization_basis_points: utilization_basis_points,
+                barrier_leaf_capacity_warning_percent,
+                barrier_leaf_capacity_refusal_percent,
+            },
+        );
+    }
+
+    entries.into_values().collect()
 }
 
 /// Fetch room-scoped chat messages after verifying epoch membership.
@@ -1991,6 +2091,41 @@ mod tests {
         assert_eq!(entry.freeze_window_full, 0);
         assert_eq!(entry.freeze_rho_replay, 0);
         assert!(entry.last_active_heads >= 1);
+        assert_eq!(entry.barrier_n_max, 1024);
+        assert_eq!(entry.barrier_active_leaf_count, 1);
+        assert_eq!(entry.barrier_revoked_leaf_count, 0);
+        assert_eq!(entry.barrier_pending_join_ticket_count, 0);
+        assert_eq!(entry.barrier_reserved_cover_leaf_count, 1);
+        assert_eq!(entry.barrier_remaining_cover_leaf_slots, 1023);
+        assert_eq!(entry.barrier_leaf_utilization_basis_points, 9);
+        assert_eq!(entry.barrier_leaf_capacity_warning_percent, 80);
+        assert_eq!(entry.barrier_leaf_capacity_refusal_percent, 100);
+    }
+
+    #[test]
+    fn snapshot_room_telemetry_includes_capacity_for_registered_room_without_accepts() {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x61; 32];
+        server
+            .register_group(&gid, vec![0x55; 16])
+            .expect("register group");
+
+        let telemetry = snapshot_room_telemetry(&server);
+        assert_eq!(telemetry.len(), 1);
+        let entry = &telemetry[0];
+        assert_eq!(entry.gid, gid.to_vec());
+        assert_eq!(entry.parent_root, [0u8; 32]);
+        assert_eq!(entry.head_attempts, 0);
+        assert_eq!(entry.head_insertions, 0);
+        assert_eq!(entry.barrier_n_max, 1024);
+        assert_eq!(entry.barrier_active_leaf_count, 0);
+        assert_eq!(entry.barrier_revoked_leaf_count, 0);
+        assert_eq!(entry.barrier_pending_join_ticket_count, 0);
+        assert_eq!(entry.barrier_reserved_cover_leaf_count, 0);
+        assert_eq!(entry.barrier_remaining_cover_leaf_slots, 1024);
+        assert_eq!(entry.barrier_leaf_utilization_basis_points, 0);
+        assert_eq!(entry.barrier_leaf_capacity_warning_percent, 80);
+        assert_eq!(entry.barrier_leaf_capacity_refusal_percent, 100);
     }
 
     #[test]

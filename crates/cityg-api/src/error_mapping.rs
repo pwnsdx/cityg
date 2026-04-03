@@ -16,6 +16,10 @@ use cityg_runtime::{
     RoomFullVerificationWitnessPreparationError, RoomTicketPreparationError,
     classify_refresh_pivot_conflict,
 };
+use cityg_server::{
+    BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR, BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR,
+    COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR,
+};
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
 use serde::Serialize;
 use serde_json::to_vec as to_json_vec;
@@ -518,6 +522,21 @@ pub(crate) fn map_room_ticket_preparation_error(
     err: RoomTicketPreparationError,
 ) -> ApiError {
     match err {
+        RoomTicketPreparationError::Client(ClientError::InvalidInput(message))
+            if message == BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR =>
+        {
+            ApiError::conflict(BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR)
+        }
+        RoomTicketPreparationError::Client(ClientError::InvalidInput(message))
+            if message == BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR =>
+        {
+            ApiError::conflict(BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR)
+        }
+        RoomTicketPreparationError::Client(ClientError::InvalidInput(message))
+            if message == COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR =>
+        {
+            ApiError::conflict(COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR)
+        }
         RoomTicketPreparationError::Client(err) => {
             maybe_record_client_concurrency_error(endpoint, &err);
             ApiError::from(err)

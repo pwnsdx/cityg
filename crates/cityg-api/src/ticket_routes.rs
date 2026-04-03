@@ -21,7 +21,11 @@ use cityg_runtime::{
     prepare_join_ticket as runtime_prepare_join_ticket,
     prepare_merge_ticket as runtime_prepare_merge_ticket,
 };
-use cityg_server::MergeTicketIntent as ServerMergeTicketIntent;
+use cityg_server::{
+    BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR, BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR,
+    MergeTicketIntent as ServerMergeTicketIntent,
+};
+use tracing::warn;
 
 use crate::{
     ApiError, ApiState, BootstrapRoomRequest, JoinTicketRequest, MESSAGE_AUTH_HEADER,
@@ -47,7 +51,7 @@ pub(crate) async fn join_ticket(
     let request = schema_prepare_join_ticket_request(request)
         .map_err(map_join_ticket_request_preparation_error)?;
 
-    let prepared = {
+    let (prepared, leaf_capacity, warning_percent) = {
         let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
         match runtime_prepare_join_ticket(
@@ -58,9 +62,36 @@ pub(crate) async fn join_ticket(
             state.fs_epoch_period_seconds,
             API_PROFILE_VERSION,
         ) {
-            Ok(prepared) => prepared,
+            Ok(prepared) => {
+                let leaf_capacity = guard.barrier_leaf_capacity(&request.gid);
+                let warning_percent = guard.barrier_leaf_capacity_warning_percent();
+                (prepared, leaf_capacity, warning_percent)
+            }
             Err(err) => {
                 metrics::counter!("cityg_join_ticket_total", "result" => "error").increment(1);
+                if matches!(
+                    err.client_error(),
+                    Some(ClientError::InvalidInput(
+                        BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR
+                    ))
+                ) {
+                    metrics::counter!(
+                        "cityg_join_ticket_capacity_total",
+                        "state" => "refused"
+                    )
+                    .increment(1);
+                } else if matches!(
+                    err.client_error(),
+                    Some(ClientError::InvalidInput(
+                        BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR
+                    ))
+                ) {
+                    metrics::counter!(
+                        "cityg_join_ticket_capacity_total",
+                        "state" => "exhausted"
+                    )
+                    .increment(1);
+                }
                 return Err(map_room_ticket_preparation_error("join_ticket", err));
             }
         }
@@ -75,6 +106,23 @@ pub(crate) async fn join_ticket(
                 binding.pop_public_key.clone(),
             )
             .await?;
+    }
+    if let Some(capacity) = leaf_capacity
+        && capacity.utilization_percent() >= u64::from(warning_percent)
+    {
+        warn!(
+            room_id = %request.room_id,
+            n_max = capacity.n_max,
+            active_leaf_count = capacity.active_leaf_count,
+            revoked_leaf_count = capacity.revoked_leaf_count,
+            pending_join_ticket_count = capacity.pending_join_ticket_count,
+            reserved_cover_leaf_count = capacity.reserved_cover_leaf_count,
+            remaining_cover_leaf_slots = capacity.remaining_cover_leaf_slots,
+            utilization_percent = capacity.utilization_percent(),
+            warning_percent,
+            "barrier leaf capacity high during join ticket issuance"
+        );
+        metrics::counter!("cityg_join_ticket_capacity_total", "state" => "warning").increment(1);
     }
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);
     Ok(protobuf_response_bytes(

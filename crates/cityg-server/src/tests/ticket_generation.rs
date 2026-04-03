@@ -1,5 +1,8 @@
 use super::*;
-use crate::{COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR, GroupState, demo, leaf_index};
+use crate::{
+    BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR, BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR,
+    COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR, GroupState, demo, leaf_index,
+};
 
 #[test]
 fn build_join_ticket_requires_kbroad_and_advances_leaf_index() -> Result<(), CityGError> {
@@ -88,6 +91,149 @@ fn build_join_ticket_with_leaf_rejects_cover_index_collisions() -> Result<(), Ci
         err,
         CityGError::InvalidInput(COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR)
     ));
+    Ok(())
+}
+
+#[test]
+fn build_join_ticket_rejects_when_barrier_leaf_capacity_is_exhausted() -> Result<(), CityGError> {
+    let mut server = CityGServer::new(ServerConfig::new());
+    let gid = [0x24; 32];
+    server.register_group(&gid, vec![0x55; 16])?;
+
+    {
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.n_max = 4;
+        state.revoked = (0..4).map(colliding_cover_leaf).collect();
+    }
+    {
+        let ctx_state = server.context_mut().barrier_group_state_entry_mut(&gid);
+        ctx_state.n_max = 4;
+    }
+
+    let capacity = server
+        .barrier_leaf_capacity(&gid)
+        .expect("registered group should expose barrier capacity");
+    assert_eq!(capacity.n_max, 4);
+    assert_eq!(capacity.revoked_leaf_count, 4);
+    assert_eq!(capacity.reserved_cover_leaf_count, 4);
+    assert_eq!(capacity.remaining_cover_leaf_slots, 0);
+
+    let err = server
+        .build_join_ticket(&gid)
+        .expect_err("exhausted barrier leaf capacity must reject new join tickets");
+    assert!(matches!(
+        err,
+        CityGError::InvalidInput(BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR)
+    ));
+    Ok(())
+}
+
+#[test]
+fn pending_join_tickets_consume_cover_slots_until_exhaustion() -> Result<(), CityGError> {
+    let mut server = CityGServer::new(ServerConfig::new());
+    let gid = [0x39; 32];
+    server.register_group(&gid, vec![0x77; 16])?;
+
+    {
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.n_max = 4;
+    }
+    {
+        let ctx_state = server.context_mut().barrier_group_state_entry_mut(&gid);
+        ctx_state.n_max = 4;
+    }
+
+    for expected_pending in 1..=4u64 {
+        let _ticket = server.build_join_ticket(&gid)?;
+        let capacity = server
+            .barrier_leaf_capacity(&gid)
+            .expect("registered group should expose barrier capacity");
+        assert_eq!(capacity.pending_join_ticket_count, expected_pending);
+        assert_eq!(capacity.reserved_cover_leaf_count, expected_pending);
+        assert_eq!(
+            capacity.remaining_cover_leaf_slots,
+            capacity.n_max.saturating_sub(expected_pending)
+        );
+    }
+
+    let err = server
+        .build_join_ticket(&gid)
+        .expect_err("pending join tickets should eventually exhaust barrier capacity");
+    assert!(matches!(
+        err,
+        CityGError::InvalidInput(BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR)
+    ));
+    Ok(())
+}
+
+#[test]
+fn build_join_ticket_rejects_new_reservations_at_refusal_threshold() -> Result<(), CityGError> {
+    let mut config = ServerConfig::new();
+    config.barrier_leaf_capacity_refusal_percent = Some(75);
+    let mut server = CityGServer::new(config);
+    let gid = [0x5A; 32];
+    server.register_group(&gid, vec![0x88; 16])?;
+
+    {
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.n_max = 4;
+    }
+    {
+        let ctx_state = server.context_mut().barrier_group_state_entry_mut(&gid);
+        ctx_state.n_max = 4;
+    }
+
+    for _ in 0..3 {
+        let _ticket = server.build_join_ticket(&gid)?;
+    }
+
+    let err = server
+        .build_join_ticket(&gid)
+        .expect_err("refusal threshold should reject new reservations before full exhaustion");
+    assert!(matches!(
+        err,
+        CityGError::InvalidInput(BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR)
+    ));
+    Ok(())
+}
+
+#[test]
+fn build_join_ticket_with_existing_pending_leaf_remains_idempotent_at_refusal_threshold()
+-> Result<(), CityGError> {
+    let mut config = ServerConfig::new();
+    config.barrier_leaf_capacity_refusal_percent = Some(50);
+    let mut server = CityGServer::new(config);
+    let gid = [0x5B; 32];
+    server.register_group(&gid, vec![0x99; 16])?;
+
+    {
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.n_max = 4;
+    }
+    {
+        let ctx_state = server.context_mut().barrier_group_state_entry_mut(&gid);
+        ctx_state.n_max = 4;
+    }
+
+    let first = server.build_join_ticket(&gid)?;
+    let _second = server.build_join_ticket(&gid)?;
+
+    let err = server
+        .build_join_ticket(&gid)
+        .expect_err("fresh reservation above threshold must fail");
+    assert!(matches!(
+        err,
+        CityGError::InvalidInput(BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR)
+    ));
+
+    let retried = server.build_join_ticket_with_leaf(&gid, Some(first.leaf_id))?;
+    assert_eq!(retried.leaf_id, first.leaf_id);
+
+    let capacity = server
+        .barrier_leaf_capacity(&gid)
+        .expect("registered group should expose barrier capacity");
+    assert_eq!(capacity.pending_join_ticket_count, 2);
+    assert_eq!(capacity.reserved_cover_leaf_count, 2);
     Ok(())
 }
 

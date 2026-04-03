@@ -137,6 +137,7 @@ const KBROAD_HISTORY_EXISTS_ERR: &str = "group already has roster history";
 ///     window_ttl: Some(Duration::from_secs(60)),  // 1 minute TTL
 ///     state_path: Some(PathBuf::from("/var/lib/cityg/journal.cbor")),
 ///     acceptance_options: None,  // Use defaults
+///     ..ServerConfig::new()
 /// };
 /// ```
 #[derive(Clone)]
@@ -149,6 +150,10 @@ pub struct ServerConfig {
     pub acceptance_options: Option<AcceptanceOptions>,
     /// Journal file path for crash recovery (default: None, in-memory only)
     pub state_path: Option<PathBuf>,
+    /// Warning threshold for barrier leaf-capacity utilization, as a percent in `[1, 100]`.
+    pub barrier_leaf_capacity_warning_percent: Option<u8>,
+    /// Refusal threshold for new barrier leaf reservations, as a percent in `[1, 100]`.
+    pub barrier_leaf_capacity_refusal_percent: Option<u8>,
     /// Optional local history authority extension.
     pub history_authority: Option<HistoryAuthorityConfig>,
 }
@@ -168,6 +173,8 @@ pub enum HistoryAuthorityMode {
 
 pub const LOCAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "local-history-authority-v1";
 pub const GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "global-history-authority-v1";
+pub const DEFAULT_BARRIER_LEAF_CAPACITY_WARNING_PERCENT: u8 = 80;
+pub const DEFAULT_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT: u8 = 100;
 const LOCAL_HISTORY_ATTESTATION_FINALITY_KIND: &str = "local-append-only";
 const GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND: &str = "global-append-only";
 
@@ -213,6 +220,20 @@ impl HistoryAuthorityMode {
     }
 }
 
+fn resolve_barrier_leaf_capacity_refusal_percent(percent: Option<u8>) -> u8 {
+    match percent {
+        Some(value @ 1..=100) => value,
+        _ => DEFAULT_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT,
+    }
+}
+
+fn resolve_barrier_leaf_capacity_warning_percent(percent: Option<u8>, refusal_percent: u8) -> u8 {
+    match percent {
+        Some(value @ 1..=100) => value.min(refusal_percent),
+        _ => DEFAULT_BARRIER_LEAF_CAPACITY_WARNING_PERCENT.min(refusal_percent),
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self::new()
@@ -226,6 +247,8 @@ impl ServerConfig {
             window_ttl: None,
             acceptance_options: None,
             state_path: None,
+            barrier_leaf_capacity_warning_percent: None,
+            barrier_leaf_capacity_refusal_percent: None,
             history_authority: None,
         }
     }
@@ -301,6 +324,8 @@ pub struct CityGServer {
     acceptance_options: AcceptanceOptions,
     journal: Option<ServerJournal>,
     kbroad_state_path: Option<PathBuf>,
+    barrier_leaf_capacity_warning_percent: u8,
+    barrier_leaf_capacity_refusal_percent: u8,
     history_authority: Option<HistoryAuthorityState>,
     replaying: bool,
 }
@@ -385,6 +410,38 @@ pub struct JoinTicketBundle {
     pub n_max: u64,
     /// Deployment-wide barrier update size limit.
     pub max_barrier_update_bytes: u64,
+}
+
+/// Snapshot of the currently reserved barrier leaf capacity for one group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BarrierLeafCapacity {
+    /// Configured fixed tree size for the group.
+    pub n_max: u64,
+    /// Number of currently active leaves in the latest roster snapshot.
+    pub active_leaf_count: u64,
+    /// Number of historically revoked leaves remembered by the room.
+    pub revoked_leaf_count: u64,
+    /// Number of currently issued join tickets that have not finalized yet.
+    pub pending_join_ticket_count: u64,
+    /// Number of unique cover-leaf slots already reserved.
+    pub reserved_cover_leaf_count: u64,
+    /// Number of cover-leaf slots still available for future joins.
+    pub remaining_cover_leaf_slots: u64,
+}
+
+impl BarrierLeafCapacity {
+    #[must_use]
+    pub fn is_exhausted(self) -> bool {
+        self.remaining_cover_leaf_slots == 0
+    }
+
+    #[must_use]
+    pub fn utilization_percent(self) -> u64 {
+        if self.n_max == 0 {
+            return 0;
+        }
+        self.reserved_cover_leaf_count.saturating_mul(100) / self.n_max
+    }
 }
 
 pub struct JoinProvisioningAuthorityArtifacts<'a> {
@@ -558,7 +615,11 @@ pub struct MergeAcceptanceRecord {
 }
 
 const DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR: &str = "duplicate active cover leaf allocation";
-const COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR: &str = "cover leaf index already allocated";
+pub const COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR: &str = "cover leaf index already allocated";
+pub const BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR: &str =
+    "barrier leaf capacity exhausted; retire and recreate group";
+pub const BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR: &str =
+    "barrier leaf refusal threshold reached; retire and recreate group";
 const GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR: &str = "genesis provisioning artifact missing";
 const HISTORICAL_BARRIER_PUBLIC_TREE_SNAPSHOT_UNAVAILABLE_ERR: &str =
     "historical barrier public tree snapshot unavailable";
@@ -1011,6 +1072,37 @@ impl CityGServer {
         self.roster.has_explicit_room_admins(gid)
     }
 
+    #[must_use]
+    pub fn barrier_leaf_capacity(&self, gid: &[u8; 32]) -> Option<BarrierLeafCapacity> {
+        self.roster
+            .groups
+            .get(gid.as_slice())
+            .and_then(|state| barrier_leaf_capacity(state).ok())
+    }
+
+    #[must_use]
+    pub fn barrier_leaf_capacity_report(&self) -> Vec<(Vec<u8>, BarrierLeafCapacity)> {
+        self.roster
+            .groups
+            .iter()
+            .filter_map(|(gid, state)| {
+                barrier_leaf_capacity(state)
+                    .ok()
+                    .map(|capacity| (gid.clone(), capacity))
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn barrier_leaf_capacity_warning_percent(&self) -> u8 {
+        self.barrier_leaf_capacity_warning_percent
+    }
+
+    #[must_use]
+    pub fn barrier_leaf_capacity_refusal_percent(&self) -> u8 {
+        self.barrier_leaf_capacity_refusal_percent
+    }
+
     /// Export the server runtime metadata that is not recoverable by replaying
     /// accepted bundles alone.
     pub fn export_runtime_metadata_bytes(&self) -> Result<Vec<u8>, CityGError> {
@@ -1045,6 +1137,13 @@ impl CityGServer {
     pub fn new(config: ServerConfig) -> Self {
         let h_max = config.h_max.unwrap_or(DEFAULT_H_MAX);
         let ttl = config.window_ttl.unwrap_or(DEFAULT_T_WINDOW);
+        let barrier_leaf_capacity_refusal_percent = resolve_barrier_leaf_capacity_refusal_percent(
+            config.barrier_leaf_capacity_refusal_percent,
+        );
+        let barrier_leaf_capacity_warning_percent = resolve_barrier_leaf_capacity_warning_percent(
+            config.barrier_leaf_capacity_warning_percent,
+            barrier_leaf_capacity_refusal_percent,
+        );
         let kbroad_state_path = config
             .state_path
             .as_ref()
@@ -1098,6 +1197,8 @@ impl CityGServer {
             acceptance_options: options,
             journal,
             kbroad_state_path,
+            barrier_leaf_capacity_warning_percent,
+            barrier_leaf_capacity_refusal_percent,
             history_authority,
             replaying: false,
         };
@@ -1139,6 +1240,7 @@ impl CityGServer {
     ) -> Result<JoinTicketBundle, CityGError> {
         self.ensure_kbroad_ready(gid)?;
         let pox_r_commit = witness::demo_pox_commit();
+        let barrier_leaf_capacity_refusal_percent = self.barrier_leaf_capacity_refusal_percent;
 
         let (parent_root, leaf_id, parent_leaves) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
@@ -1155,11 +1257,20 @@ impl CityGServer {
                 }
                 explicit_leaf_id
             } else {
-                state.sync_next_index();
-                let index = state.allocate_leaf();
-                witness::sequential_leaf(index)
+                ensure_join_capacity_allows_fresh_reservation(
+                    state,
+                    barrier_leaf_capacity_refusal_percent,
+                )?;
+                next_available_join_leaf(state)?
             };
             ensure_join_cover_leaf_indices_available(state, std::slice::from_ref(&leaf_id))?;
+            if leaf_id_override.is_some() {
+                ensure_join_capacity_allows_existing_leaf_reservation(
+                    state,
+                    &leaf_id,
+                    barrier_leaf_capacity_refusal_percent,
+                )?;
+            }
 
             let parent_root = if parent_leaves.is_empty() {
                 [0u8; 32]
@@ -5229,6 +5340,100 @@ fn active_cover_leaf_allocations(
     Ok(by_index)
 }
 
+fn reserved_cover_leaf_indices(state: &GroupState) -> Result<BTreeSet<u32>, CityGError> {
+    let mut reserved: BTreeSet<u32> = active_cover_leaf_allocations(state)?.into_keys().collect();
+    for leaf in &state.revoked {
+        reserved.insert(cover_leaf_index(leaf, state.n_max));
+    }
+    for record in state.pending_join_finalize_auth.values() {
+        reserved.insert(record.cover_leaf_index);
+    }
+    Ok(reserved)
+}
+
+fn barrier_leaf_capacity(state: &GroupState) -> Result<BarrierLeafCapacity, CityGError> {
+    let n_max = validate_barrier_n_max(state.n_max)?;
+    let active_leaf_count = state
+        .latest_snapshot()
+        .map(|snapshot| u64::try_from(snapshot.members().count()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let revoked_leaf_count = u64::try_from(state.revoked.len()).unwrap_or(u64::MAX);
+    let pending_join_ticket_count =
+        u64::try_from(state.pending_join_finalize_auth.len()).unwrap_or(u64::MAX);
+    let reserved_cover_leaf_count =
+        u64::try_from(reserved_cover_leaf_indices(state)?.len()).unwrap_or(u64::MAX);
+    Ok(BarrierLeafCapacity {
+        n_max,
+        active_leaf_count,
+        revoked_leaf_count,
+        pending_join_ticket_count,
+        reserved_cover_leaf_count,
+        remaining_cover_leaf_slots: n_max.saturating_sub(reserved_cover_leaf_count.min(n_max)),
+    })
+}
+
+fn barrier_leaf_capacity_limit_for_percent(n_max: u64, percent: u8) -> u64 {
+    n_max.saturating_mul(u64::from(percent)).saturating_div(100)
+}
+
+fn ensure_join_capacity_allows_fresh_reservation(
+    state: &GroupState,
+    refusal_percent: u8,
+) -> Result<(), CityGError> {
+    let capacity = barrier_leaf_capacity(state)?;
+    if capacity.is_exhausted() {
+        return Err(CityGError::InvalidInput(
+            BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR,
+        ));
+    }
+    if refusal_percent < 100 {
+        let reserved_after = capacity.reserved_cover_leaf_count.saturating_add(1);
+        let refusal_limit =
+            barrier_leaf_capacity_limit_for_percent(capacity.n_max, refusal_percent);
+        if reserved_after > refusal_limit {
+            return Err(CityGError::InvalidInput(
+                BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_join_capacity_allows_existing_leaf_reservation(
+    state: &GroupState,
+    leaf_id: &[u8; 32],
+    refusal_percent: u8,
+) -> Result<(), CityGError> {
+    if state.pending_join_finalize_auth.contains_key(leaf_id) {
+        return Ok(());
+    }
+    ensure_join_capacity_allows_fresh_reservation(state, refusal_percent)
+}
+
+fn next_available_join_leaf(state: &mut GroupState) -> Result<[u8; 32], CityGError> {
+    let capacity = barrier_leaf_capacity(state)?;
+    if capacity.is_exhausted() {
+        return Err(CityGError::InvalidInput(
+            BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR,
+        ));
+    }
+
+    let reserved = reserved_cover_leaf_indices(state)?;
+    state.sync_next_index();
+    let attempts = usize::try_from(capacity.n_max)
+        .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
+    for _ in 0..attempts {
+        let leaf = witness::sequential_leaf(state.allocate_leaf());
+        if !reserved.contains(&cover_leaf_index(&leaf, capacity.n_max)) {
+            return Ok(leaf);
+        }
+    }
+
+    Err(CityGError::InvalidInput(
+        BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR,
+    ))
+}
+
 fn ensure_distinct_active_cover_leaf_indices(state: &GroupState) -> Result<(), CityGError> {
     let _ = active_cover_leaf_allocations(state)?;
     Ok(())
@@ -5238,9 +5443,15 @@ fn ensure_join_cover_leaf_indices_available(
     state: &GroupState,
     joined: &[[u8; 32]],
 ) -> Result<(), CityGError> {
+    let joined_leaf_ids: BTreeSet<[u8; 32]> = joined.iter().copied().collect();
     let mut reserved: BTreeSet<u32> = active_cover_leaf_allocations(state)?.into_keys().collect();
     for leaf in &state.revoked {
         reserved.insert(cover_leaf_index(leaf, state.n_max));
+    }
+    for record in state.pending_join_finalize_auth.values() {
+        if !joined_leaf_ids.contains(&record.leaf_id) {
+            reserved.insert(record.cover_leaf_index);
+        }
     }
     for leaf in joined {
         let leaf_index = cover_leaf_index(leaf, state.n_max);

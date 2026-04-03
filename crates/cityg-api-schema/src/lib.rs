@@ -534,6 +534,15 @@ pub fn encode_telemetry_snapshot_response(
                 freeze_window_full: entry.freeze_window_full,
                 freeze_rho_replay: entry.freeze_rho_replay,
                 last_active_heads: entry.last_active_heads,
+                barrier_n_max: entry.barrier_n_max,
+                barrier_active_leaf_count: entry.barrier_active_leaf_count,
+                barrier_revoked_leaf_count: entry.barrier_revoked_leaf_count,
+                barrier_pending_join_ticket_count: entry.barrier_pending_join_ticket_count,
+                barrier_reserved_cover_leaf_count: entry.barrier_reserved_cover_leaf_count,
+                barrier_remaining_cover_leaf_slots: entry.barrier_remaining_cover_leaf_slots,
+                barrier_leaf_utilization_basis_points: entry.barrier_leaf_utilization_basis_points,
+                barrier_leaf_capacity_warning_percent: entry.barrier_leaf_capacity_warning_percent,
+                barrier_leaf_capacity_refusal_percent: entry.barrier_leaf_capacity_refusal_percent,
             })
             .collect(),
         freeze_stats: freeze_stats

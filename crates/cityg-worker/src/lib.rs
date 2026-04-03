@@ -91,6 +91,8 @@ pub enum WorkerHistoryAuthority {
 pub struct WorkerRoomBootstrap {
     pub h_max: Option<usize>,
     pub window_ttl: Option<Duration>,
+    pub barrier_leaf_capacity_warning_percent: u8,
+    pub barrier_leaf_capacity_refusal_percent: u8,
     pub history_authority: WorkerHistoryAuthority,
     pub fs_epoch_period_seconds: u64,
     pub fs_policy_version: Option<String>,
@@ -102,6 +104,10 @@ impl Default for WorkerRoomBootstrap {
         Self {
             h_max: None,
             window_ttl: None,
+            barrier_leaf_capacity_warning_percent:
+                cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_WARNING_PERCENT,
+            barrier_leaf_capacity_refusal_percent:
+                cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT,
             history_authority: WorkerHistoryAuthority::Global,
             fs_epoch_period_seconds: 1,
             fs_policy_version: None,
@@ -131,6 +137,12 @@ impl WorkerRoomBootstrap {
         Self {
             h_max: config.h_max,
             window_ttl: config.window_ttl,
+            barrier_leaf_capacity_warning_percent: config
+                .barrier_leaf_capacity_warning_percent
+                .unwrap_or(cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_WARNING_PERCENT),
+            barrier_leaf_capacity_refusal_percent: config
+                .barrier_leaf_capacity_refusal_percent
+                .unwrap_or(cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT),
             history_authority,
             fs_epoch_period_seconds: 1,
             fs_policy_version: None,
@@ -150,6 +162,10 @@ impl WorkerRoomBootstrap {
         let mut config = ServerConfig::new();
         config.h_max = self.h_max;
         config.window_ttl = self.window_ttl;
+        config.barrier_leaf_capacity_warning_percent =
+            Some(self.barrier_leaf_capacity_warning_percent);
+        config.barrier_leaf_capacity_refusal_percent =
+            Some(self.barrier_leaf_capacity_refusal_percent);
         config.acceptance_options = self.acceptance_options.clone();
         match self.history_authority {
             WorkerHistoryAuthority::Disabled => {
@@ -339,6 +355,14 @@ mod tests {
         let authority = config.history_authority.expect("history authority");
         assert_eq!(authority.mode, HistoryAuthorityMode::Global);
         assert!(authority.require_full_verification_receipt);
+        assert_eq!(
+            config.barrier_leaf_capacity_warning_percent,
+            Some(cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_WARNING_PERCENT)
+        );
+        assert_eq!(
+            config.barrier_leaf_capacity_refusal_percent,
+            Some(cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT)
+        );
     }
 
     #[test]
@@ -358,6 +382,8 @@ mod tests {
         let _engine = WorkerRoomEngine::new(WorkerRoomBootstrap {
             h_max: Some(8),
             window_ttl: Some(Duration::from_secs(45)),
+            barrier_leaf_capacity_warning_percent: 73,
+            barrier_leaf_capacity_refusal_percent: 85,
             history_authority: WorkerHistoryAuthority::Local,
             fs_epoch_period_seconds: 60,
             fs_policy_version: Some("worker-policy-v1".to_string()),
@@ -369,6 +395,8 @@ mod tests {
     fn bootstrap_from_cityg_config_preserves_demo_acceptance_options() {
         let mut config = cityg_config::CityGConfig::default();
         config.server.seed_demo_room = true;
+        config.server.barrier_leaf_capacity_warning_percent = 91;
+        config.server.barrier_leaf_capacity_refusal_percent = 95;
         let bootstrap = WorkerRoomBootstrap::from_cityg_config(&config);
         let acceptance = bootstrap
             .acceptance_options
@@ -384,6 +412,14 @@ mod tests {
         assert_eq!(
             registry.get(cityg_client::demo::DEMO_GID.as_slice()),
             Some(&cityg_client::demo::kbroad_public().to_vec())
+        );
+        assert_eq!(
+            bootstrap.barrier_leaf_capacity_warning_percent,
+            config.server.barrier_leaf_capacity_warning_percent
+        );
+        assert_eq!(
+            bootstrap.barrier_leaf_capacity_refusal_percent,
+            config.server.barrier_leaf_capacity_refusal_percent
         );
     }
 
@@ -402,6 +438,14 @@ mod tests {
         assert_eq!(
             bootstrap.fs_policy_version.as_deref(),
             Some(config.protocol.fs_policy_version.as_str())
+        );
+        assert_eq!(
+            bootstrap.barrier_leaf_capacity_warning_percent,
+            config.server.barrier_leaf_capacity_warning_percent
+        );
+        assert_eq!(
+            bootstrap.barrier_leaf_capacity_refusal_percent,
+            config.server.barrier_leaf_capacity_refusal_percent
         );
         assert!(bootstrap.acceptance_options.is_some());
     }
