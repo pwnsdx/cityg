@@ -53,6 +53,7 @@ use cityg_client::{
         BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
         build_barrier_merge_bundle as build_barrier_merge_bundle_core,
     },
+    binary::{fingerprint_full_hex, fingerprint_preview_hex},
     bundle_headers::recompute_proofs_commit,
     join_bundle::{
         JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
@@ -207,23 +208,6 @@ fn build_barrier_update_bytes(
         snapshot_pre,
     )?;
     Ok(BarrierUpdateBuildResult::from_core(built))
-}
-
-fn fingerprint_full_hex(bytes: &[u8; 32]) -> String {
-    hex::encode(bytes)
-}
-
-fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
-    let hex = fingerprint_full_hex(bytes);
-    let first = &hex[..8];
-    let second = &hex[8..16];
-    format!(
-        "{}-{} {}-{} …",
-        &first[..4],
-        &first[4..],
-        &second[..4],
-        &second[4..]
-    )
 }
 
 fn log_fingerprints(session: &Session) {

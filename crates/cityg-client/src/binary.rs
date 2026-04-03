@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, convert::TryInto};
 
 use anyhow::{Result, anyhow};
 use ciborium::value::Value;
-use hex::decode as hex_decode;
+use hex::{decode as hex_decode, encode as hex_encode};
 
 pub fn header_bytes32(header: &BTreeMap<u64, Value>, key: u64) -> Option<[u8; 32]> {
     match header.get(&key)? {
@@ -26,6 +26,23 @@ pub fn bytes32(name: &str, data: &[u8]) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("{name} must be 32 bytes, received {} bytes", data.len()))
 }
 
+pub fn fingerprint_full_hex(bytes: &[u8; 32]) -> String {
+    hex_encode(bytes)
+}
+
+pub fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
+    let hex = fingerprint_full_hex(bytes);
+    let first = &hex[..8];
+    let second = &hex[8..16];
+    format!(
+        "{}-{} {}-{} …",
+        &first[..4],
+        &first[4..],
+        &second[..4],
+        &second[4..]
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -40,5 +57,12 @@ mod tests {
     fn bytes32_accepts_exact_length() {
         let data = [0xAB; 32];
         assert_eq!(bytes32("field", &data).unwrap(), data);
+    }
+
+    #[test]
+    fn fingerprint_preview_uses_expected_shape() {
+        let data = [0xAB; 32];
+        assert_eq!(fingerprint_full_hex(&data), "ab".repeat(32));
+        assert_eq!(fingerprint_preview_hex(&data), "abab-abab abab-abab …");
     }
 }

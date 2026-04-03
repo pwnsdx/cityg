@@ -1,7 +1,9 @@
 use super::*;
 #[cfg(test)]
 pub(super) use cityg_client::barrier_crypto::generate_kbroad_keypair;
-pub(super) use cityg_client::binary::{bytes32, decode_hex_32, header_bytes32};
+pub(super) use cityg_client::binary::{
+    bytes32, decode_hex_32, fingerprint_full_hex, fingerprint_preview_hex, header_bytes32,
+};
 #[cfg(test)]
 pub(super) use cityg_client::bundle_headers::compute_fs_fingerprint_from_header;
 pub(super) use cityg_client::bundle_headers::derive_fs_fingerprint_from_fields;
@@ -33,23 +35,6 @@ pub(super) fn room_admin_identity_preview(bytes: &[u8]) -> String {
 
 pub(super) fn format_alias_display(alias: &str, leaf: &[u8; 32]) -> String {
     format!("{alias} ({})", hex_encode_prefix(leaf, 8))
-}
-
-pub(super) fn fingerprint_full_hex(bytes: &[u8; 32]) -> String {
-    hex_encode(bytes)
-}
-
-pub(super) fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
-    let hex = fingerprint_full_hex(bytes);
-    let first = &hex[..8];
-    let second = &hex[8..16];
-    format!(
-        "{}-{} {}-{} …",
-        &first[..4],
-        &first[4..],
-        &second[..4],
-        &second[4..]
-    )
 }
 
 pub(super) fn format_regular_fingerprint(value: Option<&[u8; 32]>) -> String {
