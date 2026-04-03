@@ -94,8 +94,6 @@ use notifications::{
     websocket_url,
 };
 use pqcrypto_dilithium::dilithium5::SecretKey as MlDsaSecretKey;
-#[cfg(test)]
-use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::sign::SecretKey as DilithiumSecretKeyTrait;
 use rand::{RngExt, rng};
 #[cfg(test)]
@@ -3159,9 +3157,10 @@ mod tests {
         let changed_hash = compute_barrier_tree_hash(4, &changed)?;
         assert_ne!(first, changed_hash, "tree hash must bind pk entries");
 
-        let pkhash_a = compute_barrier_pkhash(&vec![0xAA; kyber768::public_key_bytes()])?;
-        let pkhash_b = compute_barrier_pkhash(&vec![0xAA; kyber768::public_key_bytes()])?;
-        let pkhash_c = compute_barrier_pkhash(&vec![0xAB; kyber768::public_key_bytes()])?;
+        let pk_len = cityg_client::barrier_crypto::barrier_leaf_public_key_bytes();
+        let pkhash_a = compute_barrier_pkhash(&vec![0xAA; pk_len])?;
+        let pkhash_b = compute_barrier_pkhash(&vec![0xAA; pk_len])?;
+        let pkhash_c = compute_barrier_pkhash(&vec![0xAB; pk_len])?;
         assert_eq!(pkhash_a, pkhash_b, "pk hash must be deterministic");
         assert_ne!(pkhash_a, pkhash_c, "pk hash must bind pk bytes");
         Ok(())

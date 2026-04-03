@@ -620,7 +620,8 @@ fn current_pending_activation_source(
 fn sample_current_public_tree(n_max: u64, fill: u8) -> Result<BarrierPublicTree> {
     let n_max = validate_barrier_n_max(n_max)?;
     let node_count = expected_barrier_tree_nodes(n_max)?;
-    let pk_entries = vec![vec![fill; kyber768::public_key_bytes()]; node_count];
+    let pk_entries =
+        vec![vec![fill; cityg_client::barrier_crypto::barrier_leaf_public_key_bytes()]; node_count];
     let kem_tree_hash_after = compute_barrier_tree_hash(n_max, pk_entries.as_slice())?;
     Ok(BarrierPublicTree {
         n_max,
@@ -7116,7 +7117,7 @@ async fn perform_join_populates_barrier_leaf_key_material() -> Result<(), Box<dy
 
     assert_eq!(
         session.barrier_state.dk_leaf.len(),
-        kyber768::secret_key_bytes(),
+        cityg_client::barrier_crypto::barrier_leaf_secret_key_bytes(),
         "join should persist ML-KEM leaf private key material"
     );
     assert_ne!(

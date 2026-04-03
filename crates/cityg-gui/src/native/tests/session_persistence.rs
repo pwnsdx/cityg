@@ -956,7 +956,9 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     barrier_dk_nodes.insert(
         1,
         BarrierNodeKeyMaterial {
-            dk: Zeroizing::new(random_vec(kyber768::secret_key_bytes())),
+            dk: Zeroizing::new(random_vec(
+                cityg_client::barrier_crypto::barrier_leaf_secret_key_bytes(),
+            )),
             pkhash: array(0x24),
         },
     );
@@ -964,14 +966,18 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     pending_on_path.insert(
         0,
         BarrierNodeKeyMaterial {
-            dk: Zeroizing::new(random_vec(kyber768::secret_key_bytes())),
+            dk: Zeroizing::new(random_vec(
+                cityg_client::barrier_crypto::barrier_leaf_secret_key_bytes(),
+            )),
             pkhash: array(0x2A),
         },
     );
     pending_on_path.insert(
         1,
         BarrierNodeKeyMaterial {
-            dk: Zeroizing::new(random_vec(kyber768::secret_key_bytes())),
+            dk: Zeroizing::new(random_vec(
+                cityg_client::barrier_crypto::barrier_leaf_secret_key_bytes(),
+            )),
             pkhash: array(0x2B),
         },
     );
@@ -1002,7 +1008,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         bootstrap_join_records: vec![BarrierJoinRecord {
             device_pk: vec![0x41; 32],
             leaf_index: 3,
-            ek_leaf: vec![0x42; kyber768::public_key_bytes()],
+            ek_leaf: vec![0x42; cityg_client::barrier_crypto::barrier_leaf_public_key_bytes()],
         }],
         bootstrap_revoked_leaf_indices: vec![1, 2],
         bootstrap_join_finalize_auth_token: array(0x34),
@@ -1012,7 +1018,9 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,
         n_max: 8,
         cover_leaf_index: 3,
-        dk_leaf: Zeroizing::new(random_vec(kyber768::secret_key_bytes())),
+        dk_leaf: Zeroizing::new(random_vec(
+            cityg_client::barrier_crypto::barrier_leaf_secret_key_bytes(),
+        )),
         pkhash_leaf: array(0x23),
         dk_nodes: barrier_dk_nodes,
         pending: Some(BarrierPendingState {

@@ -56,6 +56,14 @@ pub fn generate_kbroad_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+pub fn barrier_leaf_public_key_bytes() -> usize {
+    kyber768::public_key_bytes()
+}
+
+pub fn barrier_leaf_secret_key_bytes() -> usize {
+    kyber768::secret_key_bytes()
+}
+
 pub fn generate_barrier_leaf_keypair() -> Result<(Vec<u8>, Vec<u8>, [u8; 32])> {
     let (public, secret) = kyber768::keypair();
     let public_key = KemPublicKey::as_bytes(&public).to_vec();
