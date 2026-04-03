@@ -1,6 +1,4 @@
 use super::*;
-#[cfg(test)]
-use cityg_client::barrier_build::build_barrier_update_bytes as build_barrier_update_bytes_core;
 use cityg_client::barrier_recovery::{
     BarrierRecoverResult as CoreBarrierRecoverResult,
     BarrierRecoveryInput as CoreBarrierRecoveryInput,
@@ -169,31 +167,4 @@ pub(super) fn try_recover_barrier_from_header(
         max_barrier_update_bytes,
         None,
     )
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn build_barrier_update_bytes(
-    gid: &[u8; 32],
-    n_max: u64,
-    updater_leaf: u64,
-    barrier_version: u64,
-    prev_barrier_version: u64,
-    revocation_roots_hash: [u8; 32],
-    kem_tree_hash_before: [u8; 32],
-    snapshot_pre: &[Vec<u8>],
-) -> Result<BarrierUpdateBuildResult> {
-    Ok(BarrierUpdateBuildResult::from_core(
-        n_max,
-        build_barrier_update_bytes_core(
-            gid,
-            n_max,
-            updater_leaf,
-            barrier_version,
-            prev_barrier_version,
-            revocation_roots_hash,
-            kem_tree_hash_before,
-            snapshot_pre,
-        )?,
-    ))
 }

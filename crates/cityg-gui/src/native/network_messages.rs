@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
 
-use crate::message_crypto::{
+use cityg_client::message_crypto::{
     MessageCryptoContext, decrypt_message_v2_with_index, derive_msg_replay_context_id,
     derive_msg_replay_tuple_tag, encrypt_message_v2,
 };

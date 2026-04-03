@@ -15,9 +15,6 @@ mod barrier_shared;
 mod client_env;
 #[path = "join_leave/message_auth.rs"]
 mod message_auth;
-#[allow(dead_code)]
-#[path = "../message_crypto.rs"]
-mod message_crypto;
 #[path = "join_leave/notifications.rs"]
 mod notifications;
 #[path = "join_leave/watch_mode.rs"]
@@ -43,7 +40,7 @@ use cityg_api_client::BarrierJoinRecord;
 #[cfg(test)]
 use cityg_api_client::RoomAdminOperation;
 use cityg_api_client::{
-    Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
+    CitygApiClient, Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
     PrepareOriginMergeTicketInput, PrepareRevocationMergeTicketInput, PreparedBarrierSnapshot,
     ensure_supported_attested_current_state_extension, is_fs_forward_jump_group_http_error,
 };
@@ -51,6 +48,11 @@ use cityg_api_client::{
 use cityg_client::barrier_build::BarrierUpdateBuildResult;
 #[cfg(test)]
 use cityg_client::demo;
+#[cfg(test)]
+use cityg_client::message_crypto::{
+    MsgReplayState, decrypt_message_v2_with_index, derive_msg_replay_context_id,
+    derive_msg_replay_tuple_tag,
+};
 use cityg_client::{
     ClientEpochBundle,
     barrier_merge_bundle::{
@@ -63,6 +65,7 @@ use cityg_client::{
         JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
     },
     join_runtime::generate_join_runtime_material,
+    message_crypto::{MessageCryptoContext, encrypt_message_v2},
 };
 #[cfg(test)]
 use cityg_client::{
@@ -75,23 +78,13 @@ use cityg_client::{
     },
 };
 use cityg_config::CityGConfig;
-use client_env::{
-    MESSAGE_AUTH_HEADER,
-    configured_client_message_token_with_server_fallback as configured_client_message_token,
-    new_api_client_with_server_fallback as new_api_client,
-};
+use client_env::{MESSAGE_AUTH_HEADER, configured_client_admin_token, read_nonempty_env};
 use futures::{SinkExt, StreamExt};
 use hex::decode as hex_decode;
 #[cfg(test)]
 use message_auth::{
     MESSAGE_PREFIX, decode_authenticated_message, encode_authenticated_message,
     generate_message_signing_keypair, sign_message, verify_message_signature,
-};
-use message_crypto::{MessageCryptoContext, encrypt_message_v2};
-#[cfg(test)]
-use message_crypto::{
-    MsgReplayState, decrypt_message_v2_with_index, derive_msg_replay_context_id,
-    derive_msg_replay_tuple_tag,
 };
 #[cfg(test)]
 use msphf_core::serde_utils::to_cbor_vec;
@@ -118,6 +111,25 @@ use watch_mode::fetch_and_decrypt_messages;
 use watch_mode::{run_watch_mode, send_message_burst};
 #[cfg(test)]
 use watch_mode::{send_dummy_message, send_text_message};
+
+fn configured_client_message_token() -> Option<String> {
+    client_env::configured_client_message_token()
+        .or_else(|| read_nonempty_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
+}
+
+fn configured_client_admin_token_with_server_fallback() -> Option<String> {
+    configured_client_admin_token()
+        .or_else(|| read_nonempty_env("CITYG_SERVER_ROOMS_ADMIN_TOKEN"))
+        .or_else(|| read_nonempty_env("CITYG_SERVER_WINDOW_ADMIN_TOKEN"))
+}
+
+fn new_api_client(server_url: &str) -> CitygApiClient {
+    client_env::new_api_client_with_tokens(
+        server_url,
+        configured_client_admin_token_with_server_fallback(),
+        configured_client_message_token(),
+    )
+}
 use websocket_replay::{
     WebSocketReplayCursor, websocket_ack_message, websocket_lag_notice,
     websocket_notification_replayed, websocket_notification_sequence, websocket_request,

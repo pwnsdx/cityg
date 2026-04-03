@@ -22,12 +22,6 @@ use crate::barrier_shared::{
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, compute_revocation_roots_hash,
     should_retry_ticket_http_error, ticket_retry_delay,
 };
-#[cfg(test)]
-use crate::message_crypto::{
-    MAX_MSGS_PER_REPLAY_TUPLE, MessageCryptoContext, decrypt_message_v2,
-    decrypt_message_v2_with_index, derive_msg_replay_tuple_tag, encrypt_message_v2,
-};
-use crate::message_crypto::{MsgReplayState, PersistedMsgReplayState};
 use ahash::AHashMap;
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 #[cfg(test)]
@@ -46,6 +40,12 @@ use cityg_client::message_auth::{
     message_signature_bytes as ml_dsa_signature_bytes,
     message_signing_public_key_bytes as ml_dsa_public_key_bytes,
 };
+#[cfg(test)]
+use cityg_client::message_crypto::{
+    MAX_MSGS_PER_REPLAY_TUPLE, MessageCryptoContext, decrypt_message_v2,
+    decrypt_message_v2_with_index, derive_msg_replay_tuple_tag, encrypt_message_v2,
+};
+use cityg_client::message_crypto::{MsgReplayState, PersistedMsgReplayState};
 use cityg_config::CityGConfig;
 #[cfg(not(test))]
 use gpui::Application;

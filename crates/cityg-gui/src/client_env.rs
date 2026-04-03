@@ -15,22 +15,11 @@ pub(crate) fn configured_client_admin_token() -> Option<String> {
     read_nonempty_env(CLIENT_ADMIN_TOKEN_ENV)
 }
 
-pub(crate) fn configured_client_admin_token_with_server_fallback() -> Option<String> {
-    configured_client_admin_token()
-        .or_else(|| read_nonempty_env("CITYG_SERVER_ROOMS_ADMIN_TOKEN"))
-        .or_else(|| read_nonempty_env("CITYG_SERVER_WINDOW_ADMIN_TOKEN"))
-}
-
 pub(crate) fn configured_client_message_token() -> Option<String> {
     read_nonempty_env(CLIENT_MESSAGE_TOKEN_ENV)
 }
 
-pub(crate) fn configured_client_message_token_with_server_fallback() -> Option<String> {
-    configured_client_message_token()
-        .or_else(|| read_nonempty_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
-}
-
-fn new_api_client_with_tokens(
+pub(crate) fn new_api_client_with_tokens(
     server_url: &str,
     admin_token: Option<String>,
     message_token: Option<String>,
@@ -51,13 +40,5 @@ pub(crate) fn new_api_client(server_url: &str) -> CitygApiClient {
         server_url,
         configured_client_admin_token(),
         configured_client_message_token(),
-    )
-}
-
-pub(crate) fn new_api_client_with_server_fallback(server_url: &str) -> CitygApiClient {
-    new_api_client_with_tokens(
-        server_url,
-        configured_client_admin_token_with_server_fallback(),
-        configured_client_message_token_with_server_fallback(),
     )
 }

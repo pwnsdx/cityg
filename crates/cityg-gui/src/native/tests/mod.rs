@@ -13,6 +13,7 @@ use crate::native::app_actions::{
     CopyRoomIdAction, ShowSessionOverviewAction, TextSelectAllAction, ToggleSidebarAction,
 };
 use cityg_api_client::HistoryAuthorityDescriptor;
+use cityg_client::barrier_build::build_barrier_update_bytes;
 use msphf_orchestrator::{LeafIdMode, compute_leaf_id};
 
 #[path = "admin_expel.rs"]

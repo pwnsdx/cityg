@@ -27,8 +27,6 @@ pub(super) struct BarrierRecoverResult {
 
 #[derive(Clone, Debug)]
 pub(super) struct BarrierUpdateBuildResult {
-    #[cfg(test)]
-    pub(super) raw_update: Vec<u8>,
     pub(super) barrier_update_digest: [u8; 32],
     pub(super) kem_tree_hash_after: [u8; 32],
     pub(super) k_barrier_new: Zeroizing<[u8; 32]>,
@@ -41,8 +39,6 @@ impl BarrierUpdateBuildResult {
         n_max: u64,
         core: cityg_client::barrier_build::BarrierUpdateBuildResult,
     ) -> Self {
-        #[cfg(test)]
-        let raw_update = core.raw_update.clone();
         let cityg_client::barrier_build::BarrierUpdateBuildResult {
             barrier_update_digest,
             kem_tree_hash_after,
@@ -53,8 +49,6 @@ impl BarrierUpdateBuildResult {
         } = core;
 
         Self {
-            #[cfg(test)]
-            raw_update,
             barrier_update_digest,
             kem_tree_hash_after,
             k_barrier_new,

@@ -3,7 +3,6 @@
 #[cfg(feature = "native-app")]
 mod barrier_shared;
 mod client_env;
-mod message_crypto;
 #[cfg(feature = "native-app")]
 mod websocket_replay;
 
