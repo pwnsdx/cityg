@@ -74,10 +74,9 @@ use futures::{SinkExt, StreamExt};
 use hex::decode as hex_decode;
 #[cfg(test)]
 use message_auth::{
-    MESSAGE_PREFIX, decode_authenticated_message, generate_message_signing_keypair,
-    verify_message_signature, verify_sender_leaf_binding,
+    MESSAGE_PREFIX, decode_authenticated_message, encode_authenticated_message,
+    generate_message_signing_keypair, sign_message, verify_message_signature,
 };
-use message_auth::{encode_authenticated_message, sign_message};
 use message_crypto::{MessageCryptoContext, encrypt_message_v2};
 #[cfg(test)]
 use message_crypto::{

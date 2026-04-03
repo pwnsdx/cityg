@@ -37,20 +37,14 @@ async fn perform_send_inner(params: SendParams) -> Result<ChatMessageEntry> {
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let signature = sign_message(
+    let authenticated_msg = build_authenticated_message(
         &leaf_id,
         timestamp_ms,
         plaintext.as_bytes(),
+        &pop_public_key,
         &pop_secret_key,
     )
     .context("failed to sign message")?;
-
-    let authenticated_msg = encode_authenticated_message(
-        timestamp_ms,
-        plaintext.as_bytes(),
-        &pop_public_key,
-        &signature,
-    );
 
     let ciphertext = encrypt_message_v2(
         &authenticated_msg,
@@ -173,90 +167,38 @@ async fn perform_fetch_inner(params: FetchParams) -> Result<FetchOutcome> {
             continue;
         }
 
-        let ml_dsa_public_key_size = message_signing_public_key_bytes();
-        let ml_dsa_signature_size = message_signature_bytes();
-        let min_msg_size =
-            MESSAGE_PREFIX.len() + 8 + 4 + 4 + ml_dsa_public_key_size + 4 + ml_dsa_signature_size;
-
-        if authenticated_msg.len() < min_msg_size {
-            tracing::warn!(
-                "message too small for authenticated format: {} bytes < {} bytes minimum",
-                authenticated_msg.len(),
-                min_msg_size
-            );
-            continue;
-        }
-
-        let envelope = match decode_authenticated_message(&authenticated_msg) {
-            Ok(env) => env,
-            Err(err) => {
-                tracing::warn!("failed to decode authenticated message: {err}");
-                continue;
-            }
-        };
-
-        if envelope.public_key.len() != ml_dsa_public_key_size {
-            tracing::warn!(
-                "unexpected public key length: {} (expected {})",
-                envelope.public_key.len(),
-                ml_dsa_public_key_size
-            );
-            continue;
-        }
-        if envelope.signature.len() != ml_dsa_signature_size {
-            tracing::warn!(
-                "unexpected signature length: {} (expected {})",
-                envelope.signature.len(),
-                ml_dsa_signature_size
-            );
-            continue;
-        }
-        if let Err(err) = verify_sender_leaf_binding(&gid, &leaf_id, envelope.public_key) {
-            tracing::warn!(
-                "sender leaf binding failed for message from {}: {}",
-                hex_encode(&leaf_id[..4]),
-                err
-            );
-            continue;
-        }
-
-        match verify_message_signature(
-            &leaf_id,
-            envelope.timestamp_ms,
-            envelope.plaintext,
-            envelope.signature,
-            envelope.public_key,
-        ) {
-            Ok(()) => {
-                let sender_display = format!("{}✓", hex_encode(&leaf_id[..4]));
-                let plaintext = String::from_utf8_lossy(envelope.plaintext).into_owned();
-
-                if message.timestamp_ms > max_timestamp {
-                    max_timestamp = message.timestamp_ms;
+        let envelope =
+            match decode_verified_authenticated_message(&gid, &leaf_id, &authenticated_msg) {
+                Ok(env) => env,
+                Err(err) => {
+                    tracing::warn!(
+                        "invalid authenticated message from {}: {}",
+                        hex_encode(&leaf_id[..4]),
+                        err
+                    );
+                    continue;
                 }
-                msg_replay_state.record(replay_tuple_tag, replay_context_id, msg_index);
+            };
 
-                tracing::info!("message from {}: verification=verified", sender_display);
+        let sender_display = format!("{}✓", hex_encode(&leaf_id[..4]));
+        let plaintext = String::from_utf8_lossy(envelope.plaintext).into_owned();
 
-                messages.push(ChatMessageEntry {
-                    sender_leaf: Some(leaf_id),
-                    fallback_label: sender_display,
-                    plaintext,
-                    ciphertext_hex: hex_encode(&message.ciphertext),
-                    timestamp_ms: message.timestamp_ms,
-                    delivery: MessageDelivery::Sent,
-                    pending_id: None,
-                });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "signature verification failed for message from {}: {}",
-                    hex_encode(&leaf_id[..4]),
-                    e
-                );
-                continue;
-            }
+        if message.timestamp_ms > max_timestamp {
+            max_timestamp = message.timestamp_ms;
         }
+        msg_replay_state.record(replay_tuple_tag, replay_context_id, msg_index);
+
+        tracing::info!("message from {}: verification=verified", sender_display);
+
+        messages.push(ChatMessageEntry {
+            sender_leaf: Some(leaf_id),
+            fallback_label: sender_display,
+            plaintext,
+            ciphertext_hex: hex_encode(&message.ciphertext),
+            timestamp_ms: message.timestamp_ms,
+            delivery: MessageDelivery::Sent,
+            pending_id: None,
+        });
     }
 
     let last_timestamp_ms = if messages.is_empty() {

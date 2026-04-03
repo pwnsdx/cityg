@@ -1,3 +1,6 @@
+use super::message_auth::build_authenticated_message;
+#[cfg(test)]
+use super::message_auth::decode_verified_authenticated_message;
 use super::*;
 
 pub(super) async fn run_watch_mode(params: WatchModeParams<'_>) -> Result<()> {
@@ -109,18 +112,13 @@ pub(super) async fn send_text_message(session: &mut Session, plaintext: &str) ->
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let signature = sign_message(
+    let authenticated = build_authenticated_message(
         &session.leaf_id,
         timestamp_ms,
         plaintext.as_bytes(),
+        &session.pop_public_key,
         session.pop_secret.as_slice(),
     )?;
-    let authenticated = encode_authenticated_message(
-        timestamp_ms,
-        plaintext.as_bytes(),
-        &session.pop_public_key,
-        &signature,
-    );
     let msg_index: u64 = rng().random();
     let ciphertext = encrypt_message_v2(
         &authenticated,
@@ -188,24 +186,12 @@ pub(super) async fn fetch_and_decrypt_messages(session: &mut Session) -> Result<
         {
             continue;
         }
-        let envelope = match decode_authenticated_message(&authenticated) {
-            Ok(envelope) => envelope,
-            Err(_) => continue,
-        };
-        if verify_sender_leaf_binding(&session.gid, &sender_leaf, envelope.public_key).is_err() {
-            continue;
-        }
-        if verify_message_signature(
-            &sender_leaf,
-            envelope.timestamp_ms,
-            envelope.plaintext,
-            envelope.signature,
-            envelope.public_key,
-        )
-        .is_err()
-        {
-            continue;
-        }
+        let envelope =
+            match decode_verified_authenticated_message(&session.gid, &sender_leaf, &authenticated)
+            {
+                Ok(envelope) => envelope,
+                Err(_) => continue,
+            };
         session
             .msg_replay_state
             .record(replay_tuple_tag, replay_context_id, msg_index);

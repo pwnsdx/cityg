@@ -121,6 +121,32 @@ pub fn message_signature_bytes() -> usize {
     dilithium5::signature_bytes()
 }
 
+pub fn authenticated_message_min_bytes() -> usize {
+    MESSAGE_PREFIX.len()
+        + 8
+        + 4
+        + 4
+        + message_signing_public_key_bytes()
+        + 4
+        + message_signature_bytes()
+}
+
+pub fn build_authenticated_message(
+    leaf_id: &[u8; 32],
+    timestamp_ms: u64,
+    plaintext: &[u8],
+    public_key: &[u8],
+    secret_key: &[u8],
+) -> Result<Vec<u8>> {
+    let signature = sign_message(leaf_id, timestamp_ms, plaintext, secret_key)?;
+    Ok(encode_authenticated_message(
+        timestamp_ms,
+        plaintext,
+        public_key,
+        &signature,
+    ))
+}
+
 pub fn detached_sign_payload(payload: &[u8], secret_key: &[u8]) -> Result<Vec<u8>> {
     let sk = dilithium5::SecretKey::from_bytes(secret_key)
         .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
@@ -184,6 +210,46 @@ pub fn verify_sender_leaf_binding(
         ));
     }
     Ok(())
+}
+
+pub fn decode_verified_authenticated_message<'a>(
+    gid: &[u8; 32],
+    sender_leaf: &[u8; 32],
+    data: &'a [u8],
+) -> Result<AuthenticatedMessage<'a>> {
+    if data.len() < authenticated_message_min_bytes() {
+        return Err(anyhow!("authenticated message too short"));
+    }
+
+    let envelope = decode_authenticated_message(data)?;
+    let expected_public_key_len = message_signing_public_key_bytes();
+    if envelope.public_key.len() != expected_public_key_len {
+        return Err(anyhow!(
+            "unexpected public key length: {} (expected {})",
+            envelope.public_key.len(),
+            expected_public_key_len
+        ));
+    }
+
+    let expected_signature_len = message_signature_bytes();
+    if envelope.signature.len() != expected_signature_len {
+        return Err(anyhow!(
+            "unexpected signature length: {} (expected {})",
+            envelope.signature.len(),
+            expected_signature_len
+        ));
+    }
+
+    verify_sender_leaf_binding(gid, sender_leaf, envelope.public_key)?;
+    verify_message_signature(
+        sender_leaf,
+        envelope.timestamp_ms,
+        envelope.plaintext,
+        envelope.signature,
+        envelope.public_key,
+    )?;
+
+    Ok(envelope)
 }
 
 pub fn sign_identity_binding(
@@ -286,6 +352,24 @@ mod tests {
         assert_eq!(decoded.timestamp_ms, ts);
         assert_eq!(decoded.plaintext, payload);
         verify_message_signature(&leaf, ts, payload, decoded.signature, decoded.public_key)?;
+        Ok(())
+    }
+
+    #[test]
+    fn verified_authenticated_message_roundtrips() -> Result<()> {
+        let gid = [0x11; 32];
+        let (pk, sk) = dilithium5::keypair();
+        let leaf = compute_leaf_id(
+            LeafIdMode::PerGroup,
+            &gid,
+            MESSAGE_SENDER_DEVICE_PK_ALG,
+            pk.as_bytes(),
+        )?;
+        let encoded =
+            build_authenticated_message(&leaf, 7, b"hello", pk.as_bytes(), sk.as_bytes())?;
+        let decoded = decode_verified_authenticated_message(&gid, &leaf, &encoded)?;
+        assert_eq!(decoded.timestamp_ms, 7);
+        assert_eq!(decoded.plaintext, b"hello");
         Ok(())
     }
 
