@@ -15,13 +15,16 @@ use cityg_api_schema::{
     RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
     RoomScopedRoutingKey, SearchMembersRequestValidationError, SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
+    decode_barrier_resolve_revoked_occupancies_request,
     decode_barrier_resolve_revoked_leaves_request,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
     decode_full_verification_witness_request, encode_bootstrap_room_response,
     encode_full_verification_witness_response, encode_list_room_admins_response,
     encode_members_response, encode_prepared_barrier_public_tree_response,
+    encode_prepared_resolved_join_occupancies_response,
     encode_prepared_join_ticket_response, encode_prepared_merge_acceptance_lookup_response,
     encode_prepared_merge_ticket_response, encode_prepared_resolved_joins_response,
+    encode_prepared_resolved_revoked_occupancies_response,
     encode_prepared_resolved_revoked_leaves_response, encode_room_admin_leaf_pair_payload,
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, extract_room_scoped_request_target, pb,
@@ -47,8 +50,9 @@ use cityg_runtime::{
     grant_room_admin as runtime_grant_room_admin, list_room_admins as runtime_list_room_admins,
     paginate_room_members, prepare_barrier_public_tree,
     prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
-    prepare_full_verification_witness, prepare_merge_acceptance_lookup, prepare_resolved_joins,
-    prepare_resolved_revoked_leaves, refresh_room_pivot,
+    prepare_full_verification_witness, prepare_merge_acceptance_lookup,
+    prepare_resolved_join_occupancies, prepare_resolved_joins,
+    prepare_resolved_revoked_leaves, prepare_resolved_revoked_occupancies, refresh_room_pivot,
     revoke_room_admin as runtime_revoke_room_admin,
     rotate_room_kbroad as runtime_rotate_room_kbroad, store_room_message,
 };
@@ -1231,23 +1235,50 @@ impl CloudflareRoomDurableObject {
             return Response::error(message, 401);
         }
 
-        let request = match pb::BarrierResolveRevokedLeavesRequest::decode(body.as_slice()) {
-            Ok(request) => request,
-            Err(error) => {
-                return Response::error(
-                    format!("failed to decode {} request: {error}", target.route.path()),
-                    400,
-                );
+        let request = match target.route {
+            RoomScopedApiRoute::BarrierResolveRevokedLeaves => {
+                let request = match pb::BarrierResolveRevokedLeavesRequest::decode(body.as_slice())
+                {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Response::error(
+                            format!("failed to decode {} request: {error}", target.route.path()),
+                            400,
+                        );
+                    }
+                };
+                match decode_barrier_resolve_revoked_leaves_request(request) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Response::error(
+                            ResolveRevokedLeavesRequestDecodeError::api_message(&error),
+                            400,
+                        );
+                    }
+                }
             }
-        };
-        let request = match decode_barrier_resolve_revoked_leaves_request(request) {
-            Ok(request) => request,
-            Err(error) => {
-                return Response::error(
-                    ResolveRevokedLeavesRequestDecodeError::api_message(&error),
-                    400,
-                );
+            RoomScopedApiRoute::BarrierResolveRevokedOccupancies => {
+                let request =
+                    match pb::BarrierResolveRevokedOccupanciesRequest::decode(body.as_slice()) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            return Response::error(
+                                format!("failed to decode {} request: {error}", target.route.path()),
+                                400,
+                            );
+                        }
+                    };
+                match decode_barrier_resolve_revoked_occupancies_request(request) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Response::error(
+                            ResolveRevokedLeavesRequestDecodeError::api_message(&error),
+                            400,
+                        );
+                    }
+                }
             }
+            _ => unreachable!("unexpected route for revoked helper handler"),
         };
         let gid = route_gid(&target)?;
         let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
@@ -1265,19 +1296,41 @@ impl CloudflareRoomDurableObject {
         };
         let (mut server, _) = room.into_parts();
 
-        let prepared = match prepare_resolved_revoked_leaves(
-            &mut server,
-            &gid,
-            &request.revocation_roots_hash,
-            request.page_offset,
-            request.max_entries,
-            MAX_BARRIER_HELPER_PAGE_ENTRIES,
-            API_PROFILE_VERSION,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => return barrier_helper_error_response(error),
-        };
-        protobuf_response_bytes(encode_prepared_resolved_revoked_leaves_response(prepared))
+        match target.route {
+            RoomScopedApiRoute::BarrierResolveRevokedLeaves => {
+                let prepared = match prepare_resolved_revoked_leaves(
+                    &mut server,
+                    &gid,
+                    &request.revocation_roots_hash,
+                    request.page_offset,
+                    request.max_entries,
+                    MAX_BARRIER_HELPER_PAGE_ENTRIES,
+                    API_PROFILE_VERSION,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => return barrier_helper_error_response(error),
+                };
+                protobuf_response_bytes(encode_prepared_resolved_revoked_leaves_response(prepared))
+            }
+            RoomScopedApiRoute::BarrierResolveRevokedOccupancies => {
+                let prepared = match prepare_resolved_revoked_occupancies(
+                    &mut server,
+                    &gid,
+                    &request.revocation_roots_hash,
+                    request.page_offset,
+                    request.max_entries,
+                    MAX_BARRIER_HELPER_PAGE_ENTRIES,
+                    API_PROFILE_VERSION,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => return barrier_helper_error_response(error),
+                };
+                protobuf_response_bytes(encode_prepared_resolved_revoked_occupancies_response(
+                    prepared,
+                ))
+            }
+            _ => unreachable!("unexpected route for revoked helper handler"),
+        }
     }
 
     async fn handle_barrier_resolve_joins_since(
@@ -1295,14 +1348,35 @@ impl CloudflareRoomDurableObject {
             return Response::error(message, 401);
         }
 
-        let request = match pb::BarrierResolveJoinsSinceRequest::decode(body.as_slice()) {
-            Ok(request) => request,
-            Err(error) => {
-                return Response::error(
-                    format!("failed to decode {} request: {error}", target.route.path()),
-                    400,
-                );
+        let request = match target.route {
+            RoomScopedApiRoute::BarrierResolveJoinsSince => {
+                match pb::BarrierResolveJoinsSinceRequest::decode(body.as_slice()) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Response::error(
+                            format!("failed to decode {} request: {error}", target.route.path()),
+                            400,
+                        );
+                    }
+                }
             }
+            RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince => {
+                match pb::BarrierResolveJoinOccupanciesSinceRequest::decode(body.as_slice()) {
+                    Ok(request) => pb::BarrierResolveJoinsSinceRequest {
+                        room_id: request.room_id,
+                        prev_barrier_version: request.prev_barrier_version,
+                        page_offset: request.page_offset,
+                        max_entries: request.max_entries,
+                    },
+                    Err(error) => {
+                        return Response::error(
+                            format!("failed to decode {} request: {error}", target.route.path()),
+                            400,
+                        );
+                    }
+                }
+            }
+            _ => unreachable!("unexpected route for joins helper handler"),
         };
         let gid = route_gid(&target)?;
         let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
@@ -1320,19 +1394,41 @@ impl CloudflareRoomDurableObject {
         };
         let (mut server, _) = room.into_parts();
 
-        let prepared = match prepare_resolved_joins(
-            &mut server,
-            &gid,
-            request.prev_barrier_version,
-            request.page_offset,
-            request.max_entries,
-            MAX_BARRIER_HELPER_PAGE_ENTRIES,
-            API_PROFILE_VERSION,
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => return barrier_helper_error_response(error),
-        };
-        protobuf_response_bytes(encode_prepared_resolved_joins_response(prepared))
+        match target.route {
+            RoomScopedApiRoute::BarrierResolveJoinsSince => {
+                let prepared = match prepare_resolved_joins(
+                    &mut server,
+                    &gid,
+                    request.prev_barrier_version,
+                    request.page_offset,
+                    request.max_entries,
+                    MAX_BARRIER_HELPER_PAGE_ENTRIES,
+                    API_PROFILE_VERSION,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => return barrier_helper_error_response(error),
+                };
+                protobuf_response_bytes(encode_prepared_resolved_joins_response(prepared))
+            }
+            RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince => {
+                let prepared = match prepare_resolved_join_occupancies(
+                    &mut server,
+                    &gid,
+                    request.prev_barrier_version,
+                    request.page_offset,
+                    request.max_entries,
+                    MAX_BARRIER_HELPER_PAGE_ENTRIES,
+                    API_PROFILE_VERSION,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => return barrier_helper_error_response(error),
+                };
+                protobuf_response_bytes(encode_prepared_resolved_join_occupancies_response(
+                    prepared,
+                ))
+            }
+            _ => unreachable!("unexpected route for joins helper handler"),
+        }
     }
 
     async fn handle_barrier_fetch_public_tree(

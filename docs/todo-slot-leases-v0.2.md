@@ -51,8 +51,9 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ### 5. API and runtime
 
-- [ ] Introduce `cityg.api.v2`
-- [~] Add `v2` helper route aliases for occupancy-oriented barrier helpers
+- [~] Introduce `cityg.api.v2`
+- [x] Add `v2` helper route aliases for occupancy-oriented barrier helpers
+- [~] Add protobuf `v2` helper request/response messages for occupancy-oriented barrier helpers
 - [ ] Replace `cover_leaf_index` fields in tickets with `slot_index` + `slot_generation`
 - [x] Rename internal server/runtime ticket bundle fields from `cover_leaf_index` to `slot_index`
 - [x] Align migrated ticket/runtime error terminology from `cover_leaf_index` to `slot_index`
@@ -92,6 +93,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 ## Immediate next slice
 
 1. Replace remaining internal `cover_leaf_index`/`slot_generation` pairs with `SlotLease` in `api-client` verification and ticket prep.
-2. Finish the `v1` to `v2` protobuf/message rename from `*LeafRecord` / `ResolveRevokedLeaves` to occupancy-oriented names.
+2. Finish the `v1` to `v2` protobuf/message rename from `*LeafRecord` / `ResolveRevokedLeaves` to occupancy-oriented names for tickets, witnesses, and remaining helper responses.
 3. Sweep the remaining `docs/specs.md` sections that still describe recovery or helper logic in `cover_leaf_index(...)` terms.
 4. Add KAT/conformance coverage that exercises the new occupancy semantics through the public helper/profile boundary.

@@ -1722,9 +1722,13 @@ mod tests {
     use cityg_client::demo::demo_bundle_alice;
     use pb::{
         AcceptEpochResponse, BarrierFetchPublicTreeRequest, BarrierFetchPublicTreeResponse,
-        BarrierLookupMergeAcceptanceResponse, BarrierResolveJoinsSinceRequest,
-        BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
-        BarrierResolveRevokedLeavesResponse, BootstrapRoomResponse, ConfigureWindowResponse,
+        BarrierJoinOccupancyRecord, BarrierLookupMergeAcceptanceResponse,
+        BarrierResolveJoinOccupanciesSinceRequest, BarrierResolveJoinOccupanciesSinceResponse,
+        BarrierResolveJoinsSinceRequest, BarrierResolveJoinsSinceResponse,
+        BarrierResolveRevokedLeavesRequest, BarrierResolveRevokedLeavesResponse,
+        BarrierResolveRevokedOccupanciesRequest,
+        BarrierResolveRevokedOccupanciesResponse, BarrierRevokedOccupancyRecord,
+        BootstrapRoomResponse, ConfigureWindowResponse,
         FetchMessagesResponse, FsForwardLeapPolicy as PbFsForwardLeapPolicy, GetBundleResponse,
         GetTelemetryResponse, GetWindowResponse, HistoryCommitment as PbHistoryCommitment,
         JoinTicketResponse, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
@@ -2548,7 +2552,7 @@ mod tests {
             "/v1/rooms/join_ticket" => encode_proto(join_ticket_ok_payload()),
             "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_with_history_authority_payload()),
             "/v1/accept_epoch" => encode_proto(AcceptEpochResponse::default()),
-            "/v1/barrier/resolve_revoked_leaves" | "/v2/barrier/resolve_revoked_occupancies" => {
+            "/v1/barrier/resolve_revoked_leaves" => {
                 let request = BarrierResolveRevokedLeavesRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveRevokedLeavesRequest::default());
                 let all = [
@@ -2617,7 +2621,76 @@ mod tests {
                     deployment_profile_manifest,
                 })
             }
-            "/v1/barrier/resolve_joins_since" | "/v2/barrier/resolve_join_occupancies_since" => {
+            "/v2/barrier/resolve_revoked_occupancies" => {
+                let request = BarrierResolveRevokedOccupanciesRequest::decode(body)
+                    .unwrap_or_else(|_| BarrierResolveRevokedOccupanciesRequest::default());
+                let all = [
+                    BarrierRevokedOccupancyRecord {
+                        slot_index: 1,
+                        slot_generation: 0,
+                    },
+                    BarrierRevokedOccupancyRecord {
+                        slot_index: 7,
+                        slot_generation: 3,
+                    },
+                ];
+                let (start, end, next_page_offset) = page_bounds(request.page_offset, all.len(), 1);
+                let history_commitment = HistoryCommitment {
+                    history_view_id: [0xD1; 32],
+                    history_commitment_id: [0xE1; 32],
+                    prev_history_commitment_id: [0x00; 32],
+                    history_seq: 7,
+                };
+                let authority =
+                    build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+                let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+                let deployment_profile_manifest = build_test_deployment_profile_manifest(
+                    &authority,
+                    GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+                    &[0x41; 32],
+                    EXPECTED_PROFILE_VERSION,
+                    8,
+                    1_048_576,
+                    &fs_forward_leap_policy,
+                );
+                let page_records = all[start..end].to_vec();
+                let page_records_core = page_records
+                    .iter()
+                    .map(|record| BarrierRevokedLeafRecord {
+                        leaf_index: record.slot_index,
+                        slot_generation: record.slot_generation,
+                    })
+                    .collect::<Vec<_>>();
+                let helper_completeness_attestation = build_test_helper_completeness_attestation(
+                    &authority,
+                    HELPER_KIND_REVOKED_LEAVES,
+                    &history_commitment,
+                    request.page_offset,
+                    u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    RevokedLeavesSelector {
+                        revocation_roots_hash: &[0xCC; 32],
+                        records: page_records_core.as_slice(),
+                    },
+                );
+                encode_proto(BarrierResolveRevokedOccupanciesResponse {
+                    records: page_records,
+                    history_view_id: vec![0xD1; 32],
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
+                    page_offset: request.page_offset,
+                    next_page_offset,
+                    total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    helper_completeness_attestation,
+                    history_authority_descriptor: authority.descriptor_bytes,
+                    global_history_attestation: authority.attestation_bytes,
+                    profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                    n_max: 8,
+                    max_barrier_update_bytes: 1_048_576,
+                    fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                    deployment_profile_manifest,
+                })
+            }
+            "/v1/barrier/resolve_joins_since" => {
                 let request = BarrierResolveJoinsSinceRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveJoinsSinceRequest::default());
                 let all = [
@@ -2675,6 +2748,85 @@ mod tests {
                     },
                 );
                 encode_proto(BarrierResolveJoinsSinceResponse {
+                    records: page_records,
+                    history_view_id: vec![0xD1; 32],
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
+                    page_offset: request.page_offset,
+                    next_page_offset,
+                    total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    helper_completeness_attestation,
+                    history_authority_descriptor: authority.descriptor_bytes,
+                    global_history_attestation: authority.attestation_bytes,
+                    profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                    n_max: 8,
+                    max_barrier_update_bytes: 1_048_576,
+                    fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                    deployment_profile_manifest,
+                })
+            }
+            "/v2/barrier/resolve_join_occupancies_since" => {
+                let request = BarrierResolveJoinOccupanciesSinceRequest::decode(body)
+                    .unwrap_or_else(|_| BarrierResolveJoinOccupanciesSinceRequest::default());
+                let all = [
+                    BarrierJoinOccupancyRecord {
+                        device_pk: vec![0xAA; 32],
+                        slot_index: 9,
+                        slot_generation: 0,
+                        ek_leaf: vec![0xBB; 1184],
+                    },
+                    BarrierJoinOccupancyRecord {
+                        device_pk: vec![0xAB; 32],
+                        slot_index: 10,
+                        slot_generation: 1,
+                        ek_leaf: vec![0xBC; 1184],
+                    },
+                ];
+                let (start, end, next_page_offset) = page_bounds(request.page_offset, all.len(), 1);
+                let history_commitment = HistoryCommitment {
+                    history_view_id: [0xD1; 32],
+                    history_commitment_id: [0xE1; 32],
+                    prev_history_commitment_id: [0x00; 32],
+                    history_seq: 7,
+                };
+                let authority = build_test_history_authority(
+                    history_commitment,
+                    [0x41; 32],
+                    request.prev_barrier_version,
+                    [0xCC; 32],
+                );
+                let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+                let deployment_profile_manifest = build_test_deployment_profile_manifest(
+                    &authority,
+                    GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+                    &[0x41; 32],
+                    EXPECTED_PROFILE_VERSION,
+                    8,
+                    1_048_576,
+                    &fs_forward_leap_policy,
+                );
+                let page_records = all[start..end].to_vec();
+                let page_records_core = page_records
+                    .iter()
+                    .map(|record| BarrierJoinRecord {
+                        device_pk: record.device_pk.clone(),
+                        leaf_index: record.slot_index,
+                        slot_generation: record.slot_generation,
+                        ek_leaf: record.ek_leaf.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let helper_completeness_attestation = build_test_helper_completeness_attestation(
+                    &authority,
+                    HELPER_KIND_JOINS_SINCE,
+                    &history_commitment,
+                    request.page_offset,
+                    u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    JoinsSinceSelector {
+                        prev_barrier_version: request.prev_barrier_version,
+                        records: page_records_core.as_slice(),
+                    },
+                );
+                encode_proto(BarrierResolveJoinOccupanciesSinceResponse {
                     records: page_records,
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),

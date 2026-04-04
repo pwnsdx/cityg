@@ -52,11 +52,12 @@ use pb::MergeTicketResponse;
 use pb::{
     AcceptEpochRequest, BarrierFetchPublicTreeRequest, BarrierIssueFullVerificationWitnessRequest,
     BarrierLookupMergeAcceptanceRequest, BarrierResolveJoinsSinceRequest,
-    BarrierResolveRevokedLeavesRequest, BootstrapRoomRequest, ChatMessage,
+    BarrierResolveJoinOccupanciesSinceRequest, BarrierResolveRevokedLeavesRequest,
+    BarrierResolveRevokedOccupanciesRequest, BootstrapRoomRequest, ChatMessage,
     ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest,
-    GetBundleResponse, JoinTicketRequest, ListRoomAdminsRequest, MembersRequest, MergeTicketIntent,
-    MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
-    RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
+    GetBundleResponse, JoinTicketRequest, ListRoomAdminsRequest, MembersRequest,
+    MergeTicketIntent, MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse,
+    RoomAdminMutationRequest, RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
 };
 #[cfg(test)]
 use pb::{
@@ -777,7 +778,7 @@ pub async fn run_with_config(
         )
         .route(
             "/v2/barrier/resolve_revoked_occupancies",
-            post(barrier_resolve_revoked_leaves),
+            post(barrier_resolve_revoked_occupancies),
         )
         .route(
             "/v1/barrier/resolve_joins_since",
@@ -785,7 +786,7 @@ pub async fn run_with_config(
         )
         .route(
             "/v2/barrier/resolve_join_occupancies_since",
-            post(barrier_resolve_joins_since),
+            post(barrier_resolve_join_occupancies_since),
         )
         .route(
             "/v1/barrier/fetch_public_tree",

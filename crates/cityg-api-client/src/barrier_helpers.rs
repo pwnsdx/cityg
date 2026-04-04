@@ -3,9 +3,12 @@ use cityg_api_schema::pb;
 use cityg_api_schema::pb::{
     BarrierFetchPublicTreeRequest, BarrierFetchPublicTreeResponse,
     BarrierIssueFullVerificationWitnessRequest, BarrierIssueFullVerificationWitnessResponse,
+    BarrierJoinOccupancyRecord as PbBarrierJoinOccupancyRecord,
+    BarrierResolveJoinOccupanciesSinceRequest,
+    BarrierResolveJoinOccupanciesSinceResponse,
     BarrierLookupMergeAcceptanceRequest, BarrierLookupMergeAcceptanceResponse,
-    BarrierResolveJoinsSinceRequest, BarrierResolveJoinsSinceResponse,
-    BarrierResolveRevokedLeavesRequest, BarrierResolveRevokedLeavesResponse,
+    BarrierResolveRevokedOccupanciesRequest, BarrierResolveRevokedOccupanciesResponse,
+    BarrierRevokedOccupancyRecord as PbBarrierRevokedOccupancyRecord,
 };
 use cityg_client::barrier::BarrierSlotLease as CoreBarrierSlotLease;
 use cityg_client::barrier_snapshot_prepare::{
@@ -351,13 +354,13 @@ impl CitygApiClient {
         let mut records = Vec::new();
 
         loop {
-            let request = BarrierResolveRevokedLeavesRequest {
+            let request = BarrierResolveRevokedOccupanciesRequest {
                 room_id: room_id.to_string(),
                 revocation_roots_hash: revocation_roots_hash.to_vec(),
                 page_offset,
                 max_entries: MAX_BARRIER_HELPER_PAGE_ENTRIES,
             };
-            let response: BarrierResolveRevokedLeavesResponse = self
+            let response: BarrierResolveRevokedOccupanciesResponse = self
                 .post_proto("/v2/barrier/resolve_revoked_occupancies", request)
                 .await?;
             if response.page_offset != page_offset {
@@ -399,8 +402,8 @@ impl CitygApiClient {
             let page_records = response
                 .records
                 .iter()
-                .map(|record| BarrierRevokedOccupancyRecord {
-                    leaf_index: record.leaf_index,
+                .map(|record: &PbBarrierRevokedOccupancyRecord| BarrierRevokedOccupancyRecord {
+                    leaf_index: record.slot_index,
                     slot_generation: record.slot_generation,
                 })
                 .collect::<Vec<_>>();
@@ -593,13 +596,13 @@ impl CitygApiClient {
         let mut records = Vec::new();
 
         loop {
-            let request = BarrierResolveJoinsSinceRequest {
+            let request = BarrierResolveJoinOccupanciesSinceRequest {
                 room_id: room_id.to_string(),
                 prev_barrier_version,
                 page_offset,
                 max_entries: MAX_BARRIER_HELPER_PAGE_ENTRIES,
             };
-            let response: BarrierResolveJoinsSinceResponse = self
+            let response: BarrierResolveJoinOccupanciesSinceResponse = self
                 .post_proto("/v2/barrier/resolve_join_occupancies_since", request)
                 .await?;
             if response.page_offset != page_offset {
@@ -641,9 +644,9 @@ impl CitygApiClient {
             let page_records = response
                 .records
                 .iter()
-                .map(|record| BarrierJoinRecord {
+                .map(|record: &PbBarrierJoinOccupancyRecord| BarrierJoinRecord {
                     device_pk: record.device_pk.clone(),
-                    leaf_index: record.leaf_index,
+                    leaf_index: record.slot_index,
                     slot_generation: record.slot_generation,
                     ek_leaf: record.ek_leaf.clone(),
                 })
