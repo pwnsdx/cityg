@@ -1140,8 +1140,7 @@ pub struct DecodedBarrierResolveRevokedLeavesRequest {
     pub max_entries: u32,
 }
 
-pub type DecodedBarrierResolveRevokedOccupanciesRequest =
-    DecodedBarrierResolveRevokedLeavesRequest;
+pub type DecodedBarrierResolveRevokedOccupanciesRequest = DecodedBarrierResolveRevokedLeavesRequest;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodedBarrierFetchPublicTreeRequest {
@@ -2252,7 +2251,10 @@ mod tests {
         .expect("parse request")
         .expect("room target");
 
-        assert_eq!(target.route, RoomScopedApiRoute::BarrierResolveRevokedOccupancies);
+        assert_eq!(
+            target.route,
+            RoomScopedApiRoute::BarrierResolveRevokedOccupancies
+        );
         assert_eq!(target.key, RoomScopedRoutingKey::Gid(DEMO_GID));
     }
 
@@ -3091,8 +3093,8 @@ mod tests {
             prev_history_commitment_id: [0x33; 32],
             history_seq: 34,
         };
-        let encoded = encode_prepared_resolved_join_occupancies_response(
-            PreparedResolvedJoinOccupancies {
+        let encoded =
+            encode_prepared_resolved_join_occupancies_response(PreparedResolvedJoinOccupancies {
                 resolved: cityg_server::ResolvedJoinOccupancies {
                     history_view_id: [0x31; 32],
                     history_commitment,
@@ -3130,11 +3132,9 @@ mod tests {
                     },
                     deployment_profile_manifest: vec![0x83],
                 },
-            },
-        );
-        let decoded =
-            pb::BarrierResolveJoinOccupanciesSinceResponse::decode(encoded.as_slice())
-                .expect("decode v2 join occupancies response");
+            });
+        let decoded = pb::BarrierResolveJoinOccupanciesSinceResponse::decode(encoded.as_slice())
+            .expect("decode v2 join occupancies response");
 
         assert_eq!(decoded.records.len(), 1);
         assert_eq!(decoded.records[0].slot_index, 3);

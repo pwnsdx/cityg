@@ -10,9 +10,9 @@ use pqcrypto_dilithium::dilithium5;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BarrierJoinOccupancyRecord, BarrierRevokedOccupancyRecord, EXPECTED_MSPHF_CRS_ID, EXPECTED_MSPHF_PARAMS_ID,
-    EXPECTED_PROFILE_VERSION, EXPECTED_PROOF_MODE, EXPECTED_VRF_ID, Error, FsForwardLeapPolicy,
-    FullVerificationWitness, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
+    BarrierJoinOccupancyRecord, BarrierRevokedOccupancyRecord, EXPECTED_MSPHF_CRS_ID,
+    EXPECTED_MSPHF_PARAMS_ID, EXPECTED_PROFILE_VERSION, EXPECTED_PROOF_MODE, EXPECTED_VRF_ID,
+    Error, FsForwardLeapPolicy, FullVerificationWitness, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
     GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, GlobalHistoryAttestation, HELPER_KIND_FETCH_PUBLIC_TREE,
     HELPER_KIND_JOINS_SINCE, HELPER_KIND_REVOKED_LEAVES, HelperCompletenessAttestation,
     HistoryAuthorityDescriptor, HistoryAuthorityExtension, HistoryCommitment,

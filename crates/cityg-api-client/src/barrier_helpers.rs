@@ -4,9 +4,8 @@ use cityg_api_schema::pb::{
     BarrierFetchPublicTreeRequest, BarrierFetchPublicTreeResponse,
     BarrierIssueFullVerificationWitnessRequest, BarrierIssueFullVerificationWitnessResponse,
     BarrierJoinOccupancyRecord as PbBarrierJoinOccupancyRecord,
-    BarrierResolveJoinOccupanciesSinceRequest,
-    BarrierResolveJoinOccupanciesSinceResponse,
     BarrierLookupMergeAcceptanceRequest, BarrierLookupMergeAcceptanceResponse,
+    BarrierResolveJoinOccupanciesSinceRequest, BarrierResolveJoinOccupanciesSinceResponse,
     BarrierResolveRevokedOccupanciesRequest, BarrierResolveRevokedOccupanciesResponse,
     BarrierRevokedOccupancyRecord as PbBarrierRevokedOccupancyRecord,
 };
@@ -402,10 +401,12 @@ impl CitygApiClient {
             let page_records = response
                 .records
                 .iter()
-                .map(|record: &PbBarrierRevokedOccupancyRecord| BarrierRevokedOccupancyRecord {
-                    leaf_index: record.slot_index,
-                    slot_generation: record.slot_generation,
-                })
+                .map(
+                    |record: &PbBarrierRevokedOccupancyRecord| BarrierRevokedOccupancyRecord {
+                        leaf_index: record.slot_index,
+                        slot_generation: record.slot_generation,
+                    },
+                )
                 .collect::<Vec<_>>();
             let global_history_attestation = match history_authority.as_ref() {
                 Some(authority) => {
@@ -644,12 +645,14 @@ impl CitygApiClient {
             let page_records = response
                 .records
                 .iter()
-                .map(|record: &PbBarrierJoinOccupancyRecord| BarrierJoinOccupancyRecord {
-                    device_pk: record.device_pk.clone(),
-                    leaf_index: record.slot_index,
-                    slot_generation: record.slot_generation,
-                    ek_leaf: record.ek_leaf.clone(),
-                })
+                .map(
+                    |record: &PbBarrierJoinOccupancyRecord| BarrierJoinOccupancyRecord {
+                        device_pk: record.device_pk.clone(),
+                        leaf_index: record.slot_index,
+                        slot_generation: record.slot_generation,
+                        ek_leaf: record.ek_leaf.clone(),
+                    },
+                )
                 .collect::<Vec<_>>();
             let global_history_attestation = match history_authority.as_ref() {
                 Some(authority) => {

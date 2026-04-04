@@ -7,14 +7,14 @@ use cityg_api_schema::{
     MAX_BARRIER_HELPER_PAGE_ENTRIES, ResolveRevokedLeavesRequestDecodeError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
-    decode_barrier_resolve_revoked_occupancies_request as schema_decode_barrier_resolve_revoked_occupancies_request,
     decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
+    decode_barrier_resolve_revoked_occupancies_request as schema_decode_barrier_resolve_revoked_occupancies_request,
     decode_full_verification_witness_request as schema_decode_full_verification_witness_request,
     encode_full_verification_witness_response, encode_prepared_barrier_public_tree_response,
-    encode_prepared_resolved_join_occupancies_response,
-    encode_prepared_merge_acceptance_lookup_response, encode_prepared_resolved_joins_response,
-    encode_prepared_resolved_revoked_occupancies_response,
+    encode_prepared_merge_acceptance_lookup_response,
+    encode_prepared_resolved_join_occupancies_response, encode_prepared_resolved_joins_response,
     encode_prepared_resolved_revoked_leaves_response,
+    encode_prepared_resolved_revoked_occupancies_response,
 };
 use cityg_runtime::{
     prepare_barrier_public_tree as runtime_prepare_barrier_public_tree,
@@ -22,8 +22,8 @@ use cityg_runtime::{
     prepare_merge_acceptance_lookup as runtime_prepare_merge_acceptance_lookup,
     prepare_resolved_join_occupancies as runtime_prepare_resolved_join_occupancies,
     prepare_resolved_joins as runtime_prepare_resolved_joins,
-    prepare_resolved_revoked_occupancies as runtime_prepare_resolved_revoked_occupancies,
     prepare_resolved_revoked_leaves as runtime_prepare_resolved_revoked_leaves,
+    prepare_resolved_revoked_occupancies as runtime_prepare_resolved_revoked_occupancies,
 };
 
 use crate::{
@@ -246,10 +246,7 @@ pub(crate) async fn barrier_resolve_join_occupancies_since(
             API_PROFILE_VERSION,
         )
         .map_err(|err| {
-            map_room_barrier_helper_preparation_error(
-                "barrier_resolve_join_occupancies_since",
-                err,
-            )
+            map_room_barrier_helper_preparation_error("barrier_resolve_join_occupancies_since", err)
         })?
     };
     Ok(protobuf_response_bytes(

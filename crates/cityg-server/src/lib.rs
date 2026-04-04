@@ -1332,8 +1332,7 @@ impl CityGServer {
                 _cover_payload,
             ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
             let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
-            let resolved_revoked =
-                self.resolve_revoked_leaf_indices(gid, &revocation_roots_hash)?;
+            let resolved_revoked = self.resolve_revoked_occupancies(gid, &revocation_roots_hash)?;
             (
                 self.resolve_joins_since(gid, prev_barrier_version)?.records,
                 resolved_revoked.records,
@@ -1489,7 +1488,7 @@ impl CityGServer {
     ) -> Result<MergeTicketBundle, CityGError> {
         self.ensure_kbroad_ready(gid)?;
         let default_state = GroupState::default();
-        ensure_distinct_active_cover_leaf_indices(
+        ensure_distinct_active_slot_indices(
             self.roster
                 .groups
                 .get(gid.as_slice())
@@ -1820,8 +1819,8 @@ impl CityGServer {
             rehydrate_replay_join_finalize_auth(&mut state_before, &bundle.header_map)?;
         }
         let delta = bundle.membership_delta()?;
-        ensure_distinct_active_cover_leaf_indices(&state_before)?;
-        ensure_join_cover_leaf_indices_available(&state_before, delta.joined.as_slice())?;
+        ensure_distinct_active_slot_indices(&state_before)?;
+        ensure_join_slot_indices_available(&state_before, delta.joined.as_slice())?;
         let barrier_validation =
             validate_barrier_update_against_roster(&state_before, &bundle.header_map, &delta)?;
         let gid: [u8; 32] = bundle
@@ -2905,11 +2904,11 @@ impl CityGServer {
         Ok(response)
     }
 
-    pub fn resolve_revoked_leaf_indices(
+    pub fn resolve_revoked_occupancies(
         &mut self,
         gid: &[u8; 32],
         revocation_roots_hash: &[u8; 32],
-    ) -> Result<ResolvedRevokedLeaves, CityGError> {
+    ) -> Result<ResolvedRevokedOccupancies, CityGError> {
         let state = self
             .roster
             .groups
@@ -2926,36 +2925,45 @@ impl CityGServer {
                 "missing revoked slot leases for committed revocations",
             ));
         }
-        let mut records: Vec<BarrierRevokedOccupancyRecord> = if !state.revoked_slot_leases.is_empty() {
-            state
-                .revoked_slot_leases
-                .values()
-                .map(|lease| BarrierRevokedOccupancyRecord {
-                    leaf_index: lease.slot_index,
-                    slot_generation: lease.slot_generation,
-                })
-                .collect()
-        } else {
-            state
-                .revoked
-                .iter()
-                .map(|leaf| {
-                    let lease = require_revoked_slot_lease(state, leaf)
-                        .expect("revoked slot lease presence checked above");
-                    BarrierRevokedOccupancyRecord {
+        let mut records: Vec<BarrierRevokedOccupancyRecord> =
+            if !state.revoked_slot_leases.is_empty() {
+                state
+                    .revoked_slot_leases
+                    .values()
+                    .map(|lease| BarrierRevokedOccupancyRecord {
                         leaf_index: lease.slot_index,
                         slot_generation: lease.slot_generation,
-                    }
-                })
-                .collect()
-        };
+                    })
+                    .collect()
+            } else {
+                state
+                    .revoked
+                    .iter()
+                    .map(|leaf| {
+                        let lease = require_revoked_slot_lease(state, leaf)
+                            .expect("revoked slot lease presence checked above");
+                        BarrierRevokedOccupancyRecord {
+                            leaf_index: lease.slot_index,
+                            slot_generation: lease.slot_generation,
+                        }
+                    })
+                    .collect()
+            };
         records.sort_by_key(|record| (record.leaf_index, record.slot_generation));
         records.dedup();
-        Ok(ResolvedRevokedLeaves {
+        Ok(ResolvedRevokedOccupancies {
             history_view_id: history_commitment.history_view_id,
             history_commitment,
             records,
         })
+    }
+
+    pub fn resolve_revoked_leaf_indices(
+        &mut self,
+        gid: &[u8; 32],
+        revocation_roots_hash: &[u8; 32],
+    ) -> Result<ResolvedRevokedLeaves, CityGError> {
+        self.resolve_revoked_occupancies(gid, revocation_roots_hash)
     }
 
     pub fn resolve_joins_since(
@@ -2968,7 +2976,7 @@ impl CityGServer {
             .groups
             .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
-        ensure_distinct_active_cover_leaf_indices(state)?;
+        ensure_distinct_active_slot_indices(state)?;
         prune_join_history(state)?;
         let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
         let active_leaves: BTreeSet<[u8; 32]> = state
@@ -3337,7 +3345,7 @@ impl CityGServer {
         kem_tree_hash_after: &[u8; 32],
         author_leaf_id: &[u8; 32],
         barrier_update_reason: u64,
-        updater_leaf: u64,
+        updater_slot_index: u64,
         updater_slot_generation: u64,
         barrier_update: &[u8],
         joins_prev_barrier_version: u64,
@@ -3370,7 +3378,7 @@ impl CityGServer {
             history_commitment,
             author_leaf_id,
             barrier_update_reason,
-            updater_leaf,
+            updater_slot_index,
             updater_slot_generation,
             barrier_update,
             joins_prev_barrier_version,
@@ -3386,7 +3394,7 @@ impl CityGServer {
             kem_tree_hash_after,
             author_leaf_id,
             barrier_update_reason,
-            updater_leaf,
+            updater_slot_index,
             updater_slot_generation,
             barrier_update,
             joins_prev_barrier_version,
@@ -3624,7 +3632,7 @@ struct ParsedNodeCiphertext {
 #[derive(Clone)]
 struct ParsedBarrierUpdate {
     prev_barrier_version: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     tree_size: u64,
     revocation_roots_hash: [u8; 32],
@@ -4060,7 +4068,8 @@ struct FullVerificationReceiptWire {
     #[serde(with = "serde_bytes")]
     author_leaf_id: Vec<u8>,
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    #[serde(rename = "updater_leaf")]
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     signature: Vec<u8>,
@@ -4074,7 +4083,8 @@ struct FullVerificationReceiptSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     author_leaf_id: &'a [u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    #[serde(rename = "updater_leaf")]
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     barrier_history_commitment: &'a [u8],
@@ -4104,7 +4114,8 @@ struct FullVerificationWitnessWire {
     #[serde(with = "serde_bytes")]
     author_leaf_id: Vec<u8>,
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    #[serde(rename = "updater_leaf")]
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     barrier_update_digest: Vec<u8>,
@@ -4139,7 +4150,8 @@ struct FullVerificationWitnessSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     author_leaf_id: &'a [u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    #[serde(rename = "updater_leaf")]
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     barrier_update_digest: &'a [u8; 32],
@@ -4301,14 +4313,14 @@ fn parse_global_history_attestation(
 fn encode_full_verification_receipt(
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     signature: Vec<u8>,
 ) -> Result<Vec<u8>, CityGError> {
     Ok(to_cbor_vec(&FullVerificationReceiptWire {
         author_leaf_id: author_leaf_id.to_vec(),
         barrier_update_reason,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         signature,
     })?)
@@ -4318,7 +4330,7 @@ fn full_verification_receipt_payload(
     gid: &[u8; 32],
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     barrier_history_commitment: &[u8],
     global_history_attestation: &[u8],
@@ -4329,7 +4341,7 @@ fn full_verification_receipt_payload(
         gid,
         author_leaf_id,
         barrier_update_reason,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         barrier_history_commitment,
         global_history_attestation,
@@ -4418,7 +4430,7 @@ fn encode_full_verification_witness(
     kem_tree_hash_after: &[u8; 32],
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     barrier_update: &[u8],
     joins_prev_barrier_version: u64,
@@ -4447,7 +4459,7 @@ fn encode_full_verification_witness(
         kem_tree_hash_after,
         author_leaf_id,
         barrier_update_reason,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         barrier_update_digest: &barrier_update_digest,
         joins_digest: &joins_digest,
@@ -4467,7 +4479,7 @@ fn encode_full_verification_witness(
         kem_tree_hash_after: kem_tree_hash_after.to_vec(),
         author_leaf_id: author_leaf_id.to_vec(),
         barrier_update_reason,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         barrier_update_digest: barrier_update_digest.to_vec(),
         joins_digest: joins_digest.to_vec(),
@@ -4903,7 +4915,7 @@ fn parse_barrier_update(
     }
 
     let KemTreeCoverPayloadWire(
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         path_nodes,
         revoked_leaf_indices_hint,
@@ -4917,11 +4929,11 @@ fn parse_barrier_update(
         .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
     let leaf_base = expected_n_max.saturating_sub(1);
 
-    if path_nodes.is_empty() || updater_leaf >= expected_n_max {
+    if path_nodes.is_empty() || updater_slot_index >= expected_n_max {
         return Err(CityGError::InvalidInput("barrier_update malformed"));
     }
     let expected_leaf = leaf_base
-        .checked_add(updater_leaf)
+        .checked_add(updater_slot_index)
         .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
     if path_nodes.first().copied() != Some(expected_leaf) || path_nodes.last().copied() != Some(0) {
         return Err(CityGError::InvalidInput("barrier_update malformed"));
@@ -4995,7 +5007,7 @@ fn parse_barrier_update(
 
     Ok(Some(ParsedBarrierUpdate {
         prev_barrier_version,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         tree_size,
         revocation_roots_hash: vec_to_32(revocation_roots_hash)?,
@@ -5495,7 +5507,7 @@ fn require_pending_or_active_slot_lease(
         ))
 }
 
-fn committed_revoked_cover_leaf_indices(state: &GroupState) -> BTreeSet<u32> {
+fn committed_revoked_slot_indices(state: &GroupState) -> BTreeSet<u32> {
     debug_assert!(
         state.revoked.is_empty() || !state.revoked_slot_leases.is_empty(),
         "committed revoked leaves must carry explicit slot leases",
@@ -5508,10 +5520,10 @@ fn committed_revoked_cover_leaf_indices(state: &GroupState) -> BTreeSet<u32> {
 }
 
 fn has_committed_revoked_slot_index(state: &GroupState, slot_index: u32) -> bool {
-    committed_revoked_cover_leaf_indices(state).contains(&slot_index)
+    committed_revoked_slot_indices(state).contains(&slot_index)
 }
 
-fn reserved_cover_leaf_indices(state: &GroupState) -> Result<BTreeSet<u32>, CityGError> {
+fn reserved_slot_indices(state: &GroupState) -> Result<BTreeSet<u32>, CityGError> {
     let mut reserved: BTreeSet<u32> = active_cover_leaf_allocations(state)?.into_keys().collect();
     for record in state.pending_join_finalize_auth.values() {
         reserved.insert(record.lease.slot_index);
@@ -5526,11 +5538,11 @@ fn barrier_leaf_capacity(state: &GroupState) -> Result<BarrierLeafCapacity, City
         .map(|snapshot| u64::try_from(snapshot.members().count()).unwrap_or(u64::MAX))
         .unwrap_or(0);
     let revoked_leaf_count =
-        u64::try_from(committed_revoked_cover_leaf_indices(state).len()).unwrap_or(u64::MAX);
+        u64::try_from(committed_revoked_slot_indices(state).len()).unwrap_or(u64::MAX);
     let pending_join_ticket_count =
         u64::try_from(state.pending_join_finalize_auth.len()).unwrap_or(u64::MAX);
     let reserved_cover_leaf_count =
-        u64::try_from(reserved_cover_leaf_indices(state)?.len()).unwrap_or(u64::MAX);
+        u64::try_from(reserved_slot_indices(state)?.len()).unwrap_or(u64::MAX);
     Ok(BarrierLeafCapacity {
         n_max,
         active_leaf_count,
@@ -5591,12 +5603,12 @@ fn next_available_join_leaf(state: &mut GroupState) -> Result<[u8; 32], CityGErr
     Ok(witness::sequential_leaf(state.allocate_leaf()))
 }
 
-fn ensure_distinct_active_cover_leaf_indices(state: &GroupState) -> Result<(), CityGError> {
+fn ensure_distinct_active_slot_indices(state: &GroupState) -> Result<(), CityGError> {
     let _ = active_cover_leaf_allocations(state)?;
     Ok(())
 }
 
-fn ensure_join_cover_leaf_indices_available(
+fn ensure_join_slot_indices_available(
     state: &GroupState,
     joined: &[[u8; 32]],
 ) -> Result<(), CityGError> {
@@ -5627,7 +5639,7 @@ where
     T: Clone,
     F: Fn(&'a Vec<u8>) -> T,
 {
-    ensure_distinct_active_cover_leaf_indices(state)?;
+    ensure_distinct_active_slot_indices(state)?;
     let (n_max, expected_len, leaf_base) = barrier_pk_entry_layout(state.n_max)?;
     let mut pk_entries = vec![empty; expected_len];
     if let Some(snapshot) = state.latest_snapshot() {
@@ -5728,7 +5740,7 @@ fn build_all_blank_pk_entries_cow(n_max: u64) -> Result<Vec<Cow<'static, [u8]>>,
 }
 
 fn build_pk_entries_cow<'a>(state: &'a GroupState) -> Result<Vec<Cow<'a, [u8]>>, CityGError> {
-    ensure_distinct_active_cover_leaf_indices(state)?;
+    ensure_distinct_active_slot_indices(state)?;
     let (_, expected_len, _) = barrier_pk_entry_layout(state.n_max)?;
     if state.barrier_pk_entries.len() == expected_len {
         return Ok(state
@@ -5809,7 +5821,7 @@ fn rehydrate_replay_join_finalize_auth(
     }
     let expected_slot_index =
         u64::from(require_active_slot_lease(state_before, &author_leaf_id)?.slot_index);
-    if expected_slot_index != parsed.updater_leaf {
+    if expected_slot_index != parsed.updater_slot_index {
         return Ok(());
     }
     if matches!(barrier_update_reason, Some(0))
@@ -5852,7 +5864,7 @@ fn parse_full_verification_receipt(
     Ok((
         vec_to_32(decoded.author_leaf_id)?,
         decoded.barrier_update_reason,
-        decoded.updater_leaf,
+        decoded.updater_slot_index,
         decoded.updater_slot_generation,
         decoded.signature,
     ))
@@ -5945,7 +5957,7 @@ fn validate_history_authority_headers(
         state_before
             .leaf_slot_leases
             .values()
-            .find(|lease| u64::from(lease.slot_index) == parsed.updater_leaf)
+            .find(|lease| u64::from(lease.slot_index) == parsed.updater_slot_index)
             .copied()
             .ok_or_else(freeze_barrier_updater_invalid_error)?
     } else {
@@ -5978,13 +5990,13 @@ fn validate_history_authority_headers(
         let (
             receipt_author_leaf_id,
             receipt_reason,
-            receipt_updater_leaf,
+            receipt_updater_slot_index,
             receipt_updater_slot_generation,
             signature,
         ) = parse_full_verification_receipt(raw_receipt)?;
         if receipt_author_leaf_id != author_leaf_id
             || receipt_reason != barrier_reason
-            || receipt_updater_leaf != parsed.updater_leaf
+            || receipt_updater_slot_index != parsed.updater_slot_index
             || parsed.updater_slot_generation != expected_updater_lease.slot_generation
             || receipt_updater_slot_generation != expected_updater_lease.slot_generation
         {
@@ -5994,7 +6006,7 @@ fn validate_history_authority_headers(
             gid,
             &author_leaf_id,
             barrier_reason,
-            parsed.updater_leaf,
+            parsed.updater_slot_index,
             expected_updater_lease.slot_generation,
             raw_history_commitment,
             raw_attestation,
@@ -6041,7 +6053,7 @@ fn validate_history_authority_headers(
             || witness_kem_tree_hash_after != state_before.kem_tree_hash_after
             || witness_author_leaf_id != author_leaf_id
             || witness.barrier_update_reason != barrier_reason
-            || witness.updater_leaf != parsed.updater_leaf
+            || witness.updater_slot_index != parsed.updater_slot_index
             || parsed.updater_slot_generation != expected_updater_lease.slot_generation
             || witness.updater_slot_generation != expected_updater_lease.slot_generation
             || witness_barrier_update_digest != barrier_update_digest
@@ -6065,7 +6077,7 @@ fn validate_history_authority_headers(
             kem_tree_hash_after: &state_before.kem_tree_hash_after,
             author_leaf_id: &author_leaf_id,
             barrier_update_reason: barrier_reason,
-            updater_leaf: parsed.updater_leaf,
+            updater_slot_index: parsed.updater_slot_index,
             updater_slot_generation: expected_updater_lease.slot_generation,
             barrier_update_digest: &barrier_update_digest,
             joins_digest: &witness_joins_digest,
@@ -6121,8 +6133,8 @@ fn validate_barrier_update_against_roster(
                 ));
             }
         }
-        ensure_distinct_active_cover_leaf_indices(state_before)?;
-        ensure_join_cover_leaf_indices_available(state_before, delta.joined.as_slice())?;
+        ensure_distinct_active_slot_indices(state_before)?;
+        ensure_join_slot_indices_available(state_before, delta.joined.as_slice())?;
         let active_leaves: BTreeSet<[u8; 32]> = state_before
             .latest_snapshot()
             .map(|snapshot| snapshot.members().copied().collect())
@@ -6183,11 +6195,10 @@ fn validate_barrier_update_against_roster(
         }
 
         // RevokedLeafSet for snapshot construction: committed revoked set plus current delta.
-        let mut revoked_indices: BTreeSet<usize> =
-            committed_revoked_cover_leaf_indices(state_before)
-                .into_iter()
-                .map(|leaf_index| leaf_index as usize)
-                .collect();
+        let mut revoked_indices: BTreeSet<usize> = committed_revoked_slot_indices(state_before)
+            .into_iter()
+            .map(|leaf_index| leaf_index as usize)
+            .collect();
         for leaf in &delta.revoked {
             revoked_indices
                 .insert(require_active_slot_lease(state_before, leaf)?.slot_index as usize);
@@ -6229,7 +6240,7 @@ fn validate_barrier_update_against_roster(
 
         // Updater cannot be a previously revoked member; allow self-revocation merges.
         let committed_revoked_indices: BTreeSet<usize> =
-            committed_revoked_cover_leaf_indices(state_before)
+            committed_revoked_slot_indices(state_before)
                 .into_iter()
                 .map(|leaf_index| leaf_index as usize)
                 .collect();
@@ -6252,7 +6263,7 @@ fn validate_barrier_update_against_roster(
                 author_leaf_ids.push(*leaf);
             }
         }
-        let parsed_updater_leaf_usize = usize::try_from(parsed.updater_leaf)
+        let parsed_updater_slot_index_usize = usize::try_from(parsed.updater_slot_index)
             .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
         let has_full_verification_witness =
             header.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS);
@@ -6264,7 +6275,7 @@ fn validate_barrier_update_against_roster(
             && delta.revoked.iter().any(|leaf| {
                 *leaf != author_leaf_ids.first().copied().unwrap_or([0u8; 32])
                     && require_active_slot_lease(state_before, leaf)
-                        .map(|lease| u64::from(lease.slot_index) == parsed.updater_leaf)
+                        .map(|lease| u64::from(lease.slot_index) == parsed.updater_slot_index)
                         .unwrap_or(false)
             })
             && has_full_verification_witness
@@ -6273,9 +6284,10 @@ fn validate_barrier_update_against_roster(
         let candidate_reclaim_join =
             matches!(barrier_update_reason, Some(0)) && join_finalize_auth_token.is_some();
         if author_cover_indices.len() != 1
-            || (!author_cover_indices.contains(&parsed.updater_leaf) && !targeted_admin_revocation)
+            || (!author_cover_indices.contains(&parsed.updater_slot_index)
+                && !targeted_admin_revocation)
             || author_leaf_ids.len() != 1
-            || (committed_revoked_indices.contains(&parsed_updater_leaf_usize)
+            || (committed_revoked_indices.contains(&parsed_updater_slot_index_usize)
                 && !candidate_reclaim_join)
         {
             return Err(CityGError::Acceptance(
@@ -6286,9 +6298,9 @@ fn validate_barrier_update_against_roster(
         }
         let author_leaf_id = author_leaf_ids[0];
         let author_reclaims_committed_revoked_slot =
-            committed_revoked_indices.contains(&parsed_updater_leaf_usize);
+            committed_revoked_indices.contains(&parsed_updater_slot_index_usize);
         if candidate_reclaim_join && author_reclaims_committed_revoked_slot {
-            revoked_indices.remove(&parsed_updater_leaf_usize);
+            revoked_indices.remove(&parsed_updater_slot_index_usize);
             can_borrow_snapshot_base = state_before.barrier_initialized
                 && state_before.barrier_pk_entries.len() == expected_len
                 && by_leaf_for_snapshot.is_empty()
@@ -6317,7 +6329,7 @@ fn validate_barrier_update_against_roster(
         }
 
         let author_is_unresolved_joiner = unresolved_join_leaf_set.contains(
-            &u32::try_from(parsed.updater_leaf)
+            &u32::try_from(parsed.updater_slot_index)
                 .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
         );
         let revocation_changed = state_before.barrier_initialized
@@ -6365,7 +6377,7 @@ fn validate_barrier_update_against_roster(
                         ),
                     ))?;
                 if record.token != supplied
-                    || u64::from(record.lease.slot_index) != parsed.updater_leaf
+                    || u64::from(record.lease.slot_index) != parsed.updater_slot_index
                 {
                     return Err(CityGError::Acceptance(
                         msphf_orchestrator::AcceptanceError::Freeze(
@@ -6392,7 +6404,7 @@ fn validate_barrier_update_against_roster(
                     || !revocation_changed
                     || !author_reclaims_committed_revoked_slot
                     || record.token != supplied
-                    || u64::from(record.lease.slot_index) != parsed.updater_leaf
+                    || u64::from(record.lease.slot_index) != parsed.updater_slot_index
                 {
                     return Err(CityGError::Acceptance(
                         msphf_orchestrator::AcceptanceError::Freeze(
@@ -6598,7 +6610,7 @@ fn validate_full_verification_witness_candidate(
     current_history_commitment: &HistoryCommitment,
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     barrier_update: &[u8],
     joins_prev_barrier_version: u64,
@@ -6626,7 +6638,7 @@ fn validate_full_verification_witness_candidate(
     }
     let expected_updater_lease = require_pending_or_active_slot_lease(state_before, author_leaf_id)
         .map_err(|_| freeze_barrier_updater_invalid_error())?;
-    if updater_leaf != u64::from(expected_updater_lease.slot_index)
+    if updater_slot_index != u64::from(expected_updater_lease.slot_index)
         || updater_slot_generation != expected_updater_lease.slot_generation
     {
         return Err(freeze_barrier_updater_invalid_error());
@@ -6643,7 +6655,7 @@ fn validate_full_verification_witness_candidate(
     let parsed = parse_barrier_update(&header, state_before.n_max)?
         .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
     if parsed.prev_barrier_version != state_before.barrier_version
-        || parsed.updater_leaf != updater_leaf
+        || parsed.updater_slot_index != updater_slot_index
         || parsed.updater_slot_generation != updater_slot_generation
         || parsed.revocation_roots_hash != *revocation_roots_hash
     {
@@ -7464,14 +7476,14 @@ mod tests {
 
     fn build_refresh_barrier_update_bytes(
         n_max: u64,
-        updater_leaf: u64,
+        updater_slot_index: u64,
         barrier_version: u64,
         prev_barrier_version: u64,
         revocation_roots_hash: [u8; 32],
         kem_tree_hash_before: [u8; 32],
         snapshot_pre: &[Vec<u8>],
     ) -> Result<Vec<u8>, CityGError> {
-        if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
+        if n_max == 0 || !n_max.is_power_of_two() || updater_slot_index >= n_max {
             return Err(CityGError::InvalidInput(
                 "invalid barrier update tree parameters",
             ));
@@ -7486,7 +7498,7 @@ mod tests {
         }
 
         let leaf_base = n_max.saturating_sub(1);
-        let mut path_nodes = vec![leaf_base.saturating_add(updater_leaf)];
+        let mut path_nodes = vec![leaf_base.saturating_add(updater_slot_index)];
         while let Some(&node) = path_nodes.last() {
             if node == 0 {
                 break;
@@ -7545,7 +7557,7 @@ mod tests {
         node_ciphertexts.sort_by_key(|entry| (entry.0, entry.1));
 
         let cover_payload = super::KemTreeCoverPayloadWire(
-            updater_leaf,
+            updater_slot_index,
             0,
             path_nodes,
             None,
@@ -7630,7 +7642,7 @@ mod tests {
         } else {
             1u64
         };
-        let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        let committed_revoked = server.resolve_revoked_occupancies(&gid, &committed_roots_hash)?;
         let mut witness_revoked_records = committed_revoked.records.clone();
         if barrier_update_reason == 0 {
             if reclaims_revoked_slot {
@@ -7786,7 +7798,7 @@ mod tests {
                 &gid,
                 &generated.leaf_id,
                 barrier_update_reason,
-                parsed_barrier_update.updater_leaf,
+                parsed_barrier_update.updater_slot_index,
                 ticket.slot_generation,
                 raw_history_commitment.as_slice(),
                 global_history_attestation.as_slice(),
@@ -7801,7 +7813,7 @@ mod tests {
                 Value::Bytes(super::encode_full_verification_receipt(
                     &generated.leaf_id,
                     barrier_update_reason,
-                    parsed_barrier_update.updater_leaf,
+                    parsed_barrier_update.updater_slot_index,
                     ticket.slot_generation,
                     receipt_signature,
                 )?),
@@ -7826,7 +7838,7 @@ mod tests {
                         &ticket.kem_tree_hash_after,
                         &generated.leaf_id,
                         barrier_update_reason,
-                        parsed_barrier_update.updater_leaf,
+                        parsed_barrier_update.updater_slot_index,
                         ticket.slot_generation,
                         raw_barrier_update.as_slice(),
                         ticket.barrier_version,
@@ -7877,7 +7889,7 @@ mod tests {
             .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
             .pk_entries;
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
-        let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        let committed_revoked = server.resolve_revoked_occupancies(&gid, &committed_roots_hash)?;
         let revoked_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_records = committed_revoked.records.clone();
@@ -7957,7 +7969,7 @@ mod tests {
                 &gid,
                 &generated.leaf_id,
                 0,
-                parsed_barrier_update.updater_leaf,
+                parsed_barrier_update.updater_slot_index,
                 ticket.slot_generation,
                 history_commitment_header.as_slice(),
                 global_history_attestation.as_slice(),
@@ -7972,7 +7984,7 @@ mod tests {
                 Value::Bytes(super::encode_full_verification_receipt(
                     &generated.leaf_id,
                     0,
-                    parsed_barrier_update.updater_leaf,
+                    parsed_barrier_update.updater_slot_index,
                     ticket.slot_generation,
                     receipt_signature,
                 )?),
@@ -7995,7 +8007,7 @@ mod tests {
                         &ticket.kem_tree_hash_after,
                         &generated.leaf_id,
                         0,
-                        parsed_barrier_update.updater_leaf,
+                        parsed_barrier_update.updater_slot_index,
                         ticket.slot_generation,
                         barrier_update.as_slice(),
                         ticket.barrier_version,
@@ -8107,7 +8119,7 @@ mod tests {
             .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
             .pk_entries;
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
-        let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        let committed_revoked = server.resolve_revoked_occupancies(&gid, &committed_roots_hash)?;
         let revoked_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_records = committed_revoked.records.clone();
@@ -8187,7 +8199,7 @@ mod tests {
                 &gid,
                 &generated.leaf_id,
                 0,
-                parsed_barrier_update.updater_leaf,
+                parsed_barrier_update.updater_slot_index,
                 ticket.slot_generation,
                 history_commitment_header.as_slice(),
                 global_history_attestation.as_slice(),
@@ -8202,7 +8214,7 @@ mod tests {
                 Value::Bytes(super::encode_full_verification_receipt(
                     &generated.leaf_id,
                     0,
-                    parsed_barrier_update.updater_leaf,
+                    parsed_barrier_update.updater_slot_index,
                     ticket.slot_generation,
                     receipt_signature,
                 )?),
@@ -8225,7 +8237,7 @@ mod tests {
                         &ticket.kem_tree_hash_after,
                         &generated.leaf_id,
                         0,
-                        parsed_barrier_update.updater_leaf,
+                        parsed_barrier_update.updater_slot_index,
                         ticket.slot_generation,
                         barrier_update.as_slice(),
                         ticket.barrier_version,
@@ -8651,7 +8663,7 @@ mod tests {
                 .ok_or(CityGError::InvalidInput(
                     "missing committed barrier roots hash",
                 ))?;
-        let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        let committed_revoked = server.resolve_revoked_occupancies(&gid, &committed_roots_hash)?;
         assert!(
             committed_revoked.records.is_empty(),
             "reclaimed slot must no longer appear in the committed revoked helper set"
@@ -9199,11 +9211,11 @@ mod tests {
             joined: vec![leaf],
             revoked: Vec::new(),
         };
-        let updater_leaf = updater_lease.slot_index;
+        let updater_slot_index = updater_lease.slot_index;
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
-            + usize::try_from(updater_leaf)
+            + usize::try_from(updater_slot_index)
                 .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
         let sibling_node = super::sibling_node(leaf_node)
             .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
@@ -9228,7 +9240,7 @@ mod tests {
 
         let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
         let cover_payload = super::KemTreeCoverPayloadWire(
-            u64::from(updater_leaf),
+            u64::from(updater_slot_index),
             0,
             path_nodes,
             None,
@@ -9299,7 +9311,7 @@ mod tests {
                     "replay rehydration must synthesize pending join_finalize auth",
                 ))?;
         assert_eq!(record.token, join_finalize_auth_token);
-        assert_eq!(record.lease.slot_index, updater_leaf);
+        assert_eq!(record.lease.slot_index, updater_slot_index);
         assert_eq!(record.lease.slot_generation, updater_lease.slot_generation);
         assert!(
             super::validate_barrier_update_against_roster(&state, &header, &delta)?.is_some(),

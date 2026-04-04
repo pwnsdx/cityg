@@ -15,17 +15,16 @@ use cityg_api_schema::{
     RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
     RoomScopedRoutingKey, SearchMembersRequestValidationError, SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
-    decode_barrier_resolve_revoked_occupancies_request,
     decode_barrier_resolve_revoked_leaves_request,
+    decode_barrier_resolve_revoked_occupancies_request,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
     decode_full_verification_witness_request, encode_bootstrap_room_response,
     encode_full_verification_witness_response, encode_list_room_admins_response,
     encode_members_response, encode_prepared_barrier_public_tree_response,
-    encode_prepared_resolved_join_occupancies_response,
     encode_prepared_join_ticket_response, encode_prepared_merge_acceptance_lookup_response,
-    encode_prepared_merge_ticket_response, encode_prepared_resolved_joins_response,
-    encode_prepared_resolved_revoked_occupancies_response,
-    encode_prepared_resolved_revoked_leaves_response, encode_room_admin_leaf_pair_payload,
+    encode_prepared_merge_ticket_response, encode_prepared_resolved_join_occupancies_response,
+    encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
+    encode_prepared_resolved_revoked_occupancies_response, encode_room_admin_leaf_pair_payload,
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, extract_room_scoped_request_target, pb,
     pb_member as schema_pb_member, prepare_join_ticket_request_for_gid,
@@ -51,8 +50,8 @@ use cityg_runtime::{
     paginate_room_members, prepare_barrier_public_tree,
     prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
     prepare_full_verification_witness, prepare_merge_acceptance_lookup,
-    prepare_resolved_join_occupancies, prepare_resolved_joins,
-    prepare_resolved_revoked_leaves, prepare_resolved_revoked_occupancies, refresh_room_pivot,
+    prepare_resolved_join_occupancies, prepare_resolved_joins, prepare_resolved_revoked_leaves,
+    prepare_resolved_revoked_occupancies, refresh_room_pivot,
     revoke_room_admin as runtime_revoke_room_admin,
     rotate_room_kbroad as runtime_rotate_room_kbroad, store_room_message,
 };
@@ -1263,7 +1262,10 @@ impl CloudflareRoomDurableObject {
                         Ok(request) => request,
                         Err(error) => {
                             return Response::error(
-                                format!("failed to decode {} request: {error}", target.route.path()),
+                                format!(
+                                    "failed to decode {} request: {error}",
+                                    target.route.path()
+                                ),
                                 400,
                             );
                         }

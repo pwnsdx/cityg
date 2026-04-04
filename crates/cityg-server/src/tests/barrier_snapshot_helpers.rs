@@ -610,7 +610,7 @@ fn fetch_barrier_public_tree_prefers_current_commitment_for_current_predecessor_
 }
 
 #[test]
-fn resolve_revoked_leaf_indices_requires_matching_roots_hash() -> Result<(), CityGError> {
+fn resolve_revoked_occupancies_requires_matching_roots_hash() -> Result<(), CityGError> {
     let mut server = crate::demo::demo_server();
     let bundle = cityg_client::demo::demo_bundle("alice")?;
     server.accept_epoch(&bundle)?;
@@ -630,8 +630,7 @@ fn resolve_revoked_leaf_indices_requires_matching_roots_hash() -> Result<(), Cit
         (leaf, root)
     };
 
-    let indices =
-        server.resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &roots_hash)?;
+    let indices = server.resolve_revoked_occupancies(&cityg_client::demo::DEMO_GID, &roots_hash)?;
     let n_max = server
         .roster
         .groups
@@ -647,7 +646,7 @@ fn resolve_revoked_leaf_indices_requires_matching_roots_hash() -> Result<(), Cit
     );
 
     let err = server
-        .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &[0x42; 32])
+        .resolve_revoked_occupancies(&cityg_client::demo::DEMO_GID, &[0x42; 32])
         .expect_err("mismatched roots hash must fail");
     assert!(matches!(
         err,
@@ -662,7 +661,7 @@ fn barrier_helpers_report_missing_group_state() {
     let gid = [0xE1; 32];
 
     assert!(matches!(
-        server.resolve_revoked_leaf_indices(&gid, &[0u8; 32]),
+        server.resolve_revoked_occupancies(&gid, &[0u8; 32]),
         Err(CityGError::InvalidInput("group not found"))
     ));
     assert!(matches!(

@@ -8,8 +8,8 @@ use cityg_client::{CityGError, ClientEpochBundle};
 use cityg_server::{
     BarrierJoinOccupancyRecord, BarrierPublicTreeSnapshot, BarrierRevokedOccupancyRecord,
     CityGServer, JoinProvisioningAuthorityArtifacts, JoinTicketBundle, MergeAcceptanceRecord,
-    MergeTicketBundle, MergeTicketIntent, ResolvedJoinOccupancies,
-    ResolvedRevokedOccupancies, ServerOutcome,
+    MergeTicketBundle, MergeTicketIntent, ResolvedJoinOccupancies, ResolvedRevokedOccupancies,
+    ServerOutcome,
 };
 use msphf_core::hash::h_l;
 use msphf_orchestrator::{PivotParity, hdr};
@@ -1018,7 +1018,7 @@ pub fn prepare_full_verification_witness(
 
     let expected_revoked_records = if request.barrier_update_reason == 0 {
         let mut records = server
-            .resolve_revoked_leaf_indices(gid, &committed_revocation_roots_hash)
+            .resolve_revoked_occupancies(gid, &committed_revocation_roots_hash)
             .map_err(RoomFullVerificationWitnessPreparationError::HelperClient)?
             .records;
         let slot_index = u32::try_from(bundle.slot_index)
@@ -1038,7 +1038,7 @@ pub fn prepare_full_verification_witness(
         records
     } else {
         let resolved_revoked = server
-            .resolve_revoked_leaf_indices(gid, &request.revocation_roots_hash)
+            .resolve_revoked_occupancies(gid, &request.revocation_roots_hash)
             .map_err(RoomFullVerificationWitnessPreparationError::HelperClient)?;
         if resolved_revoked.history_commitment != bundle.current_history_commitment {
             return Err(RoomFullVerificationWitnessPreparationError::RevokedHelperDataMismatch);
@@ -1222,7 +1222,7 @@ pub fn prepare_resolved_revoked_occupancies(
     max_page_entries: u32,
     profile_version: &str,
 ) -> Result<PreparedResolvedRevokedOccupancies, RoomBarrierHelperPreparationError> {
-    let resolved = server.resolve_revoked_leaf_indices(gid, revocation_roots_hash)?;
+    let resolved = server.resolve_revoked_occupancies(gid, revocation_roots_hash)?;
     let page = paginate_barrier_helper_slice(
         resolved.records.as_slice(),
         page_offset,

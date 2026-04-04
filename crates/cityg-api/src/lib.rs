@@ -51,13 +51,13 @@ use pb::JoinTicketResponse;
 use pb::MergeTicketResponse;
 use pb::{
     AcceptEpochRequest, BarrierFetchPublicTreeRequest, BarrierIssueFullVerificationWitnessRequest,
-    BarrierLookupMergeAcceptanceRequest, BarrierResolveJoinsSinceRequest,
-    BarrierResolveJoinOccupanciesSinceRequest, BarrierResolveRevokedLeavesRequest,
+    BarrierLookupMergeAcceptanceRequest, BarrierResolveJoinOccupanciesSinceRequest,
+    BarrierResolveJoinsSinceRequest, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedOccupanciesRequest, BootstrapRoomRequest, ChatMessage,
     ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest,
-    GetBundleResponse, JoinTicketRequest, ListRoomAdminsRequest, MembersRequest,
-    MergeTicketIntent, MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse,
-    RoomAdminMutationRequest, RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
+    GetBundleResponse, JoinTicketRequest, ListRoomAdminsRequest, MembersRequest, MergeTicketIntent,
+    MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
+    RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
 };
 #[cfg(test)]
 use pb::{

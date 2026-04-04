@@ -3,7 +3,7 @@ use super::*;
 pub(crate) fn build_pk_entries_view<'a>(
     state: &'a GroupState,
 ) -> Result<Cow<'a, [Vec<u8>]>, CityGError> {
-    ensure_distinct_active_cover_leaf_indices(state)?;
+    ensure_distinct_active_slot_indices(state)?;
     let (_, expected_len, _) = barrier_pk_entry_layout(state.n_max)?;
     if state.barrier_pk_entries.len() == expected_len {
         return Ok(Cow::Borrowed(state.barrier_pk_entries.as_slice()));

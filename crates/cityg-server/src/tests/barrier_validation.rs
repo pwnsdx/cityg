@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     BarrierUpdateWire, COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR, GroupState, KemTreeCoverPayloadWire,
     build_all_blank_pk_entries, compute_barrier_tree_hash, compute_revocation_roots_hash, demo,
-    ensure_join_cover_leaf_indices_available, to_cbor_vec, validate_barrier_update_against_roster,
+    ensure_join_slot_indices_available, to_cbor_vec, validate_barrier_update_against_roster,
 };
 use ciborium::value::{Integer, Value};
 
@@ -111,7 +111,7 @@ fn join_slot_index_guard_rejects_colliding_slot_index() -> Result<(), CityGError
     let mut state = GroupState::default();
     state.snapshots.insert(root, membership);
     state.latest_root = Some(root);
-    let err = ensure_join_cover_leaf_indices_available(&state, &[colliding_leaf])
+    let err = ensure_join_slot_indices_available(&state, &[colliding_leaf])
         .expect_err("colliding join must be rejected");
     assert!(
         matches!(

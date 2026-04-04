@@ -139,8 +139,8 @@ fn full_verification_witness_rejects_barrier_update_hash_mismatch() -> Result<()
         &ticket.revoked_since_root,
         &ticket.revoked_root,
     )?;
-    let committed_revoked = server
-        .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
+    let committed_revoked =
+        server.resolve_revoked_occupancies(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
     let (bundle, _) = build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
     let raw_barrier_update = bundle
         .header_map
@@ -219,8 +219,8 @@ fn full_verification_witness_rejects_updater_slot_generation_mismatch() -> Resul
         &ticket.revoked_since_root,
         &ticket.revoked_root,
     )?;
-    let committed_revoked = server
-        .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
+    let committed_revoked =
+        server.resolve_revoked_occupancies(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
     let (bundle, _) = build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
     let raw_barrier_update = bundle
         .header_map
@@ -369,8 +369,8 @@ fn accept_epoch_rejects_barrier_update_witness_slot_generation_mismatch_under_gl
         &ticket.revoked_since_root,
         &ticket.revoked_root,
     )?;
-    let committed_revoked = server
-        .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
+    let committed_revoked =
+        server.resolve_revoked_occupancies(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
     let raw_barrier_update = bundle
         .header_map
         .get(&hdr::HDR_BARRIER_UPDATE)

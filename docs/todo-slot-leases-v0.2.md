@@ -99,7 +99,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Replace remaining internal `cover_leaf_index`/`slot_generation` pairs with `SlotLease` in `api-client` verification and ticket prep.
-2. Finish the `v1` to `v2` protobuf/message rename from `*LeafRecord` / `ResolveRevokedLeaves` to occupancy-oriented names for tickets, witnesses, and remaining helper responses.
-3. Sweep the remaining `docs/specs.md` sections that still describe recovery or helper logic in `cover_leaf_index(...)` terms.
-4. Add KAT/conformance coverage that exercises the new occupancy semantics through the public helper/profile boundary.
+1. Finish the remaining public/profile rename from legacy helper names (`ResolveRevokedLeaves`, `ResolveJoinsSince`) to occupancy-oriented route and message names.
+2. Sweep the remaining `docs/specs.md` sections that still describe recovery or helper logic in `cover_leaf_index(...)` terms.
+3. Add KAT/conformance coverage that exercises the new occupancy semantics through the public helper/profile boundary.
