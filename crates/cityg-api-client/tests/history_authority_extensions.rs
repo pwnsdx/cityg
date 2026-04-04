@@ -346,3 +346,112 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
 
     Ok(())
 }
+
+#[test]
+fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn StdError>> {
+    let history_commitment = HistoryCommitment {
+        history_view_id: [0x61; 32],
+        history_commitment_id: [0x62; 32],
+        prev_history_commitment_id: [0x63; 32],
+        history_seq: 23,
+    };
+    let (authority, secret_key) = history_authority(0xB1);
+
+    let revoked_records = [
+        BarrierRevokedOccupancyRecord {
+            leaf_index: 7,
+            slot_generation: 0,
+        },
+        BarrierRevokedOccupancyRecord {
+            leaf_index: 7,
+            slot_generation: 2,
+        },
+    ];
+    let revoked_bytes = sign_helper_completeness_attestation(
+        &authority,
+        &secret_key,
+        HELPER_KIND_REVOKED_LEAVES,
+        &history_commitment,
+        0,
+        2,
+        RevokedLeavesSelector {
+            revocation_roots_hash: &[0x91; 32],
+            records: &revoked_records,
+        },
+    )?;
+    let revoked_attestation =
+        parse_revoked_leaves_completeness_attestation_bytes(&revoked_bytes, &authority)?
+            .ok_or("revoked helper attestation should parse")?;
+    verify_revoked_leaves_completeness_attestation(
+        &revoked_attestation,
+        &authority,
+        &history_commitment,
+        &[0x91; 32],
+        0,
+        2,
+        &revoked_records,
+    )?;
+    let mut tampered_revoked_records = revoked_records;
+    tampered_revoked_records[1].slot_generation = 3;
+    assert!(
+        verify_revoked_leaves_completeness_attestation(
+            &revoked_attestation,
+            &authority,
+            &history_commitment,
+            &[0x91; 32],
+            0,
+            2,
+            &tampered_revoked_records,
+        )
+        .is_err(),
+        "revoked helper attestation must bind slot_generation",
+    );
+
+    let join_record = BarrierJoinOccupancyRecord {
+        device_pk: vec![0xAA; 32],
+        leaf_index: 9,
+        slot_generation: 2,
+        ek_leaf: vec![0xBB; 1184],
+    };
+    let joins_bytes = sign_helper_completeness_attestation(
+        &authority,
+        &secret_key,
+        HELPER_KIND_JOINS_SINCE,
+        &history_commitment,
+        0,
+        1,
+        JoinsSinceSelector {
+            prev_barrier_version: 8,
+            records: std::slice::from_ref(&join_record),
+        },
+    )?;
+    let joins_attestation =
+        parse_joins_since_completeness_attestation_bytes(&joins_bytes, &authority)?
+            .ok_or("joins helper attestation should parse")?;
+    verify_joins_since_completeness_attestation(
+        &joins_attestation,
+        &authority,
+        &history_commitment,
+        8,
+        0,
+        1,
+        std::slice::from_ref(&join_record),
+    )?;
+    let mut tampered_join_record = join_record.clone();
+    tampered_join_record.slot_generation = 3;
+    assert!(
+        verify_joins_since_completeness_attestation(
+            &joins_attestation,
+            &authority,
+            &history_commitment,
+            8,
+            0,
+            1,
+            std::slice::from_ref(&tampered_join_record),
+        )
+        .is_err(),
+        "joins helper attestation must bind slot_generation",
+    );
+
+    Ok(())
+}
