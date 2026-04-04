@@ -939,8 +939,7 @@ pub struct MergeTicket {
     pub last_accepted_ec: u64,
     pub kbroad_generation: u64,
     pub barrier_version: u64,
-    pub cover_leaf_index: u64,
-    pub slot_generation: u64,
+    pub slot_lease: SlotLease,
     pub kem_tree_hash_after: [u8; 32],
     pub current_history_commitment: HistoryCommitment,
     pub history_authority_extension: Option<HistoryAuthorityExtension>,
@@ -1369,10 +1368,10 @@ impl MergeTicket {
             )));
         }
 
-        if self.cover_leaf_index >= self.n_max {
+        if self.slot_lease.slot_index >= self.n_max {
             return Err(Error::Parse(format!(
                 "merge ticket cover_leaf_index out of range: {} >= {}",
-                self.cover_leaf_index, self.n_max
+                self.slot_lease.slot_index, self.n_max
             )));
         }
 
@@ -1383,10 +1382,7 @@ impl MergeTicket {
         Ok(PreparedRuntimeMergeTicket {
             snapshot_hash: self.kem_tree_hash_after,
             barrier_n_max: self.n_max,
-            slot_lease: SlotLease {
-                slot_index: self.cover_leaf_index,
-                slot_generation: self.slot_generation,
-            },
+            slot_lease: self.slot_lease,
             max_barrier_update_bytes: ticket_max_barrier_update_bytes,
             max_barrier_update_bytes_normalized,
             parities: hydrate_parities(&self.parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit),
@@ -3268,8 +3264,10 @@ mod tests {
             last_accepted_ec: 17,
             kbroad_generation: 3,
             barrier_version: 9,
-            cover_leaf_index: 1,
-            slot_generation: 0,
+            slot_lease: SlotLease {
+                slot_index: 1,
+                slot_generation: 0,
+            },
             kem_tree_hash_after: [0x0F; 32],
             current_history_commitment: HistoryCommitment {
                 history_view_id: [0x90; 32],
@@ -3775,8 +3773,8 @@ mod tests {
         assert_eq!(merge.we_epoch_id, [0x01; 32]);
         assert_eq!(merge.parent_root, [0x03; 32]);
         assert_eq!(merge.kbroad_generation, 0);
-        assert_eq!(merge.cover_leaf_index, 0);
-        assert_eq!(merge.slot_generation, 0);
+        assert_eq!(merge.slot_lease.slot_index, 0);
+        assert_eq!(merge.slot_lease.slot_generation, 0);
         assert_eq!(merge.kem_tree_hash_after, [0x09; 32]);
         assert_eq!(
             merge.current_history_commitment.history_commitment_id,

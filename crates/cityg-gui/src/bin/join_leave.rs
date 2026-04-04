@@ -1741,7 +1741,10 @@ mod tests {
             last_accepted_ec: 17,
             kbroad_generation: 3,
             barrier_version: 9,
-            cover_leaf_index: 1,
+            slot_lease: cityg_api_client::SlotLease {
+                slot_index: 1,
+                slot_generation: 0,
+            },
             kem_tree_hash_after: [0x0F; 32],
             current_history_commitment: sample_history_commitment(),
             history_authority_extension: None,
@@ -2555,7 +2558,7 @@ mod tests {
             kbroad_generation: ticket.kbroad_generation,
             barrier_version: ticket.barrier_version,
             profile_version: "v0.1.4".to_string(),
-            cover_leaf_index: ticket.cover_leaf_index,
+            cover_leaf_index: ticket.slot_lease.slot_index,
             kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
             n_max: ticket.n_max,
             max_barrier_update_bytes: ticket.max_barrier_update_bytes,
@@ -4772,7 +4775,7 @@ mod tests {
             fixture.ticket.n_max
         };
         let mut bad_ticket = fixture.ticket.clone();
-        bad_ticket.cover_leaf_index = barrier_n_max;
+        bad_ticket.slot_lease.slot_index = barrier_n_max;
 
         let state = LeaveMockState::new([(
             "/v1/rooms/merge_ticket",
