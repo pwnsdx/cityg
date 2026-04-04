@@ -642,8 +642,8 @@ pub(crate) fn map_full_verification_witness_preparation_error(
                 "revoked helper data mismatch with authenticated current state",
             )
         }
-        RoomFullVerificationWitnessPreparationError::CoverLeafIndexOutOfRange => {
-            ApiError::InvalidRequest("cover_leaf_index out of range")
+        RoomFullVerificationWitnessPreparationError::SlotIndexOutOfRange => {
+            ApiError::InvalidRequest("slot_index out of range")
         }
     }
 }

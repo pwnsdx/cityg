@@ -106,7 +106,7 @@ pub(crate) fn persisted_join_finalize_auth(
         .values()
         .map(|record| PersistedJoinFinalizeAuthRecord {
             leaf_id_hex: hex::encode(record.leaf_id),
-            cover_leaf_index: record.lease.slot_index,
+            slot_index: record.lease.slot_index,
             slot_generation: record.lease.slot_generation,
             token_hex: hex::encode(record.token),
         })
@@ -163,7 +163,7 @@ pub(crate) fn decode_persisted_join_finalize_auth(
                 JoinFinalizeAuthRecord {
                     leaf_id,
                     lease: SlotLease {
-                        slot_index: record.cover_leaf_index,
+                        slot_index: record.slot_index,
                         slot_generation: record.slot_generation,
                     },
                     token,

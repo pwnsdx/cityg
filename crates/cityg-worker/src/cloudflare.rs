@@ -3009,7 +3009,7 @@ fn full_verification_witness_error_response(
             400,
         ),
         RoomFullVerificationWitnessPreparationError::CoverLeafIndexOutOfRange => {
-            Response::error("cover_leaf_index out of range", 400)
+            Response::error("slot_index out of range", 400)
         }
     }
 }

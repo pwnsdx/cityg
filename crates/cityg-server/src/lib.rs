@@ -7591,7 +7591,7 @@ mod tests {
             .map(|record| record.leaf_index)
             .collect();
         let updater_cover_leaf_index = u32::try_from(ticket.slot_index)
-            .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
+            .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let reclaims_revoked_slot = generated.join_finalize_auth_token != [0u8; 32]
             && ticket_roots_hash != committed_roots_hash
             && unresolved_join_leaf_indices.contains(&updater_cover_leaf_index);
@@ -7857,7 +7857,7 @@ mod tests {
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         let revoked_cover_leaf_index = u32::try_from(ticket.slot_index)
-            .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
+            .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
         if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
@@ -8089,7 +8089,7 @@ mod tests {
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         let revoked_cover_leaf_index = u32::try_from(ticket.slot_index)
-            .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
+            .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
         if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {

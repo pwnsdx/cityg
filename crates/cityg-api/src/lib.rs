@@ -3104,10 +3104,10 @@ mod tests {
         assert!(!decoded.deployment_profile_manifest.is_empty());
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
-        let expected_cover_leaf_index = u64::from(u32::from_be_bytes(
+        let expected_slot_index = u64::from(u32::from_be_bytes(
             leaf_id[28..32].try_into().expect("leaf suffix"),
         )) % decoded.n_max.max(1);
-        assert_eq!(decoded.cover_leaf_index, expected_cover_leaf_index);
+        assert_eq!(decoded.slot_index, expected_slot_index);
 
         let srx = SrxInputsOwned::from_cbor(&decoded.srx_cbor).expect("decode merge srx payload");
         assert!(srx.join_leaf_ids.is_empty());
@@ -3524,7 +3524,7 @@ mod tests {
         .expect("revoked leaves request should succeed");
         let revoked_decoded: BarrierResolveRevokedLeavesResponse =
             decode_proto_response(revoked_response).await;
-        assert!(revoked_decoded.leaf_indices.is_empty());
+        assert!(revoked_decoded.records.is_empty());
         assert_eq!(
             revoked_decoded.history_authority_descriptor,
             expected_history_authority_descriptor

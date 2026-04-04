@@ -574,7 +574,7 @@ pub(crate) struct PersistedJoinFinalizeAuthRecord {
     #[serde(default)]
     pub(crate) leaf_id_hex: String,
     #[serde(default)]
-    pub(crate) cover_leaf_index: u32,
+    pub(crate) slot_index: u32,
     #[serde(default)]
     pub(crate) slot_generation: u64,
     #[serde(default)]
@@ -633,6 +633,7 @@ pub(crate) fn leaf_index(leaf: &[u8; 32]) -> u32 {
 /// The mapping is deterministic across components:
 /// `cover_leaf_index(device_pk) = leaf_index(device_pk) mod n_max`.
 /// We clamp `n_max` to `[1, u32::MAX]` before applying modulo.
+#[cfg(test)]
 pub(crate) fn cover_leaf_index(leaf: &[u8; 32], n_max: u64) -> u32 {
     let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
     leaf_index(leaf) % n_max
