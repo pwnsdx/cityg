@@ -7407,6 +7407,37 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn apply_revoked_records_to_snapshot_dedups_shared_slot_indices() -> Result<(), CityGError> {
+        let mut snapshot = vec![
+            vec![0xA0],
+            vec![0xA1],
+            vec![0xA2],
+            vec![0xA3],
+            vec![0xA4],
+            vec![0xA5],
+            vec![0xA6],
+        ];
+        apply_revoked_records_to_snapshot(
+            snapshot.as_mut_slice(),
+            4,
+            &[
+                super::BarrierRevokedLeafRecord {
+                    leaf_index: 2,
+                    slot_generation: 0,
+                },
+                super::BarrierRevokedLeafRecord {
+                    leaf_index: 2,
+                    slot_generation: 4,
+                },
+            ],
+        )?;
+        assert!(snapshot[5].is_empty());
+        assert!(snapshot[2].is_empty());
+        assert!(snapshot[0].is_empty());
+        Ok(())
+    }
+
     fn collect_resolution_targets(
         snapshot: &[Vec<u8>],
         node: usize,
