@@ -243,17 +243,17 @@ Shared authenticated-view rule (normative):
 * Every successful page of one logical A), B), or C) result MUST carry the same `history_view_id` and the same `HistoryCommitment` as every other page of that same logical result.
 * Page ordering MUST be deterministic and gap-free. The response MUST identify the returned page's starting offset, the logical total number of entries, and whether another page exists. Clients composing multiple pages MUST fail closed on offset gaps, overlaps, `total_entries` drift, or authenticated-view mismatch.
 
-A) ResolveRevokedLeaves(revocation_roots_hash, page_offset?, max_entries?) -> list of RevokedLeafRecord page
-RevokedLeafRecord = [leaf_index:uint, slot_generation:uint64]
+A) ResolveRevokedLeaves(revocation_roots_hash, page_offset?, max_entries?) -> list of RevokedOccupancyRecord page
+RevokedOccupancyRecord = [slot_index:uint, slot_generation:uint64]
 Returns revoked slot occupancies corresponding to revocation_roots_hash.
 This enumeration MUST be integrity-protected by membership/SRX state referenced by header[112]/[113].
 The authenticated response MUST carry `history_view_id`.
 The authenticated response MUST carry the corresponding `HistoryCommitment`.
 If the deployment defines a helper-completeness extension, that extension MUST bind any `helper_completeness_attestation` to `(gid, history_view_id, revocation_roots_hash, page_offset, total_entries, payload page)` and to one exact authenticated history object for that result.
-Returned records MUST be strictly sorted by increasing `(leaf_index, slot_generation)`, MUST carry `leaf_index < N_max`, and the selected committed view MUST contain at most one active occupancy per `(leaf_index, slot_generation)`.
+Returned records MUST be strictly sorted by increasing `(slot_index, slot_generation)`, MUST carry `slot_index < N_max`, and the selected committed view MUST contain at most one active occupancy per `(slot_index, slot_generation)`.
 
-B) ResolveJoinsSince(prev_barrier_version, page_offset?, max_entries?) -> list of JoinLeafRecord page
-JoinLeafRecord = [device_pk:bstr, leaf_index:uint, ek_leaf:bstr, slot_generation:uint64]
+B) ResolveJoinsSince(prev_barrier_version, page_offset?, max_entries?) -> list of JoinOccupancyRecord page
+JoinOccupancyRecord = [device_pk:bstr, slot_index:uint, ek_leaf:bstr, slot_generation:uint64]
 Returns exactly the join leaf allocations and leaf public keys that:
 * were committed after prev_barrier_version,
 * remain active at the selected `history_view_id`,
@@ -265,10 +265,10 @@ The authenticated response MUST carry the corresponding `HistoryCommitment`.
 If the deployment defines a helper-completeness extension, that extension MUST bind any `helper_completeness_attestation` to `(gid, history_view_id, prev_barrier_version, page_offset, total_entries, payload page)` and to one exact authenticated history object for that result.
 When later sections refer to `JoinSet` or `unresolved JoinSet`, they mean exactly this authenticated payload for the selected `history_view_id`.
 Output constraints (normative):
-* entries MUST be strictly sorted by increasing `(leaf_index, slot_generation)`,
-* there MUST be at most one returned active occupancy per `leaf_index`,
-* `leaf_index` MUST be `< N_max`,
-* `slot_generation` MUST be a uint64 and MUST increase strictly on every reuse of the same `leaf_index`,
+* entries MUST be strictly sorted by increasing `(slot_index, slot_generation)`,
+* there MUST be at most one returned active occupancy per `slot_index`,
+* `slot_index` MUST be `< N_max`,
+* `slot_generation` MUST be a uint64 and MUST increase strictly on every reuse of the same `slot_index`,
 * `ek_leaf` MUST be exactly 1184 bytes,
 * the number of returned records MUST be `<= N_max`,
 * the server MUST prune or compact resolved, revoked, and superseded join activations so that `ResolveJoinsSince(...)` remains bounded by the currently active join activations needed for the selected `history_view_id`,
@@ -1057,12 +1057,14 @@ BarrierUpdate = [
 KemTreeCoverPayload (CBOR bytes inside cover_payload):
 KemTreeCoverPayload = [
   updater_leaf               : uint,
+  updater_slot_generation    : uint,
   path_nodes                 : [* uint],
   revoked_leaf_indices_hint  : null / [* uint],
   node_ciphertexts           : [* NodeCiphertext],
   new_public_keys            : [* [uint, bstr]]
 ]
-`KemTreeCoverPayload` MUST be a CBOR array of length exactly 5.
+`updater_leaf` is the legacy wire field name; semantically it carries the updater `slot_index`.
+`KemTreeCoverPayload` MUST be a CBOR array of length exactly 6.
 NodeCiphertext:
 NodeCiphertext = [
   source_node      : uint,
@@ -1123,11 +1125,11 @@ snapshot_base:
 * non-genesis: current committed pk_entries
 snapshot_pre construction (order is normative):
 1. Apply JoinSet:
-   For each JoinLeafRecord (device_pk, leaf_index=l, ek_leaf, slot_generation):
+   For each JoinOccupancyRecord (device_pk, slot_index=l, ek_leaf, slot_generation):
    * set pk at leaf_node(l) := ek_leaf
    * for each internal node on direct_path(leaf_node(l)) excluding the leaf: set pk := empty bstr
 2. Apply RevokedLeafSet:
-   For each revoked occupancy (leaf_index=r, slot_generation):
+   For each revoked occupancy (slot_index=r, slot_generation):
    * blank pk at leaf_node(r)
    * blank pk at every node on direct_path(leaf_node(r)) including root_node
 kem_tree_hash_before := TreeHash(root_node) over snapshot_pre (per S11.4)
@@ -1347,7 +1349,7 @@ Generic requirements on any such extension:
 
 Concrete extensions defined by this document:
 * `local-history-authority-v1` and `global-history-authority-v1` are two concrete extensions satisfying these requirements within one deployment-local or deployment-global `HistoryAuthorityScope`, respectively.
-* Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, updater_slot_generation:uint64, signature:bstr }` encoded as deterministic CBOR.
+* Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, updater_slot_generation:uint64, signature:bstr }` encoded as deterministic CBOR. `updater_leaf` is the legacy wire field name and semantically binds the updater `slot_index`.
 * Under `local-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, updater_slot_generation, header[180], header[182], header[175])`.
 * Under `local-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the server's authenticated membership view.
 * Under `local-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_leaf`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
@@ -1371,7 +1373,7 @@ Generic requirements:
 * The negotiated extension MUST define the exact witness object, signature suite, and negotiation/profile identifier.
 * The witness MUST bind at minimum `(HistoryAuthorityScope, gid, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author_leaf_id, barrier_update_reason, updater_leaf, updater_slot_generation, digest(header[175]), digest(ResolveJoinsSince result), digest(ResolveRevokedLeaves result), digest(deployment_profile_manifest))`.
 * The signer/authenticator for key `183` MUST be able to replay the exact `reason in {0,1}` authoring decision against the authenticated current tree and authenticated helper outputs for that same current state. A static blob or pure client self-assertion is insufficient.
-* Under `global-history-authority-v1`, `FullVerificationWitness := { scope_id:bstr32, history_authority_extension:tstr, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, updater_slot_generation:uint64, barrier_update_digest:bstr32, joins_digest:bstr32, revoked_digest:bstr32, deployment_profile_manifest_digest:bstr32, signature:bstr }` encoded as deterministic CBOR.
+* Under `global-history-authority-v1`, `FullVerificationWitness := { scope_id:bstr32, history_authority_extension:tstr, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, updater_slot_generation:uint64, barrier_update_digest:bstr32, joins_digest:bstr32, revoked_digest:bstr32, deployment_profile_manifest_digest:bstr32, signature:bstr }` encoded as deterministic CBOR. `updater_leaf` is the legacy wire field name and semantically binds the updater `slot_index`.
 * Under `global-history-authority-v1`, the server/history authority MUST issue key `183` only after replaying the exact S11.11.2-style chain-check for the candidate `barrier_update` against the authenticated current public tree, the authenticated A/B helper outputs, and the authenticated deployment-profile manifest for that same current committed state.
 * Under `global-history-authority-v1`, accepted `barrier_update` bundles with reason `0` or `1` MUST carry key `183`; a missing, stale, or mismatched witness is malformed for this extension.
 * Under `global-history-authority-v1`, key `183` proves server-verifiable authoring eligibility for that exact `reason in {0,1}` bundle within one deployment-global `HistoryAuthorityScope`. It still does NOT, by itself, prove federated consensus across multiple independent deployments.

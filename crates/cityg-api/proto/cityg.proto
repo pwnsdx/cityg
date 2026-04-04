@@ -359,20 +359,6 @@ message BarrierResolveRevokedLeavesResponse {
   repeated BarrierRevokedOccupancyRecord records = 16;
 }
 
-message BarrierRevokedLeafRecord {
-  reserved 1000 to 1999;
-  uint32 leaf_index = 1;
-  uint64 slot_generation = 2;
-}
-
-message BarrierJoinLeafRecord {
-  reserved 1000 to 1999;
-  bytes device_pk = 1;
-  uint32 leaf_index = 2;
-  bytes ek_leaf = 3;
-  uint64 slot_generation = 4;
-}
-
 message BarrierResolveRevokedOccupanciesRequest {
   reserved 1000 to 1999;
   string room_id = 1;

@@ -55,6 +55,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [~] Introduce `cityg.api.v2`
 - [x] Add `v2` helper route aliases for occupancy-oriented barrier helpers
 - [x] Add protobuf `v2` helper request/response messages for occupancy-oriented barrier helpers
+- [x] Remove orphaned protobuf `*LeafRecord` messages once all helper/ticket/witness wire paths consume `OccupancyRecord`
 - [ ] Replace `cover_leaf_index` fields in tickets with `slot_index` + `slot_generation`
 - [x] Rename internal server/runtime ticket bundle fields from `cover_leaf_index` to `slot_index`
 - [x] Align migrated ticket/runtime error terminology from `cover_leaf_index` to `slot_index`
