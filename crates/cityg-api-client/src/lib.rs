@@ -576,19 +576,6 @@ pub struct BarrierResolvedRevokedLeaves {
     pub records: Vec<BarrierRevokedLeafRecord>,
 }
 
-impl BarrierResolvedRevokedLeaves {
-    pub fn leaf_indices(&self) -> Vec<u32> {
-        let mut leaf_indices = self
-            .records
-            .iter()
-            .map(|record| record.leaf_index)
-            .collect::<Vec<_>>();
-        leaf_indices.sort_unstable();
-        leaf_indices.dedup();
-        leaf_indices
-    }
-}
-
 /// Join enumeration response bound to a specific authenticated history view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierResolvedJoins {
@@ -1017,17 +1004,6 @@ pub struct PreparedRuntimeJoinTicket {
 }
 
 impl PreparedRuntimeJoinTicket {
-    pub fn current_revoked_leaf_indices(&self) -> Vec<u32> {
-        let mut leaf_indices = self
-            .current_revoked_records
-            .iter()
-            .map(|record| record.leaf_index)
-            .collect::<Vec<_>>();
-        leaf_indices.sort_unstable();
-        leaf_indices.dedup();
-        leaf_indices
-    }
-
     pub fn prepare_barrier_orchestration<'a>(
         &'a self,
         pop_public_key: &'a [u8],
@@ -3544,7 +3520,7 @@ mod tests {
         );
         assert_eq!(prepared.last_accepted_ec, 21);
         assert!(prepared.current_join_records.is_empty());
-        assert!(prepared.current_revoked_leaf_indices().is_empty());
+        assert!(prepared.current_revoked_records.is_empty());
     }
 
     #[test]
@@ -3563,7 +3539,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_runtime_join_ticket_derives_unique_revoked_leaf_indices_from_records() {
+    fn prepare_runtime_join_ticket_keeps_versioned_revoked_records() {
         let mut ticket = runtime_join_ticket_payload();
         ticket.current_revoked_records = vec![
             pb::BarrierRevokedLeafRecord {
@@ -3599,7 +3575,6 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(prepared.current_revoked_leaf_indices(), vec![1, 7]);
     }
 
     #[test]
@@ -3828,7 +3803,6 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(revoked.leaf_indices(), vec![1, 7]);
         let joins = client
             .barrier_resolve_joins_since(
                 "4141414141414141414141414141414141414141414141414141414141414141",

@@ -639,8 +639,11 @@ fn resolve_revoked_leaf_indices_requires_matching_roots_hash() -> Result<(), Cit
         .map(|group| group.n_max)
         .unwrap_or(crate::DEFAULT_BARRIER_N_MAX);
     assert_eq!(
-        indices.leaf_indices(),
-        vec![crate::slot_index_for_leaf(&leaf, n_max)]
+        indices.records,
+        vec![crate::BarrierRevokedLeafRecord {
+            leaf_index: crate::slot_index_for_leaf(&leaf, n_max),
+            slot_generation: 0,
+        }]
     );
 
     let err = server

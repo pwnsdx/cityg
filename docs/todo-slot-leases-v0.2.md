@@ -63,6 +63,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Remove `revoked_leaf_indices` from full-verification witness requests
 - [x] Remove stored `leaf_indices` from `BarrierResolvedRevokedLeaves` client state
 - [x] Remove stored `leaf_indices` from `ResolvedRevokedLeaves` server state
+- [x] Remove helper-level `leaf_indices` compatibility accessors from client/server runtime surfaces
 - [ ] Update schema encoding/decoding
 - [~] Update runtime service ticket preparation
 
@@ -87,5 +88,5 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 1. Replace remaining internal `cover_leaf_index`/`slot_generation` pairs with `SlotLease` in `api-client` verification and ticket prep.
 2. Finish helper/API cleanup so all occupancy surfaces speak in versioned records only.
-3. Remove the remaining naked revoked-leaf index compatibility from helper surfaces, not just join tickets.
-4. Prepare the wire/profile `v0.2` cut once the runtime surfaces stop depending on naked slot indices.
+3. Update the primary spec text so `ResolveRevokedLeaves` and `ResolveJoinsSince` speak in versioned occupancy records.
+4. Prepare the wire/profile `v0.2` cut once the remaining route/message names stop depending on legacy “revoked leaves” terminology.

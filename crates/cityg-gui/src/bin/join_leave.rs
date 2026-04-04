@@ -2297,7 +2297,6 @@ mod tests {
         ticket: cityg_api_client::MergeTicket,
         barrier_tree_snapshot: cityg_api_client::BarrierPublicTree,
         join_records: Vec<BarrierJoinRecord>,
-        revoked_leaf_indices: Vec<u32>,
         barrier_tree_snapshot_pages_raw: Vec<Vec<u8>>,
         join_records_pages_raw: Vec<Vec<u8>>,
         revoked_leaf_indices_pages_raw: Vec<Vec<u8>>,
@@ -2308,7 +2307,6 @@ mod tests {
         ticket: cityg_api_client::MergeTicket,
         barrier_tree_snapshot: cityg_api_client::BarrierPublicTree,
         join_records: Vec<BarrierJoinRecord>,
-        revoked_leaf_indices: Vec<u32>,
         barrier_tree_snapshot_pages_raw: Vec<Vec<u8>>,
         join_records_pages_raw: Vec<Vec<u8>>,
         revoked_leaf_indices_pages_raw: Vec<Vec<u8>>,
@@ -2399,10 +2397,6 @@ mod tests {
         let join_records_pages_raw =
             capture_resolve_joins_since_pages_raw(&server_url, &room_id, ticket.barrier_version)
                 .await?;
-        let revoked_leaf_indices = client
-            .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
-            .await?
-            .leaf_indices();
         let revoked_leaf_indices_pages_raw = capture_resolve_revoked_pages_raw(
             &server_url,
             &room_id,
@@ -2415,7 +2409,6 @@ mod tests {
                 ticket,
                 barrier_tree_snapshot,
                 join_records,
-                revoked_leaf_indices,
                 barrier_tree_snapshot_pages_raw,
                 join_records_pages_raw,
                 revoked_leaf_indices_pages_raw,
@@ -2464,10 +2457,6 @@ mod tests {
         let join_records_pages_raw =
             capture_resolve_joins_since_pages_raw(&server_url, &room_id, ticket.barrier_version)
                 .await?;
-        let revoked_leaf_indices = client
-            .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
-            .await?
-            .leaf_indices();
         let revoked_leaf_indices_pages_raw = capture_resolve_revoked_pages_raw(
             &server_url,
             &room_id,
@@ -2483,7 +2472,6 @@ mod tests {
             ticket,
             barrier_tree_snapshot,
             join_records,
-            revoked_leaf_indices,
             barrier_tree_snapshot_pages_raw,
             join_records_pages_raw,
             revoked_leaf_indices_pages_raw,

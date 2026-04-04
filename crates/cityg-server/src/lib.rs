@@ -509,19 +509,6 @@ pub struct ResolvedRevokedLeaves {
     pub records: Vec<BarrierRevokedLeafRecord>,
 }
 
-impl ResolvedRevokedLeaves {
-    pub fn leaf_indices(&self) -> Vec<u32> {
-        let mut leaf_indices = self
-            .records
-            .iter()
-            .map(|record| record.leaf_index)
-            .collect::<Vec<_>>();
-        leaf_indices.sort_unstable();
-        leaf_indices.dedup();
-        leaf_indices
-    }
-}
-
 /// Join enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedJoins {
@@ -8658,7 +8645,7 @@ mod tests {
                 ))?;
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         assert!(
-            committed_revoked.leaf_indices().is_empty(),
+            committed_revoked.records.is_empty(),
             "reclaimed slot must no longer appear in the committed revoked helper set"
         );
         Ok(())
