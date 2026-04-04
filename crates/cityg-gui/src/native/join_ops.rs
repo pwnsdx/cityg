@@ -82,10 +82,10 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 {
                     retry_attempt = retry_attempt.saturating_add(1);
                     room_identity = rotate_room_identity(&server_url, &room_id)
-                        .context("regenerate room identity after cover leaf collision")?;
+                        .context("regenerate room identity after slot index collision")?;
                     warn!(
                         attempt = retry_attempt,
-                        "join identity collided on cover leaf index; regenerating identity"
+                        "join identity collided on slot index; regenerating identity"
                     );
                     continue;
                 }
