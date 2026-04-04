@@ -303,7 +303,7 @@ fn admin_expel_ticket_requires_authorized_admin_bound_to_author_leaf() -> Result
     )?;
     assert_eq!(ticket.leaf_id, alice_leaf);
     assert_eq!(
-        ticket.cover_leaf_index,
+        ticket.slot_index,
         u64::from(crate::cover_leaf_index(&bob_leaf, ticket.n_max))
     );
     let srx = witness::SrxInputsOwned::from_cbor(&ticket.srx_cbor)?;

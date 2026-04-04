@@ -95,7 +95,7 @@ fn build_join_ticket_with_leaf_assigns_first_free_slot_even_when_leaf_ids_collid
 
     let ticket = server.build_join_ticket_with_leaf(&gid, Some(colliding_leaf))?;
     assert_eq!(ticket.leaf_id, colliding_leaf);
-    assert_eq!(ticket.cover_leaf_index, 0);
+    assert_eq!(ticket.slot_index, 0);
     Ok(())
 }
 
@@ -179,7 +179,7 @@ fn build_join_ticket_reuses_revoked_slot_capacity() -> Result<(), CityGError> {
         .n_max = 2;
 
     let ticket = server.build_join_ticket(&gid)?;
-    assert_eq!(ticket.cover_leaf_index, 0);
+    assert_eq!(ticket.slot_index, 0);
 
     let capacity = server
         .barrier_leaf_capacity(&gid)

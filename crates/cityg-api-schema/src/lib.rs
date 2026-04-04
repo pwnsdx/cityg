@@ -108,7 +108,7 @@ pub fn encode_prepared_join_ticket_response(
         kbroad_generation: ticket.kbroad_generation,
         barrier_version: ticket.barrier_version,
         profile_version: API_PROFILE_VERSION.to_string(),
-        slot_index: ticket.cover_leaf_index,
+        slot_index: ticket.slot_index,
         slot_generation: ticket.slot_generation,
         kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
         n_max: ticket.n_max,
@@ -205,7 +205,7 @@ pub fn encode_prepared_merge_ticket_response(prepared: PreparedMergeTicket) -> V
         kbroad_generation: bundle.kbroad_generation,
         barrier_version: bundle.barrier_version,
         profile_version: API_PROFILE_VERSION.to_string(),
-        slot_index: bundle.cover_leaf_index,
+        slot_index: bundle.slot_index,
         slot_generation: bundle.slot_generation,
         kem_tree_hash_after: bundle.kem_tree_hash_after.to_vec(),
         n_max: bundle.n_max,
@@ -2819,7 +2819,6 @@ mod tests {
                             slot_generation: 4,
                         },
                     ],
-                    leaf_indices: vec![5, 7],
                 },
                 page: cityg_runtime::BarrierPage {
                     items: vec![cityg_server::BarrierRevokedLeafRecord {

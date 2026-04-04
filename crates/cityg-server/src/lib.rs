@@ -378,8 +378,8 @@ pub struct JoinTicketBundle {
     pub kbroad_generation: u64,
     /// Current barrier version for this group.
     pub barrier_version: u64,
-    /// Cover leaf index allocated to the joining device.
-    pub cover_leaf_index: u64,
+    /// Slot index allocated to the joining device.
+    pub slot_index: u64,
     /// Lease generation allocated to the joining device slot.
     pub slot_generation: u64,
     /// Current committed barrier tree hash.
@@ -570,7 +570,7 @@ pub struct MergeTicketBundle {
     pub kbroad_public: Vec<u8>,
     pub kbroad_generation: u64,
     pub barrier_version: u64,
-    pub cover_leaf_index: u64,
+    pub slot_index: u64,
     pub slot_generation: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_history_view_id: [u8; 32],
@@ -1311,7 +1311,7 @@ impl CityGServer {
         let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
         let current_history_view_id = current_history_commitment.history_view_id;
         let barrier_version = barrier_state.barrier_version;
-        let cover_leaf_index = u64::from(lease.slot_index);
+        let slot_index = u64::from(lease.slot_index);
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
         let requires_current_barrier_update = parent_root != [0u8; 32] || barrier_version > 0;
@@ -1385,7 +1385,7 @@ impl CityGServer {
             kbroad_public,
             kbroad_generation,
             barrier_version,
-            cover_leaf_index,
+            slot_index,
             slot_generation: lease.slot_generation,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             current_history_view_id,
@@ -1736,7 +1736,7 @@ impl CityGServer {
             kbroad_public,
             kbroad_generation,
             barrier_version,
-            cover_leaf_index: u64::from(target_lease.slot_index),
+            slot_index: u64::from(target_lease.slot_index),
             slot_generation: target_lease.slot_generation,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             current_history_view_id: current_history_commitment.history_view_id,
@@ -4487,7 +4487,7 @@ fn encode_join_provisioning_artifact(
         prev_history_commitment_id: &bundle.current_history_commitment.prev_history_commitment_id,
         history_seq: bundle.current_history_commitment.history_seq,
         barrier_version: bundle.barrier_version,
-        cover_leaf_index: bundle.cover_leaf_index,
+        cover_leaf_index: bundle.slot_index,
         slot_generation: bundle.slot_generation,
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
@@ -4531,7 +4531,7 @@ fn encode_join_provisioning_artifact(
             .to_vec(),
         history_seq: bundle.current_history_commitment.history_seq,
         barrier_version: bundle.barrier_version,
-        cover_leaf_index: bundle.cover_leaf_index,
+        cover_leaf_index: bundle.slot_index,
         slot_generation: bundle.slot_generation,
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
@@ -4574,7 +4574,7 @@ fn encode_merge_ticket_artifact(
         prev_history_commitment_id: &bundle.current_history_commitment.prev_history_commitment_id,
         history_seq: bundle.current_history_commitment.history_seq,
         barrier_version: bundle.barrier_version,
-        cover_leaf_index: bundle.cover_leaf_index,
+        cover_leaf_index: bundle.slot_index,
         slot_generation: bundle.slot_generation,
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
@@ -4626,7 +4626,7 @@ fn encode_merge_ticket_artifact(
             .to_vec(),
         history_seq: bundle.current_history_commitment.history_seq,
         barrier_version: bundle.barrier_version,
-        cover_leaf_index: bundle.cover_leaf_index,
+        cover_leaf_index: bundle.slot_index,
         slot_generation: bundle.slot_generation,
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
@@ -7595,7 +7595,7 @@ mod tests {
             .iter()
             .map(|record| record.leaf_index)
             .collect();
-        let updater_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
+        let updater_cover_leaf_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
         let reclaims_revoked_slot = generated.join_finalize_auth_token != [0u8; 32]
             && ticket_roots_hash != committed_roots_hash
@@ -7649,7 +7649,7 @@ mod tests {
         let next_barrier_version = ticket.barrier_version.saturating_add(1);
         let barrier_update = build_refresh_barrier_update_bytes(
             ticket.n_max,
-            ticket.cover_leaf_index,
+            ticket.slot_index,
             next_barrier_version,
             ticket.barrier_version,
             ticket_roots_hash,
@@ -7861,7 +7861,7 @@ mod tests {
             .pk_entries;
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
-        let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
+        let revoked_cover_leaf_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
         let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
@@ -7893,7 +7893,7 @@ mod tests {
         let next_barrier_version = ticket.barrier_version.saturating_add(1);
         let barrier_update = build_refresh_barrier_update_bytes(
             ticket.n_max,
-            ticket.cover_leaf_index,
+            ticket.slot_index,
             next_barrier_version,
             ticket.barrier_version,
             revocation_roots_hash,
@@ -8093,7 +8093,7 @@ mod tests {
             .pk_entries;
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
-        let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
+        let revoked_cover_leaf_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
         let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
@@ -8125,7 +8125,7 @@ mod tests {
         let next_barrier_version = ticket.barrier_version.saturating_add(1);
         let barrier_update = build_refresh_barrier_update_bytes(
             ticket.n_max,
-            ticket.cover_leaf_index,
+            ticket.slot_index,
             next_barrier_version,
             ticket.barrier_version,
             revocation_roots_hash,

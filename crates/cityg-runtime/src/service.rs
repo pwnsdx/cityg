@@ -1016,7 +1016,7 @@ pub fn prepare_full_verification_witness(
             .resolve_revoked_leaf_indices(gid, &committed_revocation_roots_hash)
             .map_err(RoomFullVerificationWitnessPreparationError::HelperClient)?
             .records;
-        let cover_leaf_index = u32::try_from(bundle.cover_leaf_index)
+        let cover_leaf_index = u32::try_from(bundle.slot_index)
             .map_err(|_| RoomFullVerificationWitnessPreparationError::CoverLeafIndexOutOfRange)?;
         if request.include_updater_in_revoked_set {
             let updater_record = BarrierRevokedLeafRecord {
@@ -1054,7 +1054,7 @@ pub fn prepare_full_verification_witness(
             &bundle.kem_tree_hash_after,
             &request.author_leaf_id,
             request.barrier_update_reason,
-            bundle.cover_leaf_index,
+            bundle.slot_index,
             bundle.slot_generation,
             request.barrier_update.as_slice(),
             request.joins_prev_barrier_version,
