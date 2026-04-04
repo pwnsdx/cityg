@@ -205,8 +205,9 @@ S3.1 Core identifiers (inputs)
 
 S3.2 Membership/SRX anchor roots (inputs)
 * header[110], header[111], header[112], header[113] : bstr32 roots (membership and revocation)
-* membership mapping: cover_leaf_index(device_pk) -> uint, committed by membership state
-* membership state also defines the current per-group membership leaf identifier `leaf_id(device_pk) -> bstr32` for each active device. This 32-byte `leaf_id` is distinct from `cover_leaf_index(device_pk)` and is the canonical `sender_leaf_id` used in S8.
+* membership mapping: `current_slot_lease(device_pk) -> { slot_index:uint, slot_generation:uint64 }`, committed by membership state
+* For compatibility with legacy field names and helper identifiers, `cover_leaf_index(device_pk)` refers to `current_slot_lease(device_pk).slot_index` when a later section uses the older term.
+* membership state also defines the current per-group membership leaf identifier `leaf_id(device_pk) -> bstr32` for each active device. This 32-byte `leaf_id` is distinct from the current slot lease and is the canonical `sender_leaf_id` used in S8.
 * For this base profile, `leaf_id(device_pk)` MUST be a deterministic per-group function of `(gid, device_pk, device_pk_alg)` under the selected leaf-id mode. Re-deriving `leaf_id` for the same `(gid, device_pk, device_pk_alg)` tuple MUST yield the same 32-byte value.
 
 S3.3 Interfaces REQUIRED by this profile (implementability requirement)
@@ -316,7 +317,7 @@ Requirements on that extension:
 * Under `local-history-authority-v1`, `parent_attestation_id` MUST equal `H_L("barrier/global-history/parent-attestation", [scope_id, gid, prev_history_commitment_id])`, except that it MUST be all-zero when `prev_history_commitment_id` is all-zero.
 * Under `local-history-authority-v1`, the signed payload for `GlobalHistoryAttestation` MUST bind at minimum `(scope_id, gid, history_view_id, history_commitment_id, prev_history_commitment_id, history_seq, barrier_version, kem_tree_hash_after, parent_attestation_id, finality_kind)`.
 * Under `local-history-authority-v1`, `helper_completeness_attestation` MUST be non-empty on successful A), B), and C) responses and MUST be signed over `(scope_id, helper_kind, history_view_id, history_commitment_id, page_offset, total_entries, selector/page payload)`.
-* `helper_kind` MUST be one of `resolve_revoked_leaves`, `resolve_joins_since`, or `fetch_public_tree`.
+* `helper_kind` MUST be one of `resolve_revoked_leaves`, `resolve_joins_since`, or `fetch_public_tree`. These are stable legacy helper identifiers; newer API routes may expose the same helper semantics under occupancy-oriented names.
 * When this extension is negotiated, any join/merge/provisioning artifact that carries current-state helper payloads for a client decision SHOULD also carry the same `HistoryAuthorityDescriptor` and matching scope-local attestation objects for those helper payloads.
 * This extension proves append-only correlation, current-state binding, and helper-page completeness only inside one `HistoryAuthorityScope`. It does NOT, by itself, prove non-equivocation across multiple servers, independent witnesses, or any stronger globally canonical finality.
 * Production deployments conforming to the base profile defined by this document MUST prefer `global-history-authority-v1` instead. `local-history-authority-v1` is retained only so existing tests and explicitly negotiated non-base compatibility paths have a stable identifier.
@@ -703,7 +704,7 @@ Normative constants:
 * `MAX_CT_PAYLOAD_BYTES := 1048576`
 * `MAX_PAYLOAD_ENVELOPE_BYTES := 1048640`  /* total serialized PayloadEnvelope size, including CBOR wrapper */
 Define sender_leaf_id (normative):
-* sender_leaf_id is the authenticated 32-byte current membership `leaf_id` of the sending device for this group, supplied by the outer message transport / authenticated sender context for this payload. It is NOT `cover_leaf_index(device_pk)`.
+* sender_leaf_id is the authenticated 32-byte current membership `leaf_id` of the sending device for this group, supplied by the outer message transport / authenticated sender context for this payload. It is NOT the sender's current slot lease or `cover_leaf_index(device_pk)`.
 * Every in-profile payload transport MUST carry an authenticated sender device identifier (for example `author_device_pk`) and an authenticated membership view sufficient to derive that device's current `leaf_id` for this group. A transport that omits authenticated sender device identity is out of profile for S8.
 * The same sender_leaf_id MUST be supplied to both the encrypt and decrypt paths for S8.3/S8.4 derivations.
 * If sender_leaf_id is missing, malformed, or not exactly 32 bytes, the implementation MUST fail closed and MUST NOT attempt payload decryption.

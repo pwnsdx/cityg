@@ -100,5 +100,5 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 ## Immediate next slice
 
 1. Finish the remaining public/profile rename from legacy helper names (`ResolveRevokedLeaves`, `ResolveJoinsSince`) to occupancy-oriented route and message names.
-2. Sweep the remaining `docs/specs.md` sections that still describe recovery or helper logic in `cover_leaf_index(...)` terms.
+2. Finish the remaining spec/profile sweep for legacy helper identifiers (`helper_kind`, wire labels) that still intentionally preserve old names for compatibility.
 3. Add KAT/conformance coverage that exercises the new occupancy semantics through the public helper/profile boundary.
