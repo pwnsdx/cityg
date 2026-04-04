@@ -22,6 +22,20 @@ fn resolve_joins_since_reports_join_metadata() -> Result<(), CityGError> {
 }
 
 #[test]
+fn resolve_join_occupancies_since_matches_legacy_wrapper() -> Result<(), CityGError> {
+    let mut server = crate::demo::demo_server();
+    let bundle = cityg_client::demo::demo_bundle("alice")?;
+    server.accept_epoch(&bundle)?;
+
+    let preferred = server.resolve_join_occupancies_since(&cityg_client::demo::DEMO_GID, 0)?;
+    let legacy = server.resolve_joins_since(&cityg_client::demo::DEMO_GID, 0)?;
+    assert_eq!(preferred.history_view_id, legacy.history_view_id);
+    assert_eq!(preferred.history_commitment, legacy.history_commitment);
+    assert_eq!(preferred.records, legacy.records);
+    Ok(())
+}
+
+#[test]
 fn resolve_joins_since_filters_post_genesis_join_history() -> Result<(), CityGError> {
     let gid = [0x82; 32];
     let mut server = CityGServer::new(ServerConfig::new());
@@ -652,6 +666,35 @@ fn resolve_revoked_occupancies_requires_matching_roots_hash() -> Result<(), City
         err,
         CityGError::InvalidInput("revocation_roots_hash does not match committed barrier roots")
     ));
+    Ok(())
+}
+
+#[test]
+fn resolve_revoked_occupancies_matches_legacy_wrapper() -> Result<(), CityGError> {
+    let mut server = crate::demo::demo_server();
+    let bundle = cityg_client::demo::demo_bundle("alice")?;
+    server.accept_epoch(&bundle)?;
+
+    let roots_hash = {
+        let group = server
+            .roster
+            .groups
+            .get_mut(cityg_client::demo::DEMO_GID.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        let root = group.barrier_roots_hash;
+        let leaf = group
+            .latest_snapshot()
+            .and_then(|snapshot| snapshot.members().next().copied())
+            .ok_or(CityGError::InvalidInput("missing membership snapshot"))?;
+        group.revoked.insert(leaf);
+        root
+    };
+
+    let preferred = server.resolve_revoked_occupancies(&cityg_client::demo::DEMO_GID, &roots_hash)?;
+    let legacy = server.resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &roots_hash)?;
+    assert_eq!(preferred.history_view_id, legacy.history_view_id);
+    assert_eq!(preferred.history_commitment, legacy.history_commitment);
+    assert_eq!(preferred.records, legacy.records);
     Ok(())
 }
 
