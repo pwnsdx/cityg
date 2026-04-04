@@ -510,15 +510,17 @@ impl CitygApiClient {
 
 /// Join record returned by barrier join enumeration endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BarrierJoinRecord {
+pub struct BarrierJoinOccupancyRecord {
     pub device_pk: Vec<u8>,
     pub leaf_index: u32,
     pub slot_generation: u64,
     pub ek_leaf: Vec<u8>,
 }
 
+pub type BarrierJoinRecord = BarrierJoinOccupancyRecord;
+
 fn to_core_join_snapshot_record(
-    record: &BarrierJoinRecord,
+    record: &BarrierJoinOccupancyRecord,
 ) -> cityg_client::barrier::BarrierJoinSnapshotRecord {
     cityg_client::barrier::BarrierJoinSnapshotRecord {
         leaf_index: record.leaf_index,
@@ -528,7 +530,7 @@ fn to_core_join_snapshot_record(
 }
 
 pub fn to_core_join_snapshot_records(
-    join_records: &[BarrierJoinRecord],
+    join_records: &[BarrierJoinOccupancyRecord],
 ) -> Vec<cityg_client::barrier::BarrierJoinSnapshotRecord> {
     join_records
         .iter()
@@ -590,7 +592,7 @@ pub struct BarrierResolvedJoinOccupancies {
     pub history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
-    pub records: Vec<BarrierJoinRecord>,
+    pub records: Vec<BarrierJoinOccupancyRecord>,
 }
 
 pub type BarrierResolvedJoins = BarrierResolvedJoinOccupancies;
@@ -1005,8 +1007,8 @@ pub struct PreparedRuntimeJoinTicket {
     pub max_barrier_update_bytes: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_predecessor_kem_tree_hash_after: [u8; 32],
-    pub current_join_records: Vec<BarrierJoinRecord>,
-    pub current_revoked_records: Vec<BarrierRevokedLeafRecord>,
+    pub current_join_records: Vec<BarrierJoinOccupancyRecord>,
+    pub current_revoked_records: Vec<BarrierRevokedOccupancyRecord>,
     pub current_barrier_update: Vec<u8>,
     pub last_accepted_ec: u64,
 }
@@ -1722,12 +1724,14 @@ mod tests {
     use cityg_client::demo::demo_bundle_alice;
     use pb::{
         AcceptEpochResponse, BarrierFetchPublicTreeRequest, BarrierFetchPublicTreeResponse,
-        BarrierJoinOccupancyRecord, BarrierLookupMergeAcceptanceResponse,
+        BarrierJoinOccupancyRecord as PbBarrierJoinOccupancyRecord,
+        BarrierLookupMergeAcceptanceResponse,
         BarrierResolveJoinOccupanciesSinceRequest, BarrierResolveJoinOccupanciesSinceResponse,
         BarrierResolveJoinsSinceRequest, BarrierResolveJoinsSinceResponse,
         BarrierResolveRevokedLeavesRequest, BarrierResolveRevokedLeavesResponse,
         BarrierResolveRevokedOccupanciesRequest,
-        BarrierResolveRevokedOccupanciesResponse, BarrierRevokedOccupancyRecord,
+        BarrierResolveRevokedOccupanciesResponse,
+        BarrierRevokedOccupancyRecord as PbBarrierRevokedOccupancyRecord,
         BootstrapRoomResponse, ConfigureWindowResponse,
         FetchMessagesResponse, FsForwardLeapPolicy as PbFsForwardLeapPolicy, GetBundleResponse,
         GetTelemetryResponse, GetWindowResponse, HistoryCommitment as PbHistoryCommitment,
@@ -1946,7 +1950,7 @@ mod tests {
         let join_records = response
             .current_join_records
             .iter()
-            .map(|record| BarrierJoinRecord {
+            .map(|record| BarrierJoinOccupancyRecord {
                 device_pk: record.device_pk.clone(),
                 leaf_index: record.slot_index,
                 slot_generation: record.slot_generation,
@@ -1956,7 +1960,7 @@ mod tests {
         let revoked_records = response
             .current_revoked_records
             .iter()
-            .map(|record| BarrierRevokedLeafRecord {
+            .map(|record| BarrierRevokedOccupancyRecord {
                 leaf_index: record.slot_index,
                 slot_generation: record.slot_generation,
             })
@@ -2393,8 +2397,8 @@ mod tests {
             history_seq: 1,
         };
         let authority = build_test_history_authority(history_commitment, [0x41; 32], 0, [0xCC; 32]);
-        let join_records = Vec::<BarrierJoinRecord>::new();
-        let revoked_records = Vec::<BarrierRevokedLeafRecord>::new();
+        let join_records = Vec::<BarrierJoinOccupancyRecord>::new();
+        let revoked_records = Vec::<BarrierRevokedOccupancyRecord>::new();
         let join_helper_attestation = build_test_helper_completeness_attestation(
             &authority,
             HELPER_KIND_JOINS_SINCE,
@@ -2587,7 +2591,7 @@ mod tests {
                 let page_records = all[start..end].to_vec();
                 let page_records_core = page_records
                     .iter()
-                    .map(|record| BarrierRevokedLeafRecord {
+                    .map(|record| BarrierRevokedOccupancyRecord {
                         leaf_index: record.slot_index,
                         slot_generation: record.slot_generation,
                     })
@@ -2625,11 +2629,11 @@ mod tests {
                 let request = BarrierResolveRevokedOccupanciesRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveRevokedOccupanciesRequest::default());
                 let all = [
-                    BarrierRevokedOccupancyRecord {
+                    PbBarrierRevokedOccupancyRecord {
                         slot_index: 1,
                         slot_generation: 0,
                     },
-                    BarrierRevokedOccupancyRecord {
+                    PbBarrierRevokedOccupancyRecord {
                         slot_index: 7,
                         slot_generation: 3,
                     },
@@ -2656,7 +2660,7 @@ mod tests {
                 let page_records = all[start..end].to_vec();
                 let page_records_core = page_records
                     .iter()
-                    .map(|record| BarrierRevokedLeafRecord {
+                    .map(|record| BarrierRevokedOccupancyRecord {
                         leaf_index: record.slot_index,
                         slot_generation: record.slot_generation,
                     })
@@ -2729,7 +2733,7 @@ mod tests {
                 let page_records = all[start..end].to_vec();
                 let signed_records = page_records
                     .iter()
-                    .map(|record| BarrierJoinRecord {
+                    .map(|record| BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
                         leaf_index: record.slot_index,
                         slot_generation: record.slot_generation,
@@ -2769,13 +2773,13 @@ mod tests {
                 let request = BarrierResolveJoinOccupanciesSinceRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveJoinOccupanciesSinceRequest::default());
                 let all = [
-                    BarrierJoinOccupancyRecord {
+                    PbBarrierJoinOccupancyRecord {
                         device_pk: vec![0xAA; 32],
                         slot_index: 9,
                         slot_generation: 0,
                         ek_leaf: vec![0xBB; 1184],
                     },
-                    BarrierJoinOccupancyRecord {
+                    PbBarrierJoinOccupancyRecord {
                         device_pk: vec![0xAB; 32],
                         slot_index: 10,
                         slot_generation: 1,
@@ -2808,7 +2812,7 @@ mod tests {
                 let page_records = all[start..end].to_vec();
                 let page_records_core = page_records
                     .iter()
-                    .map(|record| BarrierJoinRecord {
+                    .map(|record| BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
                         leaf_index: record.slot_index,
                         slot_generation: record.slot_generation,
@@ -3727,15 +3731,15 @@ mod tests {
         assert_eq!(
             prepared.current_revoked_records,
             vec![
-                BarrierRevokedLeafRecord {
+                BarrierRevokedOccupancyRecord {
                     leaf_index: 7,
                     slot_generation: 3,
                 },
-                BarrierRevokedLeafRecord {
+                BarrierRevokedOccupancyRecord {
                     leaf_index: 1,
                     slot_generation: 0,
                 },
-                BarrierRevokedLeafRecord {
+                BarrierRevokedOccupancyRecord {
                     leaf_index: 7,
                     slot_generation: 1,
                 },
@@ -3959,11 +3963,11 @@ mod tests {
         assert_eq!(
             revoked.records,
             vec![
-                BarrierRevokedLeafRecord {
+                BarrierRevokedOccupancyRecord {
                     leaf_index: 1,
                     slot_generation: 0,
                 },
-                BarrierRevokedLeafRecord {
+                BarrierRevokedOccupancyRecord {
                     leaf_index: 7,
                     slot_generation: 3,
                 }
@@ -5263,7 +5267,7 @@ mod tests {
             2,
             RevokedLeavesSelector {
                 revocation_roots_hash: &[0xCC; 32],
-                records: &[BarrierRevokedLeafRecord {
+                records: &[BarrierRevokedOccupancyRecord {
                     leaf_index: 1,
                     slot_generation: 0,
                 }],
@@ -5277,7 +5281,7 @@ mod tests {
             2,
             RevokedLeavesSelector {
                 revocation_roots_hash: &[0xCC; 32],
-                records: &[BarrierRevokedLeafRecord {
+                records: &[BarrierRevokedOccupancyRecord {
                     leaf_index: 2,
                     slot_generation: 0,
                 }],
@@ -5566,7 +5570,7 @@ mod tests {
             2,
             JoinsSinceSelector {
                 prev_barrier_version: 0,
-                records: &[BarrierJoinRecord {
+                records: &[BarrierJoinOccupancyRecord {
                     device_pk: vec![0xAA; 32],
                     leaf_index: 9,
                     slot_generation: 0,
@@ -5582,7 +5586,7 @@ mod tests {
             2,
             JoinsSinceSelector {
                 prev_barrier_version: 0,
-                records: &[BarrierJoinRecord {
+                records: &[BarrierJoinOccupancyRecord {
                     device_pk: vec![0xAB; 32],
                     leaf_index: 10,
                     slot_generation: 0,

@@ -188,7 +188,7 @@ impl CitygApiClient {
                 let join_records = response
                     .current_join_records
                     .iter()
-                    .map(|record| BarrierJoinRecord {
+                    .map(|record| BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
                         leaf_index: record.slot_index,
                         slot_generation: record.slot_generation,
@@ -222,7 +222,7 @@ impl CitygApiClient {
                 let revoked_records = response
                     .current_revoked_records
                     .iter()
-                    .map(|record| BarrierRevokedLeafRecord {
+                    .map(|record| BarrierRevokedOccupancyRecord {
                         leaf_index: record.slot_index,
                         slot_generation: record.slot_generation,
                     })
@@ -350,7 +350,7 @@ pub fn prepare_runtime_join_ticket(
     let current_revoked_records = response
         .current_revoked_records
         .iter()
-        .map(|record| BarrierRevokedLeafRecord {
+        .map(|record| BarrierRevokedOccupancyRecord {
             leaf_index: record.slot_index,
             slot_generation: record.slot_generation,
         })
@@ -422,7 +422,7 @@ pub fn prepare_runtime_join_ticket(
         current_join_records: response
             .current_join_records
             .iter()
-            .map(|record| BarrierJoinRecord {
+            .map(|record| BarrierJoinOccupancyRecord {
                 device_pk: record.device_pk.clone(),
                 leaf_index: record.slot_index,
                 slot_generation: record.slot_generation,

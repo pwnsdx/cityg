@@ -1,7 +1,7 @@
 use std::error::Error as StdError;
 
 use cityg_api_client::{
-    BarrierJoinRecord, BarrierRevokedLeafRecord, GlobalHistoryAttestation,
+    BarrierJoinOccupancyRecord, BarrierRevokedOccupancyRecord, GlobalHistoryAttestation,
     HelperCompletenessAttestation, HistoryAuthorityDescriptor, HistoryCommitment,
     parse_fetch_public_tree_completeness_attestation_bytes, parse_global_history_attestation_bytes,
     parse_history_authority_descriptor_bytes, parse_joins_since_completeness_attestation_bytes,
@@ -79,13 +79,13 @@ struct HelperCompletenessSignedPayload<'a, T> {
 struct RevokedLeavesSelector<'a> {
     #[serde(with = "serde_bytes")]
     revocation_roots_hash: &'a [u8; 32],
-    records: &'a [BarrierRevokedLeafRecord],
+    records: &'a [BarrierRevokedOccupancyRecord],
 }
 
 #[derive(Serialize)]
 struct JoinsSinceSelector<'a> {
     prev_barrier_version: u64,
-    records: &'a [BarrierJoinRecord],
+    records: &'a [BarrierJoinOccupancyRecord],
 }
 
 #[derive(Serialize)]
@@ -246,11 +246,11 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         RevokedLeavesSelector {
             revocation_roots_hash: &[0xDD; 32],
             records: &[
-                BarrierRevokedLeafRecord {
+                BarrierRevokedOccupancyRecord {
                     leaf_index: 1,
                     slot_generation: 0,
                 },
-                BarrierRevokedLeafRecord {
+                BarrierRevokedOccupancyRecord {
                     leaf_index: 7,
                     slot_generation: 2,
                 },
@@ -276,18 +276,18 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         0,
         2,
         &[
-            BarrierRevokedLeafRecord {
+            BarrierRevokedOccupancyRecord {
                 leaf_index: 1,
                 slot_generation: 0,
             },
-            BarrierRevokedLeafRecord {
+            BarrierRevokedOccupancyRecord {
                 leaf_index: 7,
                 slot_generation: 2,
             },
         ],
     )?;
 
-    let join_record = BarrierJoinRecord {
+    let join_record = BarrierJoinOccupancyRecord {
         device_pk: vec![0xAA; 32],
         leaf_index: 9,
         slot_generation: 0,

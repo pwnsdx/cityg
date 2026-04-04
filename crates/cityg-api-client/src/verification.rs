@@ -10,7 +10,7 @@ use pqcrypto_dilithium::dilithium5;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BarrierJoinRecord, BarrierRevokedLeafRecord, EXPECTED_MSPHF_CRS_ID, EXPECTED_MSPHF_PARAMS_ID,
+    BarrierJoinOccupancyRecord, BarrierRevokedOccupancyRecord, EXPECTED_MSPHF_CRS_ID, EXPECTED_MSPHF_PARAMS_ID,
     EXPECTED_PROFILE_VERSION, EXPECTED_PROOF_MODE, EXPECTED_VRF_ID, Error, FsForwardLeapPolicy,
     FullVerificationWitness, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
     GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, GlobalHistoryAttestation, HELPER_KIND_FETCH_PUBLIC_TREE,
@@ -276,8 +276,8 @@ pub(crate) struct JoinProvisioningArtifactSignedPayload<'a> {
     pub(crate) current_revoked_records_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
     pub(crate) current_barrier_update: &'a [u8],
-    pub(crate) current_join_records: &'a [BarrierJoinRecord],
-    pub(crate) current_revoked_records: &'a [BarrierRevokedLeafRecord],
+    pub(crate) current_join_records: &'a [BarrierJoinOccupancyRecord],
+    pub(crate) current_revoked_records: &'a [BarrierRevokedOccupancyRecord],
 }
 
 #[derive(Serialize)]
@@ -418,13 +418,13 @@ pub(crate) struct HelperCompletenessSignedPayload<'a, T> {
 pub(crate) struct RevokedLeavesSelector<'a> {
     #[serde(with = "serde_bytes")]
     pub(crate) revocation_roots_hash: &'a [u8; 32],
-    pub(crate) records: &'a [BarrierRevokedLeafRecord],
+    pub(crate) records: &'a [BarrierRevokedOccupancyRecord],
 }
 
 #[derive(Serialize)]
 pub(crate) struct JoinsSinceSelector<'a> {
     pub(crate) prev_barrier_version: u64,
-    pub(crate) records: &'a [BarrierJoinRecord],
+    pub(crate) records: &'a [BarrierJoinOccupancyRecord],
 }
 
 #[derive(Serialize)]
@@ -560,12 +560,12 @@ pub(crate) fn compute_full_verification_barrier_update_digest(
 
 pub(crate) fn compute_full_verification_joins_digest(
     prev_barrier_version: u64,
-    join_records: &[BarrierJoinRecord],
+    join_records: &[BarrierJoinOccupancyRecord],
 ) -> Result<[u8; 32], Error> {
     #[derive(Serialize)]
     struct Preimage<'a> {
         prev_barrier_version: u64,
-        records: &'a [BarrierJoinRecord],
+        records: &'a [BarrierJoinOccupancyRecord],
     }
     h_l(
         "cityg/full-verification-witness/joins",
@@ -579,13 +579,13 @@ pub(crate) fn compute_full_verification_joins_digest(
 
 pub(crate) fn compute_full_verification_revoked_digest(
     revocation_roots_hash: &[u8; 32],
-    revoked_records: &[BarrierRevokedLeafRecord],
+    revoked_records: &[BarrierRevokedOccupancyRecord],
 ) -> Result<[u8; 32], Error> {
     #[derive(Serialize)]
     struct Preimage<'a> {
         #[serde(with = "serde_bytes")]
         revocation_roots_hash: &'a [u8; 32],
-        records: &'a [BarrierRevokedLeafRecord],
+        records: &'a [BarrierRevokedOccupancyRecord],
     }
     h_l(
         "cityg/full-verification-witness/revoked",
@@ -628,9 +628,9 @@ pub(crate) fn verify_full_verification_witness(
     updater_slot_lease: SlotLease,
     barrier_update: &[u8],
     joins_prev_barrier_version: u64,
-    join_records: &[BarrierJoinRecord],
+    join_records: &[BarrierJoinOccupancyRecord],
     revocation_roots_hash: &[u8; 32],
-    revoked_records: &[BarrierRevokedLeafRecord],
+    revoked_records: &[BarrierRevokedOccupancyRecord],
     deployment_profile_manifest: &[u8],
 ) -> Result<FullVerificationWitness, Error> {
     let witness: FullVerificationWitnessWire = decode_cbor_det("full verification witness", raw)?;
@@ -829,7 +829,7 @@ pub(crate) fn verify_join_provisioning_artifact(
     let join_records = response
         .current_join_records
         .iter()
-        .map(|record| BarrierJoinRecord {
+        .map(|record| BarrierJoinOccupancyRecord {
             device_pk: record.device_pk.clone(),
             leaf_index: record.slot_index,
             slot_generation: record.slot_generation,
@@ -839,7 +839,7 @@ pub(crate) fn verify_join_provisioning_artifact(
     let revoked_records = response
         .current_revoked_records
         .iter()
-        .map(|record| BarrierRevokedLeafRecord {
+        .map(|record| BarrierRevokedOccupancyRecord {
             leaf_index: record.slot_index,
             slot_generation: record.slot_generation,
         })
@@ -1364,7 +1364,7 @@ pub fn verify_revoked_leaves_completeness_attestation(
     revocation_roots_hash: &[u8; 32],
     page_offset: u32,
     total_entries: u32,
-    records: &[BarrierRevokedLeafRecord],
+    records: &[BarrierRevokedOccupancyRecord],
 ) -> Result<(), Error> {
     let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
         label: "cityg/helper-completeness-attestation-v1",
@@ -1393,7 +1393,7 @@ pub fn verify_joins_since_completeness_attestation(
     prev_barrier_version: u64,
     page_offset: u32,
     total_entries: u32,
-    records: &[BarrierJoinRecord],
+    records: &[BarrierJoinOccupancyRecord],
 ) -> Result<(), Error> {
     let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
         label: "cityg/helper-completeness-attestation-v1",

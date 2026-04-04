@@ -267,9 +267,9 @@ impl CitygApiClient {
         barrier_version: u64,
         kem_tree_hash_after: &[u8; 32],
         joins_prev_barrier_version: u64,
-        join_records: &[BarrierJoinRecord],
+        join_records: &[BarrierJoinOccupancyRecord],
         revocation_roots_hash: &[u8; 32],
-        revoked_records: &[BarrierRevokedLeafRecord],
+        revoked_records: &[BarrierRevokedOccupancyRecord],
         include_updater_in_revoked_set: bool,
         deployment_profile_manifest: &[u8],
     ) -> Result<Vec<u8>, Error> {
@@ -644,7 +644,7 @@ impl CitygApiClient {
             let page_records = response
                 .records
                 .iter()
-                .map(|record: &PbBarrierJoinOccupancyRecord| BarrierJoinRecord {
+                .map(|record: &PbBarrierJoinOccupancyRecord| BarrierJoinOccupancyRecord {
                     device_pk: record.device_pk.clone(),
                     leaf_index: record.slot_index,
                     slot_generation: record.slot_generation,

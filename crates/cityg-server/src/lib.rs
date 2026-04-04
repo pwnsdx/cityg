@@ -393,9 +393,9 @@ pub struct JoinTicketBundle {
     /// Committed predecessor tree hash used as snapshot_base for the accepted current update.
     pub current_predecessor_kem_tree_hash_after: [u8; 32],
     /// Authenticated JoinSet for the provisioned current committed state.
-    pub current_join_records: Vec<BarrierJoinLeafRecord>,
+    pub current_join_records: Vec<BarrierJoinOccupancyRecord>,
     /// Authenticated revoked occupancies for the provisioned current committed state.
-    pub current_revoked_records: Vec<BarrierRevokedLeafRecord>,
+    pub current_revoked_records: Vec<BarrierRevokedOccupancyRecord>,
     /// Opaque server-issued capability required for reason-2 join_finalize.
     pub join_finalize_auth_token: [u8; 32],
     /// Unique nonce for this join provisioning artifact.
@@ -2926,11 +2926,11 @@ impl CityGServer {
                 "missing revoked slot leases for committed revocations",
             ));
         }
-        let mut records: Vec<BarrierRevokedLeafRecord> = if !state.revoked_slot_leases.is_empty() {
+        let mut records: Vec<BarrierRevokedOccupancyRecord> = if !state.revoked_slot_leases.is_empty() {
             state
                 .revoked_slot_leases
                 .values()
-                .map(|lease| BarrierRevokedLeafRecord {
+                .map(|lease| BarrierRevokedOccupancyRecord {
                     leaf_index: lease.slot_index,
                     slot_generation: lease.slot_generation,
                 })
@@ -2942,7 +2942,7 @@ impl CityGServer {
                 .map(|leaf| {
                     let lease = require_revoked_slot_lease(state, leaf)
                         .expect("revoked slot lease presence checked above");
-                    BarrierRevokedLeafRecord {
+                    BarrierRevokedOccupancyRecord {
                         leaf_index: lease.slot_index,
                         slot_generation: lease.slot_generation,
                     }
@@ -2975,7 +2975,7 @@ impl CityGServer {
             .latest_snapshot()
             .map(|snapshot| snapshot.members().copied().collect())
             .unwrap_or_default();
-        let mut by_leaf: BTreeMap<u32, BarrierJoinLeafRecord> = BTreeMap::new();
+        let mut by_leaf: BTreeMap<u32, BarrierJoinOccupancyRecord> = BTreeMap::new();
         if prev_barrier_version == 0 && state.barrier_version == 0 {
             let snapshot = require_genesis_provisioning_snapshot(
                 state,
@@ -2987,7 +2987,7 @@ impl CityGServer {
                 checked_insert_unique(
                     &mut by_leaf,
                     leaf_index,
-                    BarrierJoinLeafRecord {
+                    BarrierJoinOccupancyRecord {
                         device_pk: state
                             .leaf_device_pk
                             .get(leaf)
@@ -3017,7 +3017,7 @@ impl CityGServer {
                 checked_insert_unique(
                     &mut by_leaf,
                     record.leaf_index,
-                    BarrierJoinLeafRecord {
+                    BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
                         leaf_index: record.leaf_index,
                         slot_generation: record.slot_generation,
@@ -3271,7 +3271,7 @@ impl CityGServer {
         revocation_roots_hash: &[u8; 32],
         page_offset: u32,
         total_entries: u32,
-        records: &[BarrierRevokedLeafRecord],
+        records: &[BarrierRevokedOccupancyRecord],
     ) -> Result<Vec<u8>, CityGError> {
         let Some(authority) = self.history_authority.as_ref() else {
             return Ok(Vec::new());
@@ -3292,7 +3292,7 @@ impl CityGServer {
         prev_barrier_version: u64,
         page_offset: u32,
         total_entries: u32,
-        records: &[BarrierJoinLeafRecord],
+        records: &[BarrierJoinOccupancyRecord],
     ) -> Result<Vec<u8>, CityGError> {
         let Some(authority) = self.history_authority.as_ref() else {
             return Ok(Vec::new());
@@ -3341,9 +3341,9 @@ impl CityGServer {
         updater_slot_generation: u64,
         barrier_update: &[u8],
         joins_prev_barrier_version: u64,
-        join_records: &[BarrierJoinLeafRecord],
+        join_records: &[BarrierJoinOccupancyRecord],
         revocation_roots_hash: &[u8; 32],
-        revoked_records: &[BarrierRevokedLeafRecord],
+        revoked_records: &[BarrierRevokedOccupancyRecord],
         deployment_profile_manifest: &[u8],
     ) -> Result<Vec<u8>, CityGError> {
         let authority = self
@@ -3916,8 +3916,8 @@ struct JoinProvisioningArtifactSignedPayload<'a> {
     current_revoked_records_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
     current_barrier_update: &'a [u8],
-    current_join_records: &'a [BarrierJoinLeafRecord],
-    current_revoked_records: &'a [BarrierRevokedLeafRecord],
+    current_join_records: &'a [BarrierJoinOccupancyRecord],
+    current_revoked_records: &'a [BarrierRevokedOccupancyRecord],
 }
 
 #[derive(Serialize)]
@@ -4039,13 +4039,13 @@ struct RevokedLeavesSelector<'a> {
 struct RevokedLeafRecordsSelector<'a> {
     #[serde(with = "serde_bytes")]
     revocation_roots_hash: &'a [u8; 32],
-    records: &'a [BarrierRevokedLeafRecord],
+    records: &'a [BarrierRevokedOccupancyRecord],
 }
 
 #[derive(Serialize)]
 struct JoinsSinceSelector<'a> {
     prev_barrier_version: u64,
-    records: &'a [BarrierJoinLeafRecord],
+    records: &'a [BarrierJoinOccupancyRecord],
 }
 
 #[derive(Serialize)]
@@ -4355,12 +4355,12 @@ fn compute_full_verification_barrier_update_digest(
 
 fn compute_full_verification_joins_digest(
     prev_barrier_version: u64,
-    records: &[BarrierJoinLeafRecord],
+    records: &[BarrierJoinOccupancyRecord],
 ) -> Result<[u8; 32], CityGError> {
     #[derive(Serialize)]
     struct Preimage<'a> {
         prev_barrier_version: u64,
-        records: &'a [BarrierJoinLeafRecord],
+        records: &'a [BarrierJoinOccupancyRecord],
     }
     h_l(
         "cityg/full-verification-witness/joins",
@@ -4374,13 +4374,13 @@ fn compute_full_verification_joins_digest(
 
 fn compute_full_verification_revoked_digest(
     revocation_roots_hash: &[u8; 32],
-    records: &[BarrierRevokedLeafRecord],
+    records: &[BarrierRevokedOccupancyRecord],
 ) -> Result<[u8; 32], CityGError> {
     #[derive(Serialize)]
     struct Preimage<'a> {
         #[serde(with = "serde_bytes")]
         revocation_roots_hash: &'a [u8; 32],
-        records: &'a [BarrierRevokedLeafRecord],
+        records: &'a [BarrierRevokedOccupancyRecord],
     }
     h_l(
         "cityg/full-verification-witness/revoked",
@@ -4422,9 +4422,9 @@ fn encode_full_verification_witness(
     updater_slot_generation: u64,
     barrier_update: &[u8],
     joins_prev_barrier_version: u64,
-    join_records: &[BarrierJoinLeafRecord],
+    join_records: &[BarrierJoinOccupancyRecord],
     revocation_roots_hash: &[u8; 32],
-    revoked_records: &[BarrierRevokedLeafRecord],
+    revoked_records: &[BarrierRevokedOccupancyRecord],
     deployment_profile_manifest: &[u8],
 ) -> Result<Vec<u8>, CityGError> {
     let barrier_update_digest = compute_full_verification_barrier_update_digest(barrier_update)?;
@@ -4747,7 +4747,7 @@ fn encode_helper_completeness_attestation_revoked_records(
     revocation_roots_hash: &[u8; 32],
     page_offset: u32,
     total_entries: u32,
-    records: &[BarrierRevokedLeafRecord],
+    records: &[BarrierRevokedOccupancyRecord],
 ) -> Result<Vec<u8>, CityGError> {
     let helper_kind = "resolve_revoked_leaves";
     let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
@@ -4777,7 +4777,7 @@ fn encode_helper_completeness_attestation_joins(
     prev_barrier_version: u64,
     page_offset: u32,
     total_entries: u32,
-    records: &[BarrierJoinLeafRecord],
+    records: &[BarrierJoinOccupancyRecord],
 ) -> Result<Vec<u8>, CityGError> {
     let helper_kind = "resolve_joins_since";
     let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
@@ -6546,7 +6546,7 @@ fn validate_barrier_update_against_roster(
 fn apply_join_records_to_snapshot(
     pk_entries: &mut [Vec<u8>],
     n_max: u64,
-    join_records: &[BarrierJoinLeafRecord],
+    join_records: &[BarrierJoinOccupancyRecord],
 ) -> Result<(), CityGError> {
     let leaf_base = usize::try_from(n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
@@ -6569,7 +6569,7 @@ fn apply_join_records_to_snapshot(
 fn apply_revoked_records_to_snapshot(
     pk_entries: &mut [Vec<u8>],
     n_max: u64,
-    revoked_records: &[BarrierRevokedLeafRecord],
+    revoked_records: &[BarrierRevokedOccupancyRecord],
 ) -> Result<(), CityGError> {
     let leaf_base = usize::try_from(n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
@@ -6602,9 +6602,9 @@ fn validate_full_verification_witness_candidate(
     updater_slot_generation: u64,
     barrier_update: &[u8],
     joins_prev_barrier_version: u64,
-    join_records: &[BarrierJoinLeafRecord],
+    join_records: &[BarrierJoinOccupancyRecord],
     revocation_roots_hash: &[u8; 32],
-    revoked_records: &[BarrierRevokedLeafRecord],
+    revoked_records: &[BarrierRevokedOccupancyRecord],
 ) -> Result<(), CityGError> {
     if barrier_update_reason != 0 && barrier_update_reason != 1 {
         return Err(CityGError::InvalidInput("barrier_update malformed"));
@@ -6811,7 +6811,7 @@ pub struct ServerOutcome {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        BarrierRevokedLeafRecord, BarrierUpdateWire, CityGError, CityGServer,
+        BarrierRevokedOccupancyRecord, BarrierUpdateWire, CityGError, CityGServer,
         GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND, GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
         GlobalHistoryAttestationSignedPayload, GroupState, JoinFinalizeAuthRecord,
         KemTreeCoverPayloadWire, NewPublicKeyWire, NodeCiphertextWire,
@@ -7364,7 +7364,7 @@ mod tests {
     fn apply_join_records_to_snapshot(
         snapshot: &mut [Vec<u8>],
         n_max: u64,
-        records: &[super::BarrierJoinLeafRecord],
+        records: &[super::BarrierJoinOccupancyRecord],
     ) -> Result<(), CityGError> {
         let leaf_base = usize::try_from(n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
@@ -7384,7 +7384,7 @@ mod tests {
     fn apply_revoked_records_to_snapshot(
         snapshot: &mut [Vec<u8>],
         n_max: u64,
-        revoked_records: &[super::BarrierRevokedLeafRecord],
+        revoked_records: &[super::BarrierRevokedOccupancyRecord],
     ) -> Result<(), CityGError> {
         let leaf_base = usize::try_from(n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
@@ -7417,11 +7417,11 @@ mod tests {
             snapshot.as_mut_slice(),
             4,
             &[
-                super::BarrierRevokedLeafRecord {
+                super::BarrierRevokedOccupancyRecord {
                     leaf_index: 2,
                     slot_generation: 0,
                 },
-                super::BarrierRevokedLeafRecord {
+                super::BarrierRevokedOccupancyRecord {
                     leaf_index: 2,
                     slot_generation: 4,
                 },
@@ -7639,7 +7639,7 @@ mod tests {
                         || record.slot_generation != ticket.slot_generation
                 });
             } else {
-                let updater_record = BarrierRevokedLeafRecord {
+                let updater_record = BarrierRevokedOccupancyRecord {
                     leaf_index: updater_slot_index,
                     slot_generation: ticket.slot_generation,
                 };
@@ -7882,7 +7882,7 @@ mod tests {
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_records = committed_revoked.records.clone();
         {
-            let revoked_record = BarrierRevokedLeafRecord {
+            let revoked_record = BarrierRevokedOccupancyRecord {
                 leaf_index: revoked_slot_index,
                 slot_generation: ticket.slot_generation,
             };
@@ -8112,7 +8112,7 @@ mod tests {
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_records = committed_revoked.records.clone();
         {
-            let revoked_record = BarrierRevokedLeafRecord {
+            let revoked_record = BarrierRevokedOccupancyRecord {
                 leaf_index: revoked_slot_index,
                 slot_generation: ticket.slot_generation,
             };

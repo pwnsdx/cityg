@@ -74,6 +74,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
   `api-schema` now covers `v2` helper route extraction and occupancy-response protobuf encoding.
 - [~] Update runtime service ticket preparation
 - [x] Add occupancy-oriented Rust type aliases/surfaces in `server` / `runtime` / `api-client` / `api-schema`
+  Internal `server` / `api-client` call sites now consume the occupancy-named types directly; legacy aliases remain only as compatibility shims.
 
 ### 6. Client and GUI
 
