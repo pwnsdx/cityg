@@ -473,7 +473,7 @@ message BarrierIssueFullVerificationWitnessRequest {
   uint64 joins_prev_barrier_version = 7;
   repeated BarrierJoinLeafRecord join_records = 8;
   bytes revocation_roots_hash = 9;
-  repeated uint32 revoked_leaf_indices = 10;
+  reserved 10;
   bytes deployment_profile_manifest = 11;
   bytes revocation_target_leaf_id = 12;
   bytes merge_ticket_artifact = 13;

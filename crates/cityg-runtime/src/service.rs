@@ -428,7 +428,6 @@ pub struct FullVerificationWitnessRequest {
     pub revocation_target_leaf_id: Option<[u8; 32]>,
     pub join_records: Vec<BarrierJoinLeafRecord>,
     pub revoked_records: Vec<BarrierRevokedLeafRecord>,
-    pub revoked_leaf_indices: Vec<u32>,
     pub barrier_update: Vec<u8>,
 }
 
@@ -1041,13 +1040,8 @@ pub fn prepare_full_verification_witness(
         }
         resolved_revoked.records
     };
-    let expected_revoked_leaf_indices = expected_revoked_records
-        .iter()
-        .map(|record| record.leaf_index)
-        .collect::<Vec<_>>();
     if request.updater_slot_generation != bundle.slot_generation
         || request.revoked_records != expected_revoked_records
-        || request.revoked_leaf_indices != expected_revoked_leaf_indices
     {
         return Err(RoomFullVerificationWitnessPreparationError::RevokedHelperDataMismatch);
     }

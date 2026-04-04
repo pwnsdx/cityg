@@ -990,7 +990,6 @@ pub fn decode_full_verification_witness_request(
         revocation_target_leaf_id,
         join_records,
         revoked_records,
-        revoked_leaf_indices: request.revoked_leaf_indices,
         barrier_update: request.barrier_update,
     })
 }
@@ -2245,7 +2244,6 @@ mod tests {
                     slot_generation: 64,
                 }],
                 include_updater_in_revoked_set: true,
-                revoked_leaf_indices: vec![61],
                 barrier_update: vec![0x62],
             },
         )
@@ -2269,7 +2267,6 @@ mod tests {
         assert_eq!(decoded.revoked_records.len(), 1);
         assert_eq!(decoded.revoked_records[0].slot_generation, 64);
         assert!(decoded.include_updater_in_revoked_set);
-        assert_eq!(decoded.revoked_leaf_indices, vec![61]);
         assert_eq!(decoded.barrier_update, vec![0x62]);
     }
 
@@ -2296,7 +2293,6 @@ mod tests {
                 updater_slot_generation: 0,
                 revoked_records: Vec::new(),
                 include_updater_in_revoked_set: false,
-                revoked_leaf_indices: Vec::new(),
                 barrier_update: Vec::new(),
             },
         )

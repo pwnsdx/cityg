@@ -217,7 +217,6 @@ impl CitygApiClient {
                     barrier_version,
                     join_resolution.records.as_slice(),
                     &witness_selection.witness_revocation_roots_hash,
-                    witness_selection.witness_revoked_leaf_indices.as_slice(),
                     revoked_resolution.records.as_slice(),
                     !reclaims_cover_leaf_index,
                     deployment_profile_manifest_bytes,
@@ -267,7 +266,6 @@ impl CitygApiClient {
         joins_prev_barrier_version: u64,
         join_records: &[BarrierJoinRecord],
         revocation_roots_hash: &[u8; 32],
-        revoked_leaf_indices: &[u32],
         revoked_records: &[BarrierRevokedLeafRecord],
         include_updater_in_revoked_set: bool,
         deployment_profile_manifest: &[u8],
@@ -295,7 +293,6 @@ impl CitygApiClient {
                 })
                 .collect(),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
-            revoked_leaf_indices: revoked_leaf_indices.to_vec(),
             updater_slot_generation: updater_slot_lease.slot_generation,
             revoked_records: revoked_records
                 .iter()
