@@ -1744,14 +1744,14 @@ Base-profile wire/API requirement (normative):
   * `history_authority_extension`
   * `history_authority_descriptor`
   * `current_global_history_attestation`
-  * `current_join_records_completeness_attestation`
-  * `current_revoked_records_completeness_attestation`
+  * `current_join_occupancies_completeness_attestation`
+  * `current_revoked_occupancies_completeness_attestation`
   * `current_history_view_id`
   * `current_history_commitment`
   * `current_barrier_update`
   * `current_predecessor_kem_tree_hash_after`
-  * `current_join_records`
-  * `current_revoked_records`
+  * `current_join_occupancies`
+  * `current_revoked_occupancies`
   * `join_finalize_auth`
   * `provisioning_nonce`
   * `provisioning_issued_at_ms`

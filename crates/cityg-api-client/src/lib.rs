@@ -999,8 +999,8 @@ pub struct PreparedRuntimeJoinTicket {
     pub max_barrier_update_bytes: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_predecessor_kem_tree_hash_after: [u8; 32],
-    pub current_join_records: Vec<BarrierJoinOccupancyRecord>,
-    pub current_revoked_records: Vec<BarrierRevokedOccupancyRecord>,
+    pub current_join_occupancies: Vec<BarrierJoinOccupancyRecord>,
+    pub current_revoked_occupancies: Vec<BarrierRevokedOccupancyRecord>,
     pub current_barrier_update: Vec<u8>,
     pub last_accepted_ec: u64,
 }
@@ -1937,7 +1937,7 @@ mod tests {
             array32(&response.join_finalize_auth_token).expect("join_finalize_auth_token");
         let provisioning_nonce = array32(&response.provisioning_nonce).expect("provisioning_nonce");
         let join_records = response
-            .current_join_records
+            .current_join_occupancies
             .iter()
             .map(|record| BarrierJoinOccupancyRecord {
                 device_pk: record.device_pk.clone(),
@@ -1947,7 +1947,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let revoked_records = response
-            .current_revoked_records
+            .current_revoked_occupancies
             .iter()
             .map(|record| BarrierRevokedOccupancyRecord {
                 leaf_index: record.slot_index,
@@ -1986,15 +1986,15 @@ mod tests {
             current_global_history_attestation: response
                 .current_global_history_attestation
                 .as_slice(),
-            current_join_records_completeness_attestation: response
-                .current_join_records_completeness_attestation
+            current_join_occupancies_completeness_attestation: response
+                .current_join_occupancies_completeness_attestation
                 .as_slice(),
-            current_revoked_records_completeness_attestation: response
-                .current_revoked_records_completeness_attestation
+            current_revoked_occupancies_completeness_attestation: response
+                .current_revoked_occupancies_completeness_attestation
                 .as_slice(),
             current_barrier_update: response.current_barrier_update.as_slice(),
-            current_join_records: join_records.as_slice(),
-            current_revoked_records: revoked_records.as_slice(),
+            current_join_occupancies: join_records.as_slice(),
+            current_revoked_occupancies: revoked_records.as_slice(),
         });
         let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
             .as_bytes()
@@ -2448,10 +2448,10 @@ mod tests {
             kem_tree_hash_after: vec![0xCC; 32],
             history_authority_descriptor: authority.descriptor_bytes,
             current_global_history_attestation: authority.attestation_bytes,
-            current_join_records: Vec::new(),
-            current_revoked_records: Vec::new(),
-            current_join_records_completeness_attestation: join_helper_attestation,
-            current_revoked_records_completeness_attestation: revoked_records_helper_attestation,
+            current_join_occupancies: Vec::new(),
+            current_revoked_occupancies: Vec::new(),
+            current_join_occupancies_completeness_attestation: join_helper_attestation,
+            current_revoked_occupancies_completeness_attestation: revoked_records_helper_attestation,
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
             last_accepted_ec: 21,
             ..JoinTicketResponse::default()
@@ -3528,8 +3528,8 @@ mod tests {
             Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
         );
         assert_eq!(prepared.last_accepted_ec, 21);
-        assert!(prepared.current_join_records.is_empty());
-        assert!(prepared.current_revoked_records.is_empty());
+        assert!(prepared.current_join_occupancies.is_empty());
+        assert!(prepared.current_revoked_occupancies.is_empty());
     }
 
     #[test]
@@ -3550,7 +3550,7 @@ mod tests {
     #[test]
     fn prepare_runtime_join_ticket_keeps_versioned_revoked_records() {
         let mut ticket = runtime_join_ticket_payload();
-        ticket.current_revoked_records = vec![
+        ticket.current_revoked_occupancies = vec![
             pb::BarrierRevokedOccupancyRecord {
                 slot_index: 7,
                 slot_generation: 3,
@@ -3568,7 +3568,7 @@ mod tests {
             .expect("join ticket runtime preparation must succeed");
 
         assert_eq!(
-            prepared.current_revoked_records,
+            prepared.current_revoked_occupancies,
             vec![
                 BarrierRevokedOccupancyRecord {
                     leaf_index: 7,

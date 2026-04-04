@@ -253,9 +253,9 @@ pub enum RoomTicketPreparationError {
     Client(#[from] CityGError),
     #[error("missing committed barrier roots hash")]
     MissingCommittedBarrierRootsHash,
-    #[error("join ticket current_join_records length overflow")]
+    #[error("join ticket current_join_occupancies length overflow")]
     JoinRecordsLengthOverflow,
-    #[error("join ticket current_revoked_records length overflow")]
+    #[error("join ticket current_revoked_occupancies length overflow")]
     RevokedRecordsLengthOverflow,
     #[error("failed to encode pivot parity")]
     PivotParityEncode,
@@ -304,8 +304,8 @@ pub struct PreparedJoinTicket {
     pub bootstrap_public: Vec<u8>,
     pub history_authority_descriptor: Vec<u8>,
     pub current_global_history_attestation: Vec<u8>,
-    pub current_join_records_completeness_attestation: Vec<u8>,
-    pub current_revoked_records_completeness_attestation: Vec<u8>,
+    pub current_join_occupancies_completeness_attestation: Vec<u8>,
+    pub current_revoked_occupancies_completeness_attestation: Vec<u8>,
     pub history_authority_extension: String,
     pub provisioning_artifact: Vec<u8>,
     pub deployment_profile_manifest: Vec<u8>,
@@ -685,25 +685,25 @@ pub fn prepare_join_ticket(
         bundle.barrier_version,
         &bundle.kem_tree_hash_after,
     )?;
-    let current_join_records_completeness_attestation = server
+    let current_join_occupancies_completeness_attestation = server
         .helper_completeness_attestation_joins_bytes(
             &bundle.current_history_commitment,
             bundle.barrier_version.saturating_sub(1),
             0,
-            u32::try_from(bundle.current_join_records.len())
+            u32::try_from(bundle.current_join_occupancies.len())
                 .map_err(|_| RoomTicketPreparationError::JoinRecordsLengthOverflow)?,
-            bundle.current_join_records.as_slice(),
+            bundle.current_join_occupancies.as_slice(),
         )?;
-    let current_revoked_records_completeness_attestation = server
+    let current_revoked_occupancies_completeness_attestation = server
         .helper_completeness_attestation_revoked_records_bytes(
             &bundle.current_history_commitment,
             &server
                 .barrier_roots_hash(gid)
                 .ok_or(RoomTicketPreparationError::MissingCommittedBarrierRootsHash)?,
             0,
-            u32::try_from(bundle.current_revoked_records.len())
+            u32::try_from(bundle.current_revoked_occupancies.len())
                 .map_err(|_| RoomTicketPreparationError::RevokedRecordsLengthOverflow)?,
-            bundle.current_revoked_records.as_slice(),
+            bundle.current_revoked_occupancies.as_slice(),
         )?;
     let history_authority_extension = server.history_authority_extension_id().to_string();
     let provisioning_artifact = server.join_provisioning_artifact_bytes(
@@ -713,10 +713,10 @@ pub fn prepare_join_ticket(
             history_authority_extension: history_authority_extension.as_str(),
             history_authority_descriptor: history_authority_descriptor.as_slice(),
             current_global_history_attestation: current_global_history_attestation.as_slice(),
-            current_join_records_completeness_attestation:
-                current_join_records_completeness_attestation.as_slice(),
-            current_revoked_records_completeness_attestation:
-                current_revoked_records_completeness_attestation.as_slice(),
+            current_join_occupancies_completeness_attestation:
+                current_join_occupancies_completeness_attestation.as_slice(),
+            current_revoked_occupancies_completeness_attestation:
+                current_revoked_occupancies_completeness_attestation.as_slice(),
         },
     )?;
     let deployment_profile_manifest = server.deployment_profile_manifest_bytes(
@@ -736,8 +736,8 @@ pub fn prepare_join_ticket(
         bootstrap_public,
         history_authority_descriptor,
         current_global_history_attestation,
-        current_join_records_completeness_attestation,
-        current_revoked_records_completeness_attestation,
+        current_join_occupancies_completeness_attestation,
+        current_revoked_occupancies_completeness_attestation,
         history_authority_extension,
         provisioning_artifact,
         deployment_profile_manifest,

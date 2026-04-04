@@ -479,7 +479,7 @@ message JoinTicketResponse {
   optional HistoryCommitment current_history_commitment = 31;
   bytes current_barrier_update = 32;
   bytes current_predecessor_kem_tree_hash_after = 33;
-  repeated BarrierJoinLeafRecord current_join_records = 34;
+  repeated BarrierJoinLeafRecord current_join_occupancies = 34;
   repeated uint32 current_revoked_leaf_indices = 35;
   bytes join_finalize_auth_token = 36;
   bytes provisioning_nonce = 37;
@@ -489,7 +489,7 @@ message JoinTicketResponse {
   uint64 last_accepted_ec = 41;
   bytes history_authority_descriptor = 42;
   bytes current_global_history_attestation = 43;
-  bytes current_join_records_completeness_attestation = 44;
+  bytes current_join_occupancies_completeness_attestation = 44;
   bytes current_revoked_leaf_indices_completeness_attestation = 45;
   string history_authority_extension = 46;  // "global-history-authority-v1" in the base profile
   bytes provisioning_artifact = 47;         // Signed artifact over the delivered current-state provisioning fields

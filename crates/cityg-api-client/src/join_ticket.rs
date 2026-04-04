@@ -45,10 +45,10 @@ impl CitygApiClient {
                 !response.history_authority_descriptor.is_empty()
                     || !response.current_global_history_attestation.is_empty()
                     || !response
-                        .current_join_records_completeness_attestation
+                        .current_join_occupancies_completeness_attestation
                         .is_empty()
                     || !response
-                        .current_revoked_records_completeness_attestation
+                        .current_revoked_occupancies_completeness_attestation
                         .is_empty(),
             )?,
             "join ticket",
@@ -174,19 +174,19 @@ impl CitygApiClient {
                 )?;
                 let join_attestation = parse_helper_completeness_attestation_bytes(
                     response
-                        .current_join_records_completeness_attestation
+                        .current_join_occupancies_completeness_attestation
                         .as_slice(),
                     authority,
                     HELPER_KIND_JOINS_SINCE,
                 )?
                 .ok_or_else(|| {
                     Error::Parse(
-                        "join ticket missing current_join_records_completeness_attestation"
+                        "join ticket missing current_join_occupancies_completeness_attestation"
                             .to_string(),
                     )
                 })?;
                 let join_records = response
-                    .current_join_records
+                    .current_join_occupancies
                     .iter()
                     .map(|record| BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
@@ -202,25 +202,25 @@ impl CitygApiClient {
                     response.barrier_version.saturating_sub(1),
                     0,
                     u32::try_from(join_records.len()).map_err(|_| {
-                        Error::Parse("join ticket current_join_records length overflow".to_string())
+                        Error::Parse("join ticket current_join_occupancies length overflow".to_string())
                     })?,
                     join_records.as_slice(),
                 )?;
                 let revoked_attestation = parse_helper_completeness_attestation_bytes(
                     response
-                        .current_revoked_records_completeness_attestation
+                        .current_revoked_occupancies_completeness_attestation
                         .as_slice(),
                     authority,
                     HELPER_KIND_REVOKED_LEAVES,
                 )?
                 .ok_or_else(|| {
                     Error::Parse(
-                        "join ticket missing current_revoked_records_completeness_attestation"
+                        "join ticket missing current_revoked_occupancies_completeness_attestation"
                             .to_string(),
                     )
                 })?;
                 let revoked_records = response
-                    .current_revoked_records
+                    .current_revoked_occupancies
                     .iter()
                     .map(|record| BarrierRevokedOccupancyRecord {
                         leaf_index: record.slot_index,
@@ -241,7 +241,7 @@ impl CitygApiClient {
                     0,
                     u32::try_from(revoked_records.len()).map_err(|_| {
                         Error::Parse(
-                            "join ticket current_revoked_records length overflow".to_string(),
+                            "join ticket current_revoked_occupancies length overflow".to_string(),
                         )
                     })?,
                     revoked_records.as_slice(),
@@ -249,10 +249,10 @@ impl CitygApiClient {
             }
         } else if !response.current_global_history_attestation.is_empty()
             || !response
-                .current_join_records_completeness_attestation
+                .current_join_occupancies_completeness_attestation
                 .is_empty()
             || !response
-                .current_revoked_records_completeness_attestation
+                .current_revoked_occupancies_completeness_attestation
                 .is_empty()
             || !response.deployment_profile_manifest.is_empty()
             || !response.provisioning_artifact.is_empty()
@@ -347,8 +347,8 @@ pub fn prepare_runtime_join_ticket(
             "join ticket missing kbroad_public".to_string(),
         ));
     }
-    let current_revoked_records = response
-        .current_revoked_records
+    let current_revoked_occupancies = response
+        .current_revoked_occupancies
         .iter()
         .map(|record| BarrierRevokedOccupancyRecord {
             leaf_index: record.slot_index,
@@ -419,8 +419,8 @@ pub fn prepare_runtime_join_ticket(
         max_barrier_update_bytes,
         kem_tree_hash_after,
         current_predecessor_kem_tree_hash_after,
-        current_join_records: response
-            .current_join_records
+        current_join_occupancies: response
+            .current_join_occupancies
             .iter()
             .map(|record| BarrierJoinOccupancyRecord {
                 device_pk: record.device_pk.clone(),
@@ -429,7 +429,7 @@ pub fn prepare_runtime_join_ticket(
                 ek_leaf: record.ek_leaf.clone(),
             })
             .collect(),
-        current_revoked_records,
+        current_revoked_occupancies,
         current_barrier_update: response.current_barrier_update.clone(),
         last_accepted_ec: response.last_accepted_ec,
     })

@@ -64,8 +64,8 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Rename join/merge provisioning artifact CBOR fields from `cover_leaf_index` to `slot_index` and bump artifact labels to `v2`
 - [x] Require explicit slot leases in the live server join/revoke delta path instead of deriving them from `leaf_id`
 - [x] Require explicit slot leases in migrated server helper/validation paths instead of falling back to deterministic slot derivation
-- [~] Replace `current_join_records` and `current_revoked_records`
-  `JoinTicketResponse` transporte désormais des `BarrierJoinOccupancyRecord` / `BarrierRevokedOccupancyRecord`; le renommage complet des champs et du reste du wire profile reste à faire.
+- [x] Replace `current_join_occupancies` and `current_revoked_occupancies`
+  `JoinTicketResponse`, ses attestations de complétude, et les call sites runtime/client/gui utilisent désormais les noms `current_*_occupancies`.
 - [x] Remove `current_revoked_leaf_indices` from `JoinTicketResponse` and join provisioning artifacts
 - [x] Remove `leaf_indices` from revoked-helper responses
 - [x] Remove `revoked_leaf_indices` from full-verification witness requests
@@ -102,4 +102,4 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 1. Decide whether `helper_kind` and the CBOR wire label `updater_leaf` stay as documented legacy identifiers or also move in a hard `v0.2` cut.
 2. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.
-3. Finish the remaining ticket/profile rename work (`current_join_records`, `current_revoked_records`, and any remaining `cover_leaf_index`-shaped public fields).
+3. Finish the remaining ticket/profile rename work sur les champs publics encore marqués `cover_leaf_index` et autres labels legacy du provisioning path.

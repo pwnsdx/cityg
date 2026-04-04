@@ -393,9 +393,9 @@ pub struct JoinTicketBundle {
     /// Committed predecessor tree hash used as snapshot_base for the accepted current update.
     pub current_predecessor_kem_tree_hash_after: [u8; 32],
     /// Authenticated JoinSet for the provisioned current committed state.
-    pub current_join_records: Vec<BarrierJoinOccupancyRecord>,
+    pub current_join_occupancies: Vec<BarrierJoinOccupancyRecord>,
     /// Authenticated revoked occupancies for the provisioned current committed state.
-    pub current_revoked_records: Vec<BarrierRevokedOccupancyRecord>,
+    pub current_revoked_occupancies: Vec<BarrierRevokedOccupancyRecord>,
     /// Opaque server-issued capability required for reason-2 join_finalize.
     pub join_finalize_auth_token: [u8; 32],
     /// Unique nonce for this join provisioning artifact.
@@ -450,8 +450,8 @@ pub struct JoinProvisioningAuthorityArtifacts<'a> {
     pub history_authority_extension: &'a str,
     pub history_authority_descriptor: &'a [u8],
     pub current_global_history_attestation: &'a [u8],
-    pub current_join_records_completeness_attestation: &'a [u8],
-    pub current_revoked_records_completeness_attestation: &'a [u8],
+    pub current_join_occupancies_completeness_attestation: &'a [u8],
+    pub current_revoked_occupancies_completeness_attestation: &'a [u8],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1312,7 +1312,7 @@ impl CityGServer {
                 "current barrier predecessor hash missing for join provisioning",
             ));
         }
-        let (current_join_records, current_revoked_records) = if requires_current_barrier_update {
+        let (current_join_occupancies, current_revoked_occupancies) = if requires_current_barrier_update {
             let BarrierUpdateWire(
                 _mode,
                 _barrier_version,
@@ -1379,8 +1379,8 @@ impl CityGServer {
             current_history_commitment,
             current_barrier_update,
             current_predecessor_kem_tree_hash_after,
-            current_join_records,
-            current_revoked_records,
+            current_join_occupancies,
+            current_revoked_occupancies,
             join_finalize_auth_token,
             provisioning_nonce,
             provisioning_issued_at_ms,
@@ -3904,13 +3904,13 @@ struct JoinProvisioningArtifactSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     current_global_history_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
-    current_join_records_completeness_attestation: &'a [u8],
+    current_join_occupancies_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
-    current_revoked_records_completeness_attestation: &'a [u8],
+    current_revoked_occupancies_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
     current_barrier_update: &'a [u8],
-    current_join_records: &'a [BarrierJoinOccupancyRecord],
-    current_revoked_records: &'a [BarrierRevokedOccupancyRecord],
+    current_join_occupancies: &'a [BarrierJoinOccupancyRecord],
+    current_revoked_occupancies: &'a [BarrierRevokedOccupancyRecord],
 }
 
 #[derive(Serialize)]
@@ -4510,13 +4510,13 @@ fn encode_join_provisioning_artifact(
         last_accepted_ec: bundle.last_accepted_ec,
         history_authority_descriptor: artifacts.history_authority_descriptor,
         current_global_history_attestation: artifacts.current_global_history_attestation,
-        current_join_records_completeness_attestation: artifacts
-            .current_join_records_completeness_attestation,
-        current_revoked_records_completeness_attestation: artifacts
-            .current_revoked_records_completeness_attestation,
+        current_join_occupancies_completeness_attestation: artifacts
+            .current_join_occupancies_completeness_attestation,
+        current_revoked_occupancies_completeness_attestation: artifacts
+            .current_revoked_occupancies_completeness_attestation,
         current_barrier_update: bundle.current_barrier_update.as_slice(),
-        current_join_records: bundle.current_join_records.as_slice(),
-        current_revoked_records: bundle.current_revoked_records.as_slice(),
+        current_join_occupancies: bundle.current_join_occupancies.as_slice(),
+        current_revoked_occupancies: bundle.current_revoked_occupancies.as_slice(),
     })?;
     let signature = sign_history_authority_message(state, payload.as_slice())?;
     Ok(to_cbor_vec(&JoinProvisioningArtifactWire {

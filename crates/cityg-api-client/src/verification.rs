@@ -272,13 +272,13 @@ pub(crate) struct JoinProvisioningArtifactSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     pub(crate) current_global_history_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
-    pub(crate) current_join_records_completeness_attestation: &'a [u8],
+    pub(crate) current_join_occupancies_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
-    pub(crate) current_revoked_records_completeness_attestation: &'a [u8],
+    pub(crate) current_revoked_occupancies_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
     pub(crate) current_barrier_update: &'a [u8],
-    pub(crate) current_join_records: &'a [BarrierJoinOccupancyRecord],
-    pub(crate) current_revoked_records: &'a [BarrierRevokedOccupancyRecord],
+    pub(crate) current_join_occupancies: &'a [BarrierJoinOccupancyRecord],
+    pub(crate) current_revoked_occupancies: &'a [BarrierRevokedOccupancyRecord],
 }
 
 #[derive(Serialize)]
@@ -829,7 +829,7 @@ pub(crate) fn verify_join_provisioning_artifact(
     let join_finalize_auth_token = array32(&response.join_finalize_auth_token)?;
     let provisioning_nonce = array32(&response.provisioning_nonce)?;
     let join_records = response
-        .current_join_records
+        .current_join_occupancies
         .iter()
         .map(|record| BarrierJoinOccupancyRecord {
             device_pk: record.device_pk.clone(),
@@ -839,7 +839,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         })
         .collect::<Vec<_>>();
     let revoked_records = response
-        .current_revoked_records
+        .current_revoked_occupancies
         .iter()
         .map(|record| BarrierRevokedOccupancyRecord {
             leaf_index: record.slot_index,
@@ -876,15 +876,15 @@ pub(crate) fn verify_join_provisioning_artifact(
         last_accepted_ec: response.last_accepted_ec,
         history_authority_descriptor: response.history_authority_descriptor.as_slice(),
         current_global_history_attestation: response.current_global_history_attestation.as_slice(),
-        current_join_records_completeness_attestation: response
-            .current_join_records_completeness_attestation
+        current_join_occupancies_completeness_attestation: response
+            .current_join_occupancies_completeness_attestation
             .as_slice(),
-        current_revoked_records_completeness_attestation: response
-            .current_revoked_records_completeness_attestation
+        current_revoked_occupancies_completeness_attestation: response
+            .current_revoked_occupancies_completeness_attestation
             .as_slice(),
         current_barrier_update: response.current_barrier_update.as_slice(),
-        current_join_records: join_records.as_slice(),
-        current_revoked_records: revoked_records.as_slice(),
+        current_join_occupancies: join_records.as_slice(),
+        current_revoked_occupancies: revoked_records.as_slice(),
     })?;
     verify_ml_dsa_signature(
         payload.as_slice(),

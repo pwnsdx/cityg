@@ -76,8 +76,8 @@ pub fn encode_prepared_join_ticket_response(
         bootstrap_public,
         history_authority_descriptor,
         current_global_history_attestation,
-        current_join_records_completeness_attestation,
-        current_revoked_records_completeness_attestation,
+        current_join_occupancies_completeness_attestation,
+        current_revoked_occupancies_completeness_attestation,
         history_authority_extension,
         provisioning_artifact,
         deployment_profile_manifest,
@@ -130,13 +130,13 @@ pub fn encode_prepared_join_ticket_response(
         current_predecessor_kem_tree_hash_after: ticket
             .current_predecessor_kem_tree_hash_after
             .to_vec(),
-        current_join_records: ticket
-            .current_join_records
+        current_join_occupancies: ticket
+            .current_join_occupancies
             .into_iter()
             .map(pb_barrier_join_occupancy_record)
             .collect(),
-        current_revoked_records: ticket
-            .current_revoked_records
+        current_revoked_occupancies: ticket
+            .current_revoked_occupancies
             .into_iter()
             .map(pb_barrier_revoked_occupancy_record)
             .collect(),
@@ -154,8 +154,8 @@ pub fn encode_prepared_join_ticket_response(
         last_accepted_ec: ticket.last_accepted_ec,
         history_authority_descriptor,
         current_global_history_attestation,
-        current_join_records_completeness_attestation,
-        current_revoked_records_completeness_attestation,
+        current_join_occupancies_completeness_attestation,
+        current_revoked_occupancies_completeness_attestation,
         history_authority_extension,
         provisioning_artifact,
         deployment_profile_manifest,
