@@ -356,7 +356,7 @@ message BarrierResolveRevokedLeavesResponse {
   uint64 max_barrier_update_bytes = 13;
   optional FsForwardLeapPolicy fs_forward_leap_policy = 14;
   bytes deployment_profile_manifest = 15;
-  repeated BarrierRevokedLeafRecord records = 16;
+  repeated BarrierRevokedOccupancyRecord records = 16;
 }
 
 message BarrierRevokedLeafRecord {
@@ -424,7 +424,7 @@ message BarrierResolveJoinsSinceRequest {
 
 message BarrierResolveJoinsSinceResponse {
   reserved 1000 to 1999;
-  repeated BarrierJoinLeafRecord records = 1;
+  repeated BarrierJoinOccupancyRecord records = 1;
   bytes history_view_id = 2;
   optional HistoryCommitment history_commitment = 3;
   uint32 page_offset = 4;

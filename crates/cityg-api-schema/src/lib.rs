@@ -305,7 +305,7 @@ pub fn encode_prepared_resolved_revoked_leaves_response(
         records: page
             .items
             .into_iter()
-            .map(pb_barrier_revoked_leaf_record)
+            .map(pb_barrier_revoked_occupancy_record)
             .collect(),
         history_view_id: resolved.history_view_id.to_vec(),
         history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
@@ -395,7 +395,7 @@ pub fn encode_prepared_resolved_joins_response(
         records: page
             .items
             .into_iter()
-            .map(pb_barrier_join_leaf_record)
+            .map(pb_barrier_join_occupancy_record)
             .collect(),
         history_view_id: resolved.history_view_id.to_vec(),
         history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
@@ -597,17 +597,6 @@ pub fn encode_window_snapshot_response(entries: Vec<RoomWindowEntrySnapshot>) ->
     response.encode_to_vec()
 }
 
-fn pb_barrier_join_leaf_record(
-    record: ServerBarrierJoinOccupancyRecord,
-) -> pb::BarrierJoinLeafRecord {
-    pb::BarrierJoinLeafRecord {
-        device_pk: record.device_pk,
-        leaf_index: record.leaf_index,
-        ek_leaf: record.ek_leaf,
-        slot_generation: record.slot_generation,
-    }
-}
-
 fn pb_barrier_join_occupancy_record(
     record: ServerBarrierJoinOccupancyRecord,
 ) -> pb::BarrierJoinOccupancyRecord {
@@ -615,15 +604,6 @@ fn pb_barrier_join_occupancy_record(
         device_pk: record.device_pk,
         slot_index: record.leaf_index,
         ek_leaf: record.ek_leaf,
-        slot_generation: record.slot_generation,
-    }
-}
-
-fn pb_barrier_revoked_leaf_record(
-    record: ServerBarrierRevokedOccupancyRecord,
-) -> pb::BarrierRevokedLeafRecord {
-    pb::BarrierRevokedLeafRecord {
-        leaf_index: record.leaf_index,
         slot_generation: record.slot_generation,
     }
 }
@@ -3041,7 +3021,7 @@ mod tests {
             .expect("decode revoked helper response");
 
         assert_eq!(decoded.records.len(), 1);
-        assert_eq!(decoded.records[0].leaf_index, 7);
+        assert_eq!(decoded.records[0].slot_index, 7);
         assert_eq!(decoded.records[0].slot_generation, 4);
         assert_eq!(decoded.page_offset, 1);
         assert_eq!(decoded.total_entries, 2);

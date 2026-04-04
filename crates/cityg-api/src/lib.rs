@@ -3398,7 +3398,7 @@ mod tests {
         );
         assert!(decoded.history_commitment.is_some());
         let first = &decoded.records[0];
-        assert!(first.leaf_index > 0);
+        assert!(first.slot_index > 0);
         assert!(!first.device_pk.is_empty());
         assert!(
             first.ek_leaf.is_empty() || first.ek_leaf.len() == ml_kem_public_key_bytes(),

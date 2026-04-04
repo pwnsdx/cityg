@@ -40,7 +40,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Replace naked revoked leaf indices with revoked occupancy records
 - [~] Rework `ResolveJoinsSince` and `ResolveRevokedLeaves`
 - [x] Update completeness attestations to cover occupancy records
-  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; `v2` helper routes and protobufs exist, but the broader wire profile still mixes `v1`/`v2` naming.
+  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; both `v1` and `v2` helper protobufs now carry occupancy records, but the broader wire profile still mixes legacy names.
 
 ### 4. Barrier validation
 
