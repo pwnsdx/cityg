@@ -2262,6 +2262,49 @@ mod tests {
     }
 
     #[test]
+    fn extract_resolve_revoked_occupancies_room_target_from_room_id() {
+        let request = pb::BarrierResolveRevokedOccupanciesRequest {
+            room_id: hex::encode(DEMO_GID),
+            revocation_roots_hash: [0x66; 32].to_vec(),
+            page_offset: 0,
+            max_entries: 32,
+        };
+
+        let target = extract_room_scoped_request_target(
+            RoomScopedApiRoute::BarrierResolveRevokedOccupancies.path(),
+            &request.encode_to_vec(),
+        )
+        .expect("parse request")
+        .expect("room target");
+
+        assert_eq!(target.route, RoomScopedApiRoute::BarrierResolveRevokedOccupancies);
+        assert_eq!(target.key, RoomScopedRoutingKey::Gid(DEMO_GID));
+    }
+
+    #[test]
+    fn extract_resolve_join_occupancies_room_target_from_room_id() {
+        let request = pb::BarrierResolveJoinOccupanciesSinceRequest {
+            room_id: hex::encode(DEMO_GID),
+            prev_barrier_version: 9,
+            page_offset: 0,
+            max_entries: 32,
+        };
+
+        let target = extract_room_scoped_request_target(
+            RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince.path(),
+            &request.encode_to_vec(),
+        )
+        .expect("parse request")
+        .expect("room target");
+
+        assert_eq!(
+            target.route,
+            RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince
+        );
+        assert_eq!(target.key, RoomScopedRoutingKey::Gid(DEMO_GID));
+    }
+
+    #[test]
     fn non_room_scoped_paths_return_none() {
         assert_eq!(
             extract_room_scoped_request_target("/health", &[]).expect("parse"),
@@ -3008,6 +3051,121 @@ mod tests {
         assert_eq!(decoded.page_offset, 1);
         assert_eq!(decoded.total_entries, 2);
         assert_eq!(decoded.helper_completeness_attestation, vec![0x31, 0x32]);
+    }
+
+    #[test]
+    fn encode_resolved_revoked_occupancies_response_carries_slot_indices() {
+        let history_commitment = cityg_server::HistoryCommitment {
+            history_view_id: [0x21; 32],
+            history_commitment_id: [0x22; 32],
+            prev_history_commitment_id: [0x23; 32],
+            history_seq: 24,
+        };
+        let encoded = encode_prepared_resolved_revoked_occupancies_response(
+            PreparedResolvedRevokedOccupancies {
+                resolved: cityg_server::ResolvedRevokedOccupancies {
+                    history_view_id: [0x21; 32],
+                    history_commitment,
+                    records: vec![cityg_server::BarrierRevokedOccupancyRecord {
+                        leaf_index: 6,
+                        slot_generation: 5,
+                    }],
+                },
+                page: cityg_runtime::BarrierPage {
+                    items: vec![cityg_server::BarrierRevokedOccupancyRecord {
+                        leaf_index: 6,
+                        slot_generation: 5,
+                    }],
+                    page_offset: 0,
+                    next_page_offset: None,
+                    total_entries: 1,
+                },
+                helper_completeness_attestation: vec![0x51],
+                barrier: PreparedBarrierEnvelope {
+                    history_authority_descriptor: vec![0x61],
+                    global_history_attestation: vec![0x62],
+                    history_authority_extension: "global-history-authority-v1".to_string(),
+                    n_max: 8,
+                    max_barrier_update_bytes: 1_048_576,
+                    fs_forward_leap_policy: cityg_server::FsForwardLeapPolicy {
+                        h: 300,
+                        checkpoint_interval: 3600,
+                        slack_anchor: 10,
+                        slack_first_device: 20,
+                        slack_device: 30,
+                    },
+                    deployment_profile_manifest: vec![0x63],
+                },
+            },
+        );
+        let decoded = pb::BarrierResolveRevokedOccupanciesResponse::decode(encoded.as_slice())
+            .expect("decode v2 revoked occupancies response");
+
+        assert_eq!(decoded.records.len(), 1);
+        assert_eq!(decoded.records[0].slot_index, 6);
+        assert_eq!(decoded.records[0].slot_generation, 5);
+        assert_eq!(decoded.page_offset, 0);
+        assert_eq!(decoded.total_entries, 1);
+    }
+
+    #[test]
+    fn encode_resolved_join_occupancies_response_carries_slot_indices() {
+        let history_commitment = cityg_server::HistoryCommitment {
+            history_view_id: [0x31; 32],
+            history_commitment_id: [0x32; 32],
+            prev_history_commitment_id: [0x33; 32],
+            history_seq: 34,
+        };
+        let encoded = encode_prepared_resolved_join_occupancies_response(
+            PreparedResolvedJoinOccupancies {
+                resolved: cityg_server::ResolvedJoinOccupancies {
+                    history_view_id: [0x31; 32],
+                    history_commitment,
+                    records: vec![cityg_server::BarrierJoinOccupancyRecord {
+                        device_pk: vec![0x71; 32],
+                        leaf_index: 3,
+                        slot_generation: 2,
+                        ek_leaf: vec![0x72; 1184],
+                    }],
+                },
+                page: cityg_runtime::BarrierPage {
+                    items: vec![cityg_server::BarrierJoinOccupancyRecord {
+                        device_pk: vec![0x71; 32],
+                        leaf_index: 3,
+                        slot_generation: 2,
+                        ek_leaf: vec![0x72; 1184],
+                    }],
+                    page_offset: 0,
+                    next_page_offset: None,
+                    total_entries: 1,
+                },
+                helper_completeness_attestation: vec![0x73],
+                barrier: PreparedBarrierEnvelope {
+                    history_authority_descriptor: vec![0x81],
+                    global_history_attestation: vec![0x82],
+                    history_authority_extension: "global-history-authority-v1".to_string(),
+                    n_max: 8,
+                    max_barrier_update_bytes: 1_048_576,
+                    fs_forward_leap_policy: cityg_server::FsForwardLeapPolicy {
+                        h: 300,
+                        checkpoint_interval: 3600,
+                        slack_anchor: 10,
+                        slack_first_device: 20,
+                        slack_device: 30,
+                    },
+                    deployment_profile_manifest: vec![0x83],
+                },
+            },
+        );
+        let decoded =
+            pb::BarrierResolveJoinOccupanciesSinceResponse::decode(encoded.as_slice())
+                .expect("decode v2 join occupancies response");
+
+        assert_eq!(decoded.records.len(), 1);
+        assert_eq!(decoded.records[0].slot_index, 3);
+        assert_eq!(decoded.records[0].slot_generation, 2);
+        assert_eq!(decoded.records[0].device_pk, vec![0x71; 32]);
+        assert_eq!(decoded.records[0].ek_leaf, vec![0x72; 1184]);
     }
 
     #[test]

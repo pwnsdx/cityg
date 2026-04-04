@@ -40,7 +40,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Replace naked revoked leaf indices with revoked occupancy records
 - [~] Rework `ResolveJoinsSince` and `ResolveRevokedLeaves`
 - [x] Update completeness attestations to cover occupancy records
-  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; protobuf/message/route names are still `v1`.
+  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; `v2` helper routes and protobufs exist, but the broader wire profile still mixes `v1`/`v2` naming.
 
 ### 4. Barrier validation
 
@@ -53,7 +53,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 - [~] Introduce `cityg.api.v2`
 - [x] Add `v2` helper route aliases for occupancy-oriented barrier helpers
-- [~] Add protobuf `v2` helper request/response messages for occupancy-oriented barrier helpers
+- [x] Add protobuf `v2` helper request/response messages for occupancy-oriented barrier helpers
 - [ ] Replace `cover_leaf_index` fields in tickets with `slot_index` + `slot_generation`
 - [x] Rename internal server/runtime ticket bundle fields from `cover_leaf_index` to `slot_index`
 - [x] Align migrated ticket/runtime error terminology from `cover_leaf_index` to `slot_index`
@@ -68,6 +68,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Remove stored `leaf_indices` from `ResolvedRevokedLeaves` server state
 - [x] Remove helper-level `leaf_indices` compatibility accessors from client/server runtime surfaces
 - [~] Update schema encoding/decoding
+  `api-schema` now covers `v2` helper route extraction and occupancy-response protobuf encoding.
 - [~] Update runtime service ticket preparation
 - [x] Add occupancy-oriented Rust type aliases/surfaces in `server` / `runtime` / `api-client` / `api-schema`
 
