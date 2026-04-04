@@ -456,10 +456,10 @@ impl CitygApiClient {
         };
         let fs_forward_leap_policy =
             crate::parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
-        if response.cover_leaf_index >= n_max {
+        if response.slot_index >= n_max {
             return Err(Error::Parse(format!(
                 "merge ticket cover_leaf_index out of range: {} >= {}",
-                response.cover_leaf_index, n_max
+                response.slot_index, n_max
             )));
         }
         if let (Some(authority), Some(attestation)) = (
@@ -487,7 +487,7 @@ impl CitygApiClient {
                     requested_leaf_id: author_leaf_id,
                     response: &response,
                     slot_lease: SlotLease {
-                        slot_index: response.cover_leaf_index,
+                        slot_index: response.slot_index,
                         slot_generation: response.slot_generation,
                     },
                     current_history_commitment: &current_history_commitment,
@@ -529,7 +529,7 @@ impl CitygApiClient {
             kbroad_generation: response.kbroad_generation,
             barrier_version: response.barrier_version,
             slot_lease: SlotLease {
-                slot_index: response.cover_leaf_index,
+                slot_index: response.slot_index,
                 slot_generation: response.slot_generation,
             },
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,

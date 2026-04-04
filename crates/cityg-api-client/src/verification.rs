@@ -783,7 +783,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         ));
     }
     if artifact.barrier_version != response.barrier_version
-        || artifact.cover_leaf_index != response.cover_leaf_index
+        || artifact.cover_leaf_index != response.slot_index
         || artifact.slot_generation != response.slot_generation
         || artifact.n_max != response.n_max
         || artifact.max_barrier_update_bytes != response.max_barrier_update_bytes
@@ -859,7 +859,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         prev_history_commitment_id: &current_history_commitment.prev_history_commitment_id,
         history_seq: current_history_commitment.history_seq,
         barrier_version: response.barrier_version,
-        cover_leaf_index: response.cover_leaf_index,
+        cover_leaf_index: response.slot_index,
         slot_generation: response.slot_generation,
         n_max: response.n_max,
         max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -1028,7 +1028,7 @@ pub(crate) fn verify_merge_ticket_artifact(
         prev_history_commitment_id: &current_history_commitment.prev_history_commitment_id,
         history_seq: current_history_commitment.history_seq,
         barrier_version: response.barrier_version,
-        cover_leaf_index: response.cover_leaf_index,
+        cover_leaf_index: response.slot_index,
         slot_generation: response.slot_generation,
         n_max: response.n_max,
         max_barrier_update_bytes: response.max_barrier_update_bytes,

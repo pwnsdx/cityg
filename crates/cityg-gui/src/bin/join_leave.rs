@@ -1806,7 +1806,7 @@ mod tests {
         #[prost(string, tag = "22")]
         profile_version: String,
         #[prost(uint64, tag = "23")]
-        cover_leaf_index: u64,
+        slot_index: u64,
         #[prost(bytes = "vec", tag = "25")]
         kem_tree_hash_after: Vec<u8>,
         #[prost(uint64, tag = "26")]
@@ -1831,6 +1831,8 @@ mod tests {
         merge_ticket_artifact: Vec<u8>,
         #[prost(bytes = "vec", tag = "36")]
         deployment_profile_manifest: Vec<u8>,
+        #[prost(uint64, tag = "37")]
+        slot_generation: u64,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -2558,7 +2560,7 @@ mod tests {
             kbroad_generation: ticket.kbroad_generation,
             barrier_version: ticket.barrier_version,
             profile_version: "v0.1.4".to_string(),
-            cover_leaf_index: ticket.slot_lease.slot_index,
+            slot_index: ticket.slot_lease.slot_index,
             kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
             n_max: ticket.n_max,
             max_barrier_update_bytes: ticket.max_barrier_update_bytes,
@@ -2584,6 +2586,7 @@ mod tests {
                 .unwrap_or_default(),
             merge_ticket_artifact: ticket.merge_ticket_artifact_bytes.clone(),
             deployment_profile_manifest: ticket.deployment_profile_manifest_bytes.clone(),
+            slot_generation: ticket.slot_lease.slot_generation,
         }
         .encode_to_vec())
     }

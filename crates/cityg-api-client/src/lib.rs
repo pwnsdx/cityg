@@ -1973,7 +1973,7 @@ mod tests {
             prev_history_commitment_id: &history_commitment.prev_history_commitment_id,
             history_seq: history_commitment.history_seq,
             barrier_version: response.barrier_version,
-            cover_leaf_index: response.cover_leaf_index,
+            cover_leaf_index: response.slot_index,
             slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -2023,7 +2023,7 @@ mod tests {
                 .clone(),
             history_seq: current_history_commitment.history_seq,
             barrier_version: response.barrier_version,
-            cover_leaf_index: response.cover_leaf_index,
+            cover_leaf_index: response.slot_index,
             slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -2162,7 +2162,7 @@ mod tests {
             prev_history_commitment_id: &history_commitment.prev_history_commitment_id,
             history_seq: history_commitment.history_seq,
             barrier_version: response.barrier_version,
-            cover_leaf_index: response.cover_leaf_index,
+            cover_leaf_index: response.slot_index,
             slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -2214,7 +2214,7 @@ mod tests {
                 .clone(),
             history_seq: current_history_commitment.history_seq,
             barrier_version: response.barrier_version,
-            cover_leaf_index: response.cover_leaf_index,
+            cover_leaf_index: response.slot_index,
             slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -2373,7 +2373,7 @@ mod tests {
             kbroad_generation: 0,
             barrier_version: 0,
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-            cover_leaf_index: 0,
+            slot_index: 0,
             slot_generation: 0,
             kem_tree_hash_after: vec![0x09; 32],
             n_max: 1024,
@@ -2453,7 +2453,7 @@ mod tests {
             provisioning_nonce: vec![0xE6; 32],
             provisioning_issued_at_ms: 1,
             provisioning_expires_at_ms: u64::MAX,
-            cover_leaf_index: 0,
+            slot_index: 0,
             slot_generation: 0,
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
@@ -3549,7 +3549,7 @@ mod tests {
     #[test]
     fn prepare_runtime_join_ticket_rejects_cover_leaf_out_of_range() {
         let mut ticket = runtime_join_ticket_payload();
-        ticket.cover_leaf_index = ticket.n_max;
+        ticket.slot_index = ticket.n_max;
 
         let err = prepare_runtime_join_ticket(&ticket)
             .expect_err("out-of-range join cover leaf must fail");
@@ -3750,7 +3750,8 @@ mod tests {
                     &pop_secret_key,
                 )?,
             )
-            .await?;
+            .await
+            .map_err(|err| std::io::Error::other(format!("expel_member_ticket failed: {err}")))?;
         assert_eq!(expelled.we_epoch_id, [0x01; 32]);
         let _ = client.accept_epoch_bundle(&demo_bundle).await?;
         client.refresh_pivot(&demo_bundle).await?;
@@ -3765,11 +3766,17 @@ mod tests {
         let _ = client
             .search_members(&gid, "alice", Some(&[0x55; 32]), Some(0), Some(10))
             .await?;
-        let join = client.join_ticket("room-1", "alice", None).await?;
-        assert_eq!(join.cover_leaf_index, 0);
+        let join = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .map_err(|err| std::io::Error::other(format!("join_ticket failed: {err}")))?;
+        assert_eq!(join.slot_index, 0);
         assert_eq!(join.slot_generation, 0);
 
-        let merge = client.merge_ticket("room-1", &[0x01; 32]).await?;
+        let merge = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .map_err(|err| std::io::Error::other(format!("merge_ticket failed: {err}")))?;
         assert_eq!(merge.we_epoch_id, [0x01; 32]);
         assert_eq!(merge.parent_root, [0x03; 32]);
         assert_eq!(merge.kbroad_generation, 0);
@@ -3785,11 +3792,17 @@ mod tests {
         assert_eq!(merge.last_accepted_ec, 34);
         assert_eq!(merge.fs_forward_leap_policy.h, 300);
         assert_eq!(merge.fs_forward_leap_policy.checkpoint_interval, 3600);
-        let refresh_merge = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
+        let refresh_merge = client
+            .merge_ticket_refresh("room-1", &[0x01; 32])
+            .await
+            .map_err(|err| std::io::Error::other(format!("merge_ticket_refresh failed: {err}")))?;
         assert_eq!(refresh_merge.we_epoch_id, [0x01; 32]);
         let refresh_with_intent = client
             .merge_ticket_with_intent("room-1", &[0x01; 32], MergeTicketIntent::Refresh)
-            .await?;
+            .await
+            .map_err(|err| {
+                std::io::Error::other(format!("merge_ticket_with_intent failed: {err}"))
+            })?;
         assert_eq!(refresh_with_intent.we_epoch_id, [0x01; 32]);
 
         let revoked = client
@@ -3797,7 +3810,10 @@ mod tests {
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 &[0xCC; 32],
             )
-            .await?;
+            .await
+            .map_err(|err| {
+                std::io::Error::other(format!("barrier_resolve_revoked_leaves failed: {err}"))
+            })?;
         assert_eq!(revoked.history_view_id, [0xD1; 32]);
         assert_eq!(revoked.history_commitment.history_commitment_id, [0xE1; 32]);
         assert_eq!(
@@ -3864,6 +3880,53 @@ mod tests {
         let _ = client.window().await?;
         let _ = client.telemetry().await?;
         let _ = client.configure_window(Some(8), Some(120_000)).await?;
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_roundtrip_against_mock_server() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_mock_server().await?;
+        let client = CitygApiClient::with_http_client(base_url, Client::new());
+
+        let join = client.join_ticket("room-1", "alice", None).await?;
+
+        assert_eq!(join.slot_index, 0);
+        assert_eq!(join.slot_generation, 0);
+        assert_eq!(join.n_max, 1024);
+        assert_eq!(join.max_barrier_update_bytes, 1_048_576);
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expel_member_ticket_roundtrip_against_mock_server() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_mock_server().await?;
+        let client = CitygApiClient::with_http_client(base_url, Client::new());
+        let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+
+        let expelled = client
+            .expel_member_ticket(
+                "room-1",
+                &[0x01; 32],
+                &[0x02; 32],
+                build_room_admin_leaf_pair_proof(
+                    RoomAdminOperation::ExpelMember,
+                    "room-1",
+                    &[0x01; 32],
+                    &[0x02; 32],
+                    &pop_public_key,
+                    &pop_secret_key,
+                )?,
+            )
+            .await?;
+
+        assert_eq!(expelled.we_epoch_id, [0x01; 32]);
+        assert_eq!(expelled.slot_lease.slot_index, 0);
+        assert_eq!(expelled.slot_lease.slot_generation, 0);
+        assert_eq!(expelled.n_max, 1024);
 
         handle.abort();
         Ok(())

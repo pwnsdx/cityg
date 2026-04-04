@@ -297,10 +297,10 @@ impl CitygApiClient {
                 "join ticket provisioning artifact expired".to_string(),
             ));
         }
-        if response.cover_leaf_index >= n_max {
+        if response.slot_index >= n_max {
             return Err(Error::Parse(format!(
                 "join ticket cover_leaf_index out of range: {} >= {}",
-                response.cover_leaf_index, n_max
+                response.slot_index, n_max
             )));
         }
         Ok(response)
@@ -359,10 +359,10 @@ pub fn prepare_runtime_join_ticket(
     } else {
         response.n_max
     })?;
-    if response.cover_leaf_index >= barrier_n_max {
+    if response.slot_index >= barrier_n_max {
         return Err(Error::Parse(format!(
             "join ticket cover_leaf_index out of range: {} >= {}",
-            response.cover_leaf_index, barrier_n_max
+            response.slot_index, barrier_n_max
         )));
     }
     let max_barrier_update_bytes = response.max_barrier_update_bytes.max(1);
@@ -439,7 +439,7 @@ pub fn prepare_runtime_join_ticket(
         join_finalize_auth_token,
         barrier_n_max,
         slot_lease: SlotLease {
-            slot_index: response.cover_leaf_index,
+            slot_index: response.slot_index,
             slot_generation: response.slot_generation,
         },
         max_barrier_update_bytes,
