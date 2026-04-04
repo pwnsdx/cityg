@@ -57,6 +57,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Remove `leaf_indices` from `BarrierResolveRevokedLeavesResponse`
 - [x] Remove `revoked_leaf_indices` from full-verification witness requests
 - [x] Remove stored `leaf_indices` from `BarrierResolvedRevokedLeaves` client state
+- [x] Remove stored `leaf_indices` from `ResolvedRevokedLeaves` server state
 - [ ] Update schema encoding/decoding
 - [~] Update runtime service ticket preparation
 

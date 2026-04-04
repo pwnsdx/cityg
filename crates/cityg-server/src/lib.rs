@@ -507,7 +507,19 @@ pub struct ResolvedRevokedLeaves {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
     pub records: Vec<BarrierRevokedLeafRecord>,
-    pub leaf_indices: Vec<u32>,
+}
+
+impl ResolvedRevokedLeaves {
+    pub fn leaf_indices(&self) -> Vec<u32> {
+        let mut leaf_indices = self
+            .records
+            .iter()
+            .map(|record| record.leaf_index)
+            .collect::<Vec<_>>();
+        leaf_indices.sort_unstable();
+        leaf_indices.dedup();
+        leaf_indices
+    }
 }
 
 /// Join enumeration bound to one authenticated history commitment.
@@ -2928,14 +2940,10 @@ impl CityGServer {
         };
         records.sort_by_key(|record| (record.leaf_index, record.slot_generation));
         records.dedup();
-        let mut indices: Vec<u32> = records.iter().map(|record| record.leaf_index).collect();
-        indices.sort_unstable();
-        indices.dedup();
         Ok(ResolvedRevokedLeaves {
             history_view_id: history_commitment.history_view_id,
             history_commitment,
             records,
-            leaf_indices: indices,
         })
     }
 
@@ -7600,7 +7608,7 @@ mod tests {
             1u64
         };
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
-        let mut witness_revoked_leaf_indices = committed_revoked.leaf_indices.clone();
+        let mut witness_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut witness_revoked_records = committed_revoked.records.clone();
         if barrier_update_reason == 0 {
             if reclaims_revoked_slot {
@@ -7855,7 +7863,7 @@ mod tests {
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
             .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
-        let mut post_revoked_leaf_indices = committed_revoked.leaf_indices.clone();
+        let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
         if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
             post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
@@ -8087,7 +8095,7 @@ mod tests {
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
             .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
-        let mut post_revoked_leaf_indices = committed_revoked.leaf_indices.clone();
+        let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
         if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
             post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
@@ -8632,7 +8640,7 @@ mod tests {
                 ))?;
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         assert!(
-            committed_revoked.leaf_indices.is_empty(),
+            committed_revoked.leaf_indices().is_empty(),
             "reclaimed slot must no longer appear in the committed revoked helper set"
         );
         Ok(())
