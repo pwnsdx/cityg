@@ -69,6 +69,7 @@ struct FullVerificationReceiptWire {
     author_leaf_id: Vec<u8>,
     barrier_update_reason: u64,
     updater_leaf: u64,
+    updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     signature: Vec<u8>,
 }
@@ -82,6 +83,7 @@ struct FullVerificationReceiptSignedPayload<'a> {
     author_leaf_id: &'a [u8; 32],
     barrier_update_reason: u64,
     updater_leaf: u64,
+    updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     barrier_history_commitment: &'a [u8],
     #[serde(with = "serde_bytes")]
@@ -224,6 +226,7 @@ pub fn encode_full_verification_receipt(
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
     updater_leaf: u64,
+    updater_slot_generation: u64,
     barrier_history_commitment: &[u8],
     global_history_attestation: &[u8],
     barrier_update: &[u8],
@@ -235,6 +238,7 @@ pub fn encode_full_verification_receipt(
         author_leaf_id,
         barrier_update_reason,
         updater_leaf,
+        updater_slot_generation,
         barrier_history_commitment,
         global_history_attestation,
         barrier_update,
@@ -249,6 +253,7 @@ pub fn encode_full_verification_receipt(
         author_leaf_id: author_leaf_id.to_vec(),
         barrier_update_reason,
         updater_leaf,
+        updater_slot_generation,
         signature,
     })
     .map_err(|err| anyhow!("encode full verification receipt: {err}"))
@@ -261,6 +266,7 @@ pub fn verify_full_verification_receipt(
     expected_author_leaf_id: &[u8; 32],
     expected_barrier_update_reason: u64,
     expected_updater_leaf: u64,
+    expected_updater_slot_generation: Option<u64>,
     barrier_history_commitment: &[u8],
     global_history_attestation: &[u8],
     barrier_update: &[u8],
@@ -281,6 +287,8 @@ pub fn verify_full_verification_receipt(
     if author_leaf_id != *expected_author_leaf_id
         || decoded.barrier_update_reason != expected_barrier_update_reason
         || decoded.updater_leaf != expected_updater_leaf
+        || expected_updater_slot_generation
+            .is_some_and(|slot_generation| decoded.updater_slot_generation != slot_generation)
     {
         return Err(anyhow!("full verification receipt fields mismatch"));
     }
@@ -290,6 +298,7 @@ pub fn verify_full_verification_receipt(
         author_leaf_id: expected_author_leaf_id,
         barrier_update_reason: expected_barrier_update_reason,
         updater_leaf: expected_updater_leaf,
+        updater_slot_generation: decoded.updater_slot_generation,
         barrier_history_commitment,
         global_history_attestation,
         barrier_update,
@@ -710,6 +719,7 @@ mod tests {
             &author_leaf_id,
             9,
             2,
+            7,
             barrier_history_commitment.as_slice(),
             global_history_attestation.as_slice(),
             barrier_update.as_slice(),
@@ -721,10 +731,51 @@ mod tests {
             &author_leaf_id,
             9,
             2,
+            Some(7),
             barrier_history_commitment.as_slice(),
             global_history_attestation.as_slice(),
             barrier_update.as_slice(),
             public_key.as_bytes(),
         )
+    }
+
+    #[test]
+    fn full_verification_receipt_rejects_updater_slot_generation_mismatch() -> Result<()> {
+        let (public_key, secret_key) = dilithium5::keypair();
+        let gid = [0x12; 32];
+        let author_leaf_id = [0x23; 32];
+        let barrier_history_commitment = [0x34; 12];
+        let global_history_attestation = [0x45; 18];
+        let barrier_update = [0x56; 27];
+        let receipt = encode_full_verification_receipt(
+            &gid,
+            &author_leaf_id,
+            9,
+            1,
+            7,
+            barrier_history_commitment.as_slice(),
+            global_history_attestation.as_slice(),
+            barrier_update.as_slice(),
+            secret_key.as_bytes(),
+        )?;
+        let err = verify_full_verification_receipt(
+            receipt.as_slice(),
+            &gid,
+            &author_leaf_id,
+            9,
+            1,
+            Some(8),
+            barrier_history_commitment.as_slice(),
+            global_history_attestation.as_slice(),
+            barrier_update.as_slice(),
+            public_key.as_bytes(),
+        )
+        .expect_err("mismatched updater_slot_generation must be rejected");
+        assert!(
+            err.to_string()
+                .contains("full verification receipt fields mismatch"),
+            "unexpected error: {err}"
+        );
+        Ok(())
     }
 }

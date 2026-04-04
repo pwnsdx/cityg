@@ -480,6 +480,9 @@ message BarrierIssueFullVerificationWitnessRequest {
   bytes deployment_profile_manifest = 11;
   bytes revocation_target_leaf_id = 12;
   bytes merge_ticket_artifact = 13;
+  uint64 updater_slot_generation = 14;
+  repeated BarrierRevokedLeafRecord revoked_records = 15;
+  bool include_updater_in_revoked_set = 16;
 }
 
 message BarrierIssueFullVerificationWitnessResponse {

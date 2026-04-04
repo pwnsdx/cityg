@@ -425,9 +425,12 @@ pub struct FullVerificationWitnessRequest {
     pub deployment_profile_manifest: Vec<u8>,
     pub merge_ticket_artifact: Vec<u8>,
     pub barrier_update_reason: u64,
+    pub updater_slot_generation: u64,
+    pub include_updater_in_revoked_set: bool,
     pub revocation_roots_hash: [u8; 32],
     pub revocation_target_leaf_id: Option<[u8; 32]>,
     pub join_records: Vec<BarrierJoinLeafRecord>,
+    pub revoked_records: Vec<BarrierRevokedLeafRecord>,
     pub revoked_leaf_indices: Vec<u32>,
     pub barrier_update: Vec<u8>,
 }
@@ -1027,17 +1030,26 @@ pub fn prepare_full_verification_witness(
         return Err(RoomFullVerificationWitnessPreparationError::JoinHelperDataMismatch);
     }
 
-    let expected_revoked_leaf_indices = if request.barrier_update_reason == 0 {
-        let mut leaf_indices = server
+    let expected_revoked_records = if request.barrier_update_reason == 0 {
+        let mut records = server
             .resolve_revoked_leaf_indices(gid, &committed_revocation_roots_hash)
             .map_err(RoomFullVerificationWitnessPreparationError::HelperClient)?
-            .leaf_indices;
+            .records;
         let cover_leaf_index = u32::try_from(bundle.cover_leaf_index)
             .map_err(|_| RoomFullVerificationWitnessPreparationError::CoverLeafIndexOutOfRange)?;
-        if let Err(insert_at) = leaf_indices.binary_search(&cover_leaf_index) {
-            leaf_indices.insert(insert_at, cover_leaf_index);
+        if request.include_updater_in_revoked_set {
+            let updater_record = BarrierRevokedLeafRecord {
+                leaf_index: cover_leaf_index,
+                slot_generation: bundle.slot_generation,
+            };
+            if let Err(insert_at) = records.binary_search_by_key(
+                &(updater_record.leaf_index, updater_record.slot_generation),
+                |record| (record.leaf_index, record.slot_generation),
+            ) {
+                records.insert(insert_at, updater_record);
+            }
         }
-        leaf_indices
+        records
     } else {
         let resolved_revoked = server
             .resolve_revoked_leaf_indices(gid, &request.revocation_roots_hash)
@@ -1045,9 +1057,16 @@ pub fn prepare_full_verification_witness(
         if resolved_revoked.history_commitment != bundle.current_history_commitment {
             return Err(RoomFullVerificationWitnessPreparationError::RevokedHelperDataMismatch);
         }
-        resolved_revoked.leaf_indices
+        resolved_revoked.records
     };
-    if request.revoked_leaf_indices != expected_revoked_leaf_indices {
+    let expected_revoked_leaf_indices = expected_revoked_records
+        .iter()
+        .map(|record| record.leaf_index)
+        .collect::<Vec<_>>();
+    if request.updater_slot_generation != bundle.slot_generation
+        || request.revoked_records != expected_revoked_records
+        || request.revoked_leaf_indices != expected_revoked_leaf_indices
+    {
         return Err(RoomFullVerificationWitnessPreparationError::RevokedHelperDataMismatch);
     }
 
@@ -1060,11 +1079,12 @@ pub fn prepare_full_verification_witness(
             &request.author_leaf_id,
             request.barrier_update_reason,
             bundle.cover_leaf_index,
+            bundle.slot_generation,
             request.barrier_update.as_slice(),
             request.joins_prev_barrier_version,
             request.join_records.as_slice(),
             &request.revocation_roots_hash,
-            expected_revoked_leaf_indices.as_slice(),
+            expected_revoked_records.as_slice(),
             request.deployment_profile_manifest.as_slice(),
         )
         .map_err(Into::into)

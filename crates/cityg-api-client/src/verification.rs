@@ -62,6 +62,7 @@ pub(crate) struct FullVerificationWitnessWire {
     pub(crate) author_leaf_id: Vec<u8>,
     pub(crate) barrier_update_reason: u64,
     pub(crate) updater_leaf: u64,
+    pub(crate) updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     pub(crate) barrier_update_digest: Vec<u8>,
     #[serde(with = "serde_bytes")]
@@ -390,6 +391,7 @@ pub(crate) struct FullVerificationWitnessSignedPayload<'a> {
     pub(crate) author_leaf_id: &'a [u8; 32],
     pub(crate) barrier_update_reason: u64,
     pub(crate) updater_leaf: u64,
+    pub(crate) updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     pub(crate) barrier_update_digest: &'a [u8; 32],
     #[serde(with = "serde_bytes")]
@@ -585,19 +587,19 @@ pub(crate) fn compute_full_verification_joins_digest(
 
 pub(crate) fn compute_full_verification_revoked_digest(
     revocation_roots_hash: &[u8; 32],
-    revoked_leaf_indices: &[u32],
+    revoked_records: &[BarrierRevokedLeafRecord],
 ) -> Result<[u8; 32], Error> {
     #[derive(Serialize)]
     struct Preimage<'a> {
         #[serde(with = "serde_bytes")]
         revocation_roots_hash: &'a [u8; 32],
-        leaf_indices: &'a [u32],
+        records: &'a [BarrierRevokedLeafRecord],
     }
     h_l(
         "cityg/full-verification-witness/revoked",
         &Preimage {
             revocation_roots_hash,
-            leaf_indices: revoked_leaf_indices,
+            records: revoked_records,
         },
     )
     .map_err(|err| Error::Parse(format!("compute revoked digest: {err}")))
@@ -632,11 +634,12 @@ pub(crate) fn verify_full_verification_witness(
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
     updater_leaf: u64,
+    updater_slot_generation: u64,
     barrier_update: &[u8],
     joins_prev_barrier_version: u64,
     join_records: &[BarrierJoinRecord],
     revocation_roots_hash: &[u8; 32],
-    revoked_leaf_indices: &[u32],
+    revoked_records: &[BarrierRevokedLeafRecord],
     deployment_profile_manifest: &[u8],
 ) -> Result<FullVerificationWitness, Error> {
     let witness: FullVerificationWitnessWire = decode_cbor_det("full verification witness", raw)?;
@@ -655,6 +658,7 @@ pub(crate) fn verify_full_verification_witness(
         author_leaf_id: array32(&witness.author_leaf_id)?,
         barrier_update_reason: witness.barrier_update_reason,
         updater_leaf: witness.updater_leaf,
+        updater_slot_generation: witness.updater_slot_generation,
         barrier_update_digest: array32(&witness.barrier_update_digest)?,
         joins_digest: array32(&witness.joins_digest)?,
         revoked_digest: array32(&witness.revoked_digest)?,
@@ -670,6 +674,7 @@ pub(crate) fn verify_full_verification_witness(
         || parsed.author_leaf_id != *author_leaf_id
         || parsed.barrier_update_reason != barrier_update_reason
         || parsed.updater_leaf != updater_leaf
+        || parsed.updater_slot_generation != updater_slot_generation
     {
         return Err(Error::Parse(
             "full verification witness fields mismatch".to_string(),
@@ -680,7 +685,7 @@ pub(crate) fn verify_full_verification_witness(
     let expected_joins_digest =
         compute_full_verification_joins_digest(joins_prev_barrier_version, join_records)?;
     let expected_revoked_digest =
-        compute_full_verification_revoked_digest(revocation_roots_hash, revoked_leaf_indices)?;
+        compute_full_verification_revoked_digest(revocation_roots_hash, revoked_records)?;
     let expected_manifest_digest =
         compute_full_verification_deployment_manifest_digest(deployment_profile_manifest)?;
     if parsed.barrier_update_digest != expected_barrier_update_digest {
@@ -717,6 +722,7 @@ pub(crate) fn verify_full_verification_witness(
         author_leaf_id,
         barrier_update_reason,
         updater_leaf,
+        updater_slot_generation,
         barrier_update_digest: &expected_barrier_update_digest,
         joins_digest: &expected_joins_digest,
         revoked_digest: &expected_revoked_digest,

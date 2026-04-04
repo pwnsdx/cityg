@@ -38,6 +38,7 @@ pub struct BarrierWrapAadPreimage<'a>(
     pub u64,
     pub u64,
     pub u64,
+    pub u64,
     #[serde(with = "serde_bytes")] pub &'a [u8; 32],
 );
 
@@ -68,6 +69,7 @@ pub fn build_barrier_update_bytes(
     gid: &[u8; 32],
     n_max: u64,
     updater_leaf: u64,
+    updater_slot_generation: u64,
     barrier_version: u64,
     prev_barrier_version: u64,
     revocation_roots_hash: [u8; 32],
@@ -190,6 +192,7 @@ pub fn build_barrier_update_bytes(
                 &kem_tree_hash_before,
                 &kem_tree_hash_after,
                 updater_leaf,
+                updater_slot_generation,
                 source_node,
                 target_node,
                 &target_pkhash,
@@ -234,6 +237,7 @@ pub fn build_barrier_update_bytes(
 
     let cover_payload = KemTreeCoverPayloadWire(
         updater_leaf,
+        updater_slot_generation,
         path_nodes,
         None,
         node_ciphertexts,
@@ -281,6 +285,7 @@ mod tests {
             0,
             0,
             0,
+            0,
             [0x22; 32],
             kem_tree_hash_before,
             snapshot_pre.as_slice(),
@@ -288,6 +293,7 @@ mod tests {
         let parsed = parse_barrier_update_for_recover(built.raw_update.as_slice(), 1, 1_048_576)?;
         assert_eq!(parsed.barrier_version, 0);
         assert_eq!(parsed.prev_barrier_version, 0);
+        assert_eq!(parsed.updater_slot_generation, 0);
         assert_eq!(parsed.node_ciphertexts.len(), 0);
         assert_eq!(parsed.new_public_keys.len(), 0);
         assert_eq!(
@@ -305,11 +311,21 @@ mod tests {
             derive_internal_node_key_material(gid.as_slice(), &[0x44; 32], 4, &rrh, 2, 2)?;
         let snapshot_pre = vec![Vec::new(), Vec::new(), ek_leaf];
         let kem_tree_hash_before = compute_barrier_tree_hash(2, snapshot_pre.as_slice())?;
-        let built =
-            build_barrier_update_bytes(&gid, 2, 0, 5, 4, rrh, kem_tree_hash_before, &snapshot_pre)?;
+        let built = build_barrier_update_bytes(
+            &gid,
+            2,
+            0,
+            0,
+            5,
+            4,
+            rrh,
+            kem_tree_hash_before,
+            &snapshot_pre,
+        )?;
         let parsed = parse_barrier_update_for_recover(built.raw_update.as_slice(), 2, 1_048_576)?;
         assert_eq!(parsed.barrier_version, 5);
         assert_eq!(parsed.prev_barrier_version, 4);
+        assert_eq!(parsed.updater_slot_generation, 0);
         assert_eq!(parsed.node_ciphertexts.len(), 1);
         assert!(parsed.new_public_keys.contains_key(&0));
         assert_eq!(built.on_path_key_material.len(), 1);

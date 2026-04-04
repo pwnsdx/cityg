@@ -38,6 +38,7 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
     let ticket_max_barrier_update_bytes_u64 = prepared_runtime.max_barrier_update_bytes;
     let ticket_max_barrier_update_bytes = prepared_runtime.max_barrier_update_bytes_normalized;
     let ticket_cover_leaf_index = prepared_runtime.cover_leaf_index;
+    let ticket_slot_generation = prepared_runtime.slot_generation;
     let ticket_barrier_roots_hash = prepared_runtime.ticket_barrier_roots_hash;
     let previous_we_epoch_id = session.we_epoch_id;
     let activation_source_before_sync = capture_barrier_pending_activation_source(&session);
@@ -54,6 +55,7 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
     session.barrier_state.max_barrier_update_bytes = ticket_max_barrier_update_bytes_u64;
     session.barrier_state.n_max = ticket_n_max;
     session.barrier_state.cover_leaf_index = ticket_cover_leaf_index;
+    session.barrier_state.slot_generation = ticket_slot_generation;
     let pending_history_outcome = apply_pending_barrier_activation_from_history(
         &client,
         &mut session,
@@ -64,7 +66,8 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
         || session.barrier_state.kem_tree_hash_after != ticket_kem_tree_hash_after
         || session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
         || session.barrier_state.n_max != ticket_n_max
-        || session.barrier_state.cover_leaf_index != ticket_cover_leaf_index;
+        || session.barrier_state.cover_leaf_index != ticket_cover_leaf_index
+        || session.barrier_state.slot_generation != ticket_slot_generation;
 
     if let Some(pivot) = select_pivot_parity(&prepared_runtime.parities) {
         session.xk_hash = pivot.xk_hash;

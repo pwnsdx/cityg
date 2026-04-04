@@ -49,6 +49,7 @@ fn validate_barrier_update_accepts_expected_pairs_and_pkhash_binding() -> Result
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
         u64::from(updater_leaf),
+        0,
         path_nodes,
         None,
         vec![super::NodeCiphertextWire(
@@ -158,6 +159,7 @@ fn validate_barrier_update_rejects_pcs_refresh_reason_for_unresolved_joiner()
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
         u64::from(updater_leaf),
+        0,
         path_nodes,
         None,
         vec![super::NodeCiphertextWire(
@@ -258,6 +260,7 @@ fn validate_barrier_update_rejects_join_finalize_reason_for_non_joiner() -> Resu
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
         u64::from(leaf_index),
+        0,
         path_nodes,
         None,
         vec![super::NodeCiphertextWire(
@@ -366,6 +369,7 @@ fn validate_barrier_update_rejects_target_pkhash_mismatch() -> Result<(), CityGE
 
     let cover_payload = super::KemTreeCoverPayloadWire(
         u64::from(updater_leaf),
+        0,
         path_nodes,
         None,
         vec![super::NodeCiphertextWire(
@@ -474,6 +478,7 @@ fn validate_barrier_update_rejects_expected_pairs_mismatch() -> Result<(), CityG
     state.barrier_roots_hash = revocation_roots_hash;
     let cover_payload = super::KemTreeCoverPayloadWire(
         u64::from(updater_leaf),
+        0,
         path_nodes,
         None,
         vec![super::NodeCiphertextWire(
@@ -584,6 +589,7 @@ fn validate_barrier_update_rejects_updater_identity_mismatch() -> Result<(), Cit
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
         u64::from(updater_leaf),
+        0,
         path_nodes,
         None,
         vec![super::NodeCiphertextWire(
@@ -691,6 +697,7 @@ fn validate_barrier_update_rejects_missing_author_pop_pk() -> Result<(), CityGEr
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
         u64::from(updater_leaf),
+        0,
         path_nodes,
         None,
         vec![super::NodeCiphertextWire(
@@ -813,6 +820,7 @@ fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), Cit
     let rrh = super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
     let cover_payload = super::KemTreeCoverPayloadWire(
         updater_leaf,
+        0,
         path_nodes,
         None,
         Vec::new(),
@@ -1026,7 +1034,8 @@ fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), Cit
     let singleton_hash =
         super::compute_barrier_tree_hash(singleton_state.n_max, singleton_snapshot.as_slice())?;
     let singleton_rrh = super::compute_revocation_roots_hash(&[0u8; 32], &[0u8; 32])?;
-    let singleton_cover = super::KemTreeCoverPayloadWire(0, vec![0], None, Vec::new(), Vec::new());
+    let singleton_cover =
+        super::KemTreeCoverPayloadWire(0, 0, vec![0], None, Vec::new(), Vec::new());
     let singleton_update = super::BarrierUpdateWire(
         "barrier-v1".to_string(),
         0,

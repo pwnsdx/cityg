@@ -971,6 +971,14 @@ pub fn decode_full_verification_witness_request(
             ek_leaf: record.ek_leaf,
         })
         .collect();
+    let revoked_records = request
+        .revoked_records
+        .into_iter()
+        .map(|record| ServerBarrierRevokedLeafRecord {
+            leaf_index: record.leaf_index,
+            slot_generation: record.slot_generation,
+        })
+        .collect();
 
     Ok(RuntimeFullVerificationWitnessRequest {
         author_leaf_id,
@@ -980,9 +988,12 @@ pub fn decode_full_verification_witness_request(
         deployment_profile_manifest: request.deployment_profile_manifest,
         merge_ticket_artifact: request.merge_ticket_artifact,
         barrier_update_reason: request.barrier_update_reason,
+        updater_slot_generation: request.updater_slot_generation,
+        include_updater_in_revoked_set: request.include_updater_in_revoked_set,
         revocation_roots_hash,
         revocation_target_leaf_id,
         join_records,
+        revoked_records,
         revoked_leaf_indices: request.revoked_leaf_indices,
         barrier_update: request.barrier_update,
     })
@@ -2232,6 +2243,12 @@ mod tests {
                     ek_leaf: vec![0x53],
                     slot_generation: 54,
                 }],
+                updater_slot_generation: 63,
+                revoked_records: vec![pb::BarrierRevokedLeafRecord {
+                    leaf_index: 61,
+                    slot_generation: 64,
+                }],
+                include_updater_in_revoked_set: true,
                 revoked_leaf_indices: vec![61],
                 barrier_update: vec![0x62],
             },
@@ -2252,6 +2269,10 @@ mod tests {
         assert_eq!(decoded.revocation_target_leaf_id, Some([0x42; 32]));
         assert_eq!(decoded.join_records.len(), 1);
         assert_eq!(decoded.join_records[0].leaf_index, 52);
+        assert_eq!(decoded.updater_slot_generation, 63);
+        assert_eq!(decoded.revoked_records.len(), 1);
+        assert_eq!(decoded.revoked_records[0].slot_generation, 64);
+        assert!(decoded.include_updater_in_revoked_set);
         assert_eq!(decoded.revoked_leaf_indices, vec![61]);
         assert_eq!(decoded.barrier_update, vec![0x62]);
     }
@@ -2276,6 +2297,9 @@ mod tests {
                 revocation_roots_hash: vec![0x41; 32],
                 revocation_target_leaf_id: vec![],
                 join_records: Vec::new(),
+                updater_slot_generation: 0,
+                revoked_records: Vec::new(),
+                include_updater_in_revoked_set: false,
                 revoked_leaf_indices: Vec::new(),
                 barrier_update: Vec::new(),
             },

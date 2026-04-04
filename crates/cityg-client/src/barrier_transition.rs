@@ -72,6 +72,7 @@ mod tests {
             kem_tree_hash_before: [0u8; 32],
             kem_tree_hash_after: [0u8; 32],
             updater_leaf: 0,
+            updater_slot_generation: 0,
             path_nodes: vec![3, 1, 0],
             node_ciphertexts: Vec::new(),
             new_public_keys: BTreeMap::from([(1u64, internal_pk.clone())]),

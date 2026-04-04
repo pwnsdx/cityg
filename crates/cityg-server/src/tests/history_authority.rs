@@ -186,11 +186,12 @@ fn full_verification_witness_rejects_barrier_update_hash_mismatch() -> Result<()
             &generated.leaf_id,
             1,
             ticket.cover_leaf_index,
+            ticket.slot_generation,
             tampered_barrier_update.as_slice(),
             ticket.barrier_version,
             join_records.records.as_slice(),
             &committed_roots_hash,
-            committed_revoked.leaf_indices.as_slice(),
+            committed_revoked.records.as_slice(),
             deployment_profile_manifest.as_slice(),
         )
         .expect_err("tampered barrier_update must not receive a full verification witness");
@@ -200,6 +201,67 @@ fn full_verification_witness_rejects_barrier_update_hash_mismatch() -> Result<()
             if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.code
                 && freeze.reason
                     == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.reason
+    ));
+    Ok(())
+}
+
+#[test]
+fn full_verification_witness_rejects_updater_slot_generation_mismatch() -> Result<(), CityGError> {
+    let generated = build_genesis_member_bundle(0x7E)?;
+    let mut server = demo_server_with_global_history_authority();
+    server.accept_epoch(&generated.bundle)?;
+
+    let ticket =
+        server.build_merge_ticket_for_refresh(&cityg_client::demo::DEMO_GID, &generated.leaf_id)?;
+    let join_records =
+        server.resolve_joins_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
+    let committed_roots_hash = super::super::compute_revocation_roots_hash(
+        &ticket.revoked_since_root,
+        &ticket.revoked_root,
+    )?;
+    let committed_revoked = server
+        .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
+    let (bundle, _) = build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+    let raw_barrier_update = bundle
+        .header_map
+        .get(&hdr::HDR_BARRIER_UPDATE)
+        .and_then(Value::as_bytes)
+        .ok_or(CityGError::InvalidInput("missing barrier_update"))?;
+    let deployment_profile_manifest = server.deployment_profile_manifest_bytes(
+        &cityg_client::demo::DEMO_GID,
+        "v0.1.4",
+        server.history_authority_extension_id(),
+        ticket.n_max,
+        ticket.max_barrier_update_bytes,
+        ticket.fs_forward_leap_policy,
+    )?;
+
+    let err = server
+        .full_verification_witness_bytes(
+            &cityg_client::demo::DEMO_GID,
+            &ticket.current_history_commitment,
+            ticket.barrier_version,
+            &ticket.kem_tree_hash_after,
+            &generated.leaf_id,
+            1,
+            ticket.cover_leaf_index,
+            ticket.slot_generation + 1,
+            raw_barrier_update,
+            ticket.barrier_version,
+            join_records.records.as_slice(),
+            &committed_roots_hash,
+            committed_revoked.records.as_slice(),
+            deployment_profile_manifest.as_slice(),
+        )
+        .expect_err(
+            "mismatched updater_slot_generation must not receive a full verification witness",
+        );
+    assert!(matches!(
+        err,
+        CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+            if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                && freeze.reason
+                    == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
     ));
     Ok(())
 }
@@ -230,6 +292,42 @@ fn accept_epoch_rejects_barrier_update_missing_receipt_under_local_history_autho
 }
 
 #[test]
+fn accept_epoch_rejects_barrier_update_receipt_slot_generation_mismatch_under_local_history_authority()
+-> Result<(), CityGError> {
+    let generated = build_genesis_member_bundle(0x7F)?;
+    let mut server = demo_server_with_local_history_authority();
+    server.accept_epoch(&generated.bundle)?;
+
+    let (mut bundle, _pristine_bundle) =
+        build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+    let raw_receipt = bundle
+        .header_map
+        .get(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
+        .and_then(Value::as_bytes)
+        .ok_or(CityGError::InvalidInput(
+            "missing full verification receipt",
+        ))?;
+    let mut receipt: super::super::FullVerificationReceiptWire =
+        super::super::parse_deterministic_cbor(raw_receipt)?;
+    receipt.updater_slot_generation += 1;
+    bundle.header_map.insert(
+        hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+        Value::Bytes(to_cbor_vec(&receipt)?),
+    );
+
+    let err = server.accept_epoch(&bundle).expect_err(
+        "local history authority must reject mismatched receipt updater_slot_generation",
+    );
+    assert!(matches!(
+        err,
+        CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+            if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+    ));
+    Ok(())
+}
+
+#[test]
 fn accept_epoch_rejects_barrier_update_missing_receipt_under_global_history_authority()
 -> Result<(), CityGError> {
     let generated = build_genesis_member_bundle(0x7C)?;
@@ -245,6 +343,74 @@ fn accept_epoch_rejects_barrier_update_missing_receipt_under_global_history_auth
     let err = server
         .accept_epoch(&bundle)
         .expect_err("global history authority must require full verification receipt");
+    assert!(matches!(
+        err,
+        CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+            if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+    ));
+    Ok(())
+}
+
+#[test]
+fn accept_epoch_rejects_barrier_update_witness_slot_generation_mismatch_under_global_history_authority()
+-> Result<(), CityGError> {
+    let generated = build_genesis_member_bundle(0x80)?;
+    let mut server = demo_server_with_global_history_authority();
+    server.accept_epoch(&generated.bundle)?;
+
+    let (mut bundle, _pristine_bundle) =
+        build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+    let ticket =
+        server.build_merge_ticket_for_refresh(&cityg_client::demo::DEMO_GID, &generated.leaf_id)?;
+    let join_records =
+        server.resolve_joins_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
+    let committed_roots_hash = super::super::compute_revocation_roots_hash(
+        &ticket.revoked_since_root,
+        &ticket.revoked_root,
+    )?;
+    let committed_revoked = server
+        .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
+    let raw_barrier_update = bundle
+        .header_map
+        .get(&hdr::HDR_BARRIER_UPDATE)
+        .and_then(Value::as_bytes)
+        .ok_or(CityGError::InvalidInput("missing barrier_update"))?;
+    let deployment_profile_manifest = server.deployment_profile_manifest_bytes(
+        &cityg_client::demo::DEMO_GID,
+        "v0.1.4",
+        server.history_authority_extension_id(),
+        ticket.n_max,
+        ticket.max_barrier_update_bytes,
+        ticket.fs_forward_leap_policy,
+    )?;
+    let raw_witness = server.full_verification_witness_bytes(
+        &cityg_client::demo::DEMO_GID,
+        &ticket.current_history_commitment,
+        ticket.barrier_version,
+        &ticket.kem_tree_hash_after,
+        &generated.leaf_id,
+        1,
+        ticket.cover_leaf_index,
+        ticket.slot_generation,
+        raw_barrier_update,
+        ticket.barrier_version,
+        join_records.records.as_slice(),
+        &committed_roots_hash,
+        committed_revoked.records.as_slice(),
+        deployment_profile_manifest.as_slice(),
+    )?;
+    let mut witness: super::super::FullVerificationWitnessWire =
+        super::super::parse_deterministic_cbor(raw_witness.as_slice())?;
+    witness.updater_slot_generation += 1;
+    bundle.header_map.insert(
+        hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+        Value::Bytes(to_cbor_vec(&witness)?),
+    );
+
+    let err = server.accept_epoch(&bundle).expect_err(
+        "global history authority must reject mismatched witness updater_slot_generation",
+    );
     assert!(matches!(
         err,
         CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))

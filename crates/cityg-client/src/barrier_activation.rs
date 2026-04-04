@@ -370,6 +370,7 @@ fn verify_client_visible_full_verification_receipt(
         &author_leaf_id,
         barrier_update_reason,
         parsed.updater_leaf,
+        None,
         raw_history_commitment,
         global_history_attestation,
         raw_barrier_update,

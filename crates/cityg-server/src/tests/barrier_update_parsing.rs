@@ -32,6 +32,7 @@ fn barrier_snapshot_helpers_cover_fallback_and_parser_paths() -> Result<(), City
 
     let cover_payload = super::KemTreeCoverPayloadWire(
         0,
+        0,
         vec![3, 1, 0],
         Some(vec![2, 1]),
         Vec::new(),
@@ -160,6 +161,7 @@ fn validate_barrier_update_uses_genesis_snapshot_joinset() -> Result<(), CityGEr
         super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
     let cover_payload = super::KemTreeCoverPayloadWire(
         updater_leaf,
+        0,
         path_nodes,
         None,
         Vec::new(),
@@ -241,6 +243,7 @@ fn barrier_helpers_cover_remaining_error_paths() -> Result<(), CityGError> {
 fn parse_barrier_update_accepts_sorted_hint_and_ciphertexts() -> Result<(), CityGError> {
     let cover_payload = super::KemTreeCoverPayloadWire(
         0,
+        0,
         vec![3, 1, 0],
         Some(vec![1, 2]),
         vec![super::NodeCiphertextWire(
@@ -283,6 +286,7 @@ fn parse_barrier_update_accepts_sorted_hint_and_ciphertexts() -> Result<(), City
 fn parse_barrier_update_rejects_new_public_keys_expected_set_mismatch() -> Result<(), CityGError> {
     let cover_missing = super::KemTreeCoverPayloadWire(
         0,
+        0,
         vec![3, 1, 0],
         None,
         Vec::new(),
@@ -309,6 +313,7 @@ fn parse_barrier_update_rejects_new_public_keys_expected_set_mismatch() -> Resul
     ));
 
     let cover_extra = super::KemTreeCoverPayloadWire(
+        0,
         0,
         vec![3, 1, 0],
         None,
@@ -344,6 +349,7 @@ fn parse_barrier_update_rejects_new_public_keys_expected_set_mismatch() -> Resul
 fn parse_barrier_update_rejects_invalid_mode_and_path_shapes() -> Result<(), CityGError> {
     let valid_cover = super::KemTreeCoverPayloadWire(
         0,
+        0,
         vec![3, 1, 0],
         None,
         Vec::new(),
@@ -375,6 +381,7 @@ fn parse_barrier_update_rejects_invalid_mode_and_path_shapes() -> Result<(), Cit
 
     let empty_path = super::KemTreeCoverPayloadWire(
         0,
+        0,
         Vec::new(),
         None,
         Vec::new(),
@@ -403,6 +410,7 @@ fn parse_barrier_update_rejects_invalid_mode_and_path_shapes() -> Result<(), Cit
     ));
 
     let wrong_leaf = super::KemTreeCoverPayloadWire(
+        0,
         0,
         vec![4, 1, 0],
         None,
@@ -433,6 +441,7 @@ fn parse_barrier_update_rejects_invalid_mode_and_path_shapes() -> Result<(), Cit
 
     let duplicate_path = super::KemTreeCoverPayloadWire(
         0,
+        0,
         vec![3, 1, 1, 0],
         None,
         Vec::new(),
@@ -462,6 +471,7 @@ fn parse_barrier_update_rejects_invalid_mode_and_path_shapes() -> Result<(), Cit
     ));
 
     let non_parent_chain = super::KemTreeCoverPayloadWire(
+        0,
         0,
         vec![3, 0],
         None,
@@ -495,6 +505,7 @@ fn parse_barrier_update_rejects_invalid_key_and_ciphertext_shapes() -> Result<()
 
     let wrong_key_len = super::KemTreeCoverPayloadWire(
         0,
+        0,
         vec![3, 1, 0],
         None,
         Vec::new(),
@@ -524,6 +535,7 @@ fn parse_barrier_update_rejects_invalid_key_and_ciphertext_shapes() -> Result<()
 
     let unsorted_keys = super::KemTreeCoverPayloadWire(
         0,
+        0,
         vec![3, 1, 0],
         None,
         Vec::new(),
@@ -552,6 +564,7 @@ fn parse_barrier_update_rejects_invalid_key_and_ciphertext_shapes() -> Result<()
     ));
 
     let wrong_ciphertext_size = super::KemTreeCoverPayloadWire(
+        0,
         0,
         vec![3, 1, 0],
         None,
@@ -587,6 +600,7 @@ fn parse_barrier_update_rejects_invalid_key_and_ciphertext_shapes() -> Result<()
     ));
 
     let unsorted_ciphertexts = super::KemTreeCoverPayloadWire(
+        0,
         0,
         vec![3, 1, 0],
         None,

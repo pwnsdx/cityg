@@ -145,6 +145,7 @@ fn build_barrier_update_bytes(
     gid: &[u8],
     n_max: u64,
     updater_leaf: u64,
+    updater_slot_generation: u64,
     barrier_version: u64,
     prev_barrier_version: u64,
     revocation_roots_hash: [u8; 32],
@@ -156,6 +157,7 @@ fn build_barrier_update_bytes(
         &gid,
         n_max,
         updater_leaf,
+        updater_slot_generation,
         barrier_version,
         prev_barrier_version,
         revocation_roots_hash,
@@ -2787,6 +2789,7 @@ mod tests {
             &[0x44; 32],
             1_024,
             0,
+            0,
             9,
             8,
             [0x33; 32],
@@ -2814,7 +2817,7 @@ mod tests {
             _ => return Err(anyhow!("cover payload must be encoded as bytes")),
         };
         let cover_value: Value = ciborium::de::from_reader(cover_bytes.as_slice())?;
-        assert!(matches!(cover_value, Value::Array(fields) if fields.len() == 5));
+        assert!(matches!(cover_value, Value::Array(fields) if fields.len() == 6));
         Ok(())
     }
 
@@ -2826,6 +2829,7 @@ mod tests {
         let update = build_barrier_update_bytes(
             &[0x11; 32],
             n_max,
+            0,
             0,
             2,
             1,
@@ -2894,6 +2898,7 @@ mod tests {
                 &[0u8; 32],
                 0,
                 0,
+                0,
                 1,
                 0,
                 [0u8; 32],
@@ -2907,6 +2912,7 @@ mod tests {
                 &[0u8; 32],
                 3,
                 0,
+                0,
                 1,
                 0,
                 [0u8; 32],
@@ -2920,6 +2926,7 @@ mod tests {
                 &[0u8; 32],
                 8,
                 8,
+                0,
                 1,
                 0,
                 [0u8; 32],
@@ -2933,6 +2940,7 @@ mod tests {
             build_barrier_update_bytes(
                 &[0u8; 32],
                 8,
+                0,
                 0,
                 1,
                 0,

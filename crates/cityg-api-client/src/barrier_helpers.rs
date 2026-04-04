@@ -58,6 +58,7 @@ impl CitygApiClient {
             leaf_id,
             barrier_version,
             cover_leaf_index,
+            slot_generation,
             snapshot_hash,
             barrier_n_max,
             max_barrier_update_bytes,
@@ -158,6 +159,7 @@ impl CitygApiClient {
             gid,
             leaf_id,
             updater_leaf: cover_leaf_index,
+            updater_slot_generation: slot_generation,
             barrier_version,
             barrier_update_reason,
             barrier_n_max,
@@ -209,6 +211,9 @@ impl CitygApiClient {
                     join_resolution.records.as_slice(),
                     &witness_selection.witness_revocation_roots_hash,
                     witness_selection.witness_revoked_leaf_indices.as_slice(),
+                    revoked_resolution.records.as_slice(),
+                    !reclaims_cover_leaf_index,
+                    slot_generation,
                     deployment_profile_manifest_bytes,
                 )
                 .await?;
@@ -256,6 +261,9 @@ impl CitygApiClient {
         join_records: &[BarrierJoinRecord],
         revocation_roots_hash: &[u8; 32],
         revoked_leaf_indices: &[u32],
+        revoked_records: &[BarrierRevokedLeafRecord],
+        include_updater_in_revoked_set: bool,
+        updater_slot_generation: u64,
         deployment_profile_manifest: &[u8],
     ) -> Result<Vec<u8>, Error> {
         if barrier_update_reason != 0 && barrier_update_reason != 1 {
@@ -282,6 +290,15 @@ impl CitygApiClient {
                 .collect(),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
             revoked_leaf_indices: revoked_leaf_indices.to_vec(),
+            updater_slot_generation,
+            revoked_records: revoked_records
+                .iter()
+                .map(|record| pb::BarrierRevokedLeafRecord {
+                    leaf_index: record.leaf_index,
+                    slot_generation: record.slot_generation,
+                })
+                .collect(),
+            include_updater_in_revoked_set,
             deployment_profile_manifest: deployment_profile_manifest.to_vec(),
             revocation_target_leaf_id: revocation_target_leaf_id
                 .map(|leaf_id| leaf_id.to_vec())
@@ -304,11 +321,12 @@ impl CitygApiClient {
             author_leaf_id,
             barrier_update_reason,
             updater_leaf,
+            updater_slot_generation,
             barrier_update,
             joins_prev_barrier_version,
             join_records,
             revocation_roots_hash,
-            revoked_leaf_indices,
+            revoked_records,
             deployment_profile_manifest,
         )?;
         Ok(response.full_verification_witness)

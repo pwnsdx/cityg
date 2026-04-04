@@ -48,6 +48,8 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) cover_leaf_index: u64,
     #[serde(default)]
+    pub(in crate::native) slot_generation: u64,
+    #[serde(default)]
     pub(in crate::native) dk_leaf_hex: String,
     #[serde(default)]
     pub(in crate::native) pkhash_leaf_hex: String,
@@ -453,6 +455,7 @@ impl PersistedBarrierState {
             max_barrier_update_bytes: state.max_barrier_update_bytes,
             n_max: state.n_max.max(1),
             cover_leaf_index: state.cover_leaf_index,
+            slot_generation: state.slot_generation,
             dk_leaf_hex: hex_encode(state.dk_leaf.as_slice()),
             pkhash_leaf_hex: hex_encode(state.pkhash_leaf),
             dk_nodes,
@@ -536,6 +539,7 @@ impl PersistedBarrierState {
             max_barrier_update_bytes: self.max_barrier_update_bytes,
             n_max: self.n_max.max(1),
             cover_leaf_index: self.cover_leaf_index,
+            slot_generation: self.slot_generation,
             dk_leaf: Zeroizing::new(decode_hex_vec(
                 "barrier_state.dk_leaf_hex",
                 &self.dk_leaf_hex,

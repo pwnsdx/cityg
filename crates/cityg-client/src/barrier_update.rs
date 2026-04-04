@@ -25,6 +25,7 @@ pub struct BarrierUpdateWire(
 #[derive(Clone, Serialize, Deserialize)]
 pub struct KemTreeCoverPayloadWire(
     pub u64,
+    pub u64,
     pub Vec<u64>,
     pub Option<Vec<u64>>,
     pub Vec<NodeCiphertextWire>,
@@ -61,6 +62,7 @@ pub struct ParsedBarrierUpdate {
     pub kem_tree_hash_before: [u8; 32],
     pub kem_tree_hash_after: [u8; 32],
     pub updater_leaf: u64,
+    pub updater_slot_generation: u64,
     pub path_nodes: Vec<u64>,
     pub node_ciphertexts: Vec<ParsedNodeCiphertext>,
     pub new_public_keys: BTreeMap<u64, Vec<u8>>,
@@ -143,6 +145,7 @@ pub fn parse_barrier_update_for_recover(
 
     let KemTreeCoverPayloadWire(
         updater_leaf,
+        updater_slot_generation,
         path_nodes,
         _revoked_leaf_indices_hint,
         node_ciphertexts_wire,
@@ -272,6 +275,7 @@ pub fn parse_barrier_update_for_recover(
         kem_tree_hash_before: to_array32("kem_tree_hash_before", kem_tree_hash_before)?,
         kem_tree_hash_after: to_array32("kem_tree_hash_after", kem_tree_hash_after)?,
         updater_leaf,
+        updater_slot_generation,
         path_nodes,
         node_ciphertexts,
         new_public_keys: parsed_new_public_keys,
@@ -295,6 +299,7 @@ mod tests {
     fn parse_barrier_update_for_recover_accepts_canonical_payload() {
         let cover = KemTreeCoverPayloadWire(
             2,
+            7,
             vec![5, 2, 0],
             None,
             Vec::new(),
@@ -321,6 +326,7 @@ mod tests {
         assert_eq!(parsed.prev_barrier_version, 3);
         assert_eq!(parsed.tree_size, 4);
         assert_eq!(parsed.updater_leaf, 2);
+        assert_eq!(parsed.updater_slot_generation, 7);
         assert_eq!(parsed.path_nodes, vec![5, 2, 0]);
         assert_eq!(parsed.new_public_keys.len(), 2);
     }

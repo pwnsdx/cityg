@@ -45,7 +45,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 - [ ] Replace `updater_leaf` binding with lease binding in the wire profile
 - [x] Update `join_finalize_auth` validation to match the current leased slot
-- [ ] Update receipts and full-verification witness payloads
+- [x] Update receipts and full-verification witness payloads
 - [x] Update snapshot reconstruction so reclaim joins remove the updater slot from the revoked set
 
 ### 5. API and runtime
@@ -58,7 +58,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ### 6. Client and GUI
 
-- [ ] Persist local `SlotLease`
+- [~] Persist local `slot_generation` alongside the local slot index
 - [ ] Update bootstrap/join-finalize state
 - [ ] Update barrier recovery to compare full leases
 - [ ] Update tests and fixtures
@@ -71,6 +71,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Version helper outputs away from naked slot indices.
-2. Move the wire/profile from `cover_leaf_index` to `slot_index + slot_generation`.
-3. Persist and compare `SlotLease` end-to-end in client recovery and GUI state.
+1. Replace ticket/runtime `cover_leaf_index` naming with an explicit lease shape.
+2. Carry full lease comparisons through recovery/bootstrap state instead of mixing indexed fallback paths.
+3. Finish helper/API cleanup so all occupancy surfaces speak in versioned records only.

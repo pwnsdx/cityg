@@ -30,6 +30,7 @@ fn validate_barrier_update_rejects_genesis_update_without_snapshot_artifact()
         state.kem_tree_hash_after.to_vec(),
         to_cbor_vec(&KemTreeCoverPayloadWire(
             0,
+            0,
             vec![0],
             None,
             Vec::new(),

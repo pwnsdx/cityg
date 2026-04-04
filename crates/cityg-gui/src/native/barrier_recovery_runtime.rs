@@ -86,6 +86,7 @@ pub(super) fn try_recover_barrier_inner(
         gid: &session.gid,
         local_n_max: session.barrier_state.n_max,
         local_cover_leaf_index: session.barrier_state.cover_leaf_index,
+        local_slot_generation: session.barrier_state.slot_generation,
         local_barrier_initialized: session.barrier_state.barrier_initialized,
         local_barrier_version: session.barrier_state.barrier_version,
         local_barrier_roots_hash: session.barrier_state.barrier_roots_hash,

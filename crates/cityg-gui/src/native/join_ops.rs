@@ -296,6 +296,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
                 n_max: prepared_runtime.barrier_n_max,
                 cover_leaf_index: prepared_runtime.cover_leaf_index,
+                slot_generation: prepared_runtime.slot_generation,
                 dk_leaf: Zeroizing::new(join_runtime.barrier_leaf_secret_key),
                 pkhash_leaf: join_runtime.barrier_leaf_pkhash,
                 barrier_recovery_pending: true,

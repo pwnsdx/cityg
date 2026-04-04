@@ -1019,6 +1019,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,
         n_max: 8,
         cover_leaf_index: 3,
+        slot_generation: 9,
         dk_leaf: Zeroizing::new(random_vec(
             cityg_client::barrier_crypto::barrier_leaf_secret_key_bytes(),
         )),
@@ -1194,6 +1195,10 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         loaded.barrier_state.cover_leaf_index,
         session.barrier_state.cover_leaf_index
+    );
+    assert_eq!(
+        loaded.barrier_state.slot_generation,
+        session.barrier_state.slot_generation
     );
     assert_eq!(
         loaded.barrier_state.barrier_recovery_pending,

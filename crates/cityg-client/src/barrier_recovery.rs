@@ -44,6 +44,7 @@ pub struct BarrierRecoveryInput<'a> {
     pub gid: &'a [u8; 32],
     pub local_n_max: u64,
     pub local_cover_leaf_index: u64,
+    pub local_slot_generation: u64,
     pub local_barrier_initialized: bool,
     pub local_barrier_version: u64,
     pub local_barrier_roots_hash: [u8; 32],
@@ -145,7 +146,10 @@ pub fn recover_barrier_update(
         .author_pop_public_key
         .map(|pk| pk == input.local_pop_public_key)
         .unwrap_or(false);
-    if author_matches && parsed.updater_leaf == input.local_cover_leaf_index {
+    if author_matches
+        && parsed.updater_leaf == input.local_cover_leaf_index
+        && parsed.updater_slot_generation == input.local_slot_generation
+    {
         return Ok(None);
     }
 
@@ -218,6 +222,7 @@ pub fn recover_barrier_update(
             &parsed.kem_tree_hash_before,
             &parsed.kem_tree_hash_after,
             parsed.updater_leaf,
+            parsed.updater_slot_generation,
             node.source_node,
             node.target_node,
             &pkhash_t,
@@ -415,8 +420,17 @@ mod tests {
             Vec::new(),
         ];
         let kem_tree_hash_before = crate::barrier::compute_barrier_tree_hash(8, &snapshot_pre)?;
-        let built =
-            build_barrier_update_bytes(&gid, 8, 0, 5, 4, rrh, kem_tree_hash_before, &snapshot_pre)?;
+        let built = build_barrier_update_bytes(
+            &gid,
+            8,
+            0,
+            0,
+            5,
+            4,
+            rrh,
+            kem_tree_hash_before,
+            &snapshot_pre,
+        )?;
         let expected_k_fs_after =
             derive_k_fs_after_pcs(&[0x44; 32], &[0x55; 32], 7, 5, &built.k_barrier_new)?;
 
@@ -424,6 +438,7 @@ mod tests {
             gid: &gid,
             local_n_max: 8,
             local_cover_leaf_index: 4,
+            local_slot_generation: 0,
             local_barrier_initialized: true,
             local_barrier_version: 4,
             local_barrier_roots_hash: rrh,
