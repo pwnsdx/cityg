@@ -5219,6 +5219,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn barrier_resolve_revoked_occupancies_preserves_multiple_generations_for_one_slot()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
+        let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+        let deployment_profile_manifest = build_test_deployment_profile_manifest(
+            &authority,
+            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_576,
+            &fs_forward_leap_policy,
+        );
+        let helper_attestation_page_0 = build_test_helper_completeness_attestation(
+            &authority,
+            HELPER_KIND_REVOKED_LEAVES,
+            &history_commitment,
+            0,
+            2,
+            RevokedLeavesSelector {
+                revocation_roots_hash: &[0xCC; 32],
+                records: &[BarrierRevokedOccupancyRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                }],
+            },
+        );
+        let helper_attestation_page_1 = build_test_helper_completeness_attestation(
+            &authority,
+            HELPER_KIND_REVOKED_LEAVES,
+            &history_commitment,
+            1,
+            2,
+            RevokedLeavesSelector {
+                revocation_roots_hash: &[0xCC; 32],
+                records: &[BarrierRevokedOccupancyRecord {
+                    leaf_index: 1,
+                    slot_generation: 2,
+                }],
+            },
+        );
+        let page = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v2/barrier/resolve_revoked_occupancies",
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                let deployment_profile_manifest = deployment_profile_manifest.clone();
+                let helper_attestation_page_0 = helper_attestation_page_0.clone();
+                let helper_attestation_page_1 = helper_attestation_page_1.clone();
+                let page = page.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
+                async move {
+                    let call_index = page.fetch_add(1, Ordering::SeqCst);
+                    let (records, page_offset, next_page_offset, helper_completeness_attestation) =
+                        if call_index == 0 {
+                            (
+                                vec![pb::BarrierRevokedOccupancyRecord {
+                                    slot_index: 1,
+                                    slot_generation: 0,
+                                }],
+                                0,
+                                Some(1),
+                                helper_attestation_page_0,
+                            )
+                        } else {
+                            (
+                                vec![pb::BarrierRevokedOccupancyRecord {
+                                    slot_index: 1,
+                                    slot_generation: 2,
+                                }],
+                                1,
+                                None,
+                                helper_attestation_page_1,
+                            )
+                        };
+                    encode_proto(BarrierResolveRevokedOccupanciesResponse {
+                        records,
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        page_offset,
+                        next_page_offset,
+                        total_entries: 2,
+                        helper_completeness_attestation,
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                        history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                        n_max: 8,
+                        max_barrier_update_bytes: 1_048_576,
+                        fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                        deployment_profile_manifest,
+                    })
+                }
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let resolved = client
+            .barrier_resolve_revoked_occupancies(
+                "4141414141414141414141414141414141414141414141414141414141414141",
+                &[0xCC; 32],
+            )
+            .await?;
+        assert_eq!(resolved.records.len(), 2);
+        assert_eq!(resolved.records[0].leaf_index, 1);
+        assert_eq!(resolved.records[0].slot_generation, 0);
+        assert_eq!(resolved.records[1].leaf_index, 1);
+        assert_eq!(resolved.records[1].slot_generation, 2);
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn barrier_resolve_join_occupancies_since_rejects_missing_deployment_profile_manifest()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
