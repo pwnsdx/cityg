@@ -243,16 +243,17 @@ Shared authenticated-view rule (normative):
 * Every successful page of one logical A), B), or C) result MUST carry the same `history_view_id` and the same `HistoryCommitment` as every other page of that same logical result.
 * Page ordering MUST be deterministic and gap-free. The response MUST identify the returned page's starting offset, the logical total number of entries, and whether another page exists. Clients composing multiple pages MUST fail closed on offset gaps, overlaps, `total_entries` drift, or authenticated-view mismatch.
 
-A) ResolveRevokedLeaves(revocation_roots_hash, page_offset?, max_entries?) -> sorted unique list<uint> page
-Returns revoked cover leaf indices corresponding to revocation_roots_hash.
+A) ResolveRevokedLeaves(revocation_roots_hash, page_offset?, max_entries?) -> list of RevokedLeafRecord page
+RevokedLeafRecord = [leaf_index:uint, slot_generation:uint64]
+Returns revoked slot occupancies corresponding to revocation_roots_hash.
 This enumeration MUST be integrity-protected by membership/SRX state referenced by header[112]/[113].
 The authenticated response MUST carry `history_view_id`.
 The authenticated response MUST carry the corresponding `HistoryCommitment`.
 If the deployment defines a helper-completeness extension, that extension MUST bind any `helper_completeness_attestation` to `(gid, history_view_id, revocation_roots_hash, page_offset, total_entries, payload page)` and to one exact authenticated history object for that result.
-Returned indices MUST be strictly sorted, unique, `< N_max`, and therefore bounded in cardinality by `N_max`.
+Returned records MUST be strictly sorted by increasing `(leaf_index, slot_generation)`, MUST carry `leaf_index < N_max`, and the selected committed view MUST contain at most one active occupancy per `(leaf_index, slot_generation)`.
 
 B) ResolveJoinsSince(prev_barrier_version, page_offset?, max_entries?) -> list of JoinLeafRecord page
-JoinLeafRecord = [device_pk:bstr, leaf_index:uint, ek_leaf:bstr]
+JoinLeafRecord = [device_pk:bstr, leaf_index:uint, ek_leaf:bstr, slot_generation:uint64]
 Returns exactly the join leaf allocations and leaf public keys that:
 * were committed after prev_barrier_version,
 * remain active at the selected `history_view_id`,
@@ -264,9 +265,10 @@ The authenticated response MUST carry the corresponding `HistoryCommitment`.
 If the deployment defines a helper-completeness extension, that extension MUST bind any `helper_completeness_attestation` to `(gid, history_view_id, prev_barrier_version, page_offset, total_entries, payload page)` and to one exact authenticated history object for that result.
 When later sections refer to `JoinSet` or `unresolved JoinSet`, they mean exactly this authenticated payload for the selected `history_view_id`.
 Output constraints (normative):
-* entries MUST be strictly sorted by increasing `leaf_index`,
-* `leaf_index` values MUST be unique,
+* entries MUST be strictly sorted by increasing `(leaf_index, slot_generation)`,
+* there MUST be at most one returned active occupancy per `leaf_index`,
 * `leaf_index` MUST be `< N_max`,
+* `slot_generation` MUST be a uint64 and MUST increase strictly on every reuse of the same `leaf_index`,
 * `ek_leaf` MUST be exactly 1184 bytes,
 * the number of returned records MUST be `<= N_max`,
 * the server MUST prune or compact resolved, revoked, and superseded join activations so that `ResolveJoinsSince(...)` remains bounded by the currently active join activations needed for the selected `history_view_id`,
@@ -1109,22 +1111,23 @@ Canonical-view requirement (normative):
 Genesis convention:
 When barrier_initialized == false, prev_barrier_version MUST be treated as 0 for JoinSet enumeration, and ResolveJoinsSince(0) MUST return the complete active leaf set for genesis.
 Leaf-allocation invariant (normative):
-* cover leaf indices are single-assignment for the lifetime of `gid` and MUST NOT be reused after revocation.
-* For any selected committed `history_view_id`, the authenticated unresolved `JoinSet` returned by `ResolveJoinsSince(prev_barrier_version)` MUST contain at most one record per currently active leaf and therefore at most `N_max` records.
+* `N_max` defines concurrent slot capacity, not lifetime slot consumption.
+* cover leaf indices MAY be reused after revocation or leave, but only with a strictly increasing `slot_generation`.
+* For any selected committed `history_view_id`, the authenticated unresolved `JoinSet` returned by `ResolveJoinsSince(prev_barrier_version)` MUST contain at most one active occupancy record per currently active leaf and therefore at most `N_max` records.
 * Servers MUST prune or compact historical join-activation state so that `ResolveJoinsSince(...)` depends only on activations that remain active at the selected committed view.
 
-Leaf-exhaustion note (informative):
-Because cover leaf indices are single-assignment and N_max is fixed, a group that churns members will eventually exhaust its leaf address space. Deployments SHOULD monitor the ratio of (active + historically revoked) leaves to N_max. When this ratio approaches saturation, the deployment SHOULD initiate group retirement and re-creation with a fresh gid and appropriately sized N_max. This profile does not define an in-protocol group migration or N_max extension mechanism; such a mechanism MAY be defined by a future profile.
+Concurrent-capacity note (informative):
+Because cover leaf indices are reusable under versioned `slot_generation`, churn alone does not exhaust address space. Deployments SHOULD monitor concurrent occupancy `(active + pending)` relative to `N_max`. When concurrent demand approaches saturation, the deployment SHOULD either reject further joins or retire/re-create the group with a larger `N_max`. This profile still does not define an in-protocol `N_max` extension mechanism; such a mechanism MAY be defined by a future profile.
 snapshot_base:
 * genesis: all-blank tree (every pk_i := empty bstr for all 2*N_max-1 nodes)
 * non-genesis: current committed pk_entries
 snapshot_pre construction (order is normative):
 1. Apply JoinSet:
-   For each JoinLeafRecord (device_pk, leaf_index=l, ek_leaf):
+   For each JoinLeafRecord (device_pk, leaf_index=l, ek_leaf, slot_generation):
    * set pk at leaf_node(l) := ek_leaf
    * for each internal node on direct_path(leaf_node(l)) excluding the leaf: set pk := empty bstr
 2. Apply RevokedLeafSet:
-   For each revoked leaf r:
+   For each revoked occupancy (leaf_index=r, slot_generation):
    * blank pk at leaf_node(r)
    * blank pk at every node on direct_path(leaf_node(r)) including root_node
 kem_tree_hash_before := TreeHash(root_node) over snapshot_pre (per S11.4)
@@ -1263,7 +1266,7 @@ Before constructing any barrier_update, the updater MUST:
 Join-finalize bootstrap exception (normative):
 * A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
   * the S12.2 provisioned current barrier metadata for the current committed state,
-  * the S12.2 provisioned `join_finalize_auth` capability bound to its `(gid, leaf_id, cover_leaf_index)`,
+  * the S12.2 provisioned `join_finalize_auth` capability bound to its `(gid, leaf_id, slot_index, slot_generation)`,
   * authenticated access to S3.3.A/B for that same current committed state, with those A/B responses validating to the provisioned `current_history_commitment`,
   * authenticated access to `FetchBarrierPublicTree(current kem_tree_hash_after)` for that same current committed state,
   * the authenticated accepted current `barrier_update` bytes for that same current committed state, together with authenticated history material sufficient to authenticate the predecessor snapshot named by that accepted update,
@@ -1344,17 +1347,17 @@ Generic requirements on any such extension:
 
 Concrete extensions defined by this document:
 * `local-history-authority-v1` and `global-history-authority-v1` are two concrete extensions satisfying these requirements within one deployment-local or deployment-global `HistoryAuthorityScope`, respectively.
-* Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, signature:bstr }` encoded as deterministic CBOR.
-* Under `local-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, header[180], header[182], header[175])`.
+* Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, updater_slot_generation:uint64, signature:bstr }` encoded as deterministic CBOR.
+* Under `local-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, updater_slot_generation, header[180], header[182], header[175])`.
 * Under `local-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the server's authenticated membership view.
-* Under `local-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, and `updater_leaf` in key `181` match the actual author/current update being accepted.
+* Under `local-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_leaf`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
 * Under `local-history-authority-v1`, key `181` MUST NOT appear without a matching key `182` for the same current `HistoryCommitment`; receipt validation fails closed if the attestation or commitment differs.
 * Under `local-history-authority-v1`, any accepted `barrier_update` originated under that extension MUST carry both key `181` and key `182`; a bundle carrying key `182` without key `181`, or vice versa, is malformed for this extension.
 * Under `local-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact scope-local attested helper state. It does NOT upgrade that scope-local attestation into a globally canonical finality proof.
 * Under `global-history-authority-v1`, key `181` MUST carry the same `FullVerificationReceipt` object and deterministic CBOR form as above.
-* Under `global-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, header[180], header[182], header[175])`.
+* Under `global-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, updater_slot_generation, header[180], header[182], header[175])`.
 * Under `global-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the deployment-global authenticated membership view being used for acceptance.
-* Under `global-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, and `updater_leaf` in key `181` match the actual author/current update being accepted.
+* Under `global-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_leaf`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
 * Under `global-history-authority-v1`, key `181` MUST NOT appear without a matching key `182` for the same current `HistoryCommitment`; receipt validation fails closed if the attestation or commitment differs.
 * Under `global-history-authority-v1`, any accepted `barrier_update` originated under that extension MUST carry both key `181` and key `182`; a bundle carrying key `182` without key `181`, or vice versa, is malformed for this extension.
 * Under `global-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact deployment-global attested helper state. It does NOT, by itself, prove federated consensus across multiple deployments.
@@ -1366,9 +1369,9 @@ S11.11.4A Full-verification witness
 Key `183` is the generic wire slot for an authority-issued `FullVerificationWitness` on `barrier_update` reasons `0` and `1`.
 Generic requirements:
 * The negotiated extension MUST define the exact witness object, signature suite, and negotiation/profile identifier.
-* The witness MUST bind at minimum `(HistoryAuthorityScope, gid, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author_leaf_id, barrier_update_reason, updater_leaf, digest(header[175]), digest(ResolveJoinsSince result), digest(ResolveRevokedLeaves result), digest(deployment_profile_manifest))`.
+* The witness MUST bind at minimum `(HistoryAuthorityScope, gid, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author_leaf_id, barrier_update_reason, updater_leaf, updater_slot_generation, digest(header[175]), digest(ResolveJoinsSince result), digest(ResolveRevokedLeaves result), digest(deployment_profile_manifest))`.
 * The signer/authenticator for key `183` MUST be able to replay the exact `reason in {0,1}` authoring decision against the authenticated current tree and authenticated helper outputs for that same current state. A static blob or pure client self-assertion is insufficient.
-* Under `global-history-authority-v1`, `FullVerificationWitness := { scope_id:bstr32, history_authority_extension:tstr, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, barrier_update_digest:bstr32, joins_digest:bstr32, revoked_digest:bstr32, deployment_profile_manifest_digest:bstr32, signature:bstr }` encoded as deterministic CBOR.
+* Under `global-history-authority-v1`, `FullVerificationWitness := { scope_id:bstr32, history_authority_extension:tstr, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, updater_slot_generation:uint64, barrier_update_digest:bstr32, joins_digest:bstr32, revoked_digest:bstr32, deployment_profile_manifest_digest:bstr32, signature:bstr }` encoded as deterministic CBOR.
 * Under `global-history-authority-v1`, the server/history authority MUST issue key `183` only after replaying the exact S11.11.2-style chain-check for the candidate `barrier_update` against the authenticated current public tree, the authenticated A/B helper outputs, and the authenticated deployment-profile manifest for that same current committed state.
 * Under `global-history-authority-v1`, accepted `barrier_update` bundles with reason `0` or `1` MUST carry key `183`; a missing, stale, or mismatched witness is malformed for this extension.
 * Under `global-history-authority-v1`, key `183` proves server-verifiable authoring eligibility for that exact `reason in {0,1}` bundle within one deployment-global `HistoryAuthorityScope`. It still does NOT, by itself, prove federated consensus across multiple independent deployments.
@@ -1445,10 +1448,11 @@ E) Contract for new_public_keys MUST
 
 F) Updater identity binding + updater-not-revoked
 * Define updater_leaf := CP.updater_leaf.
-* Require updater_leaf == cover_leaf_index(header[108]); else reject 960.1.
-* Require updater_leaf NOT in RevokedLeafSet for this update; else reject 960.1.
+* Define `current_slot_lease(header[108]) := (slot_index, slot_generation)` as the unique currently active or pending slot lease for the acting `leaf_id`.
+* Require `updater_leaf == current_slot_lease(header[108]).slot_index` and `CP.updater_slot_generation == current_slot_lease(header[108]).slot_generation`; else reject 960.1.
+* Require the exact updater lease `(updater_leaf, CP.updater_slot_generation)` NOT appear in RevokedLeafSet for this update; else reject 960.1.
 * Let JoinSet := ResolveJoinsSince(BU.prev_barrier_version).
-* Let JoinLeafSet := the set of `leaf_index` values carried by JoinSet.
+* Let JoinLeafSet := the set of active `leaf_index` values carried by JoinSet.
 * The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `HistoryCommitment`; inability to establish a single common commitment -> reject 960.9.
 * The server MUST require `header[180]` to equal that same authenticated current-state `HistoryCommitment`; mismatch -> reject 960.9.
 * These checks establish helper-state coherence only. They MUST NOT be documented or relied upon as proof that the client performed FULL verification, unless a deployment-defined extension adds such a proof.
@@ -1457,7 +1461,7 @@ F) Updater identity binding + updater-not-revoked
   * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
 * If header[178] == 2:
   * Require updater_leaf IN JoinLeafSet, else reject 960.5.
-  * Require `header[179]` to match one server-issued pending `join_finalize_auth` capability bound to the acting `(gid, leaf_id, updater_leaf)`; otherwise reject 960.1.
+  * Require `header[179]` to match one server-issued pending `join_finalize_auth` capability bound to the acting `(gid, leaf_id, updater_leaf, CP.updater_slot_generation)`; otherwise reject 960.1.
   * join_finalize MUST NOT execute S10.4B PCS rate-limit checks.
 
 G) Hash-chain checks MUST
@@ -1495,10 +1499,11 @@ S11.13 Client recover (non-updater) (normative)
 Definitions (normative)
 * BU := the parsed BarrierUpdate from header[175]
 * CP := the parsed KemTreeCoverPayload from BU.cover_payload
-self_cover_leaf_index := cover_leaf_index(self_device_pk)
-SelfPath := direct_path(leaf_node(self_cover_leaf_index))     /* node indices */
+let self_slot_lease := the locally provisioned or persisted `(slot_index, slot_generation)` for `self_device_pk`
+SelfPath := direct_path(leaf_node(self_slot_lease.slot_index))     /* node indices */
 own_barrier_update := (header[108] == self_device_pk)
-  AND (CP.updater_leaf == self_cover_leaf_index)
+  AND (CP.updater_leaf == self_slot_lease.slot_index)
+  AND (CP.updater_slot_generation == self_slot_lease.slot_generation)
 
 Updater exclusion (normative, MUST):
 If own_barrier_update == true, the client MUST NOT run Recover for that barrier_update. The updater activates via S11.14 (persisted pending state). Attempting Recover for one's own update would produce a spurious 960.6 (no NodeCiphertext targets the updater's own leaf by design).
@@ -1579,9 +1584,9 @@ Let pn := CP.path_nodes and let s := source_node for the unique match.
 Let j be the unique index such that pn[j] == s (must exist, else reject 960.7).
 SuffixNodes := { pn[k] | k in [j..len(pn)-1] }
 Client MUST:
-* Maintain dk_leaf (join-generated) for n == leaf_node(self_cover_leaf_index); it is NOT derived from path_secret.
+* Maintain dk_leaf (join-generated) for n == leaf_node(self_slot_lease.slot_index); it is NOT derived from path_secret.
 * Maintain pkhash_leaf := H_pk(ek_leaf) for the same leaf (bstr32).
-* For each node n in (SuffixNodes INTERSECT SelfPath) such that n != leaf_node(self_cover_leaf_index):
+* For each node n in (SuffixNodes INTERSECT SelfPath) such that n != leaf_node(self_slot_lease.slot_index):
   * derive (d_n, z_n) and (ek_n, dk_n) using S11.10 with path_secret[n]
   * store dk_n (overwriting any prior dk_n for that node)
   * store pkhash_n := H_pk(ek_n) alongside dk_n (overwriting any prior pkhash_n for that node)
@@ -1714,7 +1719,7 @@ S12.0 Genesis provisioning artifact (normative)
 Before the first accepted MERGE when `barrier_initialized == false`, the deployment MUST establish the initial active leaf set as a genesis provisioning artifact. This artifact is the source consumed by `ResolveJoinsSince(0)` in S11.6.
 Requirements:
 * it MUST contain the complete initial active set,
-* each entry MUST bind exactly one active device to exactly one `leaf_index` and one `ek_leaf`,
+* each entry MUST bind exactly one active device to exactly one `(leaf_index, slot_generation)` occupancy and one `ek_leaf`,
 * entries MUST be strictly sorted by increasing `leaf_index`,
 * `leaf_index` values MUST be unique and `< N_max`,
 * `ek_leaf` MUST be exactly 1184 bytes for every entry,
@@ -1727,7 +1732,7 @@ Joiner MUST store dk_leaf locally and MUST also store pkhash_leaf := H_pk(ek_lea
 The initial JOIN anchor published by the joiner MUST carry `header[97]` in the S3.4 `author-local form`, not the `barrier-recovery form`; no knowledge of the current `K_barrier` is required or permitted for this initial JOIN publication.
 
 S12.2 Provisioning to joiner
-Join provisioning MUST deliver to the joiner as a signed and confidential provisioning artifact bound, at minimum, to `(gid, profile_version, current_history_view_id, current_history_commitment, current barrier_version, current kem_tree_hash_after, cover_leaf_index, N_max, max_barrier_update_bytes)`, and carrying a unique nonce, issuance time, and expiry. Joiners MUST reject artifacts that are stale, expired, replayed for the same join attempt, or not bound to the current `(gid, profile_version)`.
+Join provisioning MUST deliver to the joiner as a signed and confidential provisioning artifact bound, at minimum, to `(gid, profile_version, current_history_view_id, current_history_commitment, current barrier_version, current kem_tree_hash_after, slot_index, slot_generation, N_max, max_barrier_update_bytes)`, and carrying a unique nonce, issuance time, and expiry. Joiners MUST reject artifacts that are stale, expired, replayed for the same join attempt, or not bound to the current `(gid, profile_version)`.
 The provisioning artifact, the provisioned `current_history_commitment`, the provisioned accepted current `barrier_update`, and any subsequent authenticated S3.3 A/B/C lookups used to justify `join_finalize` bootstrap MUST all come from one common `HistoryAuthorityScope`; otherwise the joiner MUST fail closed and remain pending.
 Base-profile wire/API requirement (normative):
 * `JoinTicketResponse` MUST carry a non-empty `provisioning_artifact`.
@@ -1737,13 +1742,13 @@ Base-profile wire/API requirement (normative):
   * `history_authority_descriptor`
   * `current_global_history_attestation`
   * `current_join_records_completeness_attestation`
-  * `current_revoked_leaf_indices_completeness_attestation`
+  * `current_revoked_records_completeness_attestation`
   * `current_history_view_id`
   * `current_history_commitment`
   * `current_barrier_update`
   * `current_predecessor_kem_tree_hash_after`
   * `current_join_records`
-  * `current_revoked_leaf_indices`
+  * `current_revoked_records`
   * `join_finalize_auth`
   * `provisioning_nonce`
   * `provisioning_issued_at_ms`
@@ -1760,7 +1765,8 @@ Base-profile wire/API requirement for merge/current-state helper tickets (normat
   * `current_history_view_id`
   * `current_history_commitment`
   * `barrier_version`
-  * `cover_leaf_index`
+  * `slot_index`
+  * `slot_generation`
   * `n_max`
   * `max_barrier_update_bytes`
   * `kem_tree_hash_after`
@@ -1785,7 +1791,8 @@ Base-profile wire/API requirement for join/merge/helper/lookup profile/config de
 Join provisioning MUST deliver to the joiner:
 Barrier required fields:
 * current barrier_initialized (bool) -- for joins into an already-existing group under this profile, this MUST be true
-* cover_leaf_index (uint)
+* slot_index (uint)
+* slot_generation (uint64)
 * current barrier_version (uint)
 * current_history_view_id (bstr32)
 * current_history_commitment (`HistoryCommitment`)
@@ -1795,7 +1802,7 @@ Barrier required fields:
 * current predecessor committed `kem_tree_hash_after` (bstr32) for the accepted current `barrier_update` used by `join_finalize` bootstrap; this MAY be zero only when no accepted current `barrier_update` exists yet for the provisioned state
 * authenticated current `JoinSet` / `ResolveJoinsSince(BU_current.prev_barrier_version)` records for the provisioned current committed state, or an equivalent authenticated artifact from which the same set can be deterministically recovered
 * authenticated current `RevokedLeafSet` / `ResolveRevokedLeaves(BU_current.revocation_roots_hash)` records for the provisioned current committed state, or an equivalent authenticated artifact from which the same set can be deterministically recovered
-* `join_finalize_auth` (bstr32), an opaque server-issued capability bound at minimum to `(gid, leaf_id, cover_leaf_index)` and required as `header[179]` when the joiner later originates reason 2
+* `join_finalize_auth` (bstr32), an opaque server-issued capability bound at minimum to `(gid, leaf_id, slot_index, slot_generation)` and required as `header[179]` when the joiner later originates reason 2
 * current barrier_roots_hash (bstr32), OR authenticated current revocation-root material sufficient to deterministically compute the same barrier_roots_hash before any local S11.13.3 checks are applied
 * current kem_tree_hash_after (bstr32)
 * N_max (uint)

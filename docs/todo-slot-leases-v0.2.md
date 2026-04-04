@@ -57,7 +57,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Rename join/merge provisioning artifact CBOR fields from `cover_leaf_index` to `slot_index` and bump artifact labels to `v2`
 - [x] Require explicit slot leases in the live server join/revoke delta path instead of deriving them from `leaf_id`
 - [x] Require explicit slot leases in migrated server helper/validation paths instead of falling back to deterministic slot derivation
-- [~] Replace `current_join_records` and `current_revoked_leaf_indices`
+- [~] Replace `current_join_records` and `current_revoked_records`
 - [x] Remove `current_revoked_leaf_indices` from `JoinTicketResponse` and join provisioning artifacts
 - [x] Remove `leaf_indices` from `BarrierResolveRevokedLeavesResponse`
 - [x] Remove `revoked_leaf_indices` from full-verification witness requests
@@ -83,6 +83,8 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [~] Add replay rejection tests for stale `join_finalize_auth`
 - [~] Add historical chain-check tests where one slot has multiple generations
   Server helper coverage now exercises `resolve_joins_since` pruning across reused-slot generations; end-to-end client/history KATs still need to follow.
+- [~] Update the primary spec text from single-assignment to versioned `SlotLease` semantics
+  `docs/specs.md` now reflects reusable slots, versioned revoked/join records, and lease-bound `join_finalize_auth` / receipt / witness validation in the key barrier sections; full document sweep is still pending.
 
 ## Immediate next slice
 
