@@ -1866,13 +1866,15 @@ mod tests {
         #[prost(bytes = "vec", tag = "1")]
         device_pk: Vec<u8>,
         #[prost(uint32, tag = "2")]
-        leaf_index: u32,
+        slot_index: u32,
         #[prost(bytes = "vec", tag = "3")]
         ek_leaf: Vec<u8>,
+        #[prost(uint64, tag = "4")]
+        slot_generation: u64,
     }
 
     #[derive(Clone, PartialEq, Message)]
-    struct BarrierResolveJoinsSinceResponsePb {
+    struct BarrierResolveJoinOccupanciesSinceResponsePb {
         #[prost(message, repeated, tag = "1")]
         records: Vec<BarrierJoinOccupancyRecordPb>,
         #[prost(bytes = "vec", tag = "2")]
@@ -1888,7 +1890,7 @@ mod tests {
     }
 
     #[derive(Clone, PartialEq, Message)]
-    struct BarrierResolveJoinsSinceRequestPb {
+    struct BarrierResolveJoinOccupanciesSinceRequestPb {
         #[prost(string, tag = "1")]
         room_id: String,
         #[prost(uint64, tag = "2")]
@@ -1900,9 +1902,15 @@ mod tests {
     }
 
     #[derive(Clone, PartialEq, Message)]
-    struct BarrierResolveRevokedLeavesResponsePb {
-        #[prost(uint32, repeated, tag = "1")]
-        leaf_indices: Vec<u32>,
+    struct BarrierRevokedOccupancyRecordPb {
+        #[prost(uint32, tag = "1")]
+        slot_index: u32,
+        #[prost(uint64, tag = "2")]
+        slot_generation: u64,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct BarrierResolveRevokedOccupanciesResponsePb {
         #[prost(bytes = "vec", tag = "2")]
         history_view_id: Vec<u8>,
         #[prost(message, optional, tag = "3")]
@@ -1931,10 +1939,12 @@ mod tests {
         fs_forward_leap_policy: Option<FsForwardLeapPolicyPb>,
         #[prost(bytes = "vec", tag = "15")]
         deployment_profile_manifest: Vec<u8>,
+        #[prost(message, repeated, tag = "16")]
+        records: Vec<BarrierRevokedOccupancyRecordPb>,
     }
 
     #[derive(Clone, PartialEq, Message)]
-    struct BarrierResolveRevokedLeavesRequestPb {
+    struct BarrierResolveRevokedOccupanciesRequestPb {
         #[prost(string, tag = "1")]
         room_id: String,
         #[prost(bytes = "vec", tag = "2")]
@@ -2114,16 +2124,20 @@ mod tests {
         let mut page_offset = 0u32;
         let mut pages = Vec::new();
         loop {
-            let request = BarrierResolveJoinsSinceRequestPb {
+            let request = BarrierResolveJoinOccupanciesSinceRequestPb {
                 room_id: room_id.to_string(),
                 prev_barrier_version,
                 page_offset,
                 max_entries: 512,
             };
-            let raw =
-                post_proto_raw(server_url, "/v1/barrier/resolve_joins_since", &request).await?;
-            let decoded = BarrierResolveJoinsSinceResponsePb::decode(raw.as_slice())
-                .context("decode resolve_joins_since mock page")?;
+            let raw = post_proto_raw(
+                server_url,
+                "/v2/barrier/resolve_join_occupancies_since",
+                &request,
+            )
+            .await?;
+            let decoded = BarrierResolveJoinOccupanciesSinceResponsePb::decode(raw.as_slice())
+                .context("decode resolve_join_occupancies_since mock page")?;
             let next = decoded.next_page_offset;
             pages.push(raw);
             match next {
@@ -2142,16 +2156,20 @@ mod tests {
         let mut page_offset = 0u32;
         let mut pages = Vec::new();
         loop {
-            let request = BarrierResolveRevokedLeavesRequestPb {
+            let request = BarrierResolveRevokedOccupanciesRequestPb {
                 room_id: room_id.to_string(),
                 revocation_roots_hash: revocation_roots_hash.to_vec(),
                 page_offset,
                 max_entries: 512,
             };
-            let raw =
-                post_proto_raw(server_url, "/v1/barrier/resolve_revoked_leaves", &request).await?;
-            let decoded = BarrierResolveRevokedLeavesResponsePb::decode(raw.as_slice())
-                .context("decode resolve_revoked_leaves mock page")?;
+            let raw = post_proto_raw(
+                server_url,
+                "/v2/barrier/resolve_revoked_occupancies",
+                &request,
+            )
+            .await?;
+            let decoded = BarrierResolveRevokedOccupanciesResponsePb::decode(raw.as_slice())
+                .context("decode resolve_revoked_occupancies mock page")?;
             let next = decoded.next_page_offset;
             pages.push(raw);
             match next {
@@ -4246,11 +4264,11 @@ mod tests {
                 proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice()),
             ),
             (
-                "/v1/barrier/resolve_joins_since",
+                "/v2/barrier/resolve_join_occupancies_since",
                 proto_bytes_responses(fixture.join_records_pages_raw.as_slice()),
             ),
             (
-                "/v1/barrier/resolve_revoked_leaves",
+                "/v2/barrier/resolve_revoked_occupancies",
                 proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice()),
             ),
             (
@@ -4306,11 +4324,11 @@ mod tests {
                 proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice()),
             ),
             (
-                "/v1/barrier/resolve_joins_since",
+                "/v2/barrier/resolve_join_occupancies_since",
                 proto_bytes_responses(fixture.join_records_pages_raw.as_slice()),
             ),
             (
-                "/v1/barrier/resolve_revoked_leaves",
+                "/v2/barrier/resolve_revoked_occupancies",
                 proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice()),
             ),
             ("/v1/pivot/refresh", vec![MockResponse::empty_proto()]),
@@ -4851,11 +4869,11 @@ mod tests {
                 proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice()),
             ),
             (
-                "/v1/barrier/resolve_joins_since",
+                "/v2/barrier/resolve_join_occupancies_since",
                 proto_bytes_responses(fixture.join_records_pages_raw.as_slice()),
             ),
             (
-                "/v1/barrier/resolve_revoked_leaves",
+                "/v2/barrier/resolve_revoked_occupancies",
                 proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice()),
             ),
             (
@@ -4928,8 +4946,8 @@ mod tests {
                 ],
             ),
             ("/v1/barrier/fetch_public_tree", fetch_public_tree),
-            ("/v1/barrier/resolve_joins_since", resolve_joins),
-            ("/v1/barrier/resolve_revoked_leaves", resolve_revoked),
+            ("/v2/barrier/resolve_join_occupancies_since", resolve_joins),
+            ("/v2/barrier/resolve_revoked_occupancies", resolve_revoked),
             (
                 "/v1/pivot/refresh",
                 vec![MockResponse::empty_proto(), MockResponse::empty_proto()],
@@ -5007,11 +5025,11 @@ mod tests {
                 proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice()),
             ),
             (
-                "/v1/barrier/resolve_joins_since",
+                "/v2/barrier/resolve_join_occupancies_since",
                 proto_bytes_responses(fixture.join_records_pages_raw.as_slice()),
             ),
             (
-                "/v1/barrier/resolve_revoked_leaves",
+                "/v2/barrier/resolve_revoked_occupancies",
                 proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice()),
             ),
             ("/v1/pivot/refresh", vec![MockResponse::empty_proto()]),

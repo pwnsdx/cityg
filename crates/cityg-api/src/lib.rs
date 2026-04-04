@@ -52,7 +52,6 @@ use pb::MergeTicketResponse;
 use pb::{
     AcceptEpochRequest, BarrierFetchPublicTreeRequest, BarrierIssueFullVerificationWitnessRequest,
     BarrierLookupMergeAcceptanceRequest, BarrierResolveJoinOccupanciesSinceRequest,
-    BarrierResolveJoinsSinceRequest, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedOccupanciesRequest, BootstrapRoomRequest, ChatMessage,
     ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest,
     GetBundleResponse, JoinTicketRequest, ListRoomAdminsRequest, MembersRequest, MergeTicketIntent,
@@ -62,8 +61,7 @@ use pb::{
 #[cfg(test)]
 use pb::{
     BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceResponse,
-    BarrierResolveJoinOccupanciesSinceResponse, BarrierResolveJoinsSinceResponse,
-    BarrierResolveRevokedLeavesResponse, BarrierResolveRevokedOccupanciesResponse,
+    BarrierResolveJoinOccupanciesSinceResponse, BarrierResolveRevokedOccupanciesResponse,
     BootstrapRoomResponse, ConfigureWindowRequest, ConfigureWindowResponse, GetTelemetryRequest,
     GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
     ListRoomAdminsResponse, MembersResponse, MergeAcceptanceStatus, RoomAdminMutationResponse,
@@ -775,16 +773,8 @@ pub async fn run_with_config(
         .route("/v1/rooms/join_ticket", post(join_ticket))
         .route("/v1/rooms/merge_ticket", post(merge_ticket))
         .route(
-            "/v1/barrier/resolve_revoked_leaves",
-            post(barrier_resolve_revoked_occupancies_route),
-        )
-        .route(
             "/v2/barrier/resolve_revoked_occupancies",
             post(barrier_resolve_revoked_occupancies),
-        )
-        .route(
-            "/v1/barrier/resolve_joins_since",
-            post(barrier_resolve_join_occupancies_since_route),
         )
         .route(
             "/v2/barrier/resolve_join_occupancies_since",
@@ -1570,7 +1560,7 @@ mod tests {
             ApiError::Unauthorized("missing or invalid message auth token")
         ));
 
-        let revoked_err = barrier_resolve_revoked_occupancies_route(
+        let revoked_err = barrier_resolve_revoked_occupancies(
             State(state.clone()),
             empty_headers.clone(),
             Bytes::new(),
@@ -1582,7 +1572,7 @@ mod tests {
             ApiError::Unauthorized("missing or invalid message auth token")
         ));
 
-        let joins_err = barrier_resolve_join_occupancies_since_route(
+        let joins_err = barrier_resolve_join_occupancies_since(
             State(state.clone()),
             empty_headers.clone(),
             Bytes::new(),
@@ -3349,90 +3339,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_joins_since_returns_join_records() {
-        let state = test_api_state();
-        let headers = message_auth_headers();
-        let alice = demo_bundle("alice").expect("alice demo bundle");
-        let expected_history_authority_descriptor = {
-            let guard = state.server.read().await;
-            guard
-                .history_authority_descriptor_bytes()
-                .expect("history authority descriptor bytes")
-        };
-
-        let mut bad_body = Vec::new();
-        BarrierResolveJoinsSinceRequest {
-            room_id: String::new(),
-            prev_barrier_version: 0,
-            ..BarrierResolveJoinsSinceRequest::default()
-        }
-        .encode(&mut bad_body)
-        .expect("encode bad joins-since request");
-        let err = barrier_resolve_join_occupancies_since_route(
-            State(state.clone()),
-            headers.clone(),
-            Bytes::from(bad_body),
-        )
-        .await
-        .expect_err("joins-since missing room id should fail");
-        assert!(matches!(
-            err,
-            ApiError::InvalidRequest("room_id must be provided")
-        ));
-
-        {
-            let mut guard = state.server.write().await;
-            guard.accept_epoch(&alice).expect("accept alice");
-        }
-
-        let mut body = Vec::new();
-        BarrierResolveJoinsSinceRequest {
-            room_id: hex::encode(DEMO_GID),
-            prev_barrier_version: 0,
-            ..BarrierResolveJoinsSinceRequest::default()
-        }
-        .encode(&mut body)
-        .expect("encode joins-since request");
-        let response =
-            barrier_resolve_join_occupancies_since_route(State(state), headers, Bytes::from(body))
-                .await
-                .expect("joins-since request should succeed");
-        let decoded: BarrierResolveJoinsSinceResponse = decode_proto_response(response).await;
-        assert!(
-            !decoded.records.is_empty(),
-            "joins-since should return records"
-        );
-        assert!(decoded.history_commitment.is_some());
-        let first = &decoded.records[0];
-        assert!(first.slot_index > 0);
-        assert!(!first.device_pk.is_empty());
-        assert!(
-            first.ek_leaf.is_empty() || first.ek_leaf.len() == ml_kem_public_key_bytes(),
-            "ek_leaf should be absent or ML-KEM-768 size"
-        );
-        assert_eq!(
-            decoded.history_authority_descriptor,
-            expected_history_authority_descriptor
-        );
-        assert!(
-            !decoded.global_history_attestation.is_empty(),
-            "joins-since response should carry global history attestation under base-profile global authority"
-        );
-        assert!(
-            !decoded.helper_completeness_attestation.is_empty(),
-            "joins-since response should carry helper completeness attestation under base-profile global authority"
-        );
-        assert_eq!(decoded.profile_version, API_PROFILE_VERSION);
-        assert!(decoded.n_max > 0);
-        assert!(decoded.max_barrier_update_bytes > 0);
-        assert!(decoded.fs_forward_leap_policy.is_some());
-        assert!(
-            !decoded.deployment_profile_manifest.is_empty(),
-            "joins-since response should carry deployment_profile_manifest under base-profile global authority"
-        );
-    }
-
-    #[tokio::test]
     async fn barrier_resolve_join_occupancies_since_returns_join_records_v2() {
         let state = test_api_state();
         let headers = message_auth_headers();
@@ -3486,7 +3392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_tree_and_revoked_leaves_endpoints_validate_inputs() {
+    async fn barrier_tree_and_revoked_occupancies_endpoints_validate_inputs() {
         let state = test_api_state();
         let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
@@ -3516,14 +3422,14 @@ mod tests {
         };
 
         let mut bad_revoked_body = Vec::new();
-        BarrierResolveRevokedLeavesRequest {
+        BarrierResolveRevokedOccupanciesRequest {
             room_id: String::new(),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
-            ..BarrierResolveRevokedLeavesRequest::default()
+            ..BarrierResolveRevokedOccupanciesRequest::default()
         }
         .encode(&mut bad_revoked_body)
         .expect("encode missing room revoked request");
-        let err = barrier_resolve_revoked_occupancies_route(
+        let err = barrier_resolve_revoked_occupancies(
             State(state.clone()),
             headers.clone(),
             Bytes::from(bad_revoked_body),
@@ -3536,14 +3442,14 @@ mod tests {
         ));
 
         let mut bad_revoked_room = Vec::new();
-        BarrierResolveRevokedLeavesRequest {
+        BarrierResolveRevokedOccupanciesRequest {
             room_id: "bad-room-id".to_string(),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
-            ..BarrierResolveRevokedLeavesRequest::default()
+            ..BarrierResolveRevokedOccupanciesRequest::default()
         }
         .encode(&mut bad_revoked_room)
         .expect("encode invalid room revoked request");
-        let err = barrier_resolve_revoked_occupancies_route(
+        let err = barrier_resolve_revoked_occupancies(
             State(state.clone()),
             headers.clone(),
             Bytes::from(bad_revoked_room),
@@ -3556,14 +3462,14 @@ mod tests {
         ));
 
         let mut bad_revoked_hash = Vec::new();
-        BarrierResolveRevokedLeavesRequest {
+        BarrierResolveRevokedOccupanciesRequest {
             room_id: hex::encode(DEMO_GID),
             revocation_roots_hash: vec![0xAB; 31],
-            ..BarrierResolveRevokedLeavesRequest::default()
+            ..BarrierResolveRevokedOccupanciesRequest::default()
         }
         .encode(&mut bad_revoked_hash)
         .expect("encode short hash revoked request");
-        let err = barrier_resolve_revoked_occupancies_route(
+        let err = barrier_resolve_revoked_occupancies(
             State(state.clone()),
             headers.clone(),
             Bytes::from(bad_revoked_hash),
@@ -3576,21 +3482,21 @@ mod tests {
         ));
 
         let mut revoked_body = Vec::new();
-        BarrierResolveRevokedLeavesRequest {
+        BarrierResolveRevokedOccupanciesRequest {
             room_id: hex::encode(DEMO_GID),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
-            ..BarrierResolveRevokedLeavesRequest::default()
+            ..BarrierResolveRevokedOccupanciesRequest::default()
         }
         .encode(&mut revoked_body)
-        .expect("encode revoked leaves request");
-        let revoked_response = barrier_resolve_revoked_occupancies_route(
+        .expect("encode revoked occupancies request");
+        let revoked_response = barrier_resolve_revoked_occupancies(
             State(state.clone()),
             headers.clone(),
             Bytes::from(revoked_body),
         )
         .await
-        .expect("revoked leaves request should succeed");
-        let revoked_decoded: BarrierResolveRevokedLeavesResponse =
+        .expect("revoked occupancies request should succeed");
+        let revoked_decoded: BarrierResolveRevokedOccupanciesResponse =
             decode_proto_response(revoked_response).await;
         assert!(revoked_decoded.records.is_empty());
         assert_eq!(
@@ -3599,11 +3505,11 @@ mod tests {
         );
         assert!(
             !revoked_decoded.global_history_attestation.is_empty(),
-            "revoked-leaves response should carry global history attestation under base-profile global authority"
+            "revoked-occupancies response should carry global history attestation under base-profile global authority"
         );
         assert!(
             !revoked_decoded.helper_completeness_attestation.is_empty(),
-            "revoked-leaves response should carry helper completeness attestation under base-profile global authority"
+            "revoked-occupancies response should carry helper completeness attestation under base-profile global authority"
         );
         assert_eq!(revoked_decoded.profile_version, API_PROFILE_VERSION);
         assert!(revoked_decoded.n_max > 0);
@@ -3611,7 +3517,7 @@ mod tests {
         assert!(revoked_decoded.fs_forward_leap_policy.is_some());
         assert!(
             !revoked_decoded.deployment_profile_manifest.is_empty(),
-            "revoked-leaves response should carry deployment_profile_manifest under base-profile global authority"
+            "revoked-occupancies response should carry deployment_profile_manifest under base-profile global authority"
         );
 
         let mut bad_tree_body = Vec::new();

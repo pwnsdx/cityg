@@ -7,14 +7,11 @@ use cityg_api_schema::{
     MAX_BARRIER_HELPER_PAGE_ENTRIES, ResolveRevokedLeavesRequestDecodeError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
-    decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
     decode_barrier_resolve_revoked_occupancies_request as schema_decode_barrier_resolve_revoked_occupancies_request,
     decode_full_verification_witness_request as schema_decode_full_verification_witness_request,
     encode_full_verification_witness_response, encode_prepared_barrier_public_tree_response,
     encode_prepared_merge_acceptance_lookup_response,
-    encode_prepared_resolved_join_occupancies_response, encode_prepared_resolved_joins_response,
-    encode_prepared_resolved_revoked_leaves_response,
-    encode_prepared_resolved_revoked_occupancies_response,
+    encode_prepared_resolved_join_occupancies_response, encode_prepared_resolved_revoked_occupancies_response,
 };
 use cityg_runtime::{
     prepare_barrier_public_tree as runtime_prepare_barrier_public_tree,
@@ -27,7 +24,6 @@ use cityg_runtime::{
 use crate::{
     ApiError, ApiState, BarrierFetchPublicTreeRequest, BarrierIssueFullVerificationWitnessRequest,
     BarrierLookupMergeAcceptanceRequest, BarrierResolveJoinOccupanciesSinceRequest,
-    BarrierResolveJoinsSinceRequest, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedOccupanciesRequest, configured_message_auth_token,
     enforce_expensive_rate_limit, enforce_message_auth_header,
     map_full_verification_witness_preparation_error, map_room_barrier_helper_preparation_error,
@@ -83,89 +79,6 @@ pub(crate) async fn barrier_issue_full_verification_witness(
 
     Ok(protobuf_response_bytes(
         encode_full_verification_witness_response(witness),
-    ))
-}
-
-pub(crate) async fn barrier_resolve_revoked_occupancies_route(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = BarrierResolveRevokedLeavesRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    let gid = parse_gid(&request.room_id)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "barrier_resolve_revoked_occupancies",
-        message_scoped_rate_limit_key(&headers, &gid),
-    )
-    .await?;
-    let request = schema_decode_barrier_resolve_revoked_leaves_request(request).map_err(
-        |error: ResolveRevokedLeavesRequestDecodeError| {
-            ApiError::InvalidRequest(error.api_message())
-        },
-    )?;
-
-    let prepared = {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_prepare_resolved_revoked_occupancies(
-            &mut guard,
-            &gid,
-            &request.revocation_roots_hash,
-            request.page_offset,
-            request.max_entries,
-            MAX_BARRIER_HELPER_PAGE_ENTRIES,
-            API_PROFILE_VERSION,
-        )
-        .map_err(|err| {
-            map_room_barrier_helper_preparation_error("barrier_resolve_revoked_occupancies", err)
-        })?
-    };
-    Ok(protobuf_response_bytes(
-        encode_prepared_resolved_revoked_leaves_response(prepared),
-    ))
-}
-
-pub(crate) async fn barrier_resolve_join_occupancies_since_route(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = BarrierResolveJoinsSinceRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    let gid = parse_gid(&request.room_id)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "barrier_resolve_join_occupancies_since",
-        message_scoped_rate_limit_key(&headers, &gid),
-    )
-    .await?;
-
-    let prepared = {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_prepare_resolved_join_occupancies(
-            &mut guard,
-            &gid,
-            request.prev_barrier_version,
-            request.page_offset,
-            request.max_entries,
-            MAX_BARRIER_HELPER_PAGE_ENTRIES,
-            API_PROFILE_VERSION,
-        )
-        .map_err(|err| {
-            map_room_barrier_helper_preparation_error("barrier_resolve_join_occupancies_since", err)
-        })?
-    };
-    Ok(protobuf_response_bytes(
-        encode_prepared_resolved_joins_response(prepared),
     ))
 }
 

@@ -40,7 +40,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Replace naked revoked leaf indices with revoked occupancy records
 - [~] Rework `ResolveJoinsSince` and `ResolveRevokedLeaves`
 - [x] Update completeness attestations to cover occupancy records
-  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; the remaining legacy is now mostly in public protobuf/message names and helper-kind identifiers, not in runtime call sites.
+  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; the remaining legacy is now mostly in helper-kind identifiers and CBOR wire labels, not in helper routes/messages or runtime call sites.
 
 ### 4. Barrier validation
 
@@ -54,9 +54,9 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ### 5. API and runtime
 
-- [~] Introduce `cityg.api.v2`
-- [x] Add `v2` helper route aliases for occupancy-oriented barrier helpers
+- [x] Introduce `cityg.api.v2` for occupancy-oriented barrier helpers
 - [x] Add protobuf `v2` helper request/response messages for occupancy-oriented barrier helpers
+- [x] Remove legacy helper `v1` routes/messages once `v2` occupancies are in place
 - [x] Remove orphaned protobuf `*LeafRecord` messages once all helper/ticket/witness wire paths consume `OccupancyRecord`
 - [ ] Replace `cover_leaf_index` fields in tickets with `slot_index` + `slot_generation`
 - [x] Rename internal server/runtime ticket bundle fields from `cover_leaf_index` to `slot_index`
@@ -67,7 +67,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [~] Replace `current_join_records` and `current_revoked_records`
   `JoinTicketResponse` transporte désormais des `BarrierJoinOccupancyRecord` / `BarrierRevokedOccupancyRecord`; le renommage complet des champs et du reste du wire profile reste à faire.
 - [x] Remove `current_revoked_leaf_indices` from `JoinTicketResponse` and join provisioning artifacts
-- [x] Remove `leaf_indices` from `BarrierResolveRevokedLeavesResponse`
+- [x] Remove `leaf_indices` from revoked-helper responses
 - [x] Remove `revoked_leaf_indices` from full-verification witness requests
 - [x] Remove stored `leaf_indices` from `BarrierResolvedRevokedLeaves` client state
 - [x] Remove stored `leaf_indices` from `ResolvedRevokedLeaves` server state
@@ -100,6 +100,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Finish the remaining public/profile rename in protobuf message names and route enums that still say `ResolveRevokedLeaves` / `ResolveJoinsSince`.
-2. Decide whether `helper_kind` and the CBOR wire label `updater_leaf` stay as documented legacy identifiers or also move in a hard `v0.2` cut.
-3. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.
+1. Decide whether `helper_kind` and the CBOR wire label `updater_leaf` stay as documented legacy identifiers or also move in a hard `v0.2` cut.
+2. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.
+3. Finish the remaining ticket/profile rename work (`current_join_records`, `current_revoked_records`, and any remaining `cover_leaf_index`-shaped public fields).

@@ -332,33 +332,6 @@ message MergeTicketResponse {
   bytes deployment_profile_manifest = 36;
 }
 
-message BarrierResolveRevokedLeavesRequest {
-  reserved 1000 to 1999;
-  string room_id = 1;
-  bytes revocation_roots_hash = 2;
-  uint32 page_offset = 3;
-  uint32 max_entries = 4;
-}
-
-message BarrierResolveRevokedLeavesResponse {
-  reserved 1, 1000 to 1999;
-  bytes history_view_id = 2;
-  optional HistoryCommitment history_commitment = 3;
-  uint32 page_offset = 4;
-  optional uint32 next_page_offset = 5;
-  uint32 total_entries = 6;
-  bytes helper_completeness_attestation = 7;
-  bytes history_authority_descriptor = 8;
-  bytes global_history_attestation = 9;
-  string history_authority_extension = 10;
-  string profile_version = 11;
-  uint64 n_max = 12;
-  uint64 max_barrier_update_bytes = 13;
-  optional FsForwardLeapPolicy fs_forward_leap_policy = 14;
-  bytes deployment_profile_manifest = 15;
-  repeated BarrierRevokedOccupancyRecord records = 16;
-}
-
 message BarrierResolveRevokedOccupanciesRequest {
   reserved 1000 to 1999;
   string room_id = 1;
@@ -398,33 +371,6 @@ message BarrierJoinOccupancyRecord {
   uint32 slot_index = 2;
   bytes ek_leaf = 3;
   uint64 slot_generation = 4;
-}
-
-message BarrierResolveJoinsSinceRequest {
-  reserved 1000 to 1999;
-  string room_id = 1;
-  uint64 prev_barrier_version = 2;
-  uint32 page_offset = 3;
-  uint32 max_entries = 4;
-}
-
-message BarrierResolveJoinsSinceResponse {
-  reserved 1000 to 1999;
-  repeated BarrierJoinOccupancyRecord records = 1;
-  bytes history_view_id = 2;
-  optional HistoryCommitment history_commitment = 3;
-  uint32 page_offset = 4;
-  optional uint32 next_page_offset = 5;
-  uint32 total_entries = 6;
-  bytes helper_completeness_attestation = 7;
-  bytes history_authority_descriptor = 8;
-  bytes global_history_attestation = 9;
-  string history_authority_extension = 10;
-  string profile_version = 11;
-  uint64 n_max = 12;
-  uint64 max_barrier_update_bytes = 13;
-  optional FsForwardLeapPolicy fs_forward_leap_policy = 14;
-  bytes deployment_profile_manifest = 15;
 }
 
 message BarrierResolveJoinOccupanciesSinceRequest {

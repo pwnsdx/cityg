@@ -282,51 +282,6 @@ pub fn encode_prepared_resolved_revoked_occupancies_response(
 }
 
 #[must_use]
-pub fn encode_prepared_resolved_revoked_leaves_response(
-    prepared: PreparedResolvedRevokedOccupancies,
-) -> Vec<u8> {
-    let PreparedResolvedRevokedOccupancies {
-        resolved,
-        page,
-        helper_completeness_attestation,
-        barrier,
-    } = prepared;
-    let PreparedBarrierEnvelope {
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy,
-        deployment_profile_manifest,
-    } = barrier;
-
-    let response = pb::BarrierResolveRevokedLeavesResponse {
-        records: page
-            .items
-            .into_iter()
-            .map(pb_barrier_revoked_occupancy_record)
-            .collect(),
-        history_view_id: resolved.history_view_id.to_vec(),
-        history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
-        page_offset: page.page_offset,
-        next_page_offset: page.next_page_offset,
-        total_entries: page.total_entries,
-        helper_completeness_attestation,
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
-        deployment_profile_manifest,
-    };
-
-    response.encode_to_vec()
-}
-
-#[must_use]
 pub fn encode_prepared_resolved_join_occupancies_response(
     prepared: PreparedResolvedJoinOccupancies,
 ) -> Vec<u8> {
@@ -347,51 +302,6 @@ pub fn encode_prepared_resolved_join_occupancies_response(
     } = barrier;
 
     let response = pb::BarrierResolveJoinOccupanciesSinceResponse {
-        records: page
-            .items
-            .into_iter()
-            .map(pb_barrier_join_occupancy_record)
-            .collect(),
-        history_view_id: resolved.history_view_id.to_vec(),
-        history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
-        page_offset: page.page_offset,
-        next_page_offset: page.next_page_offset,
-        total_entries: page.total_entries,
-        helper_completeness_attestation,
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
-        deployment_profile_manifest,
-    };
-
-    response.encode_to_vec()
-}
-
-#[must_use]
-pub fn encode_prepared_resolved_joins_response(
-    prepared: PreparedResolvedJoinOccupancies,
-) -> Vec<u8> {
-    let PreparedResolvedJoinOccupancies {
-        resolved,
-        page,
-        helper_completeness_attestation,
-        barrier,
-    } = prepared;
-    let PreparedBarrierEnvelope {
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy,
-        deployment_profile_manifest,
-    } = barrier;
-
-    let response = pb::BarrierResolveJoinsSinceResponse {
         records: page
             .items
             .into_iter()
@@ -1134,13 +1044,11 @@ impl LookupMergeAcceptanceRequestDecodeError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DecodedBarrierResolveRevokedLeavesRequest {
+pub struct DecodedBarrierResolveRevokedOccupanciesRequest {
     pub revocation_roots_hash: [u8; 32],
     pub page_offset: u32,
     pub max_entries: u32,
 }
-
-pub type DecodedBarrierResolveRevokedOccupanciesRequest = DecodedBarrierResolveRevokedLeavesRequest;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodedBarrierFetchPublicTreeRequest {
@@ -1154,21 +1062,6 @@ pub struct DecodedBarrierLookupMergeAcceptanceRequest {
     pub pending_barrier_version: u64,
     pub pending_barrier_update_digest: [u8; 32],
     pub pending_we_epoch_id: [u8; 32],
-}
-
-pub fn decode_barrier_resolve_revoked_leaves_request(
-    request: pb::BarrierResolveRevokedLeavesRequest,
-) -> Result<DecodedBarrierResolveRevokedLeavesRequest, ResolveRevokedLeavesRequestDecodeError> {
-    if request.revocation_roots_hash.len() != 32 {
-        return Err(ResolveRevokedLeavesRequestDecodeError::InvalidRevocationRootsHash);
-    }
-    let mut revocation_roots_hash = [0u8; 32];
-    revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
-    Ok(DecodedBarrierResolveRevokedLeavesRequest {
-        revocation_roots_hash,
-        page_offset: request.page_offset,
-        max_entries: request.max_entries,
-    })
 }
 
 pub fn decode_barrier_resolve_revoked_occupancies_request(
@@ -1890,9 +1783,7 @@ pub enum RoomScopedApiRoute {
     ExpelMemberTicket,
     JoinTicket,
     MergeTicket,
-    BarrierResolveRevokedLeaves,
     BarrierResolveRevokedOccupancies,
-    BarrierResolveJoinsSince,
     BarrierResolveJoinOccupanciesSince,
     BarrierFetchPublicTree,
     BarrierIssueFullVerificationWitness,
@@ -1918,9 +1809,7 @@ impl RoomScopedApiRoute {
             Self::ExpelMemberTicket => "/v1/rooms/expel_member_ticket",
             Self::JoinTicket => "/v1/rooms/join_ticket",
             Self::MergeTicket => "/v1/rooms/merge_ticket",
-            Self::BarrierResolveRevokedLeaves => "/v1/barrier/resolve_revoked_leaves",
             Self::BarrierResolveRevokedOccupancies => "/v2/barrier/resolve_revoked_occupancies",
-            Self::BarrierResolveJoinsSince => "/v1/barrier/resolve_joins_since",
             Self::BarrierResolveJoinOccupanciesSince => {
                 "/v2/barrier/resolve_join_occupancies_since"
             }
@@ -2041,16 +1930,8 @@ pub fn extract_room_scoped_request_target(
             let request = decode::<pb::MergeTicketRequest>(route, body)?;
             RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
         }
-        RoomScopedApiRoute::BarrierResolveRevokedLeaves => {
-            let request = decode::<pb::BarrierResolveRevokedLeavesRequest>(route, body)?;
-            RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
-        }
         RoomScopedApiRoute::BarrierResolveRevokedOccupancies => {
             let request = decode::<pb::BarrierResolveRevokedOccupanciesRequest>(route, body)?;
-            RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
-        }
-        RoomScopedApiRoute::BarrierResolveJoinsSince => {
-            let request = decode::<pb::BarrierResolveJoinsSinceRequest>(route, body)?;
             RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
         }
         RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince => {
@@ -2105,13 +1986,9 @@ fn match_room_scoped_route(path: &str) -> Option<RoomScopedApiRoute> {
         "/v1/rooms/expel_member_ticket" => Some(RoomScopedApiRoute::ExpelMemberTicket),
         "/v1/rooms/join_ticket" => Some(RoomScopedApiRoute::JoinTicket),
         "/v1/rooms/merge_ticket" => Some(RoomScopedApiRoute::MergeTicket),
-        "/v1/barrier/resolve_revoked_leaves" => {
-            Some(RoomScopedApiRoute::BarrierResolveRevokedLeaves)
-        }
         "/v2/barrier/resolve_revoked_occupancies" => {
             Some(RoomScopedApiRoute::BarrierResolveRevokedOccupancies)
         }
-        "/v1/barrier/resolve_joins_since" => Some(RoomScopedApiRoute::BarrierResolveJoinsSince),
         "/v2/barrier/resolve_join_occupancies_since" => {
             Some(RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince)
         }
@@ -2932,14 +2809,15 @@ mod tests {
 
     #[test]
     fn decode_barrier_helper_requests_project_fixed_width_fields() {
-        let revoked =
-            decode_barrier_resolve_revoked_leaves_request(pb::BarrierResolveRevokedLeavesRequest {
+        let revoked = decode_barrier_resolve_revoked_occupancies_request(
+            pb::BarrierResolveRevokedOccupanciesRequest {
                 room_id: hex::encode(DEMO_GID),
                 revocation_roots_hash: vec![0x11; 32],
                 page_offset: 12,
                 max_entries: 13,
-            })
-            .expect("decode revoked helper request");
+            },
+        )
+        .expect("decode revoked helper request");
         assert_eq!(revoked.revocation_roots_hash, [0x11; 32]);
         assert_eq!(revoked.page_offset, 12);
         assert_eq!(revoked.max_entries, 13);
@@ -2967,67 +2845,6 @@ mod tests {
         assert_eq!(merge.pending_barrier_version, 31);
         assert_eq!(merge.pending_barrier_update_digest, [0x32; 32]);
         assert_eq!(merge.pending_we_epoch_id, [0x33; 32]);
-    }
-
-    #[test]
-    fn encode_resolved_revoked_leaves_response_carries_versioned_records() {
-        let history_commitment = cityg_server::HistoryCommitment {
-            history_view_id: [0x11; 32],
-            history_commitment_id: [0x12; 32],
-            prev_history_commitment_id: [0x13; 32],
-            history_seq: 14,
-        };
-        let encoded =
-            encode_prepared_resolved_revoked_leaves_response(PreparedResolvedRevokedOccupancies {
-                resolved: cityg_server::ResolvedRevokedOccupancies {
-                    history_view_id: [0x11; 32],
-                    history_commitment,
-                    records: vec![
-                        cityg_server::BarrierRevokedOccupancyRecord {
-                            leaf_index: 5,
-                            slot_generation: 2,
-                        },
-                        cityg_server::BarrierRevokedOccupancyRecord {
-                            leaf_index: 7,
-                            slot_generation: 4,
-                        },
-                    ],
-                },
-                page: cityg_runtime::BarrierPage {
-                    items: vec![cityg_server::BarrierRevokedOccupancyRecord {
-                        leaf_index: 7,
-                        slot_generation: 4,
-                    }],
-                    page_offset: 1,
-                    next_page_offset: None,
-                    total_entries: 2,
-                },
-                helper_completeness_attestation: vec![0x31, 0x32],
-                barrier: PreparedBarrierEnvelope {
-                    history_authority_descriptor: vec![0x41],
-                    global_history_attestation: vec![0x42],
-                    history_authority_extension: "global-history-authority-v1".to_string(),
-                    n_max: 8,
-                    max_barrier_update_bytes: 1_048_576,
-                    fs_forward_leap_policy: cityg_server::FsForwardLeapPolicy {
-                        h: 300,
-                        checkpoint_interval: 3600,
-                        slack_anchor: 10,
-                        slack_first_device: 20,
-                        slack_device: 30,
-                    },
-                    deployment_profile_manifest: vec![0x43],
-                },
-            });
-        let decoded = pb::BarrierResolveRevokedLeavesResponse::decode(encoded.as_slice())
-            .expect("decode revoked helper response");
-
-        assert_eq!(decoded.records.len(), 1);
-        assert_eq!(decoded.records[0].slot_index, 7);
-        assert_eq!(decoded.records[0].slot_generation, 4);
-        assert_eq!(decoded.page_offset, 1);
-        assert_eq!(decoded.total_entries, 2);
-        assert_eq!(decoded.helper_completeness_attestation, vec![0x31, 0x32]);
     }
 
     #[test]
