@@ -3,16 +3,6 @@ use cityg_api_schema::pb::{JoinTicketRequest, JoinTicketResponse};
 use cityg_client::barrier::DEFAULT_BARRIER_N_MAX;
 use cityg_client::witness::SrxInputsOwned;
 
-fn derive_current_revoked_leaf_indices(records: &[BarrierRevokedLeafRecord]) -> Vec<u32> {
-    let mut leaf_indices = records
-        .iter()
-        .map(|record| record.leaf_index)
-        .collect::<Vec<_>>();
-    leaf_indices.sort_unstable();
-    leaf_indices.dedup();
-    leaf_indices
-}
-
 impl CitygApiClient {
     /// Requests a join ticket for a new member.
     pub async fn join_ticket(
@@ -59,9 +49,6 @@ impl CitygApiClient {
                         .is_empty()
                     || !response
                         .current_revoked_records_completeness_attestation
-                        .is_empty()
-                    || !response
-                        .current_revoked_leaf_indices_completeness_attestation
                         .is_empty(),
             )?,
             "join ticket",
@@ -240,16 +227,6 @@ impl CitygApiClient {
                         slot_generation: record.slot_generation,
                     })
                     .collect::<Vec<_>>();
-                let derived_revoked_leaf_indices =
-                    derive_current_revoked_leaf_indices(revoked_records.as_slice());
-                if !response.current_revoked_leaf_indices.is_empty()
-                    && response.current_revoked_leaf_indices != derived_revoked_leaf_indices
-                {
-                    return Err(Error::Parse(
-                        "join ticket current_revoked_leaf_indices mismatch with current_revoked_records"
-                            .to_string(),
-                    ));
-                }
                 verify_revoked_leaves_completeness_attestation(
                     &revoked_attestation,
                     authority,
@@ -276,9 +253,6 @@ impl CitygApiClient {
                 .is_empty()
             || !response
                 .current_revoked_records_completeness_attestation
-                .is_empty()
-            || !response
-                .current_revoked_leaf_indices_completeness_attestation
                 .is_empty()
             || !response.deployment_profile_manifest.is_empty()
             || !response.provisioning_artifact.is_empty()

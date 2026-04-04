@@ -275,12 +275,9 @@ pub(crate) struct JoinProvisioningArtifactSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     pub(crate) current_revoked_records_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
-    pub(crate) current_revoked_leaf_indices_completeness_attestation: &'a [u8],
-    #[serde(with = "serde_bytes")]
     pub(crate) current_barrier_update: &'a [u8],
     pub(crate) current_join_records: &'a [BarrierJoinRecord],
     pub(crate) current_revoked_records: &'a [BarrierRevokedLeafRecord],
-    pub(crate) current_revoked_leaf_indices: &'a [u32],
 }
 
 #[derive(Serialize)]
@@ -883,13 +880,9 @@ pub(crate) fn verify_join_provisioning_artifact(
         current_revoked_records_completeness_attestation: response
             .current_revoked_records_completeness_attestation
             .as_slice(),
-        current_revoked_leaf_indices_completeness_attestation: response
-            .current_revoked_leaf_indices_completeness_attestation
-            .as_slice(),
         current_barrier_update: response.current_barrier_update.as_slice(),
         current_join_records: join_records.as_slice(),
         current_revoked_records: revoked_records.as_slice(),
-        current_revoked_leaf_indices: response.current_revoked_leaf_indices.as_slice(),
     })?;
     verify_ml_dsa_signature(
         payload.as_slice(),

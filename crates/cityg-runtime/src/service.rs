@@ -254,8 +254,6 @@ pub enum RoomTicketPreparationError {
     MissingCommittedBarrierRootsHash,
     #[error("join ticket current_join_records length overflow")]
     JoinRecordsLengthOverflow,
-    #[error("join ticket current_revoked_leaf_indices length overflow")]
-    RevokedLeafIndicesLengthOverflow,
     #[error("join ticket current_revoked_records length overflow")]
     RevokedRecordsLengthOverflow,
     #[error("failed to encode pivot parity")]
@@ -307,7 +305,6 @@ pub struct PreparedJoinTicket {
     pub current_global_history_attestation: Vec<u8>,
     pub current_join_records_completeness_attestation: Vec<u8>,
     pub current_revoked_records_completeness_attestation: Vec<u8>,
-    pub current_revoked_leaf_indices_completeness_attestation: Vec<u8>,
     pub history_authority_extension: String,
     pub provisioning_artifact: Vec<u8>,
     pub deployment_profile_manifest: Vec<u8>,
@@ -708,18 +705,6 @@ pub fn prepare_join_ticket(
                 .map_err(|_| RoomTicketPreparationError::RevokedRecordsLengthOverflow)?,
             bundle.current_revoked_records.as_slice(),
         )?;
-    let committed_revocation_roots_hash = server
-        .barrier_roots_hash(gid)
-        .ok_or(RoomTicketPreparationError::MissingCommittedBarrierRootsHash)?;
-    let current_revoked_leaf_indices_completeness_attestation = server
-        .helper_completeness_attestation_revoked_bytes(
-            &bundle.current_history_commitment,
-            &committed_revocation_roots_hash,
-            0,
-            u32::try_from(bundle.current_revoked_leaf_indices.len())
-                .map_err(|_| RoomTicketPreparationError::RevokedLeafIndicesLengthOverflow)?,
-            bundle.current_revoked_leaf_indices.as_slice(),
-        )?;
     let history_authority_extension = server.history_authority_extension_id().to_string();
     let provisioning_artifact = server.join_provisioning_artifact_bytes(
         &bundle,
@@ -732,8 +717,6 @@ pub fn prepare_join_ticket(
                 current_join_records_completeness_attestation.as_slice(),
             current_revoked_records_completeness_attestation:
                 current_revoked_records_completeness_attestation.as_slice(),
-            current_revoked_leaf_indices_completeness_attestation:
-                current_revoked_leaf_indices_completeness_attestation.as_slice(),
         },
     )?;
     let deployment_profile_manifest = server.deployment_profile_manifest_bytes(
@@ -755,7 +738,6 @@ pub fn prepare_join_ticket(
         current_global_history_attestation,
         current_join_records_completeness_attestation,
         current_revoked_records_completeness_attestation,
-        current_revoked_leaf_indices_completeness_attestation,
         history_authority_extension,
         provisioning_artifact,
         deployment_profile_manifest,

@@ -52,7 +52,8 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 - [ ] Introduce `cityg.api.v2`
 - [ ] Replace `cover_leaf_index` fields in tickets with `slot_index` + `slot_generation`
-- [ ] Replace `current_join_records` and `current_revoked_leaf_indices`
+- [~] Replace `current_join_records` and `current_revoked_leaf_indices`
+- [x] Remove `current_revoked_leaf_indices` from `JoinTicketResponse` and join provisioning artifacts
 - [ ] Update schema encoding/decoding
 - [~] Update runtime service ticket preparation
 
@@ -76,5 +77,5 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 1. Replace remaining internal `cover_leaf_index`/`slot_generation` pairs with `SlotLease` in `api-client` verification and ticket prep.
 2. Finish helper/API cleanup so all occupancy surfaces speak in versioned records only.
-3. Keep naked revoked leaf indices confined to wire compatibility and attestation payloads only.
+3. Remove the remaining naked revoked-leaf index compatibility from helper surfaces, not just join tickets.
 4. Prepare the wire/profile `v0.2` cut once the runtime surfaces stop depending on naked slot indices.

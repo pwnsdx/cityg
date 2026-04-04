@@ -78,7 +78,6 @@ pub fn encode_prepared_join_ticket_response(
         current_global_history_attestation,
         current_join_records_completeness_attestation,
         current_revoked_records_completeness_attestation,
-        current_revoked_leaf_indices_completeness_attestation,
         history_authority_extension,
         provisioning_artifact,
         deployment_profile_manifest,
@@ -146,7 +145,6 @@ pub fn encode_prepared_join_ticket_response(
             .into_iter()
             .map(pb_barrier_revoked_leaf_record)
             .collect(),
-        current_revoked_leaf_indices: ticket.current_revoked_leaf_indices,
         join_finalize_auth_token: ticket.join_finalize_auth_token.to_vec(),
         provisioning_nonce: ticket.provisioning_nonce.to_vec(),
         provisioning_issued_at_ms: ticket.provisioning_issued_at_ms,
@@ -163,7 +161,6 @@ pub fn encode_prepared_join_ticket_response(
         current_global_history_attestation,
         current_join_records_completeness_attestation,
         current_revoked_records_completeness_attestation,
-        current_revoked_leaf_indices_completeness_attestation,
         history_authority_extension,
         provisioning_artifact,
         deployment_profile_manifest,

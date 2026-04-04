@@ -396,8 +396,6 @@ pub struct JoinTicketBundle {
     pub current_join_records: Vec<BarrierJoinLeafRecord>,
     /// Authenticated revoked occupancies for the provisioned current committed state.
     pub current_revoked_records: Vec<BarrierRevokedLeafRecord>,
-    /// Authenticated RevokedLeafSet for the provisioned current committed state.
-    pub current_revoked_leaf_indices: Vec<u32>,
     /// Opaque server-issued capability required for reason-2 join_finalize.
     pub join_finalize_auth_token: [u8; 32],
     /// Unique nonce for this join provisioning artifact.
@@ -454,7 +452,6 @@ pub struct JoinProvisioningAuthorityArtifacts<'a> {
     pub current_global_history_attestation: &'a [u8],
     pub current_join_records_completeness_attestation: &'a [u8],
     pub current_revoked_records_completeness_attestation: &'a [u8],
-    pub current_revoked_leaf_indices_completeness_attestation: &'a [u8],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1316,29 +1313,27 @@ impl CityGServer {
                 "current barrier predecessor hash missing for join provisioning",
             ));
         }
-        let (current_join_records, current_revoked_records, current_revoked_leaf_indices) =
-            if requires_current_barrier_update {
-                let BarrierUpdateWire(
-                    _mode,
-                    _barrier_version,
-                    prev_barrier_version,
-                    _tree_size,
-                    revocation_roots_hash,
-                    _kem_tree_hash_before,
-                    _kem_tree_hash_after,
-                    _cover_payload,
-                ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
-                let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
-                let resolved_revoked =
-                    self.resolve_revoked_leaf_indices(gid, &revocation_roots_hash)?;
-                (
-                    self.resolve_joins_since(gid, prev_barrier_version)?.records,
-                    resolved_revoked.records,
-                    resolved_revoked.leaf_indices,
-                )
-            } else {
-                (Vec::new(), Vec::new(), Vec::new())
-            };
+        let (current_join_records, current_revoked_records) = if requires_current_barrier_update {
+            let BarrierUpdateWire(
+                _mode,
+                _barrier_version,
+                prev_barrier_version,
+                _tree_size,
+                revocation_roots_hash,
+                _kem_tree_hash_before,
+                _kem_tree_hash_after,
+                _cover_payload,
+            ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
+            let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
+            let resolved_revoked =
+                self.resolve_revoked_leaf_indices(gid, &revocation_roots_hash)?;
+            (
+                self.resolve_joins_since(gid, prev_barrier_version)?.records,
+                resolved_revoked.records,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let join_finalize_auth_token = fresh_join_finalize_auth_token();
         let provisioning_nonce = fresh_join_provisioning_nonce();
         let provisioning_issued_at_ms = current_timestamp_ms();
@@ -1387,7 +1382,6 @@ impl CityGServer {
             current_predecessor_kem_tree_hash_after,
             current_join_records,
             current_revoked_records,
-            current_revoked_leaf_indices,
             join_finalize_auth_token,
             provisioning_nonce,
             provisioning_issued_at_ms,
@@ -3905,12 +3899,9 @@ struct JoinProvisioningArtifactSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     current_revoked_records_completeness_attestation: &'a [u8],
     #[serde(with = "serde_bytes")]
-    current_revoked_leaf_indices_completeness_attestation: &'a [u8],
-    #[serde(with = "serde_bytes")]
     current_barrier_update: &'a [u8],
     current_join_records: &'a [BarrierJoinLeafRecord],
     current_revoked_records: &'a [BarrierRevokedLeafRecord],
-    current_revoked_leaf_indices: &'a [u32],
 }
 
 #[derive(Serialize)]
@@ -4510,12 +4501,9 @@ fn encode_join_provisioning_artifact(
             .current_join_records_completeness_attestation,
         current_revoked_records_completeness_attestation: artifacts
             .current_revoked_records_completeness_attestation,
-        current_revoked_leaf_indices_completeness_attestation: artifacts
-            .current_revoked_leaf_indices_completeness_attestation,
         current_barrier_update: bundle.current_barrier_update.as_slice(),
         current_join_records: bundle.current_join_records.as_slice(),
         current_revoked_records: bundle.current_revoked_records.as_slice(),
-        current_revoked_leaf_indices: bundle.current_revoked_leaf_indices.as_slice(),
     })?;
     let signature = sign_history_authority_message(state, payload.as_slice())?;
     Ok(to_cbor_vec(&JoinProvisioningArtifactWire {
