@@ -11,9 +11,9 @@ use serde_bytes::ByteBuf;
 
 use crate::{
     CitygApiClient, DeploymentProfileManifestContext, Error, IdentityBinding, MergeTicket,
-    RoomAdminProof, SlotLease, array32, ensure_profile_version, parse_global_history_attestation_bytes,
-    parse_history_authority_descriptor_bytes, parse_history_commitment,
-    require_base_profile_global_history_authority_extension,
+    RoomAdminProof, SlotLease, array32, ensure_profile_version,
+    parse_global_history_attestation_bytes, parse_history_authority_descriptor_bytes,
+    parse_history_commitment, require_base_profile_global_history_authority_extension,
     require_history_authority_descriptor_for_extension, retry_ticket_request,
     validate_local_history_attestation_kind, verify_deployment_profile_manifest,
     verify_merge_ticket_artifact,
@@ -486,6 +486,10 @@ impl CitygApiClient {
                 crate::MergeTicketArtifactContext {
                     requested_leaf_id: author_leaf_id,
                     response: &response,
+                    slot_lease: SlotLease {
+                        slot_index: response.cover_leaf_index,
+                        slot_generation: response.slot_generation,
+                    },
                     current_history_commitment: &current_history_commitment,
                     current_global_history_attestation: attestation,
                     fs_forward_leap_policy: &fs_forward_leap_policy,

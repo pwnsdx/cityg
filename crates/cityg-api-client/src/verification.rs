@@ -440,6 +440,7 @@ pub(crate) struct FetchPublicTreeSelector<'a> {
 pub(crate) struct MergeTicketArtifactContext<'a> {
     pub(crate) requested_leaf_id: &'a [u8; 32],
     pub(crate) response: &'a MergeTicketResponse,
+    pub(crate) slot_lease: SlotLease,
     pub(crate) current_history_commitment: &'a HistoryCommitment,
     pub(crate) current_global_history_attestation: &'a GlobalHistoryAttestation,
     pub(crate) fs_forward_leap_policy: &'a FsForwardLeapPolicy,
@@ -906,6 +907,7 @@ pub(crate) fn verify_merge_ticket_artifact(
     let MergeTicketArtifactContext {
         requested_leaf_id,
         response,
+        slot_lease,
         current_history_commitment,
         current_global_history_attestation,
         fs_forward_leap_policy,
@@ -953,8 +955,8 @@ pub(crate) fn verify_merge_ticket_artifact(
         ));
     }
     if artifact.barrier_version != response.barrier_version
-        || artifact.cover_leaf_index != response.cover_leaf_index
-        || artifact.slot_generation != response.slot_generation
+        || artifact.cover_leaf_index != slot_lease.slot_index
+        || artifact.slot_generation != slot_lease.slot_generation
         || artifact.n_max != response.n_max
         || artifact.max_barrier_update_bytes != response.max_barrier_update_bytes
         || array32(&artifact.kem_tree_hash_after)? != array32(&response.kem_tree_hash_after)?

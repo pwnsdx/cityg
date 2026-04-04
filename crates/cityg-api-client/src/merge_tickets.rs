@@ -159,6 +159,10 @@ impl CitygApiClient {
                 MergeTicketArtifactContext {
                     requested_leaf_id: leaf_id,
                     response: &response,
+                    slot_lease: SlotLease {
+                        slot_index: response.cover_leaf_index,
+                        slot_generation: response.slot_generation,
+                    },
                     current_history_commitment: &current_history_commitment,
                     current_global_history_attestation: attestation,
                     fs_forward_leap_policy: &fs_forward_leap_policy,
