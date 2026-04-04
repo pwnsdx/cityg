@@ -273,7 +273,7 @@ impl CitygApiClient {
         }
         if response.slot_index >= n_max {
             return Err(Error::Parse(format!(
-                "join ticket cover_leaf_index out of range: {} >= {}",
+                "join ticket slot_index out of range: {} >= {}",
                 response.slot_index, n_max
             )));
         }
@@ -335,7 +335,7 @@ pub fn prepare_runtime_join_ticket(
     })?;
     if response.slot_index >= barrier_n_max {
         return Err(Error::Parse(format!(
-            "join ticket cover_leaf_index out of range: {} >= {}",
+            "join ticket slot_index out of range: {} >= {}",
             response.slot_index, barrier_n_max
         )));
     }

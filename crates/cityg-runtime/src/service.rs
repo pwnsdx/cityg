@@ -458,8 +458,8 @@ pub enum RoomFullVerificationWitnessPreparationError {
     JoinHelperDataMismatch,
     #[error("revoked helper data mismatch with authenticated current state")]
     RevokedHelperDataMismatch,
-    #[error("cover_leaf_index out of range")]
-    CoverLeafIndexOutOfRange,
+    #[error("slot_index out of range")]
+    SlotIndexOutOfRange,
 }
 
 impl RoomFullVerificationWitnessPreparationError {
@@ -1017,7 +1017,7 @@ pub fn prepare_full_verification_witness(
             .map_err(RoomFullVerificationWitnessPreparationError::HelperClient)?
             .records;
         let cover_leaf_index = u32::try_from(bundle.slot_index)
-            .map_err(|_| RoomFullVerificationWitnessPreparationError::CoverLeafIndexOutOfRange)?;
+            .map_err(|_| RoomFullVerificationWitnessPreparationError::SlotIndexOutOfRange)?;
         if request.include_updater_in_revoked_set {
             let updater_record = BarrierRevokedLeafRecord {
                 leaf_index: cover_leaf_index,

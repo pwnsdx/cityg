@@ -1382,7 +1382,7 @@ impl MergeTicket {
 
         if self.slot_lease.slot_index >= self.n_max {
             return Err(Error::Parse(format!(
-                "merge ticket cover_leaf_index out of range: {} >= {}",
+                "merge ticket slot_index out of range: {} >= {}",
                 self.slot_lease.slot_index, self.n_max
             )));
         }
@@ -3558,7 +3558,7 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message)
-                if message.contains("join ticket cover_leaf_index out of range")
+                if message.contains("join ticket slot_index out of range")
         ));
     }
 

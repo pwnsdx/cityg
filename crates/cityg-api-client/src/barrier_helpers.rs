@@ -101,7 +101,7 @@ impl CitygApiClient {
 
         if slot_lease.slot_index >= barrier_n_max {
             return Err(Error::Parse(format!(
-                "cover_leaf_index out of range for barrier tree: {} >= {}",
+                "slot_index out of range for barrier tree: {} >= {}",
                 slot_lease.slot_index, barrier_n_max
             )));
         }

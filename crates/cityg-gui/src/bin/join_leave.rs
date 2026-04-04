@@ -4793,7 +4793,7 @@ mod tests {
             .expect_err("tampered out-of-range cover leaf must fail closed");
         let detail = format!("{err:#}");
         assert!(
-            detail.contains("merge ticket cover_leaf_index out of range"),
+            detail.contains("merge ticket slot_index out of range"),
             "unexpected detail: {detail}"
         );
         assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 1);

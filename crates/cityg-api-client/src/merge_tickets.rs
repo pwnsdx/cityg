@@ -131,7 +131,7 @@ impl CitygApiClient {
         let fs_forward_leap_policy = parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
         if response.slot_index >= n_max {
             return Err(Error::Parse(format!(
-                "merge ticket cover_leaf_index out of range: {} >= {}",
+                "merge ticket slot_index out of range: {} >= {}",
                 response.slot_index, n_max
             )));
         }
