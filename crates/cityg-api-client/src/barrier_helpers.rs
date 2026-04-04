@@ -58,8 +58,7 @@ impl CitygApiClient {
             gid,
             leaf_id,
             barrier_version,
-            cover_leaf_index,
-            slot_generation,
+            slot_lease,
             snapshot_hash,
             barrier_n_max,
             max_barrier_update_bytes,
@@ -100,9 +99,10 @@ impl CitygApiClient {
             ))
         })?;
 
-        if cover_leaf_index >= barrier_n_max {
+        if slot_lease.slot_index >= barrier_n_max {
             return Err(Error::Parse(format!(
-                "cover_leaf_index out of range for barrier tree: {cover_leaf_index} >= {barrier_n_max}"
+                "cover_leaf_index out of range for barrier tree: {} >= {}",
+                slot_lease.slot_index, barrier_n_max
             )));
         }
 
@@ -139,8 +139,8 @@ impl CitygApiClient {
         let reclaims_cover_leaf_index = barrier_update_reason == 0
             && header.contains_key(&msphf_orchestrator::hdr::HDR_JOIN_FINALIZE_AUTH);
         let updater_slot_lease = CoreBarrierSlotLease {
-            slot_index: cover_leaf_index,
-            slot_generation,
+            slot_index: slot_lease.slot_index,
+            slot_generation: slot_lease.slot_generation,
         };
         let revoked_records_core =
             to_core_revoked_snapshot_records(revoked_resolution.records.as_slice());
