@@ -335,12 +335,12 @@ impl CitygApiClient {
         Ok(response.full_verification_witness)
     }
 
-    /// Resolves revoked cover leaf indices for a committed revocation roots hash.
-    pub async fn barrier_resolve_revoked_leaves(
+    /// Resolves revoked slot occupancies for a committed revocation roots hash.
+    pub async fn barrier_resolve_revoked_occupancies(
         &self,
         room_id: &str,
         revocation_roots_hash: &[u8; 32],
-    ) -> Result<BarrierResolvedRevokedLeaves, Error> {
+    ) -> Result<BarrierResolvedRevokedOccupancies, Error> {
         let gid = parse_room_id_gid(room_id)?;
         let mut page_offset = 0u32;
         let mut expected_history = None;
@@ -399,7 +399,7 @@ impl CitygApiClient {
             let page_records = response
                 .records
                 .iter()
-                .map(|record| BarrierRevokedLeafRecord {
+                .map(|record| BarrierRevokedOccupancyRecord {
                     leaf_index: record.leaf_index,
                     slot_generation: record.slot_generation,
                 })
@@ -558,7 +558,7 @@ impl CitygApiClient {
                 "barrier helper pagination truncated revoked leaves".to_string(),
             ));
         }
-        Ok(BarrierResolvedRevokedLeaves {
+        Ok(BarrierResolvedRevokedOccupancies {
             history_view_id,
             history_commitment,
             history_authority_extension: expected_extension,
@@ -568,12 +568,21 @@ impl CitygApiClient {
         })
     }
 
-    /// Resolves join records that became active after `prev_barrier_version`.
-    pub async fn barrier_resolve_joins_since(
+    pub async fn barrier_resolve_revoked_leaves(
+        &self,
+        room_id: &str,
+        revocation_roots_hash: &[u8; 32],
+    ) -> Result<BarrierResolvedRevokedLeaves, Error> {
+        self.barrier_resolve_revoked_occupancies(room_id, revocation_roots_hash)
+            .await
+    }
+
+    /// Resolves join occupancies that became active after `prev_barrier_version`.
+    pub async fn barrier_resolve_join_occupancies_since(
         &self,
         room_id: &str,
         prev_barrier_version: u64,
-    ) -> Result<BarrierResolvedJoins, Error> {
+    ) -> Result<BarrierResolvedJoinOccupancies, Error> {
         let gid = parse_room_id_gid(room_id)?;
         let mut page_offset = 0u32;
         let mut expected_history = None;
@@ -789,7 +798,7 @@ impl CitygApiClient {
                 "barrier helper pagination truncated joins".to_string(),
             ));
         }
-        Ok(BarrierResolvedJoins {
+        Ok(BarrierResolvedJoinOccupancies {
             history_view_id,
             history_commitment,
             history_authority_extension: expected_extension,
@@ -797,6 +806,15 @@ impl CitygApiClient {
             global_history_attestation: expected_global_attestation,
             records,
         })
+    }
+
+    pub async fn barrier_resolve_joins_since(
+        &self,
+        room_id: &str,
+        prev_barrier_version: u64,
+    ) -> Result<BarrierResolvedJoins, Error> {
+        self.barrier_resolve_join_occupancies_since(room_id, prev_barrier_version)
+            .await
     }
 
     /// Fetches a barrier public-tree snapshot for a committed tree hash.

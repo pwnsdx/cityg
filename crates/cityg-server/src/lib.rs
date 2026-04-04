@@ -494,28 +494,34 @@ struct HistoryAuthorityState {
     require_full_verification_receipt: bool,
 }
 
-/// Revoked leaf enumeration bound to one authenticated history commitment.
+/// Revoked slot-occupancy enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BarrierRevokedLeafRecord {
+pub struct BarrierRevokedOccupancyRecord {
     pub leaf_index: u32,
     pub slot_generation: u64,
 }
 
-/// Revoked leaf enumeration bound to one authenticated history commitment.
+pub type BarrierRevokedLeafRecord = BarrierRevokedOccupancyRecord;
+
+/// Revoked slot-occupancy enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedRevokedLeaves {
+pub struct ResolvedRevokedOccupancies {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
-    pub records: Vec<BarrierRevokedLeafRecord>,
+    pub records: Vec<BarrierRevokedOccupancyRecord>,
 }
 
-/// Join enumeration bound to one authenticated history commitment.
+pub type ResolvedRevokedLeaves = ResolvedRevokedOccupancies;
+
+/// Join slot-occupancy enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedJoins {
+pub struct ResolvedJoinOccupancies {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
-    pub records: Vec<BarrierJoinLeafRecord>,
+    pub records: Vec<BarrierJoinOccupancyRecord>,
 }
+
+pub type ResolvedJoins = ResolvedJoinOccupancies;
 
 /// Merge ticket bundle provided to existing members during leave/rekey flow.
 ///
@@ -577,9 +583,9 @@ pub enum MergeTicketIntent {
     Refresh,
 }
 
-/// Join-leaf record returned by barrier membership enumeration APIs.
+/// Join slot-occupancy record returned by barrier membership enumeration APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BarrierJoinLeafRecord {
+pub struct BarrierJoinOccupancyRecord {
     /// Device public key associated with the join leaf.
     pub device_pk: Vec<u8>,
     /// Cover leaf index (0-based) for the member.
@@ -589,6 +595,8 @@ pub struct BarrierJoinLeafRecord {
     /// Barrier leaf ML-KEM public key (ek, 1184 bytes when provisioned).
     pub ek_leaf: Vec<u8>,
 }
+
+pub type BarrierJoinLeafRecord = BarrierJoinOccupancyRecord;
 
 /// Public-tree snapshot returned by barrier tree APIs.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -17,12 +17,12 @@ use cityg_runtime::{
     AliasLeafEntry, FullVerificationWitnessRequest as RuntimeFullVerificationWitnessRequest,
     MAX_MESSAGE_CIPHERTEXT_BYTES, MemberMetadata, PreparedBarrierEnvelope,
     PreparedBarrierPublicTree, PreparedJoinTicket, PreparedMergeAcceptanceLookup,
-    PreparedMergeTicket, PreparedResolvedJoins, PreparedResolvedRevokedLeaves,
+    PreparedMergeTicket, PreparedResolvedJoinOccupancies, PreparedResolvedRevokedOccupancies,
     RoomTelemetrySnapshotEntry, RoomWindowEntrySnapshot,
 };
 use cityg_server::{
-    BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord,
-    BarrierRevokedLeafRecord as ServerBarrierRevokedLeafRecord,
+    BarrierJoinOccupancyRecord as ServerBarrierJoinOccupancyRecord,
+    BarrierRevokedOccupancyRecord as ServerBarrierRevokedOccupancyRecord,
     FsForwardLeapPolicy as ServerFsForwardLeapPolicy, HistoryCommitment as ServerHistoryCommitment,
     MergeAcceptanceStatus as ServerMergeAcceptanceStatus,
 };
@@ -242,10 +242,10 @@ pub fn encode_prepared_merge_ticket_response(prepared: PreparedMergeTicket) -> V
 }
 
 #[must_use]
-pub fn encode_prepared_resolved_revoked_leaves_response(
-    prepared: PreparedResolvedRevokedLeaves,
+pub fn encode_prepared_resolved_revoked_occupancies_response(
+    prepared: PreparedResolvedRevokedOccupancies,
 ) -> Vec<u8> {
-    let PreparedResolvedRevokedLeaves {
+    let PreparedResolvedRevokedOccupancies {
         resolved,
         page,
         helper_completeness_attestation,
@@ -287,8 +287,17 @@ pub fn encode_prepared_resolved_revoked_leaves_response(
 }
 
 #[must_use]
-pub fn encode_prepared_resolved_joins_response(prepared: PreparedResolvedJoins) -> Vec<u8> {
-    let PreparedResolvedJoins {
+pub fn encode_prepared_resolved_revoked_leaves_response(
+    prepared: PreparedResolvedRevokedOccupancies,
+) -> Vec<u8> {
+    encode_prepared_resolved_revoked_occupancies_response(prepared)
+}
+
+#[must_use]
+pub fn encode_prepared_resolved_join_occupancies_response(
+    prepared: PreparedResolvedJoinOccupancies,
+) -> Vec<u8> {
+    let PreparedResolvedJoinOccupancies {
         resolved,
         page,
         helper_completeness_attestation,
@@ -327,6 +336,13 @@ pub fn encode_prepared_resolved_joins_response(prepared: PreparedResolvedJoins) 
     };
 
     response.encode_to_vec()
+}
+
+#[must_use]
+pub fn encode_prepared_resolved_joins_response(
+    prepared: PreparedResolvedJoinOccupancies,
+) -> Vec<u8> {
+    encode_prepared_resolved_join_occupancies_response(prepared)
 }
 
 #[must_use]
@@ -510,7 +526,9 @@ pub fn encode_window_snapshot_response(entries: Vec<RoomWindowEntrySnapshot>) ->
     response.encode_to_vec()
 }
 
-fn pb_barrier_join_leaf_record(record: ServerBarrierJoinLeafRecord) -> pb::BarrierJoinLeafRecord {
+fn pb_barrier_join_leaf_record(
+    record: ServerBarrierJoinOccupancyRecord,
+) -> pb::BarrierJoinLeafRecord {
     pb::BarrierJoinLeafRecord {
         device_pk: record.device_pk,
         leaf_index: record.leaf_index,
@@ -520,7 +538,7 @@ fn pb_barrier_join_leaf_record(record: ServerBarrierJoinLeafRecord) -> pb::Barri
 }
 
 fn pb_barrier_revoked_leaf_record(
-    record: ServerBarrierRevokedLeafRecord,
+    record: ServerBarrierRevokedOccupancyRecord,
 ) -> pb::BarrierRevokedLeafRecord {
     pb::BarrierRevokedLeafRecord {
         leaf_index: record.leaf_index,
@@ -960,7 +978,7 @@ pub fn decode_full_verification_witness_request(
     let join_records = request
         .join_records
         .into_iter()
-        .map(|record| ServerBarrierJoinLeafRecord {
+        .map(|record| ServerBarrierJoinOccupancyRecord {
             device_pk: record.device_pk,
             leaf_index: record.leaf_index,
             slot_generation: record.slot_generation,
@@ -970,7 +988,7 @@ pub fn decode_full_verification_witness_request(
     let revoked_records = request
         .revoked_records
         .into_iter()
-        .map(|record| ServerBarrierRevokedLeafRecord {
+        .map(|record| ServerBarrierRevokedOccupancyRecord {
             leaf_index: record.leaf_index,
             slot_generation: record.slot_generation,
         })
@@ -2805,23 +2823,23 @@ mod tests {
             history_seq: 14,
         };
         let encoded =
-            encode_prepared_resolved_revoked_leaves_response(PreparedResolvedRevokedLeaves {
-                resolved: cityg_server::ResolvedRevokedLeaves {
+            encode_prepared_resolved_revoked_leaves_response(PreparedResolvedRevokedOccupancies {
+                resolved: cityg_server::ResolvedRevokedOccupancies {
                     history_view_id: [0x11; 32],
                     history_commitment,
                     records: vec![
-                        cityg_server::BarrierRevokedLeafRecord {
+                        cityg_server::BarrierRevokedOccupancyRecord {
                             leaf_index: 5,
                             slot_generation: 2,
                         },
-                        cityg_server::BarrierRevokedLeafRecord {
+                        cityg_server::BarrierRevokedOccupancyRecord {
                             leaf_index: 7,
                             slot_generation: 4,
                         },
                     ],
                 },
                 page: cityg_runtime::BarrierPage {
-                    items: vec![cityg_server::BarrierRevokedLeafRecord {
+                    items: vec![cityg_server::BarrierRevokedOccupancyRecord {
                         leaf_index: 7,
                         slot_generation: 4,
                     }],

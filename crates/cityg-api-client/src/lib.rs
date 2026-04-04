@@ -536,10 +536,12 @@ pub fn to_core_join_snapshot_records(
 
 /// Revoked slot occupancy returned by barrier revocation enumeration endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BarrierRevokedLeafRecord {
+pub struct BarrierRevokedOccupancyRecord {
     pub leaf_index: u32,
     pub slot_generation: u64,
 }
+
+pub type BarrierRevokedLeafRecord = BarrierRevokedOccupancyRecord;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotLease {
@@ -548,7 +550,7 @@ pub struct SlotLease {
 }
 
 fn to_core_revoked_snapshot_record(
-    record: &BarrierRevokedLeafRecord,
+    record: &BarrierRevokedOccupancyRecord,
 ) -> cityg_client::barrier::BarrierRevokedSnapshotRecord {
     cityg_client::barrier::BarrierRevokedSnapshotRecord {
         leaf_index: record.leaf_index,
@@ -557,7 +559,7 @@ fn to_core_revoked_snapshot_record(
 }
 
 pub fn to_core_revoked_snapshot_records(
-    revoked_records: &[BarrierRevokedLeafRecord],
+    revoked_records: &[BarrierRevokedOccupancyRecord],
 ) -> Vec<cityg_client::barrier::BarrierRevokedSnapshotRecord> {
     revoked_records
         .iter()
@@ -565,20 +567,22 @@ pub fn to_core_revoked_snapshot_records(
         .collect()
 }
 
-/// Revoked-leaf response bound to a specific authenticated history view.
+/// Revoked-occupancy response bound to a specific authenticated history view.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BarrierResolvedRevokedLeaves {
+pub struct BarrierResolvedRevokedOccupancies {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
     pub history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
-    pub records: Vec<BarrierRevokedLeafRecord>,
+    pub records: Vec<BarrierRevokedOccupancyRecord>,
 }
 
-/// Join enumeration response bound to a specific authenticated history view.
+pub type BarrierResolvedRevokedLeaves = BarrierResolvedRevokedOccupancies;
+
+/// Join-occupancy response bound to a specific authenticated history view.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BarrierResolvedJoins {
+pub struct BarrierResolvedJoinOccupancies {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
     pub history_authority_extension: Option<HistoryAuthorityExtension>,
@@ -586,6 +590,8 @@ pub struct BarrierResolvedJoins {
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub records: Vec<BarrierJoinRecord>,
 }
+
+pub type BarrierResolvedJoins = BarrierResolvedJoinOccupancies;
 
 /// Barrier public-tree snapshot returned by snapshot fetch endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -609,8 +615,8 @@ pub struct BarrierFetchedPublicTree {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierSnapshotDependencies {
     pub public_tree: BarrierFetchedPublicTree,
-    pub joins: BarrierResolvedJoins,
-    pub revoked: BarrierResolvedRevokedLeaves,
+    pub joins: BarrierResolvedJoinOccupancies,
+    pub revoked: BarrierResolvedRevokedOccupancies,
 }
 
 pub struct BarrierSnapshotPreparationRequest<'a> {
@@ -674,7 +680,7 @@ pub fn ensure_matching_barrier_history_dependencies(
     expected_commitment: &HistoryCommitment,
     tree: &BarrierFetchedPublicTree,
     joins: &BarrierResolvedJoins,
-    revoked: &BarrierResolvedRevokedLeaves,
+    revoked: &BarrierResolvedRevokedOccupancies,
 ) -> Result<(), Error> {
     if tree.history_view_id == [0u8; 32]
         || tree.history_view_id != joins.history_view_id

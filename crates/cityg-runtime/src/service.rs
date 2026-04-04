@@ -6,9 +6,10 @@ use std::{
 use ciborium::ser::into_writer;
 use cityg_client::{CityGError, ClientEpochBundle};
 use cityg_server::{
-    BarrierJoinLeafRecord, BarrierPublicTreeSnapshot, BarrierRevokedLeafRecord, CityGServer,
-    JoinProvisioningAuthorityArtifacts, JoinTicketBundle, MergeAcceptanceRecord, MergeTicketBundle,
-    MergeTicketIntent, ResolvedJoins, ResolvedRevokedLeaves, ServerOutcome,
+    BarrierJoinOccupancyRecord, BarrierPublicTreeSnapshot, BarrierRevokedOccupancyRecord,
+    CityGServer, JoinProvisioningAuthorityArtifacts, JoinTicketBundle, MergeAcceptanceRecord,
+    MergeTicketBundle, MergeTicketIntent, ResolvedJoinOccupancies,
+    ResolvedRevokedOccupancies, ServerOutcome,
 };
 use msphf_core::hash::h_l;
 use msphf_orchestrator::{PivotParity, hdr};
@@ -378,23 +379,27 @@ impl RoomBarrierHelperPreparationError {
     }
 }
 
-/// Neutral runtime payload for `resolve_revoked_leaf_indices`.
+/// Neutral runtime payload for revoked-occupancy helper resolution.
 #[derive(Clone, Debug)]
-pub struct PreparedResolvedRevokedLeaves {
-    pub resolved: ResolvedRevokedLeaves,
-    pub page: BarrierPage<BarrierRevokedLeafRecord>,
+pub struct PreparedResolvedRevokedOccupancies {
+    pub resolved: ResolvedRevokedOccupancies,
+    pub page: BarrierPage<BarrierRevokedOccupancyRecord>,
     pub helper_completeness_attestation: Vec<u8>,
     pub barrier: PreparedBarrierEnvelope,
 }
 
-/// Neutral runtime payload for `resolve_joins_since`.
+pub type PreparedResolvedRevokedLeaves = PreparedResolvedRevokedOccupancies;
+
+/// Neutral runtime payload for join-occupancy helper resolution.
 #[derive(Clone, Debug)]
-pub struct PreparedResolvedJoins {
-    pub resolved: ResolvedJoins,
-    pub page: BarrierPage<BarrierJoinLeafRecord>,
+pub struct PreparedResolvedJoinOccupancies {
+    pub resolved: ResolvedJoinOccupancies,
+    pub page: BarrierPage<BarrierJoinOccupancyRecord>,
     pub helper_completeness_attestation: Vec<u8>,
     pub barrier: PreparedBarrierEnvelope,
 }
+
+pub type PreparedResolvedJoins = PreparedResolvedJoinOccupancies;
 
 /// Neutral runtime payload for `fetch_barrier_public_tree`.
 #[derive(Clone, Debug)]
@@ -426,8 +431,8 @@ pub struct FullVerificationWitnessRequest {
     pub include_updater_in_revoked_set: bool,
     pub revocation_roots_hash: [u8; 32],
     pub revocation_target_leaf_id: Option<[u8; 32]>,
-    pub join_records: Vec<BarrierJoinLeafRecord>,
-    pub revoked_records: Vec<BarrierRevokedLeafRecord>,
+    pub join_records: Vec<BarrierJoinOccupancyRecord>,
+    pub revoked_records: Vec<BarrierRevokedOccupancyRecord>,
     pub barrier_update: Vec<u8>,
 }
 
@@ -1019,7 +1024,7 @@ pub fn prepare_full_verification_witness(
         let slot_index = u32::try_from(bundle.slot_index)
             .map_err(|_| RoomFullVerificationWitnessPreparationError::SlotIndexOutOfRange)?;
         if request.include_updater_in_revoked_set {
-            let updater_record = BarrierRevokedLeafRecord {
+            let updater_record = BarrierRevokedOccupancyRecord {
                 leaf_index: slot_index,
                 slot_generation: bundle.slot_generation,
             };
@@ -1207,8 +1212,8 @@ pub fn prepare_current_barrier_envelope(
     )
 }
 
-/// Resolve revoked leaves, paginate them, and prepare the shared helper envelope.
-pub fn prepare_resolved_revoked_leaves(
+/// Resolve revoked occupancies, paginate them, and prepare the shared helper envelope.
+pub fn prepare_resolved_revoked_occupancies(
     server: &mut CityGServer,
     gid: &[u8; 32],
     revocation_roots_hash: &[u8; 32],
@@ -1216,7 +1221,7 @@ pub fn prepare_resolved_revoked_leaves(
     max_entries: u32,
     max_page_entries: u32,
     profile_version: &str,
-) -> Result<PreparedResolvedRevokedLeaves, RoomBarrierHelperPreparationError> {
+) -> Result<PreparedResolvedRevokedOccupancies, RoomBarrierHelperPreparationError> {
     let resolved = server.resolve_revoked_leaf_indices(gid, revocation_roots_hash)?;
     let page = paginate_barrier_helper_slice(
         resolved.records.as_slice(),
@@ -1239,7 +1244,7 @@ pub fn prepare_resolved_revoked_leaves(
         profile_version,
     )?;
 
-    Ok(PreparedResolvedRevokedLeaves {
+    Ok(PreparedResolvedRevokedOccupancies {
         resolved,
         page,
         helper_completeness_attestation,
@@ -1247,8 +1252,28 @@ pub fn prepare_resolved_revoked_leaves(
     })
 }
 
-/// Resolve joins since a barrier version, paginate them, and prepare the shared helper envelope.
-pub fn prepare_resolved_joins(
+pub fn prepare_resolved_revoked_leaves(
+    server: &mut CityGServer,
+    gid: &[u8; 32],
+    revocation_roots_hash: &[u8; 32],
+    page_offset: u32,
+    max_entries: u32,
+    max_page_entries: u32,
+    profile_version: &str,
+) -> Result<PreparedResolvedRevokedLeaves, RoomBarrierHelperPreparationError> {
+    prepare_resolved_revoked_occupancies(
+        server,
+        gid,
+        revocation_roots_hash,
+        page_offset,
+        max_entries,
+        max_page_entries,
+        profile_version,
+    )
+}
+
+/// Resolve join occupancies since a barrier version, paginate them, and prepare the shared helper envelope.
+pub fn prepare_resolved_join_occupancies(
     server: &mut CityGServer,
     gid: &[u8; 32],
     prev_barrier_version: u64,
@@ -1256,7 +1281,7 @@ pub fn prepare_resolved_joins(
     max_entries: u32,
     max_page_entries: u32,
     profile_version: &str,
-) -> Result<PreparedResolvedJoins, RoomBarrierHelperPreparationError> {
+) -> Result<PreparedResolvedJoinOccupancies, RoomBarrierHelperPreparationError> {
     let resolved = server.resolve_joins_since(gid, prev_barrier_version)?;
     let page = paginate_barrier_helper_slice(
         resolved.records.as_slice(),
@@ -1278,12 +1303,32 @@ pub fn prepare_resolved_joins(
         profile_version,
     )?;
 
-    Ok(PreparedResolvedJoins {
+    Ok(PreparedResolvedJoinOccupancies {
         resolved,
         page,
         helper_completeness_attestation,
         barrier,
     })
+}
+
+pub fn prepare_resolved_joins(
+    server: &mut CityGServer,
+    gid: &[u8; 32],
+    prev_barrier_version: u64,
+    page_offset: u32,
+    max_entries: u32,
+    max_page_entries: u32,
+    profile_version: &str,
+) -> Result<PreparedResolvedJoins, RoomBarrierHelperPreparationError> {
+    prepare_resolved_join_occupancies(
+        server,
+        gid,
+        prev_barrier_version,
+        page_offset,
+        max_entries,
+        max_page_entries,
+        profile_version,
+    )
 }
 
 /// Fetch a public barrier tree snapshot, paginate the entries, and prepare the shared helper envelope.
