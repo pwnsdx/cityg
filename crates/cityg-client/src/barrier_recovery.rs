@@ -40,11 +40,16 @@ pub struct BarrierRecoverResult {
     pub derived_node_key_material: BTreeMap<u32, DerivedBarrierNodeKeyMaterial>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BarrierSlotLease {
+    pub slot_index: u64,
+    pub slot_generation: u64,
+}
+
 pub struct BarrierRecoveryInput<'a> {
     pub gid: &'a [u8; 32],
     pub local_n_max: u64,
-    pub local_cover_leaf_index: u64,
-    pub local_slot_generation: u64,
+    pub local_slot_lease: BarrierSlotLease,
     pub local_barrier_initialized: bool,
     pub local_barrier_version: u64,
     pub local_barrier_roots_hash: [u8; 32],
@@ -147,13 +152,13 @@ pub fn recover_barrier_update(
         .map(|pk| pk == input.local_pop_public_key)
         .unwrap_or(false);
     if author_matches
-        && parsed.updater_leaf == input.local_cover_leaf_index
-        && parsed.updater_slot_generation == input.local_slot_generation
+        && parsed.updater_leaf == input.local_slot_lease.slot_index
+        && parsed.updater_slot_generation == input.local_slot_lease.slot_generation
     {
         return Ok(None);
     }
 
-    let self_path = barrier_path_nodes(n_max, input.local_cover_leaf_index)?;
+    let self_path = barrier_path_nodes(n_max, input.local_slot_lease.slot_index)?;
     let self_path_set: HashSet<u64> = self_path.iter().copied().collect();
     let leaf_node = self_path
         .first()
@@ -437,8 +442,10 @@ mod tests {
         let recovered = recover_barrier_update(BarrierRecoveryInput {
             gid: &gid,
             local_n_max: 8,
-            local_cover_leaf_index: 4,
-            local_slot_generation: 0,
+            local_slot_lease: BarrierSlotLease {
+                slot_index: 4,
+                slot_generation: 0,
+            },
             local_barrier_initialized: true,
             local_barrier_version: 4,
             local_barrier_roots_hash: rrh,

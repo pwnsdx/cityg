@@ -1254,7 +1254,7 @@ fn try_recover_barrier_from_header_returns_none_without_matches()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xC11, "http://127.0.0.1:9", "room-c", "carol")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 4;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
@@ -1311,7 +1311,7 @@ fn try_recover_barrier_from_header_rejects_oversized_update()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xC12, "http://127.0.0.1:9", "room-c2", "cora")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 4;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
@@ -1375,7 +1375,7 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
 
     let mut session = build_test_session(0xD44, "http://127.0.0.1:9", "room-d", "diana")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 8;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
     let fs_ec = 31;
@@ -1536,7 +1536,7 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
 
     let mut session = build_test_session(0xD4E, "http://127.0.0.1:9", "room-f", "frank")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 8;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
@@ -1678,7 +1678,7 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
 
     let mut session = build_test_session(0xD4F, "http://127.0.0.1:9", "room-g", "gina")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 8;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
@@ -1823,7 +1823,7 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
 
     let mut session = build_test_session(0xD45, "http://127.0.0.1:9", "room-e", "erin")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 8;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
@@ -1937,7 +1937,7 @@ fn try_recover_barrier_from_header_rejects_reason_mismatch_for_local_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xD50, "http://127.0.0.1:9", "room-h", "helen")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 4;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
@@ -1999,7 +1999,7 @@ fn try_recover_barrier_from_header_rejects_local_barrier_version_mismatch()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xD51, "http://127.0.0.1:9", "room-i", "irene")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 4;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
@@ -2066,7 +2066,7 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
 
     let mut session = build_test_session(0xD53, "http://127.0.0.1:9", "room-k", "kate")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 7;
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
@@ -2231,7 +2231,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad(
 
     let mut session = build_test_session(0xD54, "http://127.0.0.1:9", "room-k2", "kate")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 7;
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
@@ -2373,7 +2373,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad()
 
     let mut session = build_test_session(0xD55, "http://127.0.0.1:9", "room-k3", "kate")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_version = 7;
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.kem_tree_hash_after = [0xAA; 32];
@@ -2568,7 +2568,7 @@ fn try_recover_barrier_from_header_rejects_stale_genesis_after_local_init()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xD52, "http://127.0.0.1:9", "room-j", "jules")?;
     session.barrier_state.n_max = 8;
-    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.slot_lease.slot_index = 3;
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.barrier_version = 0;
     session.barrier_state.barrier_roots_hash = [0x10; 32];
@@ -5399,7 +5399,7 @@ async fn epoch_sync_noop_when_already_current() -> Result<(), Box<dyn std::error
         || sync.session.barrier_state.kem_tree_hash_after
             != alice.barrier_state.kem_tree_hash_after
         || sync.session.barrier_state.n_max != alice.barrier_state.n_max
-        || sync.session.barrier_state.cover_leaf_index != alice.barrier_state.cover_leaf_index;
+        || sync.session.barrier_state.slot_lease != alice.barrier_state.slot_lease;
     assert_eq!(
         sync.changed, barrier_delta,
         "sync.changed should reflect barrier-only reconciliation when head is unchanged"

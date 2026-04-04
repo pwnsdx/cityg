@@ -32,7 +32,7 @@ use cityg_api_client::room_admin_public_key_bytes;
 use cityg_api_client::{
     BarrierJoinRecord, BarrierPublicTree, BarrierRevokedLeafRecord, CitygApiClient,
     Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment, MergeAcceptanceStatus,
-    MergeTicket, RoomAdminIdentity as RoomIdentity, RoomAdminOperation,
+    MergeTicket, RoomAdminIdentity as RoomIdentity, RoomAdminOperation, SlotLease,
 };
 use cityg_client::ClientEpochBundle;
 #[cfg(test)]

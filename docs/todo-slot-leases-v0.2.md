@@ -58,12 +58,12 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ### 6. Client and GUI
 
-- [~] Persist local `slot_generation` alongside the local slot index
+- [x] Persist the local slot as an explicit `SlotLease`
 - [~] Replace prepared/runtime `cover_leaf_index` + `slot_generation` pairs with `SlotLease`
 - [~] Update bootstrap/join-finalize state
 - [x] Update bootstrap/join-finalize state to persist versioned revoked records
 - [x] Drop duplicated bootstrap/current revoked leaf-index caches where versioned records are already present
-- [ ] Update barrier recovery to compare full leases
+- [~] Update barrier recovery to compare full leases
 - [ ] Update tests and fixtures
 
 ### 7. KAT and conformance
@@ -75,6 +75,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 ## Immediate next slice
 
 1. Carry full lease comparisons through recovery/bootstrap state instead of mixing indexed fallback paths.
-2. Push `SlotLease` from prepared/runtime tickets into GUI persisted session state.
+2. Push `SlotLease` deeper into client-core barrier update/verification helpers.
 3. Finish helper/API cleanup so all occupancy surfaces speak in versioned records only.
 4. Keep naked revoked leaf indices confined to wire compatibility and attestation payloads only.
