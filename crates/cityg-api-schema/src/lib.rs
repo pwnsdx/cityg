@@ -1802,7 +1802,9 @@ pub enum RoomScopedApiRoute {
     JoinTicket,
     MergeTicket,
     BarrierResolveRevokedLeaves,
+    BarrierResolveRevokedOccupancies,
     BarrierResolveJoinsSince,
+    BarrierResolveJoinOccupanciesSince,
     BarrierFetchPublicTree,
     BarrierIssueFullVerificationWitness,
     BarrierLookupMergeAcceptance,
@@ -1828,7 +1830,11 @@ impl RoomScopedApiRoute {
             Self::JoinTicket => "/v1/rooms/join_ticket",
             Self::MergeTicket => "/v1/rooms/merge_ticket",
             Self::BarrierResolveRevokedLeaves => "/v1/barrier/resolve_revoked_leaves",
+            Self::BarrierResolveRevokedOccupancies => "/v2/barrier/resolve_revoked_occupancies",
             Self::BarrierResolveJoinsSince => "/v1/barrier/resolve_joins_since",
+            Self::BarrierResolveJoinOccupanciesSince => {
+                "/v2/barrier/resolve_join_occupancies_since"
+            }
             Self::BarrierFetchPublicTree => "/v1/barrier/fetch_public_tree",
             Self::BarrierIssueFullVerificationWitness => {
                 "/v1/barrier/issue_full_verification_witness"
@@ -1946,11 +1952,13 @@ pub fn extract_room_scoped_request_target(
             let request = decode::<pb::MergeTicketRequest>(route, body)?;
             RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
         }
-        RoomScopedApiRoute::BarrierResolveRevokedLeaves => {
+        RoomScopedApiRoute::BarrierResolveRevokedLeaves
+        | RoomScopedApiRoute::BarrierResolveRevokedOccupancies => {
             let request = decode::<pb::BarrierResolveRevokedLeavesRequest>(route, body)?;
             RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
         }
-        RoomScopedApiRoute::BarrierResolveJoinsSince => {
+        RoomScopedApiRoute::BarrierResolveJoinsSince
+        | RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince => {
             let request = decode::<pb::BarrierResolveJoinsSinceRequest>(route, body)?;
             RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
         }
@@ -2005,7 +2013,13 @@ fn match_room_scoped_route(path: &str) -> Option<RoomScopedApiRoute> {
         "/v1/barrier/resolve_revoked_leaves" => {
             Some(RoomScopedApiRoute::BarrierResolveRevokedLeaves)
         }
+        "/v2/barrier/resolve_revoked_occupancies" => {
+            Some(RoomScopedApiRoute::BarrierResolveRevokedOccupancies)
+        }
         "/v1/barrier/resolve_joins_since" => Some(RoomScopedApiRoute::BarrierResolveJoinsSince),
+        "/v2/barrier/resolve_join_occupancies_since" => {
+            Some(RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince)
+        }
         "/v1/barrier/fetch_public_tree" => Some(RoomScopedApiRoute::BarrierFetchPublicTree),
         "/v1/barrier/issue_full_verification_witness" => {
             Some(RoomScopedApiRoute::BarrierIssueFullVerificationWitness)

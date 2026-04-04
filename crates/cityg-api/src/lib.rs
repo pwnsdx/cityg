@@ -776,7 +776,15 @@ pub async fn run_with_config(
             post(barrier_resolve_revoked_leaves),
         )
         .route(
+            "/v2/barrier/resolve_revoked_occupancies",
+            post(barrier_resolve_revoked_leaves),
+        )
+        .route(
             "/v1/barrier/resolve_joins_since",
+            post(barrier_resolve_joins_since),
+        )
+        .route(
+            "/v2/barrier/resolve_join_occupancies_since",
             post(barrier_resolve_joins_since),
         )
         .route(

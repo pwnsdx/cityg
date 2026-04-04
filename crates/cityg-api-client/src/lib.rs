@@ -494,7 +494,9 @@ impl CitygApiClient {
                 | "/v1/members/search"
                 | "/v1/rooms/merge_ticket"
                 | "/v1/barrier/resolve_revoked_leaves"
+                | "/v2/barrier/resolve_revoked_occupancies"
                 | "/v1/barrier/resolve_joins_since"
+                | "/v2/barrier/resolve_join_occupancies_since"
                 | "/v1/barrier/fetch_public_tree"
                 | "/v1/barrier/issue_full_verification_witness"
                 | "/v1/barrier/lookup_merge_acceptance"
@@ -2546,7 +2548,7 @@ mod tests {
             "/v1/rooms/join_ticket" => encode_proto(join_ticket_ok_payload()),
             "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_with_history_authority_payload()),
             "/v1/accept_epoch" => encode_proto(AcceptEpochResponse::default()),
-            "/v1/barrier/resolve_revoked_leaves" => {
+            "/v1/barrier/resolve_revoked_leaves" | "/v2/barrier/resolve_revoked_occupancies" => {
                 let request = BarrierResolveRevokedLeavesRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveRevokedLeavesRequest::default());
                 let all = [
@@ -2615,7 +2617,7 @@ mod tests {
                     deployment_profile_manifest,
                 })
             }
-            "/v1/barrier/resolve_joins_since" => {
+            "/v1/barrier/resolve_joins_since" | "/v2/barrier/resolve_join_occupancies_since" => {
                 let request = BarrierResolveJoinsSinceRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveJoinsSinceRequest::default());
                 let all = [
@@ -3036,7 +3038,13 @@ mod tests {
             "/v1/barrier/resolve_revoked_leaves"
         ));
         assert!(CitygApiClient::requires_message_auth(
+            "/v2/barrier/resolve_revoked_occupancies"
+        ));
+        assert!(CitygApiClient::requires_message_auth(
             "/v1/barrier/resolve_joins_since"
+        ));
+        assert!(CitygApiClient::requires_message_auth(
+            "/v2/barrier/resolve_join_occupancies_since"
         ));
         assert!(CitygApiClient::requires_message_auth(
             "/v1/barrier/fetch_public_tree"
@@ -4755,7 +4763,7 @@ mod tests {
             &fs_forward_leap_policy,
         );
         let app = Router::new().route(
-            "/v1/barrier/resolve_revoked_leaves",
+            "/v2/barrier/resolve_revoked_occupancies",
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
@@ -4841,7 +4849,7 @@ mod tests {
             &fs_forward_leap_policy,
         );
         let app = Router::new().route(
-            "/v1/barrier/resolve_joins_since",
+            "/v2/barrier/resolve_join_occupancies_since",
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
@@ -4914,7 +4922,7 @@ mod tests {
         let attestation_bytes = authority.attestation_bytes.clone();
         let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
         let app = Router::new().route(
-            "/v1/barrier/resolve_revoked_leaves",
+            "/v2/barrier/resolve_revoked_occupancies",
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
@@ -4999,7 +5007,7 @@ mod tests {
             &fs_forward_leap_policy,
         );
         let app = Router::new().route(
-            "/v1/barrier/resolve_revoked_leaves",
+            "/v2/barrier/resolve_revoked_occupancies",
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
@@ -5125,7 +5133,7 @@ mod tests {
         );
         let page = Arc::new(AtomicUsize::new(0));
         let app = Router::new().route(
-            "/v1/barrier/resolve_revoked_leaves",
+            "/v2/barrier/resolve_revoked_occupancies",
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
@@ -5230,7 +5238,7 @@ mod tests {
         let attestation_bytes = authority.attestation_bytes.clone();
         let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
         let app = Router::new().route(
-            "/v1/barrier/resolve_joins_since",
+            "/v2/barrier/resolve_join_occupancies_since",
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
@@ -5311,7 +5319,7 @@ mod tests {
             &fs_forward_leap_policy,
         );
         let app = Router::new().route(
-            "/v1/barrier/resolve_joins_since",
+            "/v2/barrier/resolve_join_occupancies_since",
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
@@ -5432,7 +5440,7 @@ mod tests {
         );
         let page = Arc::new(AtomicUsize::new(0));
         let app = Router::new().route(
-            "/v1/barrier/resolve_joins_since",
+            "/v2/barrier/resolve_join_occupancies_since",
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes_page_0 = attestation_bytes_page_0.clone();

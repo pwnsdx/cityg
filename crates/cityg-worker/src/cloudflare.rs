@@ -329,11 +329,13 @@ impl CloudflareRoomDurableObject {
                 self.handle_fetch_messages(req, target, body).await
             }
             RoomScopedApiRoute::GetBundle => self.handle_get_bundle(req, target, body).await,
-            RoomScopedApiRoute::BarrierResolveRevokedLeaves => {
+            RoomScopedApiRoute::BarrierResolveRevokedLeaves
+            | RoomScopedApiRoute::BarrierResolveRevokedOccupancies => {
                 self.handle_barrier_resolve_revoked_leaves(req, target, body)
                     .await
             }
-            RoomScopedApiRoute::BarrierResolveJoinsSince => {
+            RoomScopedApiRoute::BarrierResolveJoinsSince
+            | RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince => {
                 self.handle_barrier_resolve_joins_since(req, target, body)
                     .await
             }
@@ -3817,7 +3819,7 @@ struct RoomCheckpointSummary {
     stored_bundle_count: usize,
 }
 
-const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 20] = [
+const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 22] = [
     RoomScopedApiRoute::AcceptEpoch,
     RoomScopedApiRoute::Members,
     RoomScopedApiRoute::SearchMembers,
@@ -3833,7 +3835,9 @@ const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 20] = [
     RoomScopedApiRoute::JoinTicket,
     RoomScopedApiRoute::MergeTicket,
     RoomScopedApiRoute::BarrierResolveRevokedLeaves,
+    RoomScopedApiRoute::BarrierResolveRevokedOccupancies,
     RoomScopedApiRoute::BarrierResolveJoinsSince,
+    RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince,
     RoomScopedApiRoute::BarrierFetchPublicTree,
     RoomScopedApiRoute::BarrierIssueFullVerificationWitness,
     RoomScopedApiRoute::BarrierLookupMergeAcceptance,

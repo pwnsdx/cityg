@@ -358,7 +358,7 @@ impl CitygApiClient {
                 max_entries: MAX_BARRIER_HELPER_PAGE_ENTRIES,
             };
             let response: BarrierResolveRevokedLeavesResponse = self
-                .post_proto("/v1/barrier/resolve_revoked_leaves", request)
+                .post_proto("/v2/barrier/resolve_revoked_occupancies", request)
                 .await?;
             if response.page_offset != page_offset {
                 return Err(Error::Parse(
@@ -600,7 +600,7 @@ impl CitygApiClient {
                 max_entries: MAX_BARRIER_HELPER_PAGE_ENTRIES,
             };
             let response: BarrierResolveJoinsSinceResponse = self
-                .post_proto("/v1/barrier/resolve_joins_since", request)
+                .post_proto("/v2/barrier/resolve_join_occupancies_since", request)
                 .await?;
             if response.page_offset != page_offset {
                 return Err(Error::Parse(
