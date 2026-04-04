@@ -6571,17 +6571,21 @@ fn apply_join_records_to_snapshot(
     Ok(())
 }
 
-fn apply_revoked_indices_to_snapshot(
+fn apply_revoked_records_to_snapshot(
     pk_entries: &mut [Vec<u8>],
     n_max: u64,
-    revoked_leaf_indices: &[u32],
+    revoked_records: &[BarrierRevokedLeafRecord],
 ) -> Result<(), CityGError> {
     let leaf_base = usize::try_from(n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
-    for leaf_index in revoked_leaf_indices {
+    let mut seen = BTreeSet::new();
+    for record in revoked_records {
+        if !seen.insert(record.leaf_index) {
+            continue;
+        }
         let leaf_node = leaf_base
             .checked_add(
-                usize::try_from(*leaf_index)
+                usize::try_from(record.leaf_index)
                     .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
             )
             .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
@@ -6657,10 +6661,6 @@ fn validate_full_verification_witness_candidate(
         return Err(freeze_barrier_updater_invalid_error());
     }
 
-    let revoked_leaf_indices = revoked_records
-        .iter()
-        .map(|record| record.leaf_index)
-        .collect::<Vec<_>>();
     let mut snapshot_pre = build_pk_entries_cow(state_before)?
         .into_iter()
         .map(|entry| entry.into_owned())
@@ -6670,10 +6670,10 @@ fn validate_full_verification_witness_candidate(
         state_before.n_max,
         join_records,
     )?;
-    apply_revoked_indices_to_snapshot(
+    apply_revoked_records_to_snapshot(
         snapshot_pre.as_mut_slice(),
         state_before.n_max,
-        revoked_leaf_indices.as_slice(),
+        revoked_records,
     )?;
     let expected_before = compute_barrier_tree_hash(state_before.n_max, snapshot_pre.as_slice())?;
     if expected_before != parsed.kem_tree_hash_before {
@@ -7386,16 +7386,20 @@ mod tests {
         Ok(())
     }
 
-    fn apply_revoked_indices_to_snapshot(
+    fn apply_revoked_records_to_snapshot(
         snapshot: &mut [Vec<u8>],
         n_max: u64,
-        revoked_indices: &[u32],
+        revoked_records: &[super::BarrierRevokedLeafRecord],
     ) -> Result<(), CityGError> {
         let leaf_base = usize::try_from(n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
-        for index in revoked_indices {
+        let mut seen = BTreeSet::new();
+        for record in revoked_records {
+            if !seen.insert(record.leaf_index) {
+                continue;
+            }
             let leaf_node = leaf_base.saturating_add(
-                usize::try_from(*index)
+                usize::try_from(record.leaf_index)
                     .map_err(|_| CityGError::InvalidInput("revoked index overflow"))?,
             );
             super::blank_leaf_and_path(snapshot, leaf_node);
@@ -7601,19 +7605,14 @@ mod tests {
             1u64
         };
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
-        let mut witness_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut witness_revoked_records = committed_revoked.records.clone();
         if barrier_update_reason == 0 {
             if reclaims_revoked_slot {
-                witness_revoked_leaf_indices.retain(|leaf_index| *leaf_index != updater_slot_index);
                 witness_revoked_records.retain(|record| {
                     record.leaf_index != updater_slot_index
                         || record.slot_generation != ticket.slot_generation
                 });
-            } else if let Err(insert_at) =
-                witness_revoked_leaf_indices.binary_search(&updater_slot_index)
-            {
-                witness_revoked_leaf_indices.insert(insert_at, updater_slot_index);
+            } else {
                 let updater_record = BarrierRevokedLeafRecord {
                     leaf_index: updater_slot_index,
                     slot_generation: ticket.slot_generation,
@@ -7631,10 +7630,10 @@ mod tests {
             ticket.n_max,
             join_records.records.as_slice(),
         )?;
-        apply_revoked_indices_to_snapshot(
+        apply_revoked_records_to_snapshot(
             snapshot_pre.as_mut_slice(),
             ticket.n_max,
-            witness_revoked_leaf_indices.as_slice(),
+            witness_revoked_records.as_slice(),
         )?;
         let kem_tree_hash_before =
             super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
@@ -7855,10 +7854,8 @@ mod tests {
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         let revoked_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
-        let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
-        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_slot_index) {
-            post_revoked_leaf_indices.insert(insert_at, revoked_slot_index);
+        {
             let revoked_record = BarrierRevokedLeafRecord {
                 leaf_index: revoked_slot_index,
                 slot_generation: ticket.slot_generation,
@@ -7875,10 +7872,10 @@ mod tests {
             ticket.n_max,
             join_records.records.as_slice(),
         )?;
-        apply_revoked_indices_to_snapshot(
+        apply_revoked_records_to_snapshot(
             snapshot_pre.as_mut_slice(),
             ticket.n_max,
-            post_revoked_leaf_indices.as_slice(),
+            post_revoked_records.as_slice(),
         )?;
         let kem_tree_hash_before =
             super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
@@ -8087,10 +8084,8 @@ mod tests {
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         let revoked_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
-        let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
-        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_slot_index) {
-            post_revoked_leaf_indices.insert(insert_at, revoked_slot_index);
+        {
             let revoked_record = BarrierRevokedLeafRecord {
                 leaf_index: revoked_slot_index,
                 slot_generation: ticket.slot_generation,
@@ -8107,10 +8102,10 @@ mod tests {
             ticket.n_max,
             join_records.records.as_slice(),
         )?;
-        apply_revoked_indices_to_snapshot(
+        apply_revoked_records_to_snapshot(
             snapshot_pre.as_mut_slice(),
             ticket.n_max,
-            post_revoked_leaf_indices.as_slice(),
+            post_revoked_records.as_slice(),
         )?;
         let kem_tree_hash_before =
             super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
