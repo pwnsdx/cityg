@@ -18,7 +18,7 @@ fn validate_barrier_update_accepts_expected_pairs_and_pkhash_binding() -> Result
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
+    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
@@ -128,7 +128,7 @@ fn validate_barrier_update_rejects_pcs_refresh_reason_for_unresolved_joiner()
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
+    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
@@ -229,7 +229,7 @@ fn validate_barrier_update_rejects_join_finalize_reason_for_non_joiner() -> Resu
     let leaf_ek = vec![0xA5; 1184];
     state.leaf_device_pk.insert(leaf, pop_pk.clone());
 
-    let leaf_index = super::cover_leaf_index(&leaf, state.n_max);
+    let leaf_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
@@ -341,7 +341,7 @@ fn validate_barrier_update_rejects_target_pkhash_mismatch() -> Result<(), CityGE
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
+    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
@@ -449,7 +449,7 @@ fn validate_barrier_update_rejects_expected_pairs_mismatch() -> Result<(), CityG
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
+    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
@@ -558,7 +558,7 @@ fn validate_barrier_update_rejects_updater_identity_mismatch() -> Result<(), Cit
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
+    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
@@ -666,7 +666,7 @@ fn validate_barrier_update_rejects_missing_author_pop_pk() -> Result<(), CityGEr
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
+    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
@@ -799,7 +799,7 @@ fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), Cit
     state.latest_root = Some(root);
     state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
 
-    let updater_leaf = u64::from(super::cover_leaf_index(&leaf, state.n_max));
+    let updater_leaf = u64::from(super::slot_index_for_leaf(&leaf, state.n_max));
     let leaf_node = state.n_max.saturating_sub(1) + updater_leaf;
     let parent_node = (leaf_node - 1) / 2;
     let path_nodes = vec![leaf_node, parent_node, 0];

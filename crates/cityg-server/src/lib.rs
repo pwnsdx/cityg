@@ -6823,10 +6823,10 @@ mod tests {
         PersistedBarrierPublicTreeSnapshot, PersistedKbroadRoomState, ServerConfig, SlotLease,
         blank_internal_path_from_leaf, build_all_blank_pk_entries, build_pk_entries,
         collect_expected_pairs, compute_barrier_pkhash, compute_barrier_tree_hash,
-        compute_group_barrier_tree_hash, compute_revocation_roots_hash, cover_leaf_index,
+        compute_group_barrier_tree_hash, compute_revocation_roots_hash,
         global_history_parent_attestation_id, parse_barrier_update,
-        parse_global_history_attestation, sibling_node, validate_barrier_update_against_roster,
-        verify_history_authority_signature,
+        parse_global_history_attestation, sibling_node, slot_index_for_leaf,
+        validate_barrier_update_against_roster, verify_history_authority_signature,
     };
     use ciborium::value::{Integer, Value};
     use cityg_client::{CityGClient, ClientEpochBundle, witness};
@@ -9767,9 +9767,9 @@ mod tests {
         let mut sorted = parent_leaves.to_vec();
         sorted.sort();
         sorted.dedup();
-        let reserved_cover_indices: BTreeSet<u32> = sorted
+        let reserved_slot_indices: BTreeSet<u32> = sorted
             .iter()
-            .map(|leaf| super::cover_leaf_index(leaf, super::DEFAULT_BARRIER_N_MAX))
+            .map(|leaf| super::slot_index_for_leaf(leaf, super::DEFAULT_BARRIER_N_MAX))
             .collect();
 
         let pool = chaos_leaf_pool();
@@ -9780,8 +9780,8 @@ mod tests {
             if sorted.binary_search(&leaf).is_ok() {
                 continue;
             }
-            let cover_index = super::cover_leaf_index(&leaf, super::DEFAULT_BARRIER_N_MAX);
-            if reserved_cover_indices.contains(&cover_index) {
+            let slot_index = super::slot_index_for_leaf(&leaf, super::DEFAULT_BARRIER_N_MAX);
+            if reserved_slot_indices.contains(&slot_index) {
                 continue;
             }
             *next_label = index as u32;
@@ -9965,22 +9965,22 @@ mod roster_tests {
     }
 
     #[test]
-    fn cover_leaf_index_clamps_and_stays_deterministic() {
+    fn slot_index_for_leaf_clamps_and_stays_deterministic() {
         let mut leaf = [0u8; 32];
         leaf[28..32].copy_from_slice(&0xFFFF_FFFE_u32.to_be_bytes());
 
         assert_eq!(super::leaf_index(&leaf), 0xFFFF_FFFE);
-        assert_eq!(super::cover_leaf_index(&leaf, 0), 0);
-        assert_eq!(super::cover_leaf_index(&leaf, 1), 0);
-        assert_eq!(super::cover_leaf_index(&leaf, 4), 2);
+        assert_eq!(super::slot_index_for_leaf(&leaf, 0), 0);
+        assert_eq!(super::slot_index_for_leaf(&leaf, 1), 0);
+        assert_eq!(super::slot_index_for_leaf(&leaf, 4), 2);
         assert_eq!(
-            super::cover_leaf_index(&leaf, u64::from(u32::MAX) + 99),
+            super::slot_index_for_leaf(&leaf, u64::from(u32::MAX) + 99),
             0xFFFF_FFFE
         );
 
         for n_max in [2u64, 3, 1024, u64::MAX] {
-            let first = super::cover_leaf_index(&leaf, n_max);
-            let second = super::cover_leaf_index(&leaf, n_max);
+            let first = super::slot_index_for_leaf(&leaf, n_max);
+            let second = super::slot_index_for_leaf(&leaf, n_max);
             let clamped = n_max.max(1).min(u32::MAX as u64);
             assert_eq!(first, second);
             assert!(u64::from(first) < clamped);

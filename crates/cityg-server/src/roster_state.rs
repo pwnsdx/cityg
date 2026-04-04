@@ -628,13 +628,13 @@ pub(crate) fn leaf_index(leaf: &[u8; 32]) -> u32 {
     u32::from_be_bytes(bytes)
 }
 
-/// Spec S3.2 cover index mapping.
+/// Test helper for the S3.2 slot-index mapping.
 ///
 /// The mapping is deterministic across components:
 /// `cover_leaf_index(device_pk) = leaf_index(device_pk) mod n_max`.
 /// We clamp `n_max` to `[1, u32::MAX]` before applying modulo.
 #[cfg(test)]
-pub(crate) fn cover_leaf_index(leaf: &[u8; 32], n_max: u64) -> u32 {
+pub(crate) fn slot_index_for_leaf(leaf: &[u8; 32], n_max: u64) -> u32 {
     let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
     leaf_index(leaf) % n_max
 }

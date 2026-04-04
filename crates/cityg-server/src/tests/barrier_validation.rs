@@ -99,7 +99,7 @@ fn accept_epoch_rejects_join_without_barrier_leaf_pk() -> Result<(), CityGError>
 }
 
 #[test]
-fn join_cover_leaf_index_guard_rejects_colliding_cover_index() -> Result<(), CityGError> {
+fn join_slot_index_guard_rejects_colliding_slot_index() -> Result<(), CityGError> {
     let active_leaf = colliding_cover_leaf(5);
     let colliding_leaf = colliding_cover_leaf(1029);
     let mut membership = cityg_client::GroupMembership::default();
