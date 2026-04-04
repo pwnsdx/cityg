@@ -1948,7 +1948,7 @@ mod tests {
             .iter()
             .map(|record| BarrierJoinRecord {
                 device_pk: record.device_pk.clone(),
-                leaf_index: record.leaf_index,
+                leaf_index: record.slot_index,
                 slot_generation: record.slot_generation,
                 ek_leaf: record.ek_leaf.clone(),
             })
@@ -1957,7 +1957,7 @@ mod tests {
             .current_revoked_records
             .iter()
             .map(|record| BarrierRevokedLeafRecord {
-                leaf_index: record.leaf_index,
+                leaf_index: record.slot_index,
                 slot_generation: record.slot_generation,
             })
             .collect::<Vec<_>>();
@@ -3708,16 +3708,16 @@ mod tests {
     fn prepare_runtime_join_ticket_keeps_versioned_revoked_records() {
         let mut ticket = runtime_join_ticket_payload();
         ticket.current_revoked_records = vec![
-            pb::BarrierRevokedLeafRecord {
-                leaf_index: 7,
+            pb::BarrierRevokedOccupancyRecord {
+                slot_index: 7,
                 slot_generation: 3,
             },
-            pb::BarrierRevokedLeafRecord {
-                leaf_index: 1,
+            pb::BarrierRevokedOccupancyRecord {
+                slot_index: 1,
                 slot_generation: 0,
             },
-            pb::BarrierRevokedLeafRecord {
-                leaf_index: 7,
+            pb::BarrierRevokedOccupancyRecord {
+                slot_index: 7,
                 slot_generation: 1,
             },
         ];

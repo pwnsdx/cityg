@@ -133,17 +133,12 @@ pub fn encode_prepared_join_ticket_response(
         current_join_records: ticket
             .current_join_records
             .into_iter()
-            .map(|record| pb::BarrierJoinLeafRecord {
-                device_pk: record.device_pk,
-                leaf_index: record.leaf_index,
-                ek_leaf: record.ek_leaf,
-                slot_generation: record.slot_generation,
-            })
+            .map(pb_barrier_join_occupancy_record)
             .collect(),
         current_revoked_records: ticket
             .current_revoked_records
             .into_iter()
-            .map(pb_barrier_revoked_leaf_record)
+            .map(pb_barrier_revoked_occupancy_record)
             .collect(),
         join_finalize_auth_token: ticket.join_finalize_auth_token.to_vec(),
         provisioning_nonce: ticket.provisioning_nonce.to_vec(),

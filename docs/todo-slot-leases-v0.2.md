@@ -61,6 +61,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Require explicit slot leases in the live server join/revoke delta path instead of deriving them from `leaf_id`
 - [x] Require explicit slot leases in migrated server helper/validation paths instead of falling back to deterministic slot derivation
 - [~] Replace `current_join_records` and `current_revoked_records`
+  `JoinTicketResponse` transporte désormais des `BarrierJoinOccupancyRecord` / `BarrierRevokedOccupancyRecord`; le renommage complet des champs et du reste du wire profile reste à faire.
 - [x] Remove `current_revoked_leaf_indices` from `JoinTicketResponse` and join provisioning artifacts
 - [x] Remove `leaf_indices` from `BarrierResolveRevokedLeavesResponse`
 - [x] Remove `revoked_leaf_indices` from full-verification witness requests

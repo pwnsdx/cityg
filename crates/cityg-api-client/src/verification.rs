@@ -831,7 +831,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         .iter()
         .map(|record| BarrierJoinRecord {
             device_pk: record.device_pk.clone(),
-            leaf_index: record.leaf_index,
+            leaf_index: record.slot_index,
             slot_generation: record.slot_generation,
             ek_leaf: record.ek_leaf.clone(),
         })
@@ -840,7 +840,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         .current_revoked_records
         .iter()
         .map(|record| BarrierRevokedLeafRecord {
-            leaf_index: record.leaf_index,
+            leaf_index: record.slot_index,
             slot_generation: record.slot_generation,
         })
         .collect::<Vec<_>>();
