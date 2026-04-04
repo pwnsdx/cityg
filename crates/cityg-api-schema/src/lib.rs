@@ -1071,7 +1071,7 @@ pub fn decode_full_verification_witness_request(
         .into_iter()
         .map(|record| ServerBarrierJoinOccupancyRecord {
             device_pk: record.device_pk,
-            leaf_index: record.leaf_index,
+            leaf_index: record.slot_index,
             slot_generation: record.slot_generation,
             ek_leaf: record.ek_leaf,
         })
@@ -1080,7 +1080,7 @@ pub fn decode_full_verification_witness_request(
         .revoked_records
         .into_iter()
         .map(|record| ServerBarrierRevokedOccupancyRecord {
-            leaf_index: record.leaf_index,
+            leaf_index: record.slot_index,
             slot_generation: record.slot_generation,
         })
         .collect();
@@ -2423,15 +2423,15 @@ mod tests {
                 barrier_update_reason: 1,
                 revocation_roots_hash: vec![0x41; 32],
                 revocation_target_leaf_id: vec![0x42; 32],
-                join_records: vec![pb::BarrierJoinLeafRecord {
+                join_records: vec![pb::BarrierJoinOccupancyRecord {
                     device_pk: vec![0x51],
-                    leaf_index: 52,
+                    slot_index: 52,
                     ek_leaf: vec![0x53],
                     slot_generation: 54,
                 }],
                 updater_slot_generation: 63,
-                revoked_records: vec![pb::BarrierRevokedLeafRecord {
-                    leaf_index: 61,
+                revoked_records: vec![pb::BarrierRevokedOccupancyRecord {
+                    slot_index: 61,
                     slot_generation: 64,
                 }],
                 include_updater_in_revoked_set: true,

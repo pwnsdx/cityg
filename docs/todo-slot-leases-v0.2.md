@@ -47,6 +47,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [ ] Replace `updater_leaf` binding with lease binding in the wire profile
 - [x] Update `join_finalize_auth` validation to match the current leased slot
 - [x] Update receipts and full-verification witness payloads
+  `BarrierIssueFullVerificationWitnessRequest` transporte désormais des records `Occupancy` versionnés.
 - [x] Update snapshot reconstruction so reclaim joins remove the updater slot from the revoked set
 
 ### 5. API and runtime
