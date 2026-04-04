@@ -1534,7 +1534,8 @@ impl CityGServer {
             target_lease,
         ) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
-            let author_cover_leaf_index = pending_or_active_cover_leaf_index(state, author_leaf_id);
+            let author_cover_leaf_index =
+                require_pending_or_active_slot_lease(state, author_leaf_id)?.slot_index;
             let pending_join_finalize_reclaim = revoked_leaf_id.is_none()
                 && state
                     .pending_join_finalize_auth
@@ -1542,7 +1543,7 @@ impl CityGServer {
                 && has_committed_revoked_cover_leaf_index(state, author_cover_leaf_index);
             let current_history_commitment = ensure_current_history_commitment(gid, state)?;
             let target_leaf = revoked_leaf_id.as_ref().unwrap_or(author_leaf_id);
-            let target_lease = pending_or_active_slot_lease(state, target_leaf);
+            let target_lease = require_pending_or_active_slot_lease(state, target_leaf)?;
             (
                 author_cover_leaf_index,
                 pending_join_finalize_reclaim,
@@ -1557,8 +1558,13 @@ impl CityGServer {
         }
         if pending_join_finalize_reclaim {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
-            revoked_all
-                .retain(|leaf| revoked_cover_leaf_index(state, leaf) != author_cover_leaf_index);
+            let mut filtered = Vec::with_capacity(revoked_all.len());
+            for leaf in revoked_all {
+                if require_revoked_slot_lease(state, &leaf)?.slot_index != author_cover_leaf_index {
+                    filtered.push(leaf);
+                }
+            }
+            revoked_all = filtered;
         }
         revoked_all.sort();
         revoked_all.dedup();
@@ -2920,6 +2926,11 @@ impl CityGServer {
             ));
         }
         let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
+        if state.revoked_slot_leases.is_empty() && !state.revoked.is_empty() {
+            return Err(CityGError::InvalidInput(
+                "missing revoked slot leases for committed revocations",
+            ));
+        }
         let mut records: Vec<BarrierRevokedLeafRecord> = if !state.revoked_slot_leases.is_empty() {
             state
                 .revoked_slot_leases
@@ -2933,9 +2944,13 @@ impl CityGServer {
             state
                 .revoked
                 .iter()
-                .map(|leaf| BarrierRevokedLeafRecord {
-                    leaf_index: revoked_cover_leaf_index(state, leaf),
-                    slot_generation: 0,
+                .map(|leaf| {
+                    let lease = require_revoked_slot_lease(state, leaf)
+                        .expect("revoked slot lease presence checked above");
+                    BarrierRevokedLeafRecord {
+                        leaf_index: lease.slot_index,
+                        slot_generation: lease.slot_generation,
+                    }
                 })
                 .collect()
         };
@@ -2972,7 +2987,8 @@ impl CityGServer {
                 genesis_provisioning_artifact_missing_error,
             )?;
             for leaf in snapshot.members() {
-                let leaf_index = active_cover_leaf_index(state, leaf);
+                let lease = require_active_slot_lease(state, leaf)?;
+                let leaf_index = lease.slot_index;
                 checked_insert_unique(
                     &mut by_leaf,
                     leaf_index,
@@ -2983,11 +2999,7 @@ impl CityGServer {
                             .cloned()
                             .unwrap_or_else(|| leaf.to_vec()),
                         leaf_index,
-                        slot_generation: state
-                            .leaf_slot_leases
-                            .get(leaf)
-                            .map(|lease| lease.slot_generation)
-                            .unwrap_or(0),
+                        slot_generation: lease.slot_generation,
                         ek_leaf: state
                             .leaf_barrier_public
                             .get(leaf)
@@ -5463,8 +5475,37 @@ fn revoked_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
     revoked_slot_lease(state, leaf).slot_index
 }
 
-fn pending_or_active_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
-    pending_or_active_slot_lease(state, leaf).slot_index
+fn require_active_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> Result<SlotLease, CityGError> {
+    state
+        .leaf_slot_leases
+        .get(leaf)
+        .copied()
+        .ok_or(CityGError::InvalidInput("missing active slot lease"))
+}
+
+fn require_revoked_slot_lease(
+    state: &GroupState,
+    leaf: &[u8; 32],
+) -> Result<SlotLease, CityGError> {
+    state
+        .revoked_slot_leases
+        .get(leaf)
+        .copied()
+        .ok_or(CityGError::InvalidInput("missing revoked slot lease"))
+}
+
+fn require_pending_or_active_slot_lease(
+    state: &GroupState,
+    leaf: &[u8; 32],
+) -> Result<SlotLease, CityGError> {
+    state
+        .pending_join_finalize_auth
+        .get(leaf)
+        .map(|record| record.lease)
+        .or_else(|| state.leaf_slot_leases.get(leaf).copied())
+        .ok_or(CityGError::InvalidInput(
+            "missing pending or active slot lease",
+        ))
 }
 
 fn active_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> SlotLease {
@@ -5617,7 +5658,7 @@ fn ensure_join_cover_leaf_indices_available(
         }
     }
     for leaf in joined {
-        let leaf_index = pending_or_active_cover_leaf_index(state, leaf);
+        let leaf_index = require_pending_or_active_slot_lease(state, leaf)?.slot_index;
         if !reserved.insert(leaf_index) {
             return Err(CityGError::InvalidInput(
                 COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR,
@@ -5641,7 +5682,7 @@ where
     let mut pk_entries = vec![empty; expected_len];
     if let Some(snapshot) = state.latest_snapshot() {
         for leaf in snapshot.members() {
-            let index = active_cover_leaf_index(state, leaf) as usize;
+            let index = require_active_slot_lease(state, leaf)?.slot_index as usize;
             if index >= n_max {
                 continue;
             }
@@ -5817,7 +5858,7 @@ fn rehydrate_replay_join_finalize_auth(
         return Ok(());
     }
     let expected_cover_leaf_index =
-        u64::from(active_cover_leaf_index(state_before, &author_leaf_id));
+        u64::from(require_active_slot_lease(state_before, &author_leaf_id)?.slot_index);
     if expected_cover_leaf_index != parsed.updater_leaf {
         return Ok(());
     }
@@ -5830,15 +5871,7 @@ fn rehydrate_replay_join_finalize_auth(
     {
         return Ok(());
     }
-    let lease = state_before
-        .leaf_slot_leases
-        .get(&author_leaf_id)
-        .copied()
-        .unwrap_or(SlotLease {
-            slot_index: u32::try_from(expected_cover_leaf_index)
-                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
-            slot_generation: 0,
-        });
+    let lease = require_active_slot_lease(state_before, &author_leaf_id)?;
     if lease.slot_generation != parsed.updater_slot_generation {
         return Ok(());
     }
@@ -6157,7 +6190,7 @@ fn validate_barrier_update_against_roster(
                 barrier_genesis_required_freeze_error,
             )?;
             for leaf in snapshot.members() {
-                let leaf_index = active_cover_leaf_index(state_before, leaf);
+                let leaf_index = require_active_slot_lease(state_before, leaf)?.slot_index;
                 let ek_leaf = state_before
                     .leaf_barrier_public
                     .get(leaf)
@@ -6190,7 +6223,7 @@ fn validate_barrier_update_against_roster(
             .map(ToOwned::to_owned)
             .unwrap_or_default();
         for leaf in &delta.joined {
-            let leaf_index = pending_or_active_cover_leaf_index(state_before, leaf);
+            let leaf_index = require_pending_or_active_slot_lease(state_before, leaf)?.slot_index;
             checked_insert_unique(
                 &mut by_leaf,
                 leaf_index,
@@ -6206,7 +6239,8 @@ fn validate_barrier_update_against_roster(
                 .map(|leaf_index| leaf_index as usize)
                 .collect();
         for leaf in &delta.revoked {
-            revoked_indices.insert(active_cover_leaf_index(state_before, leaf) as usize);
+            revoked_indices
+                .insert(require_active_slot_lease(state_before, leaf)?.slot_index as usize);
         }
 
         let expected_len = usize::try_from(tree_n_max)
@@ -6262,7 +6296,9 @@ fn validate_barrier_update_against_roster(
         let mut author_leaf_ids = Vec::new();
         for (leaf, device_pk) in &state_before.leaf_device_pk {
             if device_pk.as_slice() == author_pop_pk {
-                author_cover_indices.insert(u64::from(active_cover_leaf_index(state_before, leaf)));
+                author_cover_indices.insert(u64::from(
+                    require_active_slot_lease(state_before, leaf)?.slot_index,
+                ));
                 author_leaf_ids.push(*leaf);
             }
         }
@@ -6277,7 +6313,9 @@ fn validate_barrier_update_against_roster(
         let targeted_admin_revocation = matches!(barrier_update_reason, Some(0))
             && delta.revoked.iter().any(|leaf| {
                 *leaf != author_leaf_ids.first().copied().unwrap_or([0u8; 32])
-                    && u64::from(active_cover_leaf_index(state_before, leaf)) == parsed.updater_leaf
+                    && require_active_slot_lease(state_before, leaf)
+                        .map(|lease| u64::from(lease.slot_index) == parsed.updater_leaf)
+                        .unwrap_or(false)
             })
             && has_full_verification_witness
             && author_is_room_admin;
