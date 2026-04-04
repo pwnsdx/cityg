@@ -5455,7 +5455,7 @@ fn active_cover_leaf_allocations(
     let mut by_index = BTreeMap::new();
     if let Some(snapshot) = state.latest_snapshot() {
         for leaf in snapshot.members() {
-            let leaf_index = active_cover_leaf_index(state, leaf);
+            let leaf_index = require_active_slot_lease(state, leaf)?.slot_index;
             checked_insert_unique(
                 &mut by_index,
                 leaf_index,
@@ -5465,14 +5465,6 @@ fn active_cover_leaf_allocations(
         }
     }
     Ok(by_index)
-}
-
-fn active_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
-    active_slot_lease(state, leaf).slot_index
-}
-
-fn revoked_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
-    revoked_slot_lease(state, leaf).slot_index
 }
 
 fn require_active_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> Result<SlotLease, CityGError> {
@@ -5508,52 +5500,15 @@ fn require_pending_or_active_slot_lease(
         ))
 }
 
-fn active_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> SlotLease {
-    state
-        .leaf_slot_leases
-        .get(leaf)
-        .copied()
-        .unwrap_or(SlotLease {
-            slot_index: cover_leaf_index(leaf, state.n_max),
-            slot_generation: 0,
-        })
-}
-
-fn revoked_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> SlotLease {
+fn committed_revoked_cover_leaf_indices(state: &GroupState) -> BTreeSet<u32> {
+    debug_assert!(
+        state.revoked.is_empty() || !state.revoked_slot_leases.is_empty(),
+        "committed revoked leaves must carry explicit slot leases",
+    );
     state
         .revoked_slot_leases
-        .get(leaf)
-        .copied()
-        .unwrap_or(SlotLease {
-            slot_index: cover_leaf_index(leaf, state.n_max),
-            slot_generation: 0,
-        })
-}
-
-fn pending_or_active_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> SlotLease {
-    state
-        .pending_join_finalize_auth
-        .get(leaf)
-        .map(|record| record.lease)
-        .or_else(|| state.leaf_slot_leases.get(leaf).copied())
-        .unwrap_or(SlotLease {
-            slot_index: cover_leaf_index(leaf, state.n_max),
-            slot_generation: 0,
-        })
-}
-
-fn committed_revoked_cover_leaf_indices(state: &GroupState) -> BTreeSet<u32> {
-    if !state.revoked_slot_leases.is_empty() {
-        return state
-            .revoked_slot_leases
-            .values()
-            .map(|lease| lease.slot_index)
-            .collect();
-    }
-    state
-        .revoked
-        .iter()
-        .map(|leaf| revoked_cover_leaf_index(state, leaf))
+        .values()
+        .map(|lease| lease.slot_index)
         .collect()
 }
 
@@ -5999,7 +5954,7 @@ fn validate_history_authority_headers(
             .copied()
             .ok_or_else(freeze_barrier_updater_invalid_error)?
     } else {
-        pending_or_active_slot_lease(state_before, &author_leaf_id)
+        require_pending_or_active_slot_lease(state_before, &author_leaf_id)?
     };
 
     let raw_receipt = match header.get(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT) {
@@ -6670,7 +6625,8 @@ fn validate_full_verification_witness_candidate(
     {
         return Err(freeze_barrier_updater_invalid_error());
     }
-    let expected_updater_lease = pending_or_active_slot_lease(state_before, author_leaf_id);
+    let expected_updater_lease = require_pending_or_active_slot_lease(state_before, author_leaf_id)
+        .map_err(|_| freeze_barrier_updater_invalid_error())?;
     if updater_leaf != u64::from(expected_updater_lease.slot_index)
         || updater_slot_generation != expected_updater_lease.slot_generation
     {
