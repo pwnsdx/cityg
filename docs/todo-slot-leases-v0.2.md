@@ -80,7 +80,8 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 - [ ] Add KATs for slot reuse after leave/revoke
 - [~] Add replay rejection tests for stale `join_finalize_auth`
-- [ ] Add historical chain-check tests where one slot has multiple generations
+- [~] Add historical chain-check tests where one slot has multiple generations
+  Server helper coverage now exercises `resolve_joins_since` pruning across reused-slot generations; end-to-end client/history KATs still need to follow.
 
 ## Immediate next slice
 

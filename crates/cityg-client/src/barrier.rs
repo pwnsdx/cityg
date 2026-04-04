@@ -723,6 +723,39 @@ mod tests {
     }
 
     #[test]
+    fn apply_join_set_to_snapshot_keeps_latest_generation_for_reused_slot() -> Result<()> {
+        let mut snapshot = vec![
+            vec![0xA0],
+            vec![0xA1],
+            vec![0xA2],
+            vec![0xA3],
+            vec![0xA4],
+            vec![0xA5],
+            vec![0xA6],
+        ];
+        apply_join_set_to_snapshot(
+            snapshot.as_mut_slice(),
+            4,
+            &[
+                BarrierJoinSnapshotRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                    ek_leaf: vec![0xCC; 8],
+                },
+                BarrierJoinSnapshotRecord {
+                    leaf_index: 1,
+                    slot_generation: 3,
+                    ek_leaf: vec![0xDD; 8],
+                },
+            ],
+        )?;
+        assert_eq!(snapshot[4], vec![0xDD; 8]);
+        assert!(snapshot[1].is_empty());
+        assert!(snapshot[0].is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn apply_revoked_records_to_snapshot_dedups_shared_slot_indices() -> Result<()> {
         let mut snapshot = vec![
             vec![0xA0],

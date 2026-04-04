@@ -146,6 +146,64 @@ fn resolve_joins_since_prunes_resolved_and_revoked_join_history() -> Result<(), 
 }
 
 #[test]
+fn resolve_joins_since_keeps_latest_generation_for_reused_slot() -> Result<(), CityGError> {
+    let gid = [0x86; 32];
+    let mut server = CityGServer::new(ServerConfig::new());
+    let old_leaf = colliding_cover_leaf(13);
+    let new_leaf = colliding_cover_leaf(17);
+    let latest_root = [0xB6; 32];
+
+    let mut membership = cityg_client::GroupMembership::default();
+    membership.apply_delta(&cityg_client::MembershipDelta {
+        joined: vec![new_leaf],
+        revoked: Vec::new(),
+    });
+
+    let state = server.roster.groups.entry(gid.to_vec()).or_default();
+    state.n_max = 4;
+    state.barrier_version = 6;
+    state.latest_root = Some(latest_root);
+    state.snapshots.insert(latest_root, membership);
+    state.join_history = vec![
+        crate::JoinLeafHistoryRecord {
+            leaf_id: old_leaf,
+            barrier_version: 4,
+            leaf_index: 1,
+            slot_generation: 0,
+            device_pk: vec![0x31; 4],
+            ek_leaf: vec![0x41; 1184],
+        },
+        crate::JoinLeafHistoryRecord {
+            leaf_id: new_leaf,
+            barrier_version: 6,
+            leaf_index: 1,
+            slot_generation: 1,
+            device_pk: vec![0x32; 4],
+            ek_leaf: vec![0x42; 1184],
+        },
+    ];
+
+    let records = server.resolve_joins_since(&gid, 3)?;
+    assert_eq!(records.records.len(), 1);
+    assert_eq!(records.records[0].leaf_index, 1);
+    assert_eq!(records.records[0].slot_generation, 1);
+    assert_eq!(records.records[0].device_pk, vec![0x32; 4]);
+    assert_eq!(records.records[0].ek_leaf, vec![0x42; 1184]);
+
+    let pruned = &server
+        .roster
+        .groups
+        .get(gid.as_slice())
+        .ok_or(CityGError::InvalidInput("group not found"))?
+        .join_history;
+    assert_eq!(pruned.len(), 1);
+    assert_eq!(pruned[0].leaf_id, new_leaf);
+    assert_eq!(pruned[0].leaf_index, 1);
+    assert_eq!(pruned[0].slot_generation, 1);
+    Ok(())
+}
+
+#[test]
 fn resolve_joins_since_rejects_duplicate_active_cover_allocations() -> Result<(), CityGError> {
     let gid = [0x84; 32];
     let mut server = CityGServer::new(ServerConfig::new());
