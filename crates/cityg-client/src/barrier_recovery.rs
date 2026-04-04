@@ -146,7 +146,7 @@ pub fn recover_barrier_update(
         .map(|pk| pk == input.local_pop_public_key)
         .unwrap_or(false);
     if author_matches
-        && parsed.updater_leaf == input.local_slot_lease.slot_index
+        && parsed.updater_slot_index == input.local_slot_lease.slot_index
         && parsed.updater_slot_generation == input.local_slot_lease.slot_generation
     {
         return Ok(None);
@@ -220,7 +220,7 @@ pub fn recover_barrier_update(
             &parsed.revocation_roots_hash,
             &parsed.kem_tree_hash_before,
             &parsed.kem_tree_hash_after,
-            parsed.updater_leaf,
+            parsed.updater_slot_index,
             parsed.updater_slot_generation,
             node.source_node,
             node.target_node,

@@ -80,7 +80,7 @@ struct FullVerificationReceiptWire {
     #[serde(with = "serde_bytes")]
     author_leaf_id: Vec<u8>,
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     signature: Vec<u8>,
@@ -94,7 +94,7 @@ struct FullVerificationReceiptSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     author_leaf_id: &'a [u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     barrier_history_commitment: &'a [u8],
@@ -237,7 +237,7 @@ pub fn encode_full_verification_receipt(
     gid: &[u8; 32],
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     barrier_history_commitment: &[u8],
     global_history_attestation: &[u8],
@@ -249,7 +249,7 @@ pub fn encode_full_verification_receipt(
         gid,
         author_leaf_id,
         barrier_update_reason,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         barrier_history_commitment,
         global_history_attestation,
@@ -264,7 +264,7 @@ pub fn encode_full_verification_receipt(
     to_cbor_vec(&FullVerificationReceiptWire {
         author_leaf_id: author_leaf_id.to_vec(),
         barrier_update_reason,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         signature,
     })
@@ -298,7 +298,7 @@ pub fn verify_full_verification_receipt(
         .map_err(|_| anyhow!("full verification receipt author_leaf_id must be 32 bytes"))?;
     if author_leaf_id != *expected_author_leaf_id
         || decoded.barrier_update_reason != expected_barrier_update_reason
-        || decoded.updater_leaf != expected_updater_leaf
+        || decoded.updater_slot_index != expected_updater_leaf
         || expected_updater_slot_generation
             .is_some_and(|slot_generation| decoded.updater_slot_generation != slot_generation)
     {
@@ -309,7 +309,7 @@ pub fn verify_full_verification_receipt(
         gid,
         author_leaf_id: expected_author_leaf_id,
         barrier_update_reason: expected_barrier_update_reason,
-        updater_leaf: expected_updater_leaf,
+        updater_slot_index: expected_updater_leaf,
         updater_slot_generation: decoded.updater_slot_generation,
         barrier_history_commitment,
         global_history_attestation,
@@ -414,13 +414,13 @@ pub fn expected_barrier_tree_nodes(n_max: u64) -> Result<usize> {
         .ok_or_else(|| anyhow!("invalid barrier n_max"))
 }
 
-pub fn barrier_path_nodes(n_max: u64, updater_leaf: u64) -> Result<Vec<u64>> {
+pub fn barrier_path_nodes(n_max: u64, updater_slot_index: u64) -> Result<Vec<u64>> {
     let n_max = validate_barrier_n_max(n_max)?;
-    if updater_leaf >= n_max {
+    if updater_slot_index >= n_max {
         return Err(anyhow!("invalid barrier update tree parameters"));
     }
     let leaf_base = n_max.saturating_sub(1);
-    let mut path_nodes = vec![leaf_base.saturating_add(updater_leaf)];
+    let mut path_nodes = vec![leaf_base.saturating_add(updater_slot_index)];
     while let Some(&node) = path_nodes.last() {
         if node == 0 {
             break;
@@ -527,11 +527,11 @@ pub fn apply_join_set_to_snapshot(
 
 pub fn expected_same_rrh_barrier_reason(
     join_records: &[BarrierJoinSnapshotRecord],
-    updater_leaf: u64,
+    updater_slot_index: u64,
 ) -> u64 {
     if join_records
         .iter()
-        .any(|record| u64::from(record.leaf_index) == updater_leaf)
+        .any(|record| u64::from(record.leaf_index) == updater_slot_index)
     {
         2
     } else {

@@ -369,7 +369,7 @@ fn verify_client_visible_full_verification_receipt(
         input.gid,
         &author_leaf_id,
         barrier_update_reason,
-        parsed.updater_leaf,
+        parsed.updater_slot_index,
         None,
         raw_history_commitment,
         global_history_attestation,

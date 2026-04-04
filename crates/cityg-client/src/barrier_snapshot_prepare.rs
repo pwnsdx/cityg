@@ -111,10 +111,10 @@ pub fn derive_barrier_snapshot_witness_selection(
     let mut witness_revoked_records = resolved_revoked_records.to_vec();
     let witness_revocation_roots_hash = if barrier_update_reason == 0 {
         if include_updater_in_revoked_set {
-            let updater_leaf = u32::try_from(updater_slot_lease.slot_index)
+            let updater_slot_index = u32::try_from(updater_slot_lease.slot_index)
                 .map_err(|_| anyhow!("slot_index out of range"))?;
             witness_revoked_records.push(BarrierRevokedSnapshotRecord {
-                leaf_index: updater_leaf,
+                leaf_index: updater_slot_index,
                 slot_generation: updater_slot_lease.slot_generation,
             });
         }

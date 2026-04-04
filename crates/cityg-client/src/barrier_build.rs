@@ -68,7 +68,7 @@ fn zeroize_path_secret_map(path_secrets: &mut BTreeMap<u64, [u8; 32]>) {
 pub fn build_barrier_update_bytes(
     gid: &[u8; 32],
     n_max: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     barrier_version: u64,
     prev_barrier_version: u64,
@@ -77,7 +77,7 @@ pub fn build_barrier_update_bytes(
     snapshot_pre: &[Vec<u8>],
 ) -> Result<BarrierUpdateBuildResult> {
     let n_max = validate_barrier_n_max(n_max)?;
-    if updater_leaf >= n_max {
+    if updater_slot_index >= n_max {
         return Err(anyhow!("invalid barrier update tree parameters"));
     }
     let expected_nodes = expected_barrier_tree_nodes(n_max)?;
@@ -89,7 +89,7 @@ pub fn build_barrier_update_bytes(
     }
 
     let leaf_base = n_max.saturating_sub(1);
-    let path_nodes = barrier_path_nodes(n_max, updater_leaf)?;
+    let path_nodes = barrier_path_nodes(n_max, updater_slot_index)?;
 
     let mut path_secrets = BTreeMap::new();
     let mut ps_leaf = [0u8; 32];
@@ -191,7 +191,7 @@ pub fn build_barrier_update_bytes(
                 &revocation_roots_hash,
                 &kem_tree_hash_before,
                 &kem_tree_hash_after,
-                updater_leaf,
+                updater_slot_index,
                 updater_slot_generation,
                 source_node,
                 target_node,
@@ -236,7 +236,7 @@ pub fn build_barrier_update_bytes(
     node_ciphertexts.sort_by_key(|entry| (entry.0, entry.1));
 
     let cover_payload = KemTreeCoverPayloadWire(
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         path_nodes,
         None,

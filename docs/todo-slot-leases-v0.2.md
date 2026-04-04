@@ -46,6 +46,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 - [ ] Replace `updater_leaf` binding with lease binding in the wire profile
   `api-client` mappe désormais explicitement le champ wire legacy `updater_leaf` vers `updater_slot_index` dans les adaptateurs de vérification, mais le format CBOR reste inchangé.
+  `cityg-client` consomme désormais `updater_slot_index` en interne pour `ParsedBarrierUpdate` et les chemins de build/recovery associés.
 - [x] Update `join_finalize_auth` validation to match the current leased slot
 - [x] Update receipts and full-verification witness payloads
   `BarrierIssueFullVerificationWitnessRequest` transporte désormais des records `Occupancy` versionnés.

@@ -61,7 +61,7 @@ pub struct ParsedBarrierUpdate {
     pub revocation_roots_hash: [u8; 32],
     pub kem_tree_hash_before: [u8; 32],
     pub kem_tree_hash_after: [u8; 32],
-    pub updater_leaf: u64,
+    pub updater_slot_index: u64,
     pub updater_slot_generation: u64,
     pub path_nodes: Vec<u64>,
     pub node_ciphertexts: Vec<ParsedNodeCiphertext>,
@@ -144,7 +144,7 @@ pub fn parse_barrier_update_for_recover(
     }
 
     let KemTreeCoverPayloadWire(
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         path_nodes,
         _revoked_leaf_indices_hint,
@@ -152,8 +152,8 @@ pub fn parse_barrier_update_for_recover(
         new_public_keys,
     ) = parse_deterministic_cbor(cover_payload.as_slice(), "barrier cover payload")?;
 
-    if updater_leaf >= expected_n_max {
-        return Err(anyhow!("barrier updater_leaf out of range"));
+    if updater_slot_index >= expected_n_max {
+        return Err(anyhow!("barrier updater_slot_index out of range"));
     }
 
     let expected_nodes = expected_n_max
@@ -162,7 +162,7 @@ pub fn parse_barrier_update_for_recover(
         .ok_or_else(|| anyhow!("barrier tree size overflow"))?;
     let max_index = expected_nodes.saturating_sub(1);
     let leaf_base = expected_n_max.saturating_sub(1);
-    let expected_leaf = leaf_base.saturating_add(updater_leaf);
+    let expected_leaf = leaf_base.saturating_add(updater_slot_index);
 
     if path_nodes.is_empty() {
         return Err(anyhow!("barrier path_nodes must be non-empty"));
@@ -274,7 +274,7 @@ pub fn parse_barrier_update_for_recover(
         revocation_roots_hash: to_array32("revocation_roots_hash", revocation_roots_hash)?,
         kem_tree_hash_before: to_array32("kem_tree_hash_before", kem_tree_hash_before)?,
         kem_tree_hash_after: to_array32("kem_tree_hash_after", kem_tree_hash_after)?,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         path_nodes,
         node_ciphertexts,
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(parsed.barrier_version, 4);
         assert_eq!(parsed.prev_barrier_version, 3);
         assert_eq!(parsed.tree_size, 4);
-        assert_eq!(parsed.updater_leaf, 2);
+        assert_eq!(parsed.updater_slot_index, 2);
         assert_eq!(parsed.updater_slot_generation, 7);
         assert_eq!(parsed.path_nodes, vec![5, 2, 0]);
         assert_eq!(parsed.new_public_keys.len(), 2);
