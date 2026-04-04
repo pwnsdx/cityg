@@ -776,7 +776,7 @@ pub async fn run_with_config(
         .route("/v1/rooms/merge_ticket", post(merge_ticket))
         .route(
             "/v1/barrier/resolve_revoked_leaves",
-            post(barrier_resolve_revoked_leaves),
+            post(barrier_resolve_revoked_occupancies_route),
         )
         .route(
             "/v2/barrier/resolve_revoked_occupancies",
@@ -784,7 +784,7 @@ pub async fn run_with_config(
         )
         .route(
             "/v1/barrier/resolve_joins_since",
-            post(barrier_resolve_joins_since),
+            post(barrier_resolve_join_occupancies_since_route),
         )
         .route(
             "/v2/barrier/resolve_join_occupancies_since",
@@ -1570,7 +1570,7 @@ mod tests {
             ApiError::Unauthorized("missing or invalid message auth token")
         ));
 
-        let revoked_err = barrier_resolve_revoked_leaves(
+        let revoked_err = barrier_resolve_revoked_occupancies_route(
             State(state.clone()),
             empty_headers.clone(),
             Bytes::new(),
@@ -1582,10 +1582,13 @@ mod tests {
             ApiError::Unauthorized("missing or invalid message auth token")
         ));
 
-        let joins_err =
-            barrier_resolve_joins_since(State(state.clone()), empty_headers.clone(), Bytes::new())
-                .await
-                .expect_err("joins-since should require message auth");
+        let joins_err = barrier_resolve_join_occupancies_since_route(
+            State(state.clone()),
+            empty_headers.clone(),
+            Bytes::new(),
+        )
+        .await
+        .expect_err("joins-since should require message auth");
         assert!(matches!(
             joins_err,
             ApiError::Unauthorized("missing or invalid message auth token")
@@ -3365,7 +3368,7 @@ mod tests {
         }
         .encode(&mut bad_body)
         .expect("encode bad joins-since request");
-        let err = barrier_resolve_joins_since(
+        let err = barrier_resolve_join_occupancies_since_route(
             State(state.clone()),
             headers.clone(),
             Bytes::from(bad_body),
@@ -3390,9 +3393,10 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode joins-since request");
-        let response = barrier_resolve_joins_since(State(state), headers, Bytes::from(body))
-            .await
-            .expect("joins-since request should succeed");
+        let response =
+            barrier_resolve_join_occupancies_since_route(State(state), headers, Bytes::from(body))
+                .await
+                .expect("joins-since request should succeed");
         let decoded: BarrierResolveJoinsSinceResponse = decode_proto_response(response).await;
         assert!(
             !decoded.records.is_empty(),
@@ -3519,7 +3523,7 @@ mod tests {
         }
         .encode(&mut bad_revoked_body)
         .expect("encode missing room revoked request");
-        let err = barrier_resolve_revoked_leaves(
+        let err = barrier_resolve_revoked_occupancies_route(
             State(state.clone()),
             headers.clone(),
             Bytes::from(bad_revoked_body),
@@ -3539,7 +3543,7 @@ mod tests {
         }
         .encode(&mut bad_revoked_room)
         .expect("encode invalid room revoked request");
-        let err = barrier_resolve_revoked_leaves(
+        let err = barrier_resolve_revoked_occupancies_route(
             State(state.clone()),
             headers.clone(),
             Bytes::from(bad_revoked_room),
@@ -3559,7 +3563,7 @@ mod tests {
         }
         .encode(&mut bad_revoked_hash)
         .expect("encode short hash revoked request");
-        let err = barrier_resolve_revoked_leaves(
+        let err = barrier_resolve_revoked_occupancies_route(
             State(state.clone()),
             headers.clone(),
             Bytes::from(bad_revoked_hash),
@@ -3579,7 +3583,7 @@ mod tests {
         }
         .encode(&mut revoked_body)
         .expect("encode revoked leaves request");
-        let revoked_response = barrier_resolve_revoked_leaves(
+        let revoked_response = barrier_resolve_revoked_occupancies_route(
             State(state.clone()),
             headers.clone(),
             Bytes::from(revoked_body),

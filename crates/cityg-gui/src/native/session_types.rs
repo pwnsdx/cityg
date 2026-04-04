@@ -72,7 +72,7 @@ pub(super) struct BarrierSecretState {
     pub(super) bootstrap_history_commitment: Option<HistoryCommitment>,
     pub(super) bootstrap_predecessor_kem_tree_hash_after: [u8; 32],
     pub(super) bootstrap_join_records: Vec<BarrierJoinRecord>,
-    pub(super) bootstrap_revoked_records: Vec<BarrierRevokedLeafRecord>,
+    pub(super) bootstrap_revoked_records: Vec<BarrierRevokedOccupancyRecord>,
     pub(super) bootstrap_join_finalize_auth_token: [u8; 32],
     pub(super) k_barrier: Zeroizing<[u8; 32]>,
     pub(super) kem_tree_hash_after: [u8; 32],

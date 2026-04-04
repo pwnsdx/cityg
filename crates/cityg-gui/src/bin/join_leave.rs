@@ -1862,7 +1862,7 @@ mod tests {
     }
 
     #[derive(Clone, PartialEq, Message)]
-    struct BarrierJoinLeafRecordPb {
+    struct BarrierJoinOccupancyRecordPb {
         #[prost(bytes = "vec", tag = "1")]
         device_pk: Vec<u8>,
         #[prost(uint32, tag = "2")]
@@ -1874,7 +1874,7 @@ mod tests {
     #[derive(Clone, PartialEq, Message)]
     struct BarrierResolveJoinsSinceResponsePb {
         #[prost(message, repeated, tag = "1")]
-        records: Vec<BarrierJoinLeafRecordPb>,
+        records: Vec<BarrierJoinOccupancyRecordPb>,
         #[prost(bytes = "vec", tag = "2")]
         history_view_id: Vec<u8>,
         #[prost(message, optional, tag = "3")]
@@ -2391,7 +2391,7 @@ mod tests {
             capture_fetch_public_tree_pages_raw(&server_url, &room_id, &ticket.kem_tree_hash_after)
                 .await?;
         let join_records = client
-            .barrier_resolve_joins_since(&room_id, ticket.barrier_version)
+            .barrier_resolve_join_occupancies_since(&room_id, ticket.barrier_version)
             .await?
             .records;
         let join_records_pages_raw =
@@ -2451,7 +2451,7 @@ mod tests {
             capture_fetch_public_tree_pages_raw(&server_url, &room_id, &ticket.kem_tree_hash_after)
                 .await?;
         let join_records = client
-            .barrier_resolve_joins_since(&room_id, ticket.barrier_version)
+            .barrier_resolve_join_occupancies_since(&room_id, ticket.barrier_version)
             .await?
             .records;
         let join_records_pages_raw =
@@ -5077,7 +5077,7 @@ mod tests {
                     pk_entries: Vec::new(),
                 },
             },
-            &cityg_api_client::BarrierResolvedJoins {
+            &cityg_api_client::BarrierResolvedJoinOccupancies {
                 history_view_id: expected.history_view_id,
                 history_commitment: expected,
                 history_authority_extension: None,
@@ -5085,7 +5085,7 @@ mod tests {
                 global_history_attestation: None,
                 records: Vec::new(),
             },
-            &cityg_api_client::BarrierResolvedRevokedLeaves {
+            &cityg_api_client::BarrierResolvedRevokedOccupancies {
                 history_view_id: expected.history_view_id,
                 history_commitment: expected,
                 history_authority_extension: None,

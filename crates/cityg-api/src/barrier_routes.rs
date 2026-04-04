@@ -21,8 +21,6 @@ use cityg_runtime::{
     prepare_full_verification_witness as runtime_prepare_full_verification_witness,
     prepare_merge_acceptance_lookup as runtime_prepare_merge_acceptance_lookup,
     prepare_resolved_join_occupancies as runtime_prepare_resolved_join_occupancies,
-    prepare_resolved_joins as runtime_prepare_resolved_joins,
-    prepare_resolved_revoked_leaves as runtime_prepare_resolved_revoked_leaves,
     prepare_resolved_revoked_occupancies as runtime_prepare_resolved_revoked_occupancies,
 };
 
@@ -88,7 +86,7 @@ pub(crate) async fn barrier_issue_full_verification_witness(
     ))
 }
 
-pub(crate) async fn barrier_resolve_revoked_leaves(
+pub(crate) async fn barrier_resolve_revoked_occupancies_route(
     State(state): State<ApiState>,
     headers: HeaderMap,
     body: Bytes,
@@ -101,7 +99,7 @@ pub(crate) async fn barrier_resolve_revoked_leaves(
     let gid = parse_gid(&request.room_id)?;
     enforce_expensive_rate_limit(
         &state,
-        "barrier_resolve_revoked_leaves",
+        "barrier_resolve_revoked_occupancies",
         message_scoped_rate_limit_key(&headers, &gid),
     )
     .await?;
@@ -114,7 +112,7 @@ pub(crate) async fn barrier_resolve_revoked_leaves(
     let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        runtime_prepare_resolved_revoked_leaves(
+        runtime_prepare_resolved_revoked_occupancies(
             &mut guard,
             &gid,
             &request.revocation_roots_hash,
@@ -124,7 +122,7 @@ pub(crate) async fn barrier_resolve_revoked_leaves(
             API_PROFILE_VERSION,
         )
         .map_err(|err| {
-            map_room_barrier_helper_preparation_error("barrier_resolve_revoked_leaves", err)
+            map_room_barrier_helper_preparation_error("barrier_resolve_revoked_occupancies", err)
         })?
     };
     Ok(protobuf_response_bytes(
@@ -132,7 +130,7 @@ pub(crate) async fn barrier_resolve_revoked_leaves(
     ))
 }
 
-pub(crate) async fn barrier_resolve_joins_since(
+pub(crate) async fn barrier_resolve_join_occupancies_since_route(
     State(state): State<ApiState>,
     headers: HeaderMap,
     body: Bytes,
@@ -145,7 +143,7 @@ pub(crate) async fn barrier_resolve_joins_since(
     let gid = parse_gid(&request.room_id)?;
     enforce_expensive_rate_limit(
         &state,
-        "barrier_resolve_joins_since",
+        "barrier_resolve_join_occupancies_since",
         message_scoped_rate_limit_key(&headers, &gid),
     )
     .await?;
@@ -153,7 +151,7 @@ pub(crate) async fn barrier_resolve_joins_since(
     let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        runtime_prepare_resolved_joins(
+        runtime_prepare_resolved_join_occupancies(
             &mut guard,
             &gid,
             request.prev_barrier_version,
@@ -163,7 +161,7 @@ pub(crate) async fn barrier_resolve_joins_since(
             API_PROFILE_VERSION,
         )
         .map_err(|err| {
-            map_room_barrier_helper_preparation_error("barrier_resolve_joins_since", err)
+            map_room_barrier_helper_preparation_error("barrier_resolve_join_occupancies_since", err)
         })?
     };
     Ok(protobuf_response_bytes(

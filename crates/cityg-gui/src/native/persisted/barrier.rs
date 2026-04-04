@@ -282,15 +282,15 @@ impl PersistedBarrierJoinRecord {
 }
 
 impl PersistedBarrierRevokedRecord {
-    pub(in crate::native) fn from_runtime(record: &BarrierRevokedLeafRecord) -> Self {
+    pub(in crate::native) fn from_runtime(record: &BarrierRevokedOccupancyRecord) -> Self {
         Self {
             leaf_index: record.leaf_index,
             slot_generation: record.slot_generation,
         }
     }
 
-    pub(in crate::native) fn into_runtime(self) -> BarrierRevokedLeafRecord {
-        BarrierRevokedLeafRecord {
+    pub(in crate::native) fn into_runtime(self) -> BarrierRevokedOccupancyRecord {
+        BarrierRevokedOccupancyRecord {
             leaf_index: self.leaf_index,
             slot_generation: self.slot_generation,
         }

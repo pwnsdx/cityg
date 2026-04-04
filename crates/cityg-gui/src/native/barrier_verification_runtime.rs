@@ -60,11 +60,11 @@ pub(super) async fn full_chain_check_barrier_update(
         revoked_root,
     )?;
     let join_resolution = client
-        .barrier_resolve_joins_since(room_id, parsed.prev_barrier_version)
+        .barrier_resolve_join_occupancies_since(room_id, parsed.prev_barrier_version)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
     let revoked_resolution = client
-        .barrier_resolve_revoked_leaves(room_id, &prevalidated.revocation_roots_hash)
+        .barrier_resolve_revoked_occupancies(room_id, &prevalidated.revocation_roots_hash)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
     let join_record_count = join_resolution.records.len();

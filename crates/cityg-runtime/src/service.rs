@@ -388,8 +388,6 @@ pub struct PreparedResolvedRevokedOccupancies {
     pub barrier: PreparedBarrierEnvelope,
 }
 
-pub type PreparedResolvedRevokedLeaves = PreparedResolvedRevokedOccupancies;
-
 /// Neutral runtime payload for join-occupancy helper resolution.
 #[derive(Clone, Debug)]
 pub struct PreparedResolvedJoinOccupancies {
@@ -398,8 +396,6 @@ pub struct PreparedResolvedJoinOccupancies {
     pub helper_completeness_attestation: Vec<u8>,
     pub barrier: PreparedBarrierEnvelope,
 }
-
-pub type PreparedResolvedJoins = PreparedResolvedJoinOccupancies;
 
 /// Neutral runtime payload for `fetch_barrier_public_tree`.
 #[derive(Clone, Debug)]
@@ -1252,26 +1248,6 @@ pub fn prepare_resolved_revoked_occupancies(
     })
 }
 
-pub fn prepare_resolved_revoked_leaves(
-    server: &mut CityGServer,
-    gid: &[u8; 32],
-    revocation_roots_hash: &[u8; 32],
-    page_offset: u32,
-    max_entries: u32,
-    max_page_entries: u32,
-    profile_version: &str,
-) -> Result<PreparedResolvedRevokedLeaves, RoomBarrierHelperPreparationError> {
-    prepare_resolved_revoked_occupancies(
-        server,
-        gid,
-        revocation_roots_hash,
-        page_offset,
-        max_entries,
-        max_page_entries,
-        profile_version,
-    )
-}
-
 /// Resolve join occupancies since a barrier version, paginate them, and prepare the shared helper envelope.
 pub fn prepare_resolved_join_occupancies(
     server: &mut CityGServer,
@@ -1309,26 +1285,6 @@ pub fn prepare_resolved_join_occupancies(
         helper_completeness_attestation,
         barrier,
     })
-}
-
-pub fn prepare_resolved_joins(
-    server: &mut CityGServer,
-    gid: &[u8; 32],
-    prev_barrier_version: u64,
-    page_offset: u32,
-    max_entries: u32,
-    max_page_entries: u32,
-    profile_version: &str,
-) -> Result<PreparedResolvedJoins, RoomBarrierHelperPreparationError> {
-    prepare_resolved_join_occupancies(
-        server,
-        gid,
-        prev_barrier_version,
-        page_offset,
-        max_entries,
-        max_page_entries,
-        profile_version,
-    )
 }
 
 /// Fetch a public barrier tree snapshot, paginate the entries, and prepare the shared helper envelope.

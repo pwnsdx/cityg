@@ -501,8 +501,6 @@ pub struct BarrierRevokedOccupancyRecord {
     pub slot_generation: u64,
 }
 
-pub type BarrierRevokedLeafRecord = BarrierRevokedOccupancyRecord;
-
 /// Revoked slot-occupancy enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRevokedOccupancies {
@@ -511,8 +509,6 @@ pub struct ResolvedRevokedOccupancies {
     pub records: Vec<BarrierRevokedOccupancyRecord>,
 }
 
-pub type ResolvedRevokedLeaves = ResolvedRevokedOccupancies;
-
 /// Join slot-occupancy enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedJoinOccupancies {
@@ -520,8 +516,6 @@ pub struct ResolvedJoinOccupancies {
     pub history_commitment: HistoryCommitment,
     pub records: Vec<BarrierJoinOccupancyRecord>,
 }
-
-pub type ResolvedJoins = ResolvedJoinOccupancies;
 
 /// Merge ticket bundle provided to existing members during leave/rekey flow.
 ///
@@ -595,8 +589,6 @@ pub struct BarrierJoinOccupancyRecord {
     /// Barrier leaf ML-KEM public key (ek, 1184 bytes when provisioned).
     pub ek_leaf: Vec<u8>,
 }
-
-pub type BarrierJoinLeafRecord = BarrierJoinOccupancyRecord;
 
 /// Public-tree snapshot returned by barrier tree APIs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2959,14 +2951,6 @@ impl CityGServer {
         })
     }
 
-    pub fn resolve_revoked_leaf_indices(
-        &mut self,
-        gid: &[u8; 32],
-        revocation_roots_hash: &[u8; 32],
-    ) -> Result<ResolvedRevokedLeaves, CityGError> {
-        self.resolve_revoked_occupancies(gid, revocation_roots_hash)
-    }
-
     pub fn resolve_join_occupancies_since(
         &mut self,
         gid: &[u8; 32],
@@ -3041,14 +3025,6 @@ impl CityGServer {
             history_commitment,
             records: by_leaf.into_values().collect(),
         })
-    }
-
-    pub fn resolve_joins_since(
-        &mut self,
-        gid: &[u8; 32],
-        prev_barrier_version: u64,
-    ) -> Result<ResolvedJoins, CityGError> {
-        self.resolve_join_occupancies_since(gid, prev_barrier_version)
     }
 
     pub fn fetch_barrier_public_tree(

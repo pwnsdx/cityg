@@ -1012,11 +1012,11 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             ek_leaf: vec![0x42; cityg_client::barrier_crypto::barrier_leaf_public_key_bytes()],
         }],
         bootstrap_revoked_records: vec![
-            BarrierRevokedLeafRecord {
+            BarrierRevokedOccupancyRecord {
                 leaf_index: 1,
                 slot_generation: 0,
             },
-            BarrierRevokedLeafRecord {
+            BarrierRevokedOccupancyRecord {
                 leaf_index: 2,
                 slot_generation: 4,
             },

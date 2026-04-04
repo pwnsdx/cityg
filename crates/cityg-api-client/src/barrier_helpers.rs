@@ -31,10 +31,10 @@ impl CitygApiClient {
             .barrier_fetch_public_tree(room_id, snapshot_hash)
             .await?;
         let joins = self
-            .barrier_resolve_joins_since(room_id, barrier_version)
+            .barrier_resolve_join_occupancies_since(room_id, barrier_version)
             .await?;
         let revoked = self
-            .barrier_resolve_revoked_leaves(room_id, committed_revocation_roots_hash)
+            .barrier_resolve_revoked_occupancies(room_id, committed_revocation_roots_hash)
             .await?;
         ensure_matching_barrier_history_dependencies(
             context,
@@ -572,15 +572,6 @@ impl CitygApiClient {
         })
     }
 
-    pub async fn barrier_resolve_revoked_leaves(
-        &self,
-        room_id: &str,
-        revocation_roots_hash: &[u8; 32],
-    ) -> Result<BarrierResolvedRevokedLeaves, Error> {
-        self.barrier_resolve_revoked_occupancies(room_id, revocation_roots_hash)
-            .await
-    }
-
     /// Resolves join occupancies that became active after `prev_barrier_version`.
     pub async fn barrier_resolve_join_occupancies_since(
         &self,
@@ -812,15 +803,6 @@ impl CitygApiClient {
             global_history_attestation: expected_global_attestation,
             records,
         })
-    }
-
-    pub async fn barrier_resolve_joins_since(
-        &self,
-        room_id: &str,
-        prev_barrier_version: u64,
-    ) -> Result<BarrierResolvedJoins, Error> {
-        self.barrier_resolve_join_occupancies_since(room_id, prev_barrier_version)
-            .await
     }
 
     /// Fetches a barrier public-tree snapshot for a committed tree hash.

@@ -50,8 +50,7 @@ use cityg_runtime::{
     paginate_room_members, prepare_barrier_public_tree,
     prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
     prepare_full_verification_witness, prepare_merge_acceptance_lookup,
-    prepare_resolved_join_occupancies, prepare_resolved_joins, prepare_resolved_revoked_leaves,
-    prepare_resolved_revoked_occupancies, refresh_room_pivot,
+    prepare_resolved_join_occupancies, prepare_resolved_revoked_occupancies, refresh_room_pivot,
     revoke_room_admin as runtime_revoke_room_admin,
     rotate_room_kbroad as runtime_rotate_room_kbroad, store_room_message,
 };
@@ -334,12 +333,12 @@ impl CloudflareRoomDurableObject {
             RoomScopedApiRoute::GetBundle => self.handle_get_bundle(req, target, body).await,
             RoomScopedApiRoute::BarrierResolveRevokedLeaves
             | RoomScopedApiRoute::BarrierResolveRevokedOccupancies => {
-                self.handle_barrier_resolve_revoked_leaves(req, target, body)
+                self.handle_barrier_resolve_revoked_occupancies(req, target, body)
                     .await
             }
             RoomScopedApiRoute::BarrierResolveJoinsSince
             | RoomScopedApiRoute::BarrierResolveJoinOccupanciesSince => {
-                self.handle_barrier_resolve_joins_since(req, target, body)
+                self.handle_barrier_resolve_join_occupancies_since(req, target, body)
                     .await
             }
             RoomScopedApiRoute::BarrierFetchPublicTree => {
@@ -1219,7 +1218,7 @@ impl CloudflareRoomDurableObject {
         protobuf_response(&response)
     }
 
-    async fn handle_barrier_resolve_revoked_leaves(
+    async fn handle_barrier_resolve_revoked_occupancies(
         &self,
         req: &Request,
         target: RoomScopedRequestTarget,
@@ -1300,7 +1299,7 @@ impl CloudflareRoomDurableObject {
 
         match target.route {
             RoomScopedApiRoute::BarrierResolveRevokedLeaves => {
-                let prepared = match prepare_resolved_revoked_leaves(
+                let prepared = match prepare_resolved_revoked_occupancies(
                     &mut server,
                     &gid,
                     &request.revocation_roots_hash,
@@ -1335,7 +1334,7 @@ impl CloudflareRoomDurableObject {
         }
     }
 
-    async fn handle_barrier_resolve_joins_since(
+    async fn handle_barrier_resolve_join_occupancies_since(
         &self,
         req: &Request,
         target: RoomScopedRequestTarget,
@@ -1398,7 +1397,7 @@ impl CloudflareRoomDurableObject {
 
         match target.route {
             RoomScopedApiRoute::BarrierResolveJoinsSince => {
-                let prepared = match prepare_resolved_joins(
+                let prepared = match prepare_resolved_join_occupancies(
                     &mut server,
                     &gid,
                     request.prev_barrier_version,

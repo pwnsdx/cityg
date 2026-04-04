@@ -36,11 +36,11 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ### 3. Helper surfaces
 
-- [~] Replace `BarrierJoinLeafRecord` with occupancy records
+- [x] Replace `BarrierJoinLeafRecord` with occupancy records
 - [x] Replace naked revoked leaf indices with revoked occupancy records
 - [~] Rework `ResolveJoinsSince` and `ResolveRevokedLeaves`
 - [x] Update completeness attestations to cover occupancy records
-  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; both `v1` and `v2` helper protobufs now carry occupancy records, but the broader wire profile still mixes legacy names.
+  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; the remaining legacy is now mostly in public protobuf/message names and helper-kind identifiers, not in runtime call sites.
 
 ### 4. Barrier validation
 
@@ -72,11 +72,12 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Remove stored `leaf_indices` from `BarrierResolvedRevokedLeaves` client state
 - [x] Remove stored `leaf_indices` from `ResolvedRevokedLeaves` server state
 - [x] Remove helper-level `leaf_indices` compatibility accessors from client/server runtime surfaces
+- [x] Remove helper-level `*Leaves` / `*Joins` compatibility shims from client/server/runtime Rust APIs
 - [~] Update schema encoding/decoding
   `api-schema` now covers `v2` helper route extraction and occupancy-response protobuf encoding.
 - [~] Update runtime service ticket preparation
 - [x] Add occupancy-oriented Rust type aliases/surfaces in `server` / `runtime` / `api-client` / `api-schema`
-  Internal `server` / `api-client` call sites now consume the occupancy-named types directly; legacy aliases remain only as compatibility shims.
+  Internal `server` / `runtime` / `api-client` / `gui` call sites now consume the occupancy-named types directly.
 
 ### 6. Client and GUI
 
@@ -99,6 +100,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Finish the remaining public/profile rename from legacy helper names (`ResolveRevokedLeaves`, `ResolveJoinsSince`) to occupancy-oriented route and message names.
-2. Finish the remaining spec/profile sweep for legacy helper identifiers (`helper_kind`, wire labels) that still intentionally preserve old names for compatibility.
-3. Add KAT/conformance coverage that exercises the new occupancy semantics through the public helper/profile boundary.
+1. Finish the remaining public/profile rename in protobuf message names and route enums that still say `ResolveRevokedLeaves` / `ResolveJoinsSince`.
+2. Decide whether `helper_kind` and the CBOR wire label `updater_leaf` stay as documented legacy identifiers or also move in a hard `v0.2` cut.
+3. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.

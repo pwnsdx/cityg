@@ -30,7 +30,7 @@ use ciborium::value::Value;
 #[cfg(test)]
 use cityg_api_client::room_admin_public_key_bytes;
 use cityg_api_client::{
-    BarrierJoinRecord, BarrierPublicTree, BarrierRevokedLeafRecord, CitygApiClient,
+    BarrierJoinRecord, BarrierPublicTree, BarrierRevokedOccupancyRecord, CitygApiClient,
     Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment, MergeAcceptanceStatus,
     MergeTicket, RoomAdminIdentity as RoomIdentity, RoomAdminOperation, SlotLease,
 };
