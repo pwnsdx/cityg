@@ -574,7 +574,19 @@ pub struct BarrierResolvedRevokedLeaves {
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub records: Vec<BarrierRevokedLeafRecord>,
-    pub leaf_indices: Vec<u32>,
+}
+
+impl BarrierResolvedRevokedLeaves {
+    pub fn leaf_indices(&self) -> Vec<u32> {
+        let mut leaf_indices = self
+            .records
+            .iter()
+            .map(|record| record.leaf_index)
+            .collect::<Vec<_>>();
+        leaf_indices.sort_unstable();
+        leaf_indices.dedup();
+        leaf_indices
+    }
 }
 
 /// Join enumeration response bound to a specific authenticated history view.
@@ -3816,7 +3828,7 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(revoked.leaf_indices, vec![1, 7]);
+        assert_eq!(revoked.leaf_indices(), vec![1, 7]);
         let joins = client
             .barrier_resolve_joins_since(
                 "4141414141414141414141414141414141414141414141414141414141414141",

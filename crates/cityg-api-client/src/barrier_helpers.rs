@@ -558,11 +558,6 @@ impl CitygApiClient {
                 "barrier helper pagination truncated revoked leaves".to_string(),
             ));
         }
-        let mut leaf_indices = records
-            .iter()
-            .map(|record| record.leaf_index)
-            .collect::<Vec<_>>();
-        leaf_indices.dedup();
         Ok(BarrierResolvedRevokedLeaves {
             history_view_id,
             history_commitment,
@@ -570,7 +565,6 @@ impl CitygApiClient {
             history_authority: expected_authority,
             global_history_attestation: expected_global_attestation,
             records,
-            leaf_indices,
         })
     }
 

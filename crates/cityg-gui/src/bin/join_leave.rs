@@ -2402,7 +2402,7 @@ mod tests {
         let revoked_leaf_indices = client
             .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
             .await?
-            .leaf_indices;
+            .leaf_indices();
         let revoked_leaf_indices_pages_raw = capture_resolve_revoked_pages_raw(
             &server_url,
             &room_id,
@@ -2467,7 +2467,7 @@ mod tests {
         let revoked_leaf_indices = client
             .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
             .await?
-            .leaf_indices;
+            .leaf_indices();
         let revoked_leaf_indices_pages_raw = capture_resolve_revoked_pages_raw(
             &server_url,
             &room_id,
@@ -5103,7 +5103,7 @@ mod tests {
                 history_authority_extension: None,
                 history_authority: None,
                 global_history_attestation: None,
-                leaf_indices: Vec::new(),
+                records: Vec::new(),
             },
         )
         .expect_err("history commitment mismatch must fail");
