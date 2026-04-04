@@ -2604,10 +2604,6 @@ mod tests {
                     },
                 );
                 encode_proto(BarrierResolveRevokedLeavesResponse {
-                    leaf_indices: page_records
-                        .iter()
-                        .map(|record| record.leaf_index)
-                        .collect(),
                     records: page_records,
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
@@ -4775,7 +4771,6 @@ mod tests {
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
-                        leaf_indices: vec![1, 2],
                         records: vec![
                             pb::BarrierRevokedLeafRecord {
                                 leaf_index: 1,
@@ -4934,7 +4929,6 @@ mod tests {
                 let fs_forward_leap_policy = fs_forward_leap_policy;
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
-                        leaf_indices: vec![1, 2],
                         records: vec![
                             pb::BarrierRevokedLeafRecord {
                                 leaf_index: 1,
@@ -5021,7 +5015,6 @@ mod tests {
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
-                        leaf_indices: vec![1, 2],
                         records: vec![
                             pb::BarrierRevokedLeafRecord {
                                 leaf_index: 1,
@@ -5154,7 +5147,6 @@ mod tests {
                     let call_index = page.fetch_add(1, Ordering::SeqCst);
                     let (
                         records,
-                        leaf_indices,
                         page_offset,
                         next_page_offset,
                         max_barrier_update_bytes,
@@ -5166,7 +5158,6 @@ mod tests {
                                 leaf_index: 1,
                                 slot_generation: 0,
                             }],
-                            vec![1],
                             0,
                             Some(1),
                             1_048_576,
@@ -5179,7 +5170,6 @@ mod tests {
                                 leaf_index: 2,
                                 slot_generation: 0,
                             }],
-                            vec![2],
                             1,
                             None,
                             1_048_577,
@@ -5188,7 +5178,6 @@ mod tests {
                         )
                     };
                     encode_proto(BarrierResolveRevokedLeavesResponse {
-                        leaf_indices,
                         records,
                         history_view_id: vec![0xD1; 32],
                         history_commitment: Some(history_commitment_ok_payload(

@@ -262,7 +262,6 @@ pub fn encode_prepared_resolved_revoked_leaves_response(
     } = barrier;
 
     let response = pb::BarrierResolveRevokedLeavesResponse {
-        leaf_indices: page.items.iter().map(|record| record.leaf_index).collect(),
         records: page
             .items
             .into_iter()
@@ -2855,7 +2854,6 @@ mod tests {
         let decoded = pb::BarrierResolveRevokedLeavesResponse::decode(encoded.as_slice())
             .expect("decode revoked helper response");
 
-        assert_eq!(decoded.leaf_indices, vec![7]);
         assert_eq!(decoded.records.len(), 1);
         assert_eq!(decoded.records[0].leaf_index, 7);
         assert_eq!(decoded.records[0].slot_generation, 4);

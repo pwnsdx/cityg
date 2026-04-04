@@ -407,15 +407,6 @@ impl CitygApiClient {
                     slot_generation: record.slot_generation,
                 })
                 .collect::<Vec<_>>();
-            let page_leaf_indices = page_records
-                .iter()
-                .map(|record| record.leaf_index)
-                .collect::<Vec<_>>();
-            if !response.leaf_indices.is_empty() && response.leaf_indices != page_leaf_indices {
-                return Err(Error::Parse(
-                    "revoked leaves response leaf_indices mismatch with records".to_string(),
-                ));
-            }
             let global_history_attestation = match history_authority.as_ref() {
                 Some(authority) => {
                     let attestation = parse_global_history_attestation_bytes(

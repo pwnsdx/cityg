@@ -341,8 +341,7 @@ message BarrierResolveRevokedLeavesRequest {
 }
 
 message BarrierResolveRevokedLeavesResponse {
-  reserved 1000 to 1999;
-  repeated uint32 leaf_indices = 1;
+  reserved 1, 1000 to 1999;
   bytes history_view_id = 2;
   optional HistoryCommitment history_commitment = 3;
   uint32 page_offset = 4;
