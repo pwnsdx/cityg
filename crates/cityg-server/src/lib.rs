@@ -1528,24 +1528,24 @@ impl CityGServer {
 
         let mut revoked_all = self.roster.revoked(gid);
         let (
-            author_cover_leaf_index,
+            author_slot_index,
             pending_join_finalize_reclaim,
             current_history_commitment,
             target_lease,
         ) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
-            let author_cover_leaf_index =
+            let author_slot_index =
                 require_pending_or_active_slot_lease(state, author_leaf_id)?.slot_index;
             let pending_join_finalize_reclaim = revoked_leaf_id.is_none()
                 && state
                     .pending_join_finalize_auth
                     .contains_key(author_leaf_id)
-                && has_committed_revoked_cover_leaf_index(state, author_cover_leaf_index);
+                && has_committed_revoked_slot_index(state, author_slot_index);
             let current_history_commitment = ensure_current_history_commitment(gid, state)?;
             let target_leaf = revoked_leaf_id.as_ref().unwrap_or(author_leaf_id);
             let target_lease = require_pending_or_active_slot_lease(state, target_leaf)?;
             (
-                author_cover_leaf_index,
+                author_slot_index,
                 pending_join_finalize_reclaim,
                 current_history_commitment,
                 target_lease,
@@ -1560,7 +1560,7 @@ impl CityGServer {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
             let mut filtered = Vec::with_capacity(revoked_all.len());
             for leaf in revoked_all {
-                if require_revoked_slot_lease(state, &leaf)?.slot_index != author_cover_leaf_index {
+                if require_revoked_slot_lease(state, &leaf)?.slot_index != author_slot_index {
                     filtered.push(leaf);
                 }
             }
@@ -5512,7 +5512,7 @@ fn committed_revoked_cover_leaf_indices(state: &GroupState) -> BTreeSet<u32> {
         .collect()
 }
 
-fn has_committed_revoked_cover_leaf_index(state: &GroupState, slot_index: u32) -> bool {
+fn has_committed_revoked_slot_index(state: &GroupState, slot_index: u32) -> bool {
     committed_revoked_cover_leaf_indices(state).contains(&slot_index)
 }
 
@@ -5812,15 +5812,15 @@ fn rehydrate_replay_join_finalize_auth(
     if matching_leafs.next().is_some() {
         return Ok(());
     }
-    let expected_cover_leaf_index =
+    let expected_slot_index =
         u64::from(require_active_slot_lease(state_before, &author_leaf_id)?.slot_index);
-    if expected_cover_leaf_index != parsed.updater_leaf {
+    if expected_slot_index != parsed.updater_leaf {
         return Ok(());
     }
     if matches!(barrier_update_reason, Some(0))
-        && !has_committed_revoked_cover_leaf_index(
+        && !has_committed_revoked_slot_index(
             state_before,
-            u32::try_from(expected_cover_leaf_index)
+            u32::try_from(expected_slot_index)
                 .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
         )
     {
@@ -6987,20 +6987,18 @@ mod tests {
     fn install_pending_join_finalize_auth(
         state: &mut super::GroupState,
         leaf_id: [u8; 32],
-    ) -> [u8; 32] {
+    ) -> Result<[u8; 32], CityGError> {
         let token = [0xE7; 32];
+        let lease = state.allocate_slot_lease(leaf_id)?;
         state.pending_join_finalize_auth.insert(
             leaf_id,
             super::JoinFinalizeAuthRecord {
                 leaf_id,
-                lease: super::SlotLease {
-                    slot_index: super::cover_leaf_index(&leaf_id, state.n_max),
-                    slot_generation: 0,
-                },
+                lease,
                 token,
             },
         );
-        token
+        Ok(token)
     }
 
     fn install_current_history_commitment_header(
@@ -7590,14 +7588,14 @@ mod tests {
             .iter()
             .map(|record| record.leaf_index)
             .collect();
-        let updater_cover_leaf_index = u32::try_from(ticket.slot_index)
+        let updater_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let reclaims_revoked_slot = generated.join_finalize_auth_token != [0u8; 32]
             && ticket_roots_hash != committed_roots_hash
-            && unresolved_join_leaf_indices.contains(&updater_cover_leaf_index);
+            && unresolved_join_leaf_indices.contains(&updater_slot_index);
         let barrier_update_reason = if reclaims_revoked_slot {
             0u64
-        } else if unresolved_join_leaf_indices.contains(&updater_cover_leaf_index) {
+        } else if unresolved_join_leaf_indices.contains(&updater_slot_index) {
             2u64
         } else {
             1u64
@@ -7607,18 +7605,17 @@ mod tests {
         let mut witness_revoked_records = committed_revoked.records.clone();
         if barrier_update_reason == 0 {
             if reclaims_revoked_slot {
-                witness_revoked_leaf_indices
-                    .retain(|leaf_index| *leaf_index != updater_cover_leaf_index);
+                witness_revoked_leaf_indices.retain(|leaf_index| *leaf_index != updater_slot_index);
                 witness_revoked_records.retain(|record| {
-                    record.leaf_index != updater_cover_leaf_index
+                    record.leaf_index != updater_slot_index
                         || record.slot_generation != ticket.slot_generation
                 });
             } else if let Err(insert_at) =
-                witness_revoked_leaf_indices.binary_search(&updater_cover_leaf_index)
+                witness_revoked_leaf_indices.binary_search(&updater_slot_index)
             {
-                witness_revoked_leaf_indices.insert(insert_at, updater_cover_leaf_index);
+                witness_revoked_leaf_indices.insert(insert_at, updater_slot_index);
                 let updater_record = BarrierRevokedLeafRecord {
-                    leaf_index: updater_cover_leaf_index,
+                    leaf_index: updater_slot_index,
                     slot_generation: ticket.slot_generation,
                 };
                 if let Err(record_insert_at) = witness_revoked_records.binary_search_by_key(
@@ -7856,14 +7853,14 @@ mod tests {
             .pk_entries;
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
-        let revoked_cover_leaf_index = u32::try_from(ticket.slot_index)
+        let revoked_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
-        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
-            post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
+        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_slot_index) {
+            post_revoked_leaf_indices.insert(insert_at, revoked_slot_index);
             let revoked_record = BarrierRevokedLeafRecord {
-                leaf_index: revoked_cover_leaf_index,
+                leaf_index: revoked_slot_index,
                 slot_generation: ticket.slot_generation,
             };
             if let Err(record_insert_at) = post_revoked_records.binary_search_by_key(
@@ -8088,14 +8085,14 @@ mod tests {
             .pk_entries;
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
-        let revoked_cover_leaf_index = u32::try_from(ticket.slot_index)
+        let revoked_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_leaf_indices = committed_revoked.leaf_indices();
         let mut post_revoked_records = committed_revoked.records.clone();
-        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
-            post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
+        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_slot_index) {
+            post_revoked_leaf_indices.insert(insert_at, revoked_slot_index);
             let revoked_record = BarrierRevokedLeafRecord {
-                leaf_index: revoked_cover_leaf_index,
+                leaf_index: revoked_slot_index,
                 slot_generation: ticket.slot_generation,
             };
             if let Err(record_insert_at) = post_revoked_records.binary_search_by_key(
@@ -9077,12 +9074,14 @@ mod tests {
         let pop_pk = vec![0xA7; 32];
         let join_finalize_auth_token = [0xE7; 32];
         state.leaf_device_pk.insert(leaf, pop_pk.clone());
+        let updater_lease = state.allocate_slot_lease(leaf)?;
+        state.activate_slot_lease(leaf, updater_lease)?;
         let join_ek = vec![0xA5; 1184];
         let delta = cityg_client::MembershipDelta {
             joined: vec![leaf],
             revoked: Vec::new(),
         };
-        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
+        let updater_leaf = updater_lease.slot_index;
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
@@ -9183,6 +9182,7 @@ mod tests {
                 ))?;
         assert_eq!(record.token, join_finalize_auth_token);
         assert_eq!(record.lease.slot_index, updater_leaf);
+        assert_eq!(record.lease.slot_generation, updater_lease.slot_generation);
         assert!(
             super::validate_barrier_update_against_roster(&state, &header, &delta)?.is_some(),
             "rehydrated replay state must validate the historical reason-2 merge"

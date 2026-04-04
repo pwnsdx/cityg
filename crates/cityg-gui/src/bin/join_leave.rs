@@ -792,7 +792,7 @@ async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> R
     prepare_join_session_with_identity(server_url, room_id, alias, identity).await
 }
 
-fn is_cover_leaf_index_collision_error(err: &anyhow::Error) -> bool {
+fn is_slot_index_collision_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
             .to_string()
@@ -806,13 +806,13 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         let session = match prepare_join_session(server_url, room_id, alias).await {
             Ok(session) => session,
             Err(err)
-                if is_cover_leaf_index_collision_error(&err)
+                if is_slot_index_collision_error(&err)
                     && retry_attempt < JOIN_IDENTITY_RETRY_MAX_ATTEMPTS =>
             {
                 retry_attempt = retry_attempt.saturating_add(1);
                 warn!(
                     attempt = retry_attempt,
-                    "join identity collided on cover leaf index; regenerating identity"
+                    "join identity collided on slot index; regenerating identity"
                 );
                 continue;
             }
@@ -821,13 +821,13 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         match perform_join_finalize(session).await {
             Ok(session) => return Ok(session),
             Err(err)
-                if is_cover_leaf_index_collision_error(&err)
+                if is_slot_index_collision_error(&err)
                     && retry_attempt < JOIN_IDENTITY_RETRY_MAX_ATTEMPTS =>
             {
                 retry_attempt = retry_attempt.saturating_add(1);
                 warn!(
                     attempt = retry_attempt,
-                    "join finalize collided on cover leaf index; regenerating identity"
+                    "join finalize collided on slot index; regenerating identity"
                 );
             }
             Err(err) => return Err(err),
@@ -2732,13 +2732,13 @@ mod tests {
     #[test]
     fn join_collision_classifier_detects_nested_cover_leaf_errors() {
         let err = anyhow!("server error (500): invalid input: cover leaf index already allocated");
-        assert!(is_cover_leaf_index_collision_error(&err));
+        assert!(is_slot_index_collision_error(&err));
 
         let wrapped = err.context("server rejected join bundle");
-        assert!(is_cover_leaf_index_collision_error(&wrapped));
+        assert!(is_slot_index_collision_error(&wrapped));
 
         let unrelated = anyhow!("server error (500): invalid input: kbroad key missing");
-        assert!(!is_cover_leaf_index_collision_error(&unrelated));
+        assert!(!is_slot_index_collision_error(&unrelated));
     }
 
     #[test]

@@ -12,7 +12,7 @@ fn validate_barrier_update_accepts_expected_pairs_and_pkhash_binding() -> Result
     let leaf = cityg_client::demo::demo_member_leaf("barrier-expected-pairs");
     let pop_pk = vec![0xAB; 32];
     state.leaf_device_pk.insert(leaf, pop_pk.clone());
-    let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
+    let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf)?;
     let join_ek = vec![0xA5; 1184];
     let delta = cityg_client::MembershipDelta {
         joined: vec![leaf],
@@ -122,7 +122,7 @@ fn validate_barrier_update_rejects_pcs_refresh_reason_for_unresolved_joiner()
     let leaf = cityg_client::demo::demo_member_leaf("barrier-join-finalize-must-use-reason2");
     let pop_pk = vec![0xAC; 32];
     state.leaf_device_pk.insert(leaf, pop_pk.clone());
-    let _join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
+    let _join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf)?;
     let join_ek = vec![0xA5; 1184];
     let delta = cityg_client::MembershipDelta {
         joined: vec![leaf],
@@ -335,7 +335,7 @@ fn validate_barrier_update_rejects_target_pkhash_mismatch() -> Result<(), CityGE
     let leaf = cityg_client::demo::demo_member_leaf("barrier-target-pkhash-mismatch");
     let pop_pk = vec![0xAD; 32];
     state.leaf_device_pk.insert(leaf, pop_pk.clone());
-    let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
+    let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf)?;
     let join_ek = vec![0xA5; 1184];
     let delta = cityg_client::MembershipDelta {
         joined: vec![leaf],
@@ -443,7 +443,7 @@ fn validate_barrier_update_rejects_expected_pairs_mismatch() -> Result<(), CityG
     let leaf = cityg_client::demo::demo_member_leaf("barrier-pairs-mismatch");
     let pop_pk = vec![0xBC; 32];
     state.leaf_device_pk.insert(leaf, pop_pk.clone());
-    let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
+    let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf)?;
     let join_ek = vec![0xA5; 1184];
     let delta = cityg_client::MembershipDelta {
         joined: vec![leaf],

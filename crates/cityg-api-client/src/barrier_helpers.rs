@@ -136,7 +136,7 @@ impl CitygApiClient {
         )
         .map_err(|err| Error::Parse(err.to_string()))?;
 
-        let reclaims_cover_leaf_index = barrier_update_reason == 0
+        let reclaims_slot_index = barrier_update_reason == 0
             && header.contains_key(&msphf_orchestrator::hdr::HDR_JOIN_FINALIZE_AUTH);
         let updater_slot_lease = CoreBarrierSlotLease {
             slot_index: slot_lease.slot_index,
@@ -150,7 +150,7 @@ impl CitygApiClient {
             revoked_records_core.as_slice(),
             ticket_fields.revocation_roots_hash,
             ticket_fields.committed_revocation_roots_hash,
-            !reclaims_cover_leaf_index,
+            !reclaims_slot_index,
         )
         .map_err(|err| Error::Parse(err.to_string()))?;
         let ticket_history_commitment_core = to_core_history_commitment(ticket_history_commitment);
@@ -218,7 +218,7 @@ impl CitygApiClient {
                     join_resolution.records.as_slice(),
                     &witness_selection.witness_revocation_roots_hash,
                     revoked_resolution.records.as_slice(),
-                    !reclaims_cover_leaf_index,
+                    !reclaims_slot_index,
                     deployment_profile_manifest_bytes,
                 )
                 .await?;

@@ -74,7 +74,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Update bootstrap/join-finalize state to persist versioned revoked records
 - [x] Drop duplicated bootstrap/current revoked leaf-index caches where versioned records are already present
 - [~] Update barrier recovery to compare full leases
-- [ ] Update tests and fixtures
+- [~] Update tests and fixtures
 
 ### 7. KAT and conformance
 
