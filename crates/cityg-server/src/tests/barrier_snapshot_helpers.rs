@@ -6,7 +6,7 @@ fn resolve_joins_since_reports_join_metadata() -> Result<(), CityGError> {
     let bundle = cityg_client::demo::demo_bundle("alice")?;
     server.accept_epoch(&bundle)?;
 
-    let records = server.resolve_joins_since(&cityg_client::demo::DEMO_GID, 0)?;
+    let records = server.resolve_join_occupancies_since(&cityg_client::demo::DEMO_GID, 0)?;
     assert!(
         !records.records.is_empty(),
         "expected at least one join record"
@@ -73,7 +73,7 @@ fn resolve_joins_since_filters_post_genesis_join_history() -> Result<(), CityGEr
         },
     ];
 
-    let records = server.resolve_joins_since(&gid, 1)?;
+    let records = server.resolve_join_occupancies_since(&gid, 1)?;
     assert_eq!(records.records.len(), 3);
     assert_eq!(records.records[0].leaf_index, 8);
     assert_eq!(records.records[0].device_pk, vec![0x12; 4]);
@@ -127,7 +127,7 @@ fn resolve_joins_since_prunes_resolved_and_revoked_join_history() -> Result<(), 
         },
     ];
 
-    let records = server.resolve_joins_since(&gid, 1)?;
+    let records = server.resolve_join_occupancies_since(&gid, 1)?;
     assert_eq!(records.records.len(), 1);
     assert_eq!(records.records[0].leaf_index, 11);
     assert_eq!(records.records[0].device_pk, vec![0x15; 4]);
@@ -183,7 +183,7 @@ fn resolve_joins_since_keeps_latest_generation_for_reused_slot() -> Result<(), C
         },
     ];
 
-    let records = server.resolve_joins_since(&gid, 3)?;
+    let records = server.resolve_join_occupancies_since(&gid, 3)?;
     assert_eq!(records.records.len(), 1);
     assert_eq!(records.records[0].leaf_index, 1);
     assert_eq!(records.records[0].slot_generation, 1);
@@ -220,7 +220,7 @@ fn resolve_joins_since_rejects_duplicate_active_cover_allocations() -> Result<()
     state.latest_root = Some(root);
 
     let err = server
-        .resolve_joins_since(&gid, 0)
+        .resolve_join_occupancies_since(&gid, 0)
         .expect_err("duplicate active cover allocations must fail closed");
     assert!(matches!(
         err,
@@ -239,7 +239,7 @@ fn resolve_joins_since_genesis_without_snapshot_rejects_missing_artifact() -> Re
         .groups
         .insert(gid.to_vec(), crate::GroupState::default());
     let err = server
-        .resolve_joins_since(&gid, 0)
+        .resolve_join_occupancies_since(&gid, 0)
         .expect_err("missing genesis provisioning artifact must fail closed");
     assert!(matches!(
         err,
@@ -665,7 +665,7 @@ fn barrier_helpers_report_missing_group_state() {
         Err(CityGError::InvalidInput("group not found"))
     ));
     assert!(matches!(
-        server.resolve_joins_since(&gid, 0),
+        server.resolve_join_occupancies_since(&gid, 0),
         Err(CityGError::InvalidInput("group not found"))
     ));
     assert!(matches!(

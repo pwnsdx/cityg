@@ -1008,7 +1008,7 @@ pub fn prepare_full_verification_witness(
     }
 
     let resolved_joins = server
-        .resolve_joins_since(gid, request.joins_prev_barrier_version)
+        .resolve_join_occupancies_since(gid, request.joins_prev_barrier_version)
         .map_err(RoomFullVerificationWitnessPreparationError::HelperClient)?;
     if resolved_joins.history_commitment != bundle.current_history_commitment
         || request.join_records != resolved_joins.records
@@ -1282,7 +1282,7 @@ pub fn prepare_resolved_join_occupancies(
     max_page_entries: u32,
     profile_version: &str,
 ) -> Result<PreparedResolvedJoinOccupancies, RoomBarrierHelperPreparationError> {
-    let resolved = server.resolve_joins_since(gid, prev_barrier_version)?;
+    let resolved = server.resolve_join_occupancies_since(gid, prev_barrier_version)?;
     let page = paginate_barrier_helper_slice(
         resolved.records.as_slice(),
         page_offset,

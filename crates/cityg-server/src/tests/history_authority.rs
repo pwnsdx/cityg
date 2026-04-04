@@ -133,8 +133,8 @@ fn full_verification_witness_rejects_barrier_update_hash_mismatch() -> Result<()
 
     let ticket =
         server.build_merge_ticket_for_refresh(&cityg_client::demo::DEMO_GID, &generated.leaf_id)?;
-    let join_records =
-        server.resolve_joins_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
+    let join_records = server
+        .resolve_join_occupancies_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
     let committed_roots_hash = super::super::compute_revocation_roots_hash(
         &ticket.revoked_since_root,
         &ticket.revoked_root,
@@ -213,8 +213,8 @@ fn full_verification_witness_rejects_updater_slot_generation_mismatch() -> Resul
 
     let ticket =
         server.build_merge_ticket_for_refresh(&cityg_client::demo::DEMO_GID, &generated.leaf_id)?;
-    let join_records =
-        server.resolve_joins_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
+    let join_records = server
+        .resolve_join_occupancies_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
     let committed_roots_hash = super::super::compute_revocation_roots_hash(
         &ticket.revoked_since_root,
         &ticket.revoked_root,
@@ -363,8 +363,8 @@ fn accept_epoch_rejects_barrier_update_witness_slot_generation_mismatch_under_gl
         build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
     let ticket =
         server.build_merge_ticket_for_refresh(&cityg_client::demo::DEMO_GID, &generated.leaf_id)?;
-    let join_records =
-        server.resolve_joins_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
+    let join_records = server
+        .resolve_join_occupancies_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
     let committed_roots_hash = super::super::compute_revocation_roots_hash(
         &ticket.revoked_since_root,
         &ticket.revoked_root,

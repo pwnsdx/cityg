@@ -1334,7 +1334,8 @@ impl CityGServer {
             let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
             let resolved_revoked = self.resolve_revoked_occupancies(gid, &revocation_roots_hash)?;
             (
-                self.resolve_joins_since(gid, prev_barrier_version)?.records,
+                self.resolve_join_occupancies_since(gid, prev_barrier_version)?
+                    .records,
                 resolved_revoked.records,
             )
         } else {
@@ -2966,11 +2967,11 @@ impl CityGServer {
         self.resolve_revoked_occupancies(gid, revocation_roots_hash)
     }
 
-    pub fn resolve_joins_since(
+    pub fn resolve_join_occupancies_since(
         &mut self,
         gid: &[u8; 32],
         prev_barrier_version: u64,
-    ) -> Result<ResolvedJoins, CityGError> {
+    ) -> Result<ResolvedJoinOccupancies, CityGError> {
         let state = self
             .roster
             .groups
@@ -3012,7 +3013,7 @@ impl CityGServer {
                     DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
                 )?;
             }
-            return Ok(ResolvedJoins {
+            return Ok(ResolvedJoinOccupancies {
                 history_view_id: history_commitment.history_view_id,
                 history_commitment,
                 records: by_leaf.into_values().collect(),
@@ -3035,11 +3036,19 @@ impl CityGServer {
                 )?;
             }
         }
-        Ok(ResolvedJoins {
+        Ok(ResolvedJoinOccupancies {
             history_view_id: history_commitment.history_view_id,
             history_commitment,
             records: by_leaf.into_values().collect(),
         })
+    }
+
+    pub fn resolve_joins_since(
+        &mut self,
+        gid: &[u8; 32],
+        prev_barrier_version: u64,
+    ) -> Result<ResolvedJoins, CityGError> {
+        self.resolve_join_occupancies_since(gid, prev_barrier_version)
     }
 
     pub fn fetch_barrier_public_tree(
@@ -7624,7 +7633,7 @@ mod tests {
         let mut snapshot_pre = server
             .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
             .pk_entries;
-        let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
+        let join_records = server.resolve_join_occupancies_since(&gid, ticket.barrier_version)?;
         let unresolved_join_leaf_indices: BTreeSet<u32> = join_records
             .records
             .iter()
@@ -7888,7 +7897,7 @@ mod tests {
         let mut snapshot_pre = server
             .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
             .pk_entries;
-        let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
+        let join_records = server.resolve_join_occupancies_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_occupancies(&gid, &committed_roots_hash)?;
         let revoked_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
@@ -8118,7 +8127,7 @@ mod tests {
         let mut snapshot_pre = server
             .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
             .pk_entries;
-        let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
+        let join_records = server.resolve_join_occupancies_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_occupancies(&gid, &committed_roots_hash)?;
         let revoked_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
@@ -9734,7 +9743,7 @@ mod tests {
 
         let mut reloaded = demo_server_with_journal(&journal_path);
         let err = reloaded
-            .resolve_joins_since(&cityg_client::demo::DEMO_GID, 0)
+            .resolve_join_occupancies_since(&cityg_client::demo::DEMO_GID, 0)
             .expect_err("restart without membership artifact must fail closed");
         assert!(matches!(
             err,
