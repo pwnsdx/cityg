@@ -61,7 +61,8 @@ pub(crate) struct FullVerificationWitnessWire {
     #[serde(with = "serde_bytes")]
     pub(crate) author_leaf_id: Vec<u8>,
     pub(crate) barrier_update_reason: u64,
-    pub(crate) updater_leaf: u64,
+    #[serde(rename = "updater_leaf")]
+    pub(crate) updater_slot_index: u64,
     pub(crate) updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     pub(crate) barrier_update_digest: Vec<u8>,
@@ -387,7 +388,8 @@ pub(crate) struct FullVerificationWitnessSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     pub(crate) author_leaf_id: &'a [u8; 32],
     pub(crate) barrier_update_reason: u64,
-    pub(crate) updater_leaf: u64,
+    #[serde(rename = "updater_leaf")]
+    pub(crate) updater_slot_index: u64,
     pub(crate) updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
     pub(crate) barrier_update_digest: &'a [u8; 32],
@@ -649,7 +651,7 @@ pub(crate) fn verify_full_verification_witness(
         author_leaf_id: array32(&witness.author_leaf_id)?,
         barrier_update_reason: witness.barrier_update_reason,
         updater_slot_lease: SlotLease {
-            slot_index: witness.updater_leaf,
+            slot_index: witness.updater_slot_index,
             slot_generation: witness.updater_slot_generation,
         },
         barrier_update_digest: array32(&witness.barrier_update_digest)?,
@@ -713,7 +715,7 @@ pub(crate) fn verify_full_verification_witness(
         kem_tree_hash_after,
         author_leaf_id,
         barrier_update_reason,
-        updater_leaf: updater_slot_lease.slot_index,
+        updater_slot_index: updater_slot_lease.slot_index,
         updater_slot_generation: updater_slot_lease.slot_generation,
         barrier_update_digest: &expected_barrier_update_digest,
         joins_digest: &expected_joins_digest,
