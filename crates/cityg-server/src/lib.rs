@@ -1927,10 +1927,9 @@ impl CityGServer {
                     .get(leaf)
                     .map(|record| record.lease)
                     .or_else(|| state.leaf_slot_leases.get(leaf).copied())
-                    .unwrap_or(SlotLease {
-                        slot_index: cover_leaf_index(leaf, state.n_max),
-                        slot_generation: 0,
-                    });
+                    .ok_or(CityGError::InvalidInput(
+                        "missing slot lease for joined leaf",
+                    ))?;
                 state.activate_slot_lease(*leaf, lease)?;
                 let device_pk = maybe_device_pk.clone().unwrap_or_else(|| leaf.to_vec());
                 let ek_leaf =
@@ -1953,10 +1952,12 @@ impl CityGServer {
                 }
             }
             for leaf in &delta.revoked {
-                let released_lease = state.release_slot_lease(leaf).unwrap_or(SlotLease {
-                    slot_index: active_cover_leaf_index(state, leaf),
-                    slot_generation: 0,
-                });
+                let released_lease =
+                    state
+                        .release_slot_lease(leaf)
+                        .ok_or(CityGError::InvalidInput(
+                            "missing slot lease for revoked leaf",
+                        ))?;
                 state.leaf_device_pk.remove(leaf);
                 state.leaf_barrier_public.remove(leaf);
                 state.pending_join_finalize_auth.remove(leaf);
@@ -8643,6 +8644,62 @@ mod tests {
             committed_revoked.leaf_indices().is_empty(),
             "reclaimed slot must no longer appear in the committed revoked helper set"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn accept_epoch_rejects_join_without_pending_slot_lease() -> Result<(), CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let mut server = super::demo::demo_server();
+        let alice = build_genesis_member_bundle(0x77)?;
+        server.accept_epoch(&alice.bundle)?;
+
+        let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x78, false)?;
+        server
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput(
+                "missing roster state before join validation",
+            ))?
+            .pending_join_finalize_auth
+            .remove(&bob.leaf_id);
+
+        let err = server
+            .accept_epoch(&bob.bundle)
+            .expect_err("join without pending slot lease must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("missing slot lease for joined leaf")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn accept_epoch_rejects_revoke_without_active_slot_lease() -> Result<(), CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let mut server = super::demo::demo_server();
+        let alice = build_genesis_member_bundle(0x79)?;
+        server.accept_epoch(&alice.bundle)?;
+
+        let leave_bundle = build_leave_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+        server
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput(
+                "missing roster state before leave validation",
+            ))?
+            .leaf_slot_leases
+            .remove(&alice.leaf_id);
+
+        let err = server
+            .accept_epoch(&leave_bundle)
+            .expect_err("revoke without active slot lease must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("missing slot lease for revoked leaf")
+        ));
         Ok(())
     }
 

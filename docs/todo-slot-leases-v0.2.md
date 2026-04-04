@@ -55,6 +55,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Rename internal server/runtime ticket bundle fields from `cover_leaf_index` to `slot_index`
 - [x] Align migrated ticket/runtime error terminology from `cover_leaf_index` to `slot_index`
 - [x] Rename join/merge provisioning artifact CBOR fields from `cover_leaf_index` to `slot_index` and bump artifact labels to `v2`
+- [x] Require explicit slot leases in the live server join/revoke delta path instead of deriving them from `leaf_id`
 - [~] Replace `current_join_records` and `current_revoked_leaf_indices`
 - [x] Remove `current_revoked_leaf_indices` from `JoinTicketResponse` and join provisioning artifacts
 - [x] Remove `leaf_indices` from `BarrierResolveRevokedLeavesResponse`
