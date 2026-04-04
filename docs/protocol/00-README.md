@@ -47,12 +47,13 @@ specification and reference implementation.
 13. **[13-testing-guide.md](13-testing-guide.md)** - Test coverage and known-answer tests (KATs)
 14. **[14-deployment-guide.md](14-deployment-guide.md)** - Deployment considerations for experimental/research use
 15. **[20-protocol-checklist.md](20-protocol-checklist.md)** - Protocol guarantee checklist and E2E coverage map
+16. **[21-slot-leases-v0.2.md](21-slot-leases-v0.2.md)** - `v0.2` reusable barrier slot model and `SlotLease` semantics
 
 ### Reference Materials
 
-16. **[15-label-registry.md](15-label-registry.md)** - All domain-separation labels and constants
-17. **[16-comparison-mls.md](16-comparison-mls.md)** - How City-G differs from MLS
-18. **[17-faq.md](17-faq.md)** - Frequently asked questions
+17. **[15-label-registry.md](15-label-registry.md)** - All domain-separation labels and constants
+18. **[16-comparison-mls.md](16-comparison-mls.md)** - How City-G differs from MLS
+19. **[17-faq.md](17-faq.md)** - Frequently asked questions
 
 ---
 
@@ -61,6 +62,8 @@ specification and reference implementation.
 ### If you need the protocol rules
 - Start with [`../specs.md`](../specs.md).
 - Use this directory only for explanation, walkthroughs, and cross-references.
+- For the reusable-slot `v0.2` direction, also review
+  [21-slot-leases-v0.2.md](21-slot-leases-v0.2.md).
 
 ### If you need the current implementation map
 - Start with [11-implementation-guide.md](11-implementation-guide.md).
