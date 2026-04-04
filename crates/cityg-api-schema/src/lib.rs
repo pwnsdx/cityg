@@ -110,6 +110,7 @@ pub fn encode_prepared_join_ticket_response(
         barrier_version: ticket.barrier_version,
         profile_version: API_PROFILE_VERSION.to_string(),
         cover_leaf_index: ticket.cover_leaf_index,
+        slot_generation: ticket.slot_generation,
         kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
         n_max: ticket.n_max,
         max_barrier_update_bytes: ticket.max_barrier_update_bytes,
@@ -208,6 +209,7 @@ pub fn encode_prepared_merge_ticket_response(prepared: PreparedMergeTicket) -> V
         barrier_version: bundle.barrier_version,
         profile_version: API_PROFILE_VERSION.to_string(),
         cover_leaf_index: bundle.cover_leaf_index,
+        slot_generation: bundle.slot_generation,
         kem_tree_hash_after: bundle.kem_tree_hash_after.to_vec(),
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
@@ -2786,8 +2788,8 @@ mod tests {
             prev_history_commitment_id: [0x13; 32],
             history_seq: 14,
         };
-        let encoded = encode_prepared_resolved_revoked_leaves_response(
-            PreparedResolvedRevokedLeaves {
+        let encoded =
+            encode_prepared_resolved_revoked_leaves_response(PreparedResolvedRevokedLeaves {
                 resolved: cityg_server::ResolvedRevokedLeaves {
                     history_view_id: [0x11; 32],
                     history_commitment,
@@ -2828,8 +2830,7 @@ mod tests {
                     },
                     deployment_profile_manifest: vec![0x43],
                 },
-            },
-        );
+            });
         let decoded = pb::BarrierResolveRevokedLeavesResponse::decode(encoded.as_slice())
             .expect("decode revoked helper response");
 

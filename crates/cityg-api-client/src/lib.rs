@@ -916,6 +916,7 @@ pub struct MergeTicket {
     pub kbroad_generation: u64,
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
+    pub slot_generation: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_history_commitment: HistoryCommitment,
     pub history_authority_extension: Option<HistoryAuthorityExtension>,
@@ -934,6 +935,7 @@ pub struct PreparedRuntimeMergeTicket {
     pub snapshot_hash: [u8; 32],
     pub barrier_n_max: u64,
     pub cover_leaf_index: u64,
+    pub slot_generation: u64,
     pub max_barrier_update_bytes: u64,
     pub max_barrier_update_bytes_normalized: usize,
     pub parities: Vec<PivotParity>,
@@ -971,6 +973,7 @@ pub struct PreparedRuntimeJoinTicket {
     pub join_finalize_auth_token: [u8; 32],
     pub barrier_n_max: u64,
     pub cover_leaf_index: u64,
+    pub slot_generation: u64,
     pub max_barrier_update_bytes: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_predecessor_kem_tree_hash_after: [u8; 32],
@@ -1035,6 +1038,7 @@ pub struct PreparedEpochSyncMergeTicket {
     pub snapshot_hash: [u8; 32],
     pub barrier_n_max: u64,
     pub cover_leaf_index: u64,
+    pub slot_generation: u64,
     pub max_barrier_update_bytes: u64,
     pub max_barrier_update_bytes_normalized: usize,
     pub parities: Vec<PivotParity>,
@@ -1065,6 +1069,7 @@ pub struct PrepareOriginMergeTicketInput<'a> {
 pub struct PreparedOriginMergeTicket {
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
+    pub slot_generation: u64,
     pub snapshot_hash: [u8; 32],
     pub barrier_n_max: u64,
     pub max_barrier_update_bytes: u64,
@@ -1112,6 +1117,7 @@ pub struct PrepareRevocationMergeTicketInput<'a> {
 pub struct PreparedRevocationMergeTicket {
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
+    pub slot_generation: u64,
     pub snapshot_hash: [u8; 32],
     pub barrier_n_max: u64,
     pub max_barrier_update_bytes: u64,
@@ -1349,6 +1355,7 @@ impl MergeTicket {
             snapshot_hash: self.kem_tree_hash_after,
             barrier_n_max: self.n_max,
             cover_leaf_index: self.cover_leaf_index,
+            slot_generation: self.slot_generation,
             max_barrier_update_bytes: ticket_max_barrier_update_bytes,
             max_barrier_update_bytes_normalized,
             parities: hydrate_parities(&self.parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit),
@@ -1414,6 +1421,7 @@ impl MergeTicket {
         Ok(PreparedOriginMergeTicket {
             barrier_version: self.barrier_version,
             cover_leaf_index: self.cover_leaf_index,
+            slot_generation: self.slot_generation,
             snapshot_hash: prepared_runtime.snapshot_hash,
             barrier_n_max: prepared_runtime.barrier_n_max,
             max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
@@ -1486,6 +1494,7 @@ impl MergeTicket {
             snapshot_hash: prepared_runtime.snapshot_hash,
             barrier_n_max: prepared_runtime.barrier_n_max,
             cover_leaf_index: prepared_runtime.cover_leaf_index,
+            slot_generation: prepared_runtime.slot_generation,
             max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
             max_barrier_update_bytes_normalized: prepared_runtime
                 .max_barrier_update_bytes_normalized,
@@ -1558,6 +1567,7 @@ impl MergeTicket {
         Ok(PreparedRevocationMergeTicket {
             barrier_version: self.barrier_version,
             cover_leaf_index: self.cover_leaf_index,
+            slot_generation: self.slot_generation,
             snapshot_hash: prepared_runtime.snapshot_hash,
             barrier_n_max: prepared_runtime.barrier_n_max,
             max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
@@ -1940,6 +1950,7 @@ mod tests {
             history_seq: history_commitment.history_seq,
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
+            slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
             kem_tree_hash_after: &kem_tree_hash_after,
@@ -1989,6 +2000,7 @@ mod tests {
             history_seq: current_history_commitment.history_seq,
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
+            slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
             kem_tree_hash_after: response.kem_tree_hash_after.clone(),
@@ -2127,6 +2139,7 @@ mod tests {
             history_seq: history_commitment.history_seq,
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
+            slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
             kem_tree_hash_after: &kem_tree_hash_after,
@@ -2178,6 +2191,7 @@ mod tests {
             history_seq: current_history_commitment.history_seq,
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
+            slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
             kem_tree_hash_after: response.kem_tree_hash_after.clone(),
@@ -2336,6 +2350,7 @@ mod tests {
             barrier_version: 0,
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
             cover_leaf_index: 0,
+            slot_generation: 0,
             kem_tree_hash_after: vec![0x09; 32],
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
@@ -2415,6 +2430,7 @@ mod tests {
             provisioning_issued_at_ms: 1,
             provisioning_expires_at_ms: u64::MAX,
             cover_leaf_index: 0,
+            slot_generation: 0,
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
             kem_tree_hash_after: vec![0xCC; 32],
@@ -2571,7 +2587,10 @@ mod tests {
                     },
                 );
                 encode_proto(BarrierResolveRevokedLeavesResponse {
-                    leaf_indices: page_records.iter().map(|record| record.leaf_index).collect(),
+                    leaf_indices: page_records
+                        .iter()
+                        .map(|record| record.leaf_index)
+                        .collect(),
                     records: page_records,
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
@@ -3222,6 +3241,7 @@ mod tests {
             kbroad_generation: 3,
             barrier_version: 9,
             cover_leaf_index: 1,
+            slot_generation: 0,
             kem_tree_hash_after: [0x0F; 32],
             current_history_commitment: HistoryCommitment {
                 history_view_id: [0x90; 32],
@@ -3486,6 +3506,7 @@ mod tests {
         assert_eq!(prepared.fs_policy_version, "7");
         assert_eq!(prepared.barrier_n_max, 1024);
         assert_eq!(prepared.cover_leaf_index, 0);
+        assert_eq!(prepared.slot_generation, 0);
         assert_eq!(prepared.max_barrier_update_bytes, 1_048_576);
         assert_eq!(prepared.witness_bytes, None);
         assert_eq!(
@@ -3716,13 +3737,16 @@ mod tests {
         let _ = client
             .search_members(&gid, "alice", Some(&[0x55; 32]), Some(0), Some(10))
             .await?;
-        let _ = client.join_ticket("room-1", "alice", None).await?;
+        let join = client.join_ticket("room-1", "alice", None).await?;
+        assert_eq!(join.cover_leaf_index, 0);
+        assert_eq!(join.slot_generation, 0);
 
         let merge = client.merge_ticket("room-1", &[0x01; 32]).await?;
         assert_eq!(merge.we_epoch_id, [0x01; 32]);
         assert_eq!(merge.parent_root, [0x03; 32]);
         assert_eq!(merge.kbroad_generation, 0);
         assert_eq!(merge.cover_leaf_index, 0);
+        assert_eq!(merge.slot_generation, 0);
         assert_eq!(merge.kem_tree_hash_after, [0x09; 32]);
         assert_eq!(
             merge.current_history_commitment.history_commitment_id,

@@ -439,6 +439,7 @@ pub fn prepare_runtime_join_ticket(
         join_finalize_auth_token,
         barrier_n_max,
         cover_leaf_index: response.cover_leaf_index,
+        slot_generation: response.slot_generation,
         max_barrier_update_bytes,
         kem_tree_hash_after,
         current_predecessor_kem_tree_hash_after,

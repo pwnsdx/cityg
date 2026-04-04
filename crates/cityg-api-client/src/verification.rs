@@ -10,14 +10,14 @@ use pqcrypto_dilithium::dilithium5;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BarrierJoinRecord, BarrierRevokedLeafRecord, EXPECTED_MSPHF_CRS_ID,
-    EXPECTED_MSPHF_PARAMS_ID, EXPECTED_PROFILE_VERSION, EXPECTED_PROOF_MODE, EXPECTED_VRF_ID,
-    Error, FsForwardLeapPolicy, FullVerificationWitness,
-    GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND, GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
-    GlobalHistoryAttestation, HELPER_KIND_FETCH_PUBLIC_TREE, HELPER_KIND_JOINS_SINCE,
-    HELPER_KIND_REVOKED_LEAVES, HelperCompletenessAttestation, HistoryAuthorityDescriptor,
-    HistoryAuthorityExtension, HistoryCommitment, LOCAL_HISTORY_ATTESTATION_FINALITY_KIND,
-    LOCAL_HISTORY_AUTHORITY_EXTENSION_ID, MAX_BARRIER_N_MAX, MergeAcceptanceStatus,
+    BarrierJoinRecord, BarrierRevokedLeafRecord, EXPECTED_MSPHF_CRS_ID, EXPECTED_MSPHF_PARAMS_ID,
+    EXPECTED_PROFILE_VERSION, EXPECTED_PROOF_MODE, EXPECTED_VRF_ID, Error, FsForwardLeapPolicy,
+    FullVerificationWitness, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
+    GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, GlobalHistoryAttestation, HELPER_KIND_FETCH_PUBLIC_TREE,
+    HELPER_KIND_JOINS_SINCE, HELPER_KIND_REVOKED_LEAVES, HelperCompletenessAttestation,
+    HistoryAuthorityDescriptor, HistoryAuthorityExtension, HistoryCommitment,
+    LOCAL_HISTORY_ATTESTATION_FINALITY_KIND, LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
+    MAX_BARRIER_N_MAX, MergeAcceptanceStatus,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +93,7 @@ pub(crate) struct JoinProvisioningArtifactWire {
     pub(crate) history_seq: u64,
     pub(crate) barrier_version: u64,
     pub(crate) cover_leaf_index: u64,
+    pub(crate) slot_generation: u64,
     pub(crate) n_max: u64,
     pub(crate) max_barrier_update_bytes: u64,
     #[serde(with = "serde_bytes")]
@@ -134,6 +135,7 @@ pub(crate) struct MergeTicketArtifactWire {
     pub(crate) history_seq: u64,
     pub(crate) barrier_version: u64,
     pub(crate) cover_leaf_index: u64,
+    pub(crate) slot_generation: u64,
     pub(crate) n_max: u64,
     pub(crate) max_barrier_update_bytes: u64,
     #[serde(with = "serde_bytes")]
@@ -244,6 +246,7 @@ pub(crate) struct JoinProvisioningArtifactSignedPayload<'a> {
     pub(crate) history_seq: u64,
     pub(crate) barrier_version: u64,
     pub(crate) cover_leaf_index: u64,
+    pub(crate) slot_generation: u64,
     pub(crate) n_max: u64,
     pub(crate) max_barrier_update_bytes: u64,
     #[serde(with = "serde_bytes")]
@@ -299,6 +302,7 @@ pub(crate) struct MergeTicketArtifactSignedPayload<'a> {
     pub(crate) history_seq: u64,
     pub(crate) barrier_version: u64,
     pub(crate) cover_leaf_index: u64,
+    pub(crate) slot_generation: u64,
     pub(crate) n_max: u64,
     pub(crate) max_barrier_update_bytes: u64,
     #[serde(with = "serde_bytes")]
@@ -779,6 +783,7 @@ pub(crate) fn verify_join_provisioning_artifact(
     }
     if artifact.barrier_version != response.barrier_version
         || artifact.cover_leaf_index != response.cover_leaf_index
+        || artifact.slot_generation != response.slot_generation
         || artifact.n_max != response.n_max
         || artifact.max_barrier_update_bytes != response.max_barrier_update_bytes
         || array32(&artifact.kem_tree_hash_after)? != array32(&response.kem_tree_hash_after)?
@@ -854,6 +859,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         history_seq: current_history_commitment.history_seq,
         barrier_version: response.barrier_version,
         cover_leaf_index: response.cover_leaf_index,
+        slot_generation: response.slot_generation,
         n_max: response.n_max,
         max_barrier_update_bytes: response.max_barrier_update_bytes,
         kem_tree_hash_after: &kem_tree_hash_after,
@@ -948,6 +954,7 @@ pub(crate) fn verify_merge_ticket_artifact(
     }
     if artifact.barrier_version != response.barrier_version
         || artifact.cover_leaf_index != response.cover_leaf_index
+        || artifact.slot_generation != response.slot_generation
         || artifact.n_max != response.n_max
         || artifact.max_barrier_update_bytes != response.max_barrier_update_bytes
         || array32(&artifact.kem_tree_hash_after)? != array32(&response.kem_tree_hash_after)?
@@ -1020,6 +1027,7 @@ pub(crate) fn verify_merge_ticket_artifact(
         history_seq: current_history_commitment.history_seq,
         barrier_version: response.barrier_version,
         cover_leaf_index: response.cover_leaf_index,
+        slot_generation: response.slot_generation,
         n_max: response.n_max,
         max_barrier_update_bytes: response.max_barrier_update_bytes,
         kem_tree_hash_after: &kem_tree_hash_after,

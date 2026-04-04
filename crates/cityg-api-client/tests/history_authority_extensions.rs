@@ -2,8 +2,7 @@ use std::error::Error as StdError;
 
 use cityg_api_client::{
     BarrierJoinRecord, BarrierRevokedLeafRecord, GlobalHistoryAttestation,
-    HelperCompletenessAttestation,
-    HistoryAuthorityDescriptor, HistoryCommitment,
+    HelperCompletenessAttestation, HistoryAuthorityDescriptor, HistoryCommitment,
     parse_fetch_public_tree_completeness_attestation_bytes, parse_global_history_attestation_bytes,
     parse_history_authority_descriptor_bytes, parse_joins_since_completeness_attestation_bytes,
     parse_revoked_leaves_completeness_attestation_bytes,

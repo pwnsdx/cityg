@@ -1228,8 +1228,8 @@ pub fn prepare_resolved_revoked_leaves(
         max_entries,
         max_page_entries,
     )?;
-    let helper_completeness_attestation =
-        server.helper_completeness_attestation_revoked_records_bytes(
+    let helper_completeness_attestation = server
+        .helper_completeness_attestation_revoked_records_bytes(
             &resolved.history_commitment,
             revocation_roots_hash,
             page.page_offset,

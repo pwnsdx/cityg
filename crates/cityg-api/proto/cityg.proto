@@ -253,6 +253,7 @@ message JoinTicketResponse {
   uint64 barrier_version = 23;
   string profile_version = 24;
   uint64 cover_leaf_index = 25;
+  uint64 slot_generation = 51;
   reserved 26;
   bytes kem_tree_hash_after = 27;
   uint64 n_max = 28;
@@ -317,6 +318,7 @@ message MergeTicketResponse {
   uint64 barrier_version = 21;
   string profile_version = 22;
   uint64 cover_leaf_index = 23;
+  uint64 slot_generation = 37;
   reserved 24;
   bytes kem_tree_hash_after = 25;
   uint64 n_max = 26;

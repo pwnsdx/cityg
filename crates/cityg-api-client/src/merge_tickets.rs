@@ -198,6 +198,7 @@ impl CitygApiClient {
             kbroad_generation: response.kbroad_generation,
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
+            slot_generation: response.slot_generation,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             current_history_commitment,
             history_authority_extension: Some(history_authority_extension),

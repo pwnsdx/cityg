@@ -380,6 +380,8 @@ pub struct JoinTicketBundle {
     pub barrier_version: u64,
     /// Cover leaf index allocated to the joining device.
     pub cover_leaf_index: u64,
+    /// Lease generation allocated to the joining device slot.
+    pub slot_generation: u64,
     /// Current committed barrier tree hash.
     pub kem_tree_hash_after: [u8; 32],
     /// Current authenticated history view for barrier membership and checkpoints.
@@ -560,6 +562,7 @@ pub struct MergeTicketBundle {
     pub kbroad_generation: u64,
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
+    pub slot_generation: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_history_view_id: [u8; 32],
     pub current_history_commitment: HistoryCommitment,
@@ -1326,7 +1329,8 @@ impl CityGServer {
                     _cover_payload,
                 ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
                 let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
-                let resolved_revoked = self.resolve_revoked_leaf_indices(gid, &revocation_roots_hash)?;
+                let resolved_revoked =
+                    self.resolve_revoked_leaf_indices(gid, &revocation_roots_hash)?;
                 (
                     self.resolve_joins_since(gid, prev_barrier_version)?.records,
                     resolved_revoked.records,
@@ -1375,6 +1379,7 @@ impl CityGServer {
             kbroad_generation,
             barrier_version,
             cover_leaf_index,
+            slot_generation: lease.slot_generation,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             current_history_view_id,
             current_history_commitment,
@@ -1520,7 +1525,7 @@ impl CityGServer {
             author_cover_leaf_index,
             pending_join_finalize_reclaim,
             current_history_commitment,
-            cover_leaf_index,
+            target_lease,
         ) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
             let author_cover_leaf_index = pending_or_active_cover_leaf_index(state, author_leaf_id);
@@ -1531,13 +1536,12 @@ impl CityGServer {
                 && has_committed_revoked_cover_leaf_index(state, author_cover_leaf_index);
             let current_history_commitment = ensure_current_history_commitment(gid, state)?;
             let target_leaf = revoked_leaf_id.as_ref().unwrap_or(author_leaf_id);
-            let cover_leaf_index =
-                u64::from(pending_or_active_cover_leaf_index(state, target_leaf));
+            let target_lease = pending_or_active_slot_lease(state, target_leaf);
             (
                 author_cover_leaf_index,
                 pending_join_finalize_reclaim,
                 current_history_commitment,
-                cover_leaf_index,
+                target_lease,
             )
         };
         if let Some(target_leaf_id) = revoked_leaf_id
@@ -1726,7 +1730,8 @@ impl CityGServer {
             kbroad_public,
             kbroad_generation,
             barrier_version,
-            cover_leaf_index,
+            cover_leaf_index: u64::from(target_lease.slot_index),
+            slot_generation: target_lease.slot_generation,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             current_history_view_id: current_history_commitment.history_view_id,
             current_history_commitment,
@@ -2909,7 +2914,8 @@ impl CityGServer {
         }
         let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
         let mut records: Vec<BarrierRevokedLeafRecord> = if !state.revoked_slot_leases.is_empty() {
-            state.revoked_slot_leases
+            state
+                .revoked_slot_leases
                 .values()
                 .map(|lease| BarrierRevokedLeafRecord {
                     leaf_index: lease.slot_index,
@@ -3720,6 +3726,7 @@ struct JoinProvisioningArtifactWire {
     history_seq: u64,
     barrier_version: u64,
     cover_leaf_index: u64,
+    slot_generation: u64,
     n_max: u64,
     max_barrier_update_bytes: u64,
     #[serde(with = "serde_bytes")]
@@ -3761,6 +3768,7 @@ struct MergeTicketArtifactWire {
     history_seq: u64,
     barrier_version: u64,
     cover_leaf_index: u64,
+    slot_generation: u64,
     n_max: u64,
     max_barrier_update_bytes: u64,
     #[serde(with = "serde_bytes")]
@@ -3864,6 +3872,7 @@ struct JoinProvisioningArtifactSignedPayload<'a> {
     history_seq: u64,
     barrier_version: u64,
     cover_leaf_index: u64,
+    slot_generation: u64,
     n_max: u64,
     max_barrier_update_bytes: u64,
     #[serde(with = "serde_bytes")]
@@ -3919,6 +3928,7 @@ struct MergeTicketArtifactSignedPayload<'a> {
     history_seq: u64,
     barrier_version: u64,
     cover_leaf_index: u64,
+    slot_generation: u64,
     n_max: u64,
     max_barrier_update_bytes: u64,
     #[serde(with = "serde_bytes")]
@@ -4463,6 +4473,7 @@ fn encode_join_provisioning_artifact(
         history_seq: bundle.current_history_commitment.history_seq,
         barrier_version: bundle.barrier_version,
         cover_leaf_index: bundle.cover_leaf_index,
+        slot_generation: bundle.slot_generation,
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
         kem_tree_hash_after: &bundle.kem_tree_hash_after,
@@ -4509,6 +4520,7 @@ fn encode_join_provisioning_artifact(
         history_seq: bundle.current_history_commitment.history_seq,
         barrier_version: bundle.barrier_version,
         cover_leaf_index: bundle.cover_leaf_index,
+        slot_generation: bundle.slot_generation,
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
         kem_tree_hash_after: bundle.kem_tree_hash_after.to_vec(),
@@ -4551,6 +4563,7 @@ fn encode_merge_ticket_artifact(
         history_seq: bundle.current_history_commitment.history_seq,
         barrier_version: bundle.barrier_version,
         cover_leaf_index: bundle.cover_leaf_index,
+        slot_generation: bundle.slot_generation,
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
         kem_tree_hash_after: &bundle.kem_tree_hash_after,
@@ -4602,6 +4615,7 @@ fn encode_merge_ticket_artifact(
         history_seq: bundle.current_history_commitment.history_seq,
         barrier_version: bundle.barrier_version,
         cover_leaf_index: bundle.cover_leaf_index,
+        slot_generation: bundle.slot_generation,
         n_max: bundle.n_max,
         max_barrier_update_bytes: bundle.max_barrier_update_bytes,
         kem_tree_hash_after: bundle.kem_tree_hash_after.to_vec(),
@@ -5427,33 +5441,49 @@ fn active_cover_leaf_allocations(
 }
 
 fn active_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
-    state
-        .leaf_slot_leases
-        .get(leaf)
-        .map(|lease| lease.slot_index)
-        .unwrap_or_else(|| cover_leaf_index(leaf, state.n_max))
+    active_slot_lease(state, leaf).slot_index
 }
 
 fn revoked_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
-    state
-        .revoked_slot_leases
-        .get(leaf)
-        .map(|lease| lease.slot_index)
-        .unwrap_or_else(|| cover_leaf_index(leaf, state.n_max))
+    revoked_slot_lease(state, leaf).slot_index
 }
 
 fn pending_or_active_cover_leaf_index(state: &GroupState, leaf: &[u8; 32]) -> u32 {
+    pending_or_active_slot_lease(state, leaf).slot_index
+}
+
+fn active_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> SlotLease {
+    state
+        .leaf_slot_leases
+        .get(leaf)
+        .copied()
+        .unwrap_or(SlotLease {
+            slot_index: cover_leaf_index(leaf, state.n_max),
+            slot_generation: 0,
+        })
+}
+
+fn revoked_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> SlotLease {
+    state
+        .revoked_slot_leases
+        .get(leaf)
+        .copied()
+        .unwrap_or(SlotLease {
+            slot_index: cover_leaf_index(leaf, state.n_max),
+            slot_generation: 0,
+        })
+}
+
+fn pending_or_active_slot_lease(state: &GroupState, leaf: &[u8; 32]) -> SlotLease {
     state
         .pending_join_finalize_auth
         .get(leaf)
-        .map(|record| record.lease.slot_index)
-        .or_else(|| {
-            state
-                .leaf_slot_leases
-                .get(leaf)
-                .map(|lease| lease.slot_index)
+        .map(|record| record.lease)
+        .or_else(|| state.leaf_slot_leases.get(leaf).copied())
+        .unwrap_or(SlotLease {
+            slot_index: cover_leaf_index(leaf, state.n_max),
+            slot_generation: 0,
         })
-        .unwrap_or_else(|| cover_leaf_index(leaf, state.n_max))
 }
 
 fn committed_revoked_cover_leaf_indices(state: &GroupState) -> BTreeSet<u32> {
