@@ -8639,6 +8639,103 @@ mod tests {
     }
 
     #[test]
+    fn slot_reuse_rejects_stale_join_finalize_auth_token() -> Result<(), CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let mut server = super::demo::demo_server();
+
+        let alice = build_genesis_member_bundle(0x7A)?;
+        server.accept_epoch(&alice.bundle)?;
+
+        let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x7B, false)?;
+        let bob_pending_lease = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .and_then(|state| state.pending_join_finalize_auth.get(&bob.leaf_id))
+            .map(|record| record.lease)
+            .ok_or(CityGError::InvalidInput(
+                "missing pending lease for first joiner",
+            ))?;
+        server.accept_epoch(&bob.bundle)?;
+
+        let (bob_finalize, _) = build_refresh_bundle_for_member(&mut server, &bob, &bob.bundle)?;
+        server.accept_epoch(&bob_finalize)?;
+
+        let bob_leave = build_leave_bundle_for_member(&mut server, &bob, &bob_finalize)?;
+        server.accept_epoch(&bob_leave)?;
+
+        let charlie = build_join_member_from_server_ticket(&mut server, &gid, 0x7C, false)?;
+        assert_ne!(
+            charlie.join_finalize_auth_token, bob.join_finalize_auth_token,
+            "slot reuse must issue a fresh join_finalize_auth token",
+        );
+        let charlie_pending_lease = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .and_then(|state| state.pending_join_finalize_auth.get(&charlie.leaf_id))
+            .map(|record| record.lease)
+            .ok_or(CityGError::InvalidInput(
+                "missing pending lease for reused-slot joiner",
+            ))?;
+        assert_eq!(
+            charlie_pending_lease.slot_index, bob_pending_lease.slot_index,
+            "reused joiner must reclaim the previously released slot",
+        );
+        assert_eq!(
+            charlie_pending_lease.slot_generation,
+            bob_pending_lease.slot_generation + 1,
+            "reused slot must advance its generation",
+        );
+
+        server.accept_epoch(&charlie.bundle)?;
+
+        let (reclaim_bundle, _) =
+            build_refresh_bundle_for_member(&mut server, &charlie, &charlie.bundle)?;
+        assert_eq!(
+            u64_from_header(&reclaim_bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?,
+            0,
+            "reused slot joiner must emit a reclaim join_finalize",
+        );
+
+        let mut stale_header = reclaim_bundle.header_map.clone();
+        stale_header.insert(
+            hdr::HDR_JOIN_FINALIZE_AUTH,
+            Value::Bytes(bob.join_finalize_auth_token.to_vec()),
+        );
+        let reclaim_delta = reclaim_bundle
+            .membership_delta()
+            .map_err(|_| CityGError::InvalidInput("reclaim bundle missing membership delta"))?;
+        let state_before_reclaim =
+            server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput(
+                    "missing roster state before reclaim validation",
+                ))?;
+        let err = match validate_barrier_update_against_roster(
+            state_before_reclaim,
+            &stale_header,
+            &reclaim_delta,
+        ) {
+            Ok(_) => {
+                return Err(CityGError::InvalidInput(
+                    "stale join_finalize_auth token must be rejected after slot reuse",
+                ));
+            }
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn accept_epoch_rejects_join_without_pending_slot_lease() -> Result<(), CityGError> {
         let gid = cityg_client::demo::DEMO_GID;
         let mut server = super::demo::demo_server();

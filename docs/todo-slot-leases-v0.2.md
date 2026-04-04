@@ -79,7 +79,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 ### 7. KAT and conformance
 
 - [ ] Add KATs for slot reuse after leave/revoke
-- [ ] Add replay rejection tests for stale `join_finalize_auth`
+- [~] Add replay rejection tests for stale `join_finalize_auth`
 - [ ] Add historical chain-check tests where one slot has multiple generations
 
 ## Immediate next slice
