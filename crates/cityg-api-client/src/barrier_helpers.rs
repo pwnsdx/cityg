@@ -7,6 +7,7 @@ use cityg_api_schema::pb::{
     BarrierResolveJoinsSinceRequest, BarrierResolveJoinsSinceResponse,
     BarrierResolveRevokedLeavesRequest, BarrierResolveRevokedLeavesResponse,
 };
+use cityg_client::barrier::BarrierSlotLease as CoreBarrierSlotLease;
 use cityg_client::barrier_snapshot_prepare::{
     BarrierSnapshotArtifactsInput, derive_barrier_snapshot_ticket_fields,
     derive_barrier_snapshot_witness_selection, prepare_barrier_snapshot_artifacts,
@@ -137,12 +138,15 @@ impl CitygApiClient {
 
         let reclaims_cover_leaf_index = barrier_update_reason == 0
             && header.contains_key(&msphf_orchestrator::hdr::HDR_JOIN_FINALIZE_AUTH);
+        let updater_slot_lease = CoreBarrierSlotLease {
+            slot_index: cover_leaf_index,
+            slot_generation,
+        };
         let revoked_records_core =
             to_core_revoked_snapshot_records(revoked_resolution.records.as_slice());
         let witness_selection = derive_barrier_snapshot_witness_selection(
             barrier_update_reason,
-            cover_leaf_index,
-            slot_generation,
+            updater_slot_lease,
             revoked_records_core.as_slice(),
             ticket_fields.revocation_roots_hash,
             ticket_fields.committed_revocation_roots_hash,
@@ -161,8 +165,7 @@ impl CitygApiClient {
             header,
             gid,
             leaf_id,
-            updater_leaf: cover_leaf_index,
-            updater_slot_generation: slot_generation,
+            updater_slot_lease,
             barrier_version,
             barrier_update_reason,
             barrier_n_max,
@@ -203,7 +206,7 @@ impl CitygApiClient {
                     merge_ticket_artifact_bytes,
                     barrier_update_reason,
                     prepared_snapshot.barrier_update.raw_update.as_slice(),
-                    cover_leaf_index,
+                    updater_slot_lease,
                     barrier_n_max,
                     ticket_history_commitment,
                     history_authority_extension,
@@ -217,7 +220,6 @@ impl CitygApiClient {
                     witness_selection.witness_revoked_leaf_indices.as_slice(),
                     revoked_resolution.records.as_slice(),
                     !reclaims_cover_leaf_index,
-                    slot_generation,
                     deployment_profile_manifest_bytes,
                 )
                 .await?;
@@ -254,7 +256,7 @@ impl CitygApiClient {
         merge_ticket_artifact: &[u8],
         barrier_update_reason: u64,
         barrier_update: &[u8],
-        updater_leaf: u64,
+        updater_slot_lease: CoreBarrierSlotLease,
         _n_max: u64,
         current_history_commitment: &HistoryCommitment,
         history_authority_extension: HistoryAuthorityExtension,
@@ -268,7 +270,6 @@ impl CitygApiClient {
         revoked_leaf_indices: &[u32],
         revoked_records: &[BarrierRevokedLeafRecord],
         include_updater_in_revoked_set: bool,
-        updater_slot_generation: u64,
         deployment_profile_manifest: &[u8],
     ) -> Result<Vec<u8>, Error> {
         if barrier_update_reason != 0 && barrier_update_reason != 1 {
@@ -295,7 +296,7 @@ impl CitygApiClient {
                 .collect(),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
             revoked_leaf_indices: revoked_leaf_indices.to_vec(),
-            updater_slot_generation,
+            updater_slot_generation: updater_slot_lease.slot_generation,
             revoked_records: revoked_records
                 .iter()
                 .map(|record| pb::BarrierRevokedLeafRecord {
@@ -323,8 +324,10 @@ impl CitygApiClient {
             kem_tree_hash_after,
             author_leaf_id,
             barrier_update_reason,
-            updater_leaf,
-            updater_slot_generation,
+            SlotLease {
+                slot_index: updater_slot_lease.slot_index,
+                slot_generation: updater_slot_lease.slot_generation,
+            },
             barrier_update,
             joins_prev_barrier_version,
             join_records,

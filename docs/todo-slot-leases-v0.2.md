@@ -74,7 +74,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Carry full lease comparisons through recovery/bootstrap state instead of mixing indexed fallback paths.
-2. Push `SlotLease` deeper into client-core barrier update/verification helpers.
-3. Finish helper/API cleanup so all occupancy surfaces speak in versioned records only.
-4. Keep naked revoked leaf indices confined to wire compatibility and attestation payloads only.
+1. Replace remaining internal `cover_leaf_index`/`slot_generation` pairs with `SlotLease` in `api-client` verification and ticket prep.
+2. Finish helper/API cleanup so all occupancy surfaces speak in versioned records only.
+3. Keep naked revoked leaf indices confined to wire compatibility and attestation payloads only.
+4. Prepare the wire/profile `v0.2` cut once the runtime surfaces stop depending on naked slot indices.

@@ -17,7 +17,7 @@ use crate::{
     HELPER_KIND_JOINS_SINCE, HELPER_KIND_REVOKED_LEAVES, HelperCompletenessAttestation,
     HistoryAuthorityDescriptor, HistoryAuthorityExtension, HistoryCommitment,
     LOCAL_HISTORY_ATTESTATION_FINALITY_KIND, LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
-    MAX_BARRIER_N_MAX, MergeAcceptanceStatus,
+    MAX_BARRIER_N_MAX, MergeAcceptanceStatus, SlotLease,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -627,8 +627,7 @@ pub(crate) fn verify_full_verification_witness(
     kem_tree_hash_after: &[u8; 32],
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
-    updater_leaf: u64,
-    updater_slot_generation: u64,
+    updater_slot_lease: SlotLease,
     barrier_update: &[u8],
     joins_prev_barrier_version: u64,
     join_records: &[BarrierJoinRecord],
@@ -651,8 +650,10 @@ pub(crate) fn verify_full_verification_witness(
         kem_tree_hash_after: array32(&witness.kem_tree_hash_after)?,
         author_leaf_id: array32(&witness.author_leaf_id)?,
         barrier_update_reason: witness.barrier_update_reason,
-        updater_leaf: witness.updater_leaf,
-        updater_slot_generation: witness.updater_slot_generation,
+        updater_slot_lease: SlotLease {
+            slot_index: witness.updater_leaf,
+            slot_generation: witness.updater_slot_generation,
+        },
         barrier_update_digest: array32(&witness.barrier_update_digest)?,
         joins_digest: array32(&witness.joins_digest)?,
         revoked_digest: array32(&witness.revoked_digest)?,
@@ -667,8 +668,7 @@ pub(crate) fn verify_full_verification_witness(
         || parsed.kem_tree_hash_after != *kem_tree_hash_after
         || parsed.author_leaf_id != *author_leaf_id
         || parsed.barrier_update_reason != barrier_update_reason
-        || parsed.updater_leaf != updater_leaf
-        || parsed.updater_slot_generation != updater_slot_generation
+        || parsed.updater_slot_lease != updater_slot_lease
     {
         return Err(Error::Parse(
             "full verification witness fields mismatch".to_string(),
@@ -715,8 +715,8 @@ pub(crate) fn verify_full_verification_witness(
         kem_tree_hash_after,
         author_leaf_id,
         barrier_update_reason,
-        updater_leaf,
-        updater_slot_generation,
+        updater_leaf: updater_slot_lease.slot_index,
+        updater_slot_generation: updater_slot_lease.slot_generation,
         barrier_update_digest: &expected_barrier_update_digest,
         joins_digest: &expected_joins_digest,
         revoked_digest: &expected_revoked_digest,

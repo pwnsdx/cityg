@@ -10,8 +10,8 @@ use pqcrypto_kyber::kyber768;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::barrier::{
-    BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
-    barrier_path_nodes, compute_revocation_roots_hash,
+    BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierSlotLease,
+    BarrierTreePathSaltPreimage, barrier_path_nodes, compute_revocation_roots_hash,
 };
 use crate::barrier_crypto::{
     ML_KEM_EXPANDED_DK_BYTES, decapsulate_internal_node_shared_secret,
@@ -38,12 +38,6 @@ pub struct BarrierRecoverResult {
     pub kem_tree_hash_after: [u8; 32],
     pub k_fs_after_pcs: Option<Zeroizing<[u8; 32]>>,
     pub derived_node_key_material: BTreeMap<u32, DerivedBarrierNodeKeyMaterial>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BarrierSlotLease {
-    pub slot_index: u64,
-    pub slot_generation: u64,
 }
 
 pub struct BarrierRecoveryInput<'a> {

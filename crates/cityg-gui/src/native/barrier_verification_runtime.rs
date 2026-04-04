@@ -3,6 +3,7 @@ use crate::barrier_shared::require_current_state_history_commitment;
 use cityg_api_client::{
     to_core_history_commitment, to_core_join_snapshot_records, to_core_revoked_snapshot_records,
 };
+use cityg_client::barrier::BarrierSlotLease as CoreBarrierSlotLease;
 use cityg_client::barrier_prevalidation::{
     BootstrapCurrentStateInput, prevalidate_bootstrap_current_state, prevalidate_full_chain_update,
     validate_bootstrap_provisioning, validate_full_chain_reason,
@@ -106,7 +107,10 @@ pub(super) async fn full_chain_check_barrier_update(
         parsed.revocation_roots_hash,
         barrier_reason,
         join_records_core.as_slice(),
-        parsed.updater_leaf,
+        CoreBarrierSlotLease {
+            slot_index: parsed.updater_leaf,
+            slot_generation: parsed.updater_slot_generation,
+        },
     )?;
 
     let parsed_for_hash = parsed.clone();

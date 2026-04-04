@@ -7,8 +7,8 @@ use msphf_orchestrator::{PivotParity, hdr};
 
 use crate::barrier::{
     BarrierHistoryCommitment, BarrierJoinSnapshotRecord, BarrierRevokedSnapshotRecord,
-    apply_join_set_to_snapshot, apply_revoked_records_to_snapshot, compute_barrier_tree_hash,
-    compute_revocation_roots_hash, encode_full_verification_receipt,
+    BarrierSlotLease, apply_join_set_to_snapshot, apply_revoked_records_to_snapshot,
+    compute_barrier_tree_hash, compute_revocation_roots_hash, encode_full_verification_receipt,
     encode_history_commitment_header, require_current_state_history_commitment,
     require_same_history_commitment, revoked_leaf_indices_from_records,
 };
@@ -45,8 +45,7 @@ pub struct BarrierSnapshotArtifactsInput<'a> {
     pub header: BTreeMap<u64, Value>,
     pub gid: &'a [u8; 32],
     pub leaf_id: &'a [u8; 32],
-    pub updater_leaf: u64,
-    pub updater_slot_generation: u64,
+    pub updater_slot_lease: BarrierSlotLease,
     pub barrier_version: u64,
     pub barrier_update_reason: u64,
     pub barrier_n_max: u64,
@@ -103,8 +102,7 @@ pub fn derive_barrier_snapshot_ticket_fields(
 
 pub fn derive_barrier_snapshot_witness_selection(
     barrier_update_reason: u64,
-    updater_leaf: u64,
-    updater_slot_generation: u64,
+    updater_slot_lease: BarrierSlotLease,
     resolved_revoked_records: &[BarrierRevokedSnapshotRecord],
     revocation_roots_hash: [u8; 32],
     committed_revocation_roots_hash: [u8; 32],
@@ -113,11 +111,11 @@ pub fn derive_barrier_snapshot_witness_selection(
     let mut witness_revoked_records = resolved_revoked_records.to_vec();
     let witness_revocation_roots_hash = if barrier_update_reason == 0 {
         if include_updater_in_revoked_set {
-            let updater_leaf = u32::try_from(updater_leaf)
+            let updater_leaf = u32::try_from(updater_slot_lease.slot_index)
                 .map_err(|_| anyhow!("cover_leaf_index out of range"))?;
             witness_revoked_records.push(BarrierRevokedSnapshotRecord {
                 leaf_index: updater_leaf,
-                slot_generation: updater_slot_generation,
+                slot_generation: updater_slot_lease.slot_generation,
             });
         }
         revocation_roots_hash
@@ -142,8 +140,7 @@ pub fn prepare_barrier_snapshot_artifacts(
         mut header,
         gid,
         leaf_id,
-        updater_leaf,
-        updater_slot_generation,
+        updater_slot_lease,
         barrier_version,
         barrier_update_reason,
         barrier_n_max,
@@ -210,8 +207,8 @@ pub fn prepare_barrier_snapshot_artifacts(
     let barrier_update = build_barrier_update_bytes(
         gid,
         barrier_n_max,
-        updater_leaf,
-        updater_slot_generation,
+        updater_slot_lease.slot_index,
+        updater_slot_lease.slot_generation,
         barrier_version.saturating_add(1),
         barrier_version,
         revocation_roots_hash,
@@ -242,8 +239,8 @@ pub fn prepare_barrier_snapshot_artifacts(
             gid,
             leaf_id,
             barrier_update_reason,
-            updater_leaf,
-            updater_slot_generation,
+            updater_slot_lease.slot_index,
+            updater_slot_lease.slot_generation,
             history_commitment_header.as_slice(),
             current_global_history_attestation_bytes,
             barrier_update.raw_update.as_slice(),
@@ -336,8 +333,10 @@ mod tests {
         assert_eq!(fields.cat, [0xAA; 32]);
         let selection = derive_barrier_snapshot_witness_selection(
             0,
-            4,
-            9,
+            BarrierSlotLease {
+                slot_index: 4,
+                slot_generation: 9,
+            },
             &[
                 BarrierRevokedSnapshotRecord {
                     leaf_index: 1,
@@ -387,8 +386,10 @@ mod tests {
             header: BTreeMap::new(),
             gid: &[0xAA; 32],
             leaf_id: &[0xBB; 32],
-            updater_leaf: 0,
-            updater_slot_generation: 0,
+            updater_slot_lease: BarrierSlotLease {
+                slot_index: 0,
+                slot_generation: 0,
+            },
             barrier_version: 0,
             barrier_update_reason: 1,
             barrier_n_max: 2,
@@ -428,8 +429,10 @@ mod tests {
     fn derive_barrier_snapshot_witness_selection_skips_updater_for_reclaim_join() -> Result<()> {
         let selection = derive_barrier_snapshot_witness_selection(
             0,
-            4,
-            3,
+            BarrierSlotLease {
+                slot_index: 4,
+                slot_generation: 3,
+            },
             &[
                 BarrierRevokedSnapshotRecord {
                     leaf_index: 1,
@@ -481,8 +484,10 @@ mod tests {
             header: BTreeMap::new(),
             gid: &[0xAA; 32],
             leaf_id: &[0xBB; 32],
-            updater_leaf: 0,
-            updater_slot_generation: 0,
+            updater_slot_lease: BarrierSlotLease {
+                slot_index: 0,
+                slot_generation: 0,
+            },
             barrier_version: 0,
             barrier_update_reason: 0,
             barrier_n_max: 2,

@@ -3,7 +3,8 @@ use cityg_client::barrier_recovery::{
     BarrierRecoverResult as CoreBarrierRecoverResult,
     BarrierRecoveryInput as CoreBarrierRecoveryInput,
     BarrierRecoveryNodeMaterialRef as CoreBarrierRecoveryNodeMaterialRef,
-    BarrierSlotLease as CoreBarrierSlotLease, recover_barrier_update as recover_barrier_update_core,
+    BarrierSlotLease as CoreBarrierSlotLease,
+    recover_barrier_update as recover_barrier_update_core,
 };
 
 pub(super) fn try_recover_barrier_from_header_with_expected_before(

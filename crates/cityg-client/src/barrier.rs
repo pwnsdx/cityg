@@ -40,6 +40,12 @@ pub struct BarrierRevokedSnapshotRecord {
     pub slot_generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BarrierSlotLease {
+    pub slot_index: u64,
+    pub slot_generation: u64,
+}
+
 #[derive(Serialize)]
 struct BarrierRootsPreimage<'a>(
     #[serde(with = "serde_bytes")] &'a [u8; 32],

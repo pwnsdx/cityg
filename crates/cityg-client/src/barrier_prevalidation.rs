@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 
 use crate::barrier::{
     BarrierHistoryCommitment, BarrierJoinSnapshotRecord, BarrierRevokedSnapshotRecord,
-    compute_revocation_roots_hash, expected_same_rrh_barrier_reason,
+    BarrierSlotLease, compute_revocation_roots_hash, expected_same_rrh_barrier_reason,
     require_same_history_commitment,
 };
 use crate::barrier_update::{
@@ -70,13 +70,14 @@ pub fn validate_full_chain_reason(
     parsed_revocation_roots_hash: [u8; 32],
     barrier_reason: u64,
     join_records: &[BarrierJoinSnapshotRecord],
-    updater_leaf: u64,
+    updater_slot_lease: BarrierSlotLease,
 ) -> Result<()> {
     if genesis_local_case {
         return Ok(());
     }
     if local_barrier_roots_hash == parsed_revocation_roots_hash {
-        let expected_reason = expected_same_rrh_barrier_reason(join_records, updater_leaf);
+        let expected_reason =
+            expected_same_rrh_barrier_reason(join_records, updater_slot_lease.slot_index);
         if barrier_reason != expected_reason {
             return Err(anyhow!(
                 "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash unchanged but barrier_update_reason != {expected_reason}"
