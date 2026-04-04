@@ -34,8 +34,6 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) bootstrap_revoked_records: Vec<PersistedBarrierRevokedRecord>,
     #[serde(default)]
-    pub(in crate::native) bootstrap_revoked_leaf_indices: Vec<u32>,
-    #[serde(default)]
     pub(in crate::native) bootstrap_join_finalize_auth_token_hex: String,
     #[serde(default)]
     pub(in crate::native) k_barrier_hex: String,
@@ -474,7 +472,6 @@ impl PersistedBarrierState {
                 .iter()
                 .map(PersistedBarrierRevokedRecord::from_runtime)
                 .collect(),
-            bootstrap_revoked_leaf_indices: state.bootstrap_revoked_leaf_indices.clone(),
             bootstrap_join_finalize_auth_token_hex: hex_encode(
                 state.bootstrap_join_finalize_auth_token,
             ),
@@ -555,7 +552,6 @@ impl PersistedBarrierState {
                 .into_iter()
                 .map(PersistedBarrierRevokedRecord::into_runtime)
                 .collect(),
-            bootstrap_revoked_leaf_indices: self.bootstrap_revoked_leaf_indices,
             bootstrap_join_finalize_auth_token: decode_hex32_or_zero(
                 "barrier_state.bootstrap_join_finalize_auth_token_hex",
                 &self.bootstrap_join_finalize_auth_token_hex,

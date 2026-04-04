@@ -9,7 +9,6 @@ pub(super) fn clear_join_finalize_bootstrap_artifact(state: &mut BarrierSecretSt
     state.bootstrap_predecessor_kem_tree_hash_after = [0u8; 32];
     state.bootstrap_join_records.clear();
     state.bootstrap_revoked_records.clear();
-    state.bootstrap_revoked_leaf_indices.clear();
     state.bootstrap_join_finalize_auth_token = [0u8; 32];
     state.bootstrap_current_barrier_update.clear();
 }

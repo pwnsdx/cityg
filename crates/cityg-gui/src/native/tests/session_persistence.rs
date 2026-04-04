@@ -1021,7 +1021,6 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
                 slot_generation: 4,
             },
         ],
-        bootstrap_revoked_leaf_indices: vec![1, 2],
         bootstrap_join_finalize_auth_token: array(0x34),
         k_barrier: Zeroizing::new(array(0x21)),
         kem_tree_hash_after: array(0x22),
@@ -1249,10 +1248,6 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         loaded.barrier_state.bootstrap_revoked_records,
         session.barrier_state.bootstrap_revoked_records
-    );
-    assert_eq!(
-        loaded.barrier_state.bootstrap_revoked_leaf_indices,
-        session.barrier_state.bootstrap_revoked_leaf_indices
     );
     assert_eq!(
         loaded.barrier_state.bootstrap_join_finalize_auth_token,

@@ -438,8 +438,10 @@ pub fn prepare_runtime_join_ticket(
             .clone(),
         join_finalize_auth_token,
         barrier_n_max,
-        cover_leaf_index: response.cover_leaf_index,
-        slot_generation: response.slot_generation,
+        slot_lease: SlotLease {
+            slot_index: response.cover_leaf_index,
+            slot_generation: response.slot_generation,
+        },
         max_barrier_update_bytes,
         kem_tree_hash_after,
         current_predecessor_kem_tree_hash_after,
@@ -453,9 +455,6 @@ pub fn prepare_runtime_join_ticket(
                 ek_leaf: record.ek_leaf.clone(),
             })
             .collect(),
-        current_revoked_leaf_indices: derive_current_revoked_leaf_indices(
-            current_revoked_records.as_slice(),
-        ),
         current_revoked_records,
         current_barrier_update: response.current_barrier_update.clone(),
         last_accepted_ec: response.last_accepted_ec,

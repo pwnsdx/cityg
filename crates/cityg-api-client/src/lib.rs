@@ -541,6 +541,12 @@ pub struct BarrierRevokedLeafRecord {
     pub slot_generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotLease {
+    pub slot_index: u64,
+    pub slot_generation: u64,
+}
+
 fn to_core_revoked_snapshot_record(
     record: &BarrierRevokedLeafRecord,
 ) -> cityg_client::barrier::BarrierRevokedSnapshotRecord {
@@ -954,8 +960,7 @@ pub struct MergeTicket {
 pub struct PreparedRuntimeMergeTicket {
     pub snapshot_hash: [u8; 32],
     pub barrier_n_max: u64,
-    pub cover_leaf_index: u64,
-    pub slot_generation: u64,
+    pub slot_lease: SlotLease,
     pub max_barrier_update_bytes: u64,
     pub max_barrier_update_bytes_normalized: usize,
     pub parities: Vec<PivotParity>,
@@ -992,19 +997,28 @@ pub struct PreparedRuntimeJoinTicket {
     pub current_global_history_attestation_bytes: Vec<u8>,
     pub join_finalize_auth_token: [u8; 32],
     pub barrier_n_max: u64,
-    pub cover_leaf_index: u64,
-    pub slot_generation: u64,
+    pub slot_lease: SlotLease,
     pub max_barrier_update_bytes: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_predecessor_kem_tree_hash_after: [u8; 32],
     pub current_join_records: Vec<BarrierJoinRecord>,
     pub current_revoked_records: Vec<BarrierRevokedLeafRecord>,
-    pub current_revoked_leaf_indices: Vec<u32>,
     pub current_barrier_update: Vec<u8>,
     pub last_accepted_ec: u64,
 }
 
 impl PreparedRuntimeJoinTicket {
+    pub fn current_revoked_leaf_indices(&self) -> Vec<u32> {
+        let mut leaf_indices = self
+            .current_revoked_records
+            .iter()
+            .map(|record| record.leaf_index)
+            .collect::<Vec<_>>();
+        leaf_indices.sort_unstable();
+        leaf_indices.dedup();
+        leaf_indices
+    }
+
     pub fn prepare_barrier_orchestration<'a>(
         &'a self,
         pop_public_key: &'a [u8],
@@ -1057,8 +1071,7 @@ pub struct PreparedEpochSyncMergeTicket {
     pub barrier_version: u64,
     pub snapshot_hash: [u8; 32],
     pub barrier_n_max: u64,
-    pub cover_leaf_index: u64,
-    pub slot_generation: u64,
+    pub slot_lease: SlotLease,
     pub max_barrier_update_bytes: u64,
     pub max_barrier_update_bytes_normalized: usize,
     pub parities: Vec<PivotParity>,
@@ -1088,8 +1101,7 @@ pub struct PrepareOriginMergeTicketInput<'a> {
 #[derive(Debug, Clone)]
 pub struct PreparedOriginMergeTicket {
     pub barrier_version: u64,
-    pub cover_leaf_index: u64,
-    pub slot_generation: u64,
+    pub slot_lease: SlotLease,
     pub snapshot_hash: [u8; 32],
     pub barrier_n_max: u64,
     pub max_barrier_update_bytes: u64,
@@ -1136,8 +1148,7 @@ pub struct PrepareRevocationMergeTicketInput<'a> {
 #[derive(Debug, Clone)]
 pub struct PreparedRevocationMergeTicket {
     pub barrier_version: u64,
-    pub cover_leaf_index: u64,
-    pub slot_generation: u64,
+    pub slot_lease: SlotLease,
     pub snapshot_hash: [u8; 32],
     pub barrier_n_max: u64,
     pub max_barrier_update_bytes: u64,
@@ -1226,8 +1237,8 @@ impl PreparedOriginMergeTicket {
             gid,
             leaf_id,
             barrier_version: self.barrier_version,
-            cover_leaf_index: self.cover_leaf_index,
-            slot_generation: self.slot_generation,
+            cover_leaf_index: self.slot_lease.slot_index,
+            slot_generation: self.slot_lease.slot_generation,
             snapshot_hash: self.snapshot_hash,
             barrier_n_max: self.barrier_n_max,
             max_barrier_update_bytes: self.max_barrier_update_bytes,
@@ -1314,8 +1325,8 @@ impl PreparedRevocationMergeTicket {
             gid,
             leaf_id,
             barrier_version: self.barrier_version,
-            cover_leaf_index: self.cover_leaf_index,
-            slot_generation: self.slot_generation,
+            cover_leaf_index: self.slot_lease.slot_index,
+            slot_generation: self.slot_lease.slot_generation,
             snapshot_hash: self.snapshot_hash,
             barrier_n_max: self.barrier_n_max,
             max_barrier_update_bytes: self.max_barrier_update_bytes,
@@ -1376,8 +1387,10 @@ impl MergeTicket {
         Ok(PreparedRuntimeMergeTicket {
             snapshot_hash: self.kem_tree_hash_after,
             barrier_n_max: self.n_max,
-            cover_leaf_index: self.cover_leaf_index,
-            slot_generation: self.slot_generation,
+            slot_lease: SlotLease {
+                slot_index: self.cover_leaf_index,
+                slot_generation: self.slot_generation,
+            },
             max_barrier_update_bytes: ticket_max_barrier_update_bytes,
             max_barrier_update_bytes_normalized,
             parities: hydrate_parities(&self.parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit),
@@ -1442,8 +1455,7 @@ impl MergeTicket {
 
         Ok(PreparedOriginMergeTicket {
             barrier_version: self.barrier_version,
-            cover_leaf_index: self.cover_leaf_index,
-            slot_generation: self.slot_generation,
+            slot_lease: prepared_runtime.slot_lease,
             snapshot_hash: prepared_runtime.snapshot_hash,
             barrier_n_max: prepared_runtime.barrier_n_max,
             max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
@@ -1515,8 +1527,7 @@ impl MergeTicket {
             barrier_version: self.barrier_version,
             snapshot_hash: prepared_runtime.snapshot_hash,
             barrier_n_max: prepared_runtime.barrier_n_max,
-            cover_leaf_index: prepared_runtime.cover_leaf_index,
-            slot_generation: prepared_runtime.slot_generation,
+            slot_lease: prepared_runtime.slot_lease,
             max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
             max_barrier_update_bytes_normalized: prepared_runtime
                 .max_barrier_update_bytes_normalized,
@@ -1588,8 +1599,7 @@ impl MergeTicket {
 
         Ok(PreparedRevocationMergeTicket {
             barrier_version: self.barrier_version,
-            cover_leaf_index: self.cover_leaf_index,
-            slot_generation: self.slot_generation,
+            slot_lease: prepared_runtime.slot_lease,
             snapshot_hash: prepared_runtime.snapshot_hash,
             barrier_n_max: prepared_runtime.barrier_n_max,
             max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
@@ -3291,7 +3301,8 @@ mod tests {
 
         assert_eq!(prepared.snapshot_hash, [0x0F; 32]);
         assert_eq!(prepared.barrier_n_max, 8);
-        assert_eq!(prepared.cover_leaf_index, 1);
+        assert_eq!(prepared.slot_lease.slot_index, 1);
+        assert_eq!(prepared.slot_lease.slot_generation, 0);
         assert_eq!(prepared.max_barrier_update_bytes, 1);
         assert_eq!(prepared.max_barrier_update_bytes_normalized, 1);
         assert_eq!(prepared.witness_bytes, Some(vec![0xA1, 0x01, 0x02]));
@@ -3445,7 +3456,8 @@ mod tests {
         assert_eq!(prepared.barrier_n_max, 8);
         assert_eq!(prepared.max_barrier_update_bytes, 1);
         assert_eq!(prepared.max_barrier_update_bytes_normalized, 1);
-        assert_eq!(prepared.cover_leaf_index, 1);
+        assert_eq!(prepared.slot_lease.slot_index, 1);
+        assert_eq!(prepared.slot_lease.slot_generation, 0);
         assert_eq!(prepared.parities.len(), 1);
         assert_eq!(prepared.last_accepted_ec, 17);
         assert_eq!(prepared.ticket_history_commitment.history_seq, 17);
@@ -3527,8 +3539,8 @@ mod tests {
         assert_eq!(prepared.policy_version, "0");
         assert_eq!(prepared.fs_policy_version, "7");
         assert_eq!(prepared.barrier_n_max, 1024);
-        assert_eq!(prepared.cover_leaf_index, 0);
-        assert_eq!(prepared.slot_generation, 0);
+        assert_eq!(prepared.slot_lease.slot_index, 0);
+        assert_eq!(prepared.slot_lease.slot_generation, 0);
         assert_eq!(prepared.max_barrier_update_bytes, 1_048_576);
         assert_eq!(prepared.witness_bytes, None);
         assert_eq!(
@@ -3537,7 +3549,7 @@ mod tests {
         );
         assert_eq!(prepared.last_accepted_ec, 21);
         assert!(prepared.current_join_records.is_empty());
-        assert!(prepared.current_revoked_leaf_indices.is_empty());
+        assert!(prepared.current_revoked_leaf_indices().is_empty());
     }
 
     #[test]
@@ -3594,7 +3606,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(prepared.current_revoked_leaf_indices, vec![1, 7]);
+        assert_eq!(prepared.current_revoked_leaf_indices(), vec![1, 7]);
     }
 
     #[test]

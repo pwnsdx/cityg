@@ -54,13 +54,15 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [ ] Replace `cover_leaf_index` fields in tickets with `slot_index` + `slot_generation`
 - [ ] Replace `current_join_records` and `current_revoked_leaf_indices`
 - [ ] Update schema encoding/decoding
-- [ ] Update runtime service ticket preparation
+- [~] Update runtime service ticket preparation
 
 ### 6. Client and GUI
 
 - [~] Persist local `slot_generation` alongside the local slot index
-- [ ] Update bootstrap/join-finalize state
-- [~] Update bootstrap/join-finalize state to persist versioned revoked records
+- [~] Replace prepared/runtime `cover_leaf_index` + `slot_generation` pairs with `SlotLease`
+- [~] Update bootstrap/join-finalize state
+- [x] Update bootstrap/join-finalize state to persist versioned revoked records
+- [x] Drop duplicated bootstrap/current revoked leaf-index caches where versioned records are already present
 - [ ] Update barrier recovery to compare full leases
 - [ ] Update tests and fixtures
 
@@ -72,7 +74,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Replace ticket/runtime `cover_leaf_index` naming with an explicit lease shape.
-2. Carry full lease comparisons through recovery/bootstrap state instead of mixing indexed fallback paths.
+1. Carry full lease comparisons through recovery/bootstrap state instead of mixing indexed fallback paths.
+2. Push `SlotLease` from prepared/runtime tickets into GUI persisted session state.
 3. Finish helper/API cleanup so all occupancy surfaces speak in versioned records only.
-4. Drop the remaining client/runtime dependence on derived `current_revoked_leaf_indices` outside attestations.
+4. Keep naked revoked leaf indices confined to wire compatibility and attestation payloads only.
