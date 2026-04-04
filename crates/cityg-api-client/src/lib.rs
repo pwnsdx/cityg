@@ -3949,13 +3949,13 @@ mod tests {
         assert_eq!(refresh_with_intent.we_epoch_id, [0x01; 32]);
 
         let revoked = client
-            .barrier_resolve_revoked_leaves(
+            .barrier_resolve_revoked_occupancies(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 &[0xCC; 32],
             )
             .await
             .map_err(|err| {
-                std::io::Error::other(format!("barrier_resolve_revoked_leaves failed: {err}"))
+                std::io::Error::other(format!("barrier_resolve_revoked_occupancies failed: {err}"))
             })?;
         assert_eq!(revoked.history_view_id, [0xD1; 32]);
         assert_eq!(revoked.history_commitment.history_commitment_id, [0xE1; 32]);
@@ -3973,7 +3973,7 @@ mod tests {
             ]
         );
         let joins = client
-            .barrier_resolve_joins_since(
+            .barrier_resolve_join_occupancies_since(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 3,
             )
@@ -4895,7 +4895,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_revoked_leaves_rejects_unexpected_completeness_attestation()
+    async fn barrier_resolve_revoked_occupancies_rejects_unexpected_completeness_attestation()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let history_commitment = HistoryCommitment {
@@ -4925,7 +4925,7 @@ mod tests {
                 let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
-                    encode_proto(BarrierResolveRevokedLeavesResponse {
+                    encode_proto(BarrierResolveRevokedOccupanciesResponse {
                         records: vec![
                             pb::BarrierRevokedOccupancyRecord {
                                 slot_index: 1,
@@ -4965,7 +4965,7 @@ mod tests {
 
         let client = CitygApiClient::new(base);
         let err = client
-            .barrier_resolve_revoked_leaves(
+            .barrier_resolve_revoked_occupancies(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 &[0xCC; 32],
             )
@@ -4981,7 +4981,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_joins_since_rejects_unexpected_completeness_attestation()
+    async fn barrier_resolve_join_occupancies_since_rejects_unexpected_completeness_attestation()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let history_commitment = HistoryCommitment {
@@ -5011,7 +5011,7 @@ mod tests {
                 let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
-                    encode_proto(BarrierResolveJoinsSinceResponse {
+                    encode_proto(BarrierResolveJoinOccupanciesSinceResponse {
                         records: vec![pb::BarrierJoinOccupancyRecord {
                             device_pk: vec![0xAA; 32],
                             slot_index: 9,
@@ -5047,7 +5047,7 @@ mod tests {
 
         let client = CitygApiClient::new(base);
         let err = client
-            .barrier_resolve_joins_since(
+            .barrier_resolve_join_occupancies_since(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 0,
             )
@@ -5063,7 +5063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_revoked_leaves_rejects_missing_deployment_profile_manifest()
+    async fn barrier_resolve_revoked_occupancies_rejects_missing_deployment_profile_manifest()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let history_commitment = HistoryCommitment {
@@ -5083,7 +5083,7 @@ mod tests {
                 let attestation_bytes = attestation_bytes.clone();
                 let fs_forward_leap_policy = fs_forward_leap_policy;
                 async move {
-                    encode_proto(BarrierResolveRevokedLeavesResponse {
+                    encode_proto(BarrierResolveRevokedOccupanciesResponse {
                         records: vec![
                             pb::BarrierRevokedOccupancyRecord {
                                 slot_index: 1,
@@ -5123,7 +5123,7 @@ mod tests {
 
         let client = CitygApiClient::new(base);
         let err = client
-            .barrier_resolve_revoked_leaves(
+            .barrier_resolve_revoked_occupancies(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 &[0xCC; 32],
             )
@@ -5139,7 +5139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_revoked_leaves_rejects_local_history_authority_in_base_profile()
+    async fn barrier_resolve_revoked_occupancies_rejects_local_history_authority_in_base_profile()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let history_commitment = HistoryCommitment {
@@ -5169,7 +5169,7 @@ mod tests {
                 let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
-                    encode_proto(BarrierResolveRevokedLeavesResponse {
+                    encode_proto(BarrierResolveRevokedOccupanciesResponse {
                         records: vec![
                             pb::BarrierRevokedOccupancyRecord {
                                 slot_index: 1,
@@ -5209,7 +5209,7 @@ mod tests {
 
         let client = CitygApiClient::new(base);
         let err = client
-            .barrier_resolve_revoked_leaves(
+            .barrier_resolve_revoked_occupancies(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 &[0xCC; 32],
             )
@@ -5227,7 +5227,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_revoked_leaves_rejects_deployment_profile_manifest_mismatch_across_pages()
+    async fn barrier_resolve_revoked_occupancies_rejects_deployment_profile_manifest_mismatch_across_pages()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let history_commitment = HistoryCommitment {
@@ -5332,7 +5332,7 @@ mod tests {
                             helper_attestation_page_1,
                         )
                     };
-                    encode_proto(BarrierResolveRevokedLeavesResponse {
+                    encode_proto(BarrierResolveRevokedOccupanciesResponse {
                         records,
                         history_view_id: vec![0xD1; 32],
                         history_commitment: Some(history_commitment_ok_payload(
@@ -5363,7 +5363,7 @@ mod tests {
 
         let client = CitygApiClient::new(base);
         let err = client
-            .barrier_resolve_revoked_leaves(
+            .barrier_resolve_revoked_occupancies(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 &[0xCC; 32],
             )
@@ -5379,7 +5379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_joins_since_rejects_missing_deployment_profile_manifest()
+    async fn barrier_resolve_join_occupancies_since_rejects_missing_deployment_profile_manifest()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let history_commitment = HistoryCommitment {
@@ -5399,7 +5399,7 @@ mod tests {
                 let attestation_bytes = attestation_bytes.clone();
                 let fs_forward_leap_policy = fs_forward_leap_policy;
                 async move {
-                    encode_proto(BarrierResolveJoinsSinceResponse {
+                    encode_proto(BarrierResolveJoinOccupanciesSinceResponse {
                         records: vec![pb::BarrierJoinOccupancyRecord {
                             device_pk: vec![0xAA; 32],
                             slot_index: 9,
@@ -5435,7 +5435,7 @@ mod tests {
 
         let client = CitygApiClient::new(base);
         let err = client
-            .barrier_resolve_joins_since(
+            .barrier_resolve_join_occupancies_since(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 0,
             )
@@ -5451,7 +5451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_joins_since_rejects_local_history_authority_in_base_profile()
+    async fn barrier_resolve_join_occupancies_since_rejects_local_history_authority_in_base_profile()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let history_commitment = HistoryCommitment {
@@ -5481,7 +5481,7 @@ mod tests {
                 let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
-                    encode_proto(BarrierResolveJoinsSinceResponse {
+                    encode_proto(BarrierResolveJoinOccupanciesSinceResponse {
                         records: vec![pb::BarrierJoinOccupancyRecord {
                             device_pk: vec![0xAA; 32],
                             slot_index: 9,
@@ -5517,7 +5517,7 @@ mod tests {
 
         let client = CitygApiClient::new(base);
         let err = client
-            .barrier_resolve_joins_since(
+            .barrier_resolve_join_occupancies_since(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 0,
             )
@@ -5535,7 +5535,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn barrier_resolve_joins_since_rejects_global_history_attestation_mismatch_across_pages()
+    async fn barrier_resolve_join_occupancies_since_rejects_global_history_attestation_mismatch_across_pages()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let history_commitment = HistoryCommitment {
@@ -5640,7 +5640,7 @@ mod tests {
                             helper_attestation_page_1,
                         )
                     };
-                    encode_proto(BarrierResolveJoinsSinceResponse {
+                    encode_proto(BarrierResolveJoinOccupanciesSinceResponse {
                         records,
                         history_view_id: vec![0xD1; 32],
                         history_commitment: Some(history_commitment_ok_payload(
@@ -5671,7 +5671,7 @@ mod tests {
 
         let client = CitygApiClient::new(base);
         let err = client
-            .barrier_resolve_joins_since(
+            .barrier_resolve_join_occupancies_since(
                 "4141414141414141414141414141414141414141414141414141414141414141",
                 0,
             )

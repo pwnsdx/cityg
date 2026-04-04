@@ -690,7 +690,8 @@ fn resolve_revoked_occupancies_matches_legacy_wrapper() -> Result<(), CityGError
         root
     };
 
-    let preferred = server.resolve_revoked_occupancies(&cityg_client::demo::DEMO_GID, &roots_hash)?;
+    let preferred =
+        server.resolve_revoked_occupancies(&cityg_client::demo::DEMO_GID, &roots_hash)?;
     let legacy = server.resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &roots_hash)?;
     assert_eq!(preferred.history_view_id, legacy.history_view_id);
     assert_eq!(preferred.history_commitment, legacy.history_commitment);

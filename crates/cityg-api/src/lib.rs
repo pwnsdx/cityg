@@ -62,10 +62,12 @@ use pb::{
 #[cfg(test)]
 use pb::{
     BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceResponse,
-    BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse, BootstrapRoomResponse,
-    ConfigureWindowRequest, ConfigureWindowResponse, GetTelemetryRequest, GetTelemetryResponse,
-    GetWindowRequest, GetWindowResponse, HealthResponse, ListRoomAdminsResponse, MembersResponse,
-    MergeAcceptanceStatus, RoomAdminMutationResponse, RoomAdminProof, RotateRoomKbroadResponse,
+    BarrierResolveJoinOccupanciesSinceResponse, BarrierResolveJoinsSinceResponse,
+    BarrierResolveRevokedLeavesResponse, BarrierResolveRevokedOccupanciesResponse,
+    BootstrapRoomResponse, ConfigureWindowRequest, ConfigureWindowResponse, GetTelemetryRequest,
+    GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
+    ListRoomAdminsResponse, MembersResponse, MergeAcceptanceStatus, RoomAdminMutationResponse,
+    RoomAdminProof, RotateRoomKbroadResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -3427,6 +3429,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn barrier_resolve_join_occupancies_since_returns_join_records_v2() {
+        let state = test_api_state();
+        let headers = message_auth_headers();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+        let expected_history_authority_descriptor = {
+            let guard = state.server.read().await;
+            guard
+                .history_authority_descriptor_bytes()
+                .expect("history authority descriptor bytes")
+        };
+
+        {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+        }
+
+        let mut body = Vec::new();
+        BarrierResolveJoinOccupanciesSinceRequest {
+            room_id: hex::encode(DEMO_GID),
+            prev_barrier_version: 0,
+            ..BarrierResolveJoinOccupanciesSinceRequest::default()
+        }
+        .encode(&mut body)
+        .expect("encode v2 join-occupancies request");
+        let response =
+            barrier_resolve_join_occupancies_since(State(state), headers, Bytes::from(body))
+                .await
+                .expect("join-occupancies request should succeed");
+        let decoded: BarrierResolveJoinOccupanciesSinceResponse =
+            decode_proto_response(response).await;
+        assert!(!decoded.records.is_empty());
+        assert!(decoded.history_commitment.is_some());
+        let first = &decoded.records[0];
+        assert!(first.slot_index > 0);
+        assert!(!first.device_pk.is_empty());
+        assert!(
+            first.ek_leaf.is_empty() || first.ek_leaf.len() == ml_kem_public_key_bytes(),
+            "ek_leaf should be absent or ML-KEM-768 size"
+        );
+        assert_eq!(
+            decoded.history_authority_descriptor,
+            expected_history_authority_descriptor
+        );
+        assert!(!decoded.global_history_attestation.is_empty());
+        assert!(!decoded.helper_completeness_attestation.is_empty());
+        assert_eq!(decoded.profile_version, API_PROFILE_VERSION);
+        assert!(decoded.n_max > 0);
+        assert!(decoded.max_barrier_update_bytes > 0);
+        assert!(decoded.fs_forward_leap_policy.is_some());
+        assert!(!decoded.deployment_profile_manifest.is_empty());
+    }
+
+    #[tokio::test]
     async fn barrier_tree_and_revoked_leaves_endpoints_validate_inputs() {
         let state = test_api_state();
         let headers = message_auth_headers();
@@ -3661,6 +3716,93 @@ mod tests {
             .await
             .expect_err("mismatched tree hash must fail");
         assert!(matches!(err, ApiError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn barrier_resolve_revoked_occupancies_validates_inputs_and_returns_records_v2() {
+        let state = test_api_state();
+        let headers = message_auth_headers();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+
+        let (revocation_roots_hash, expected_history_authority_descriptor) = {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+            (
+                guard
+                    .barrier_roots_hash(DEMO_GID.as_ref())
+                    .expect("barrier roots hash"),
+                guard
+                    .history_authority_descriptor_bytes()
+                    .expect("history authority descriptor"),
+            )
+        };
+
+        let mut bad_body = Vec::new();
+        BarrierResolveRevokedOccupanciesRequest {
+            room_id: String::new(),
+            revocation_roots_hash: revocation_roots_hash.to_vec(),
+            ..BarrierResolveRevokedOccupanciesRequest::default()
+        }
+        .encode(&mut bad_body)
+        .expect("encode missing room revoked occupancies request");
+        let err = barrier_resolve_revoked_occupancies(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(bad_body),
+        )
+        .await
+        .expect_err("missing room_id should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room_id must be provided")
+        ));
+
+        let mut bad_hash_body = Vec::new();
+        BarrierResolveRevokedOccupanciesRequest {
+            room_id: hex::encode(DEMO_GID),
+            revocation_roots_hash: vec![0xAB; 31],
+            ..BarrierResolveRevokedOccupanciesRequest::default()
+        }
+        .encode(&mut bad_hash_body)
+        .expect("encode short hash revoked occupancies request");
+        let err = barrier_resolve_revoked_occupancies(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(bad_hash_body),
+        )
+        .await
+        .expect_err("short revocation_roots_hash should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("revocation_roots_hash must be 32 bytes")
+        ));
+
+        let mut body = Vec::new();
+        BarrierResolveRevokedOccupanciesRequest {
+            room_id: hex::encode(DEMO_GID),
+            revocation_roots_hash: revocation_roots_hash.to_vec(),
+            ..BarrierResolveRevokedOccupanciesRequest::default()
+        }
+        .encode(&mut body)
+        .expect("encode revoked occupancies request");
+        let response =
+            barrier_resolve_revoked_occupancies(State(state), headers, Bytes::from(body))
+                .await
+                .expect("revoked occupancies request should succeed");
+        let decoded: BarrierResolveRevokedOccupanciesResponse =
+            decode_proto_response(response).await;
+        assert!(decoded.records.is_empty());
+        assert_eq!(
+            decoded.history_authority_descriptor,
+            expected_history_authority_descriptor
+        );
+        assert!(!decoded.global_history_attestation.is_empty());
+        assert!(!decoded.helper_completeness_attestation.is_empty());
+        assert_eq!(decoded.profile_version, API_PROFILE_VERSION);
+        assert!(decoded.n_max > 0);
+        assert!(decoded.max_barrier_update_bytes > 0);
+        assert!(decoded.fs_forward_leap_policy.is_some());
+        assert!(!decoded.deployment_profile_manifest.is_empty());
     }
 
     #[tokio::test]
