@@ -1974,7 +1974,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let payload = encode_cbor_det(&JoinProvisioningArtifactSignedPayload {
-            label: "cityg/join-provisioning-artifact-v1",
+            label: "cityg/join-provisioning-artifact-v2",
             scope_id: &authority.descriptor.scope_id,
             history_authority_extension: response.history_authority_extension.as_str(),
             gid: &gid,
@@ -1985,7 +1985,7 @@ mod tests {
             prev_history_commitment_id: &history_commitment.prev_history_commitment_id,
             history_seq: history_commitment.history_seq,
             barrier_version: response.barrier_version,
-            cover_leaf_index: response.slot_index,
+            slot_index: response.slot_index,
             slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -2031,7 +2031,7 @@ mod tests {
                 .clone(),
             history_seq: current_history_commitment.history_seq,
             barrier_version: response.barrier_version,
-            cover_leaf_index: response.slot_index,
+            slot_index: response.slot_index,
             slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -2159,7 +2159,7 @@ mod tests {
         let kem_tree_hash_after =
             array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after");
         let payload = encode_cbor_det(&MergeTicketArtifactSignedPayload {
-            label: "cityg/merge-ticket-artifact-v1",
+            label: "cityg/merge-ticket-artifact-v2",
             scope_id: &authority.descriptor.scope_id,
             history_authority_extension: response.history_authority_extension.as_str(),
             profile_version: response.profile_version.as_str(),
@@ -2170,7 +2170,7 @@ mod tests {
             prev_history_commitment_id: &history_commitment.prev_history_commitment_id,
             history_seq: history_commitment.history_seq,
             barrier_version: response.barrier_version,
-            cover_leaf_index: response.slot_index,
+            slot_index: response.slot_index,
             slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -2222,7 +2222,7 @@ mod tests {
                 .clone(),
             history_seq: current_history_commitment.history_seq,
             barrier_version: response.barrier_version,
-            cover_leaf_index: response.slot_index,
+            slot_index: response.slot_index,
             slot_generation: response.slot_generation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,

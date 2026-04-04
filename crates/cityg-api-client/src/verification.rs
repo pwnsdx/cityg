@@ -93,7 +93,7 @@ pub(crate) struct JoinProvisioningArtifactWire {
     pub(crate) prev_history_commitment_id: Vec<u8>,
     pub(crate) history_seq: u64,
     pub(crate) barrier_version: u64,
-    pub(crate) cover_leaf_index: u64,
+    pub(crate) slot_index: u64,
     pub(crate) slot_generation: u64,
     pub(crate) n_max: u64,
     pub(crate) max_barrier_update_bytes: u64,
@@ -135,7 +135,7 @@ pub(crate) struct MergeTicketArtifactWire {
     pub(crate) prev_history_commitment_id: Vec<u8>,
     pub(crate) history_seq: u64,
     pub(crate) barrier_version: u64,
-    pub(crate) cover_leaf_index: u64,
+    pub(crate) slot_index: u64,
     pub(crate) slot_generation: u64,
     pub(crate) n_max: u64,
     pub(crate) max_barrier_update_bytes: u64,
@@ -246,7 +246,7 @@ pub(crate) struct JoinProvisioningArtifactSignedPayload<'a> {
     pub(crate) prev_history_commitment_id: &'a [u8; 32],
     pub(crate) history_seq: u64,
     pub(crate) barrier_version: u64,
-    pub(crate) cover_leaf_index: u64,
+    pub(crate) slot_index: u64,
     pub(crate) slot_generation: u64,
     pub(crate) n_max: u64,
     pub(crate) max_barrier_update_bytes: u64,
@@ -299,7 +299,7 @@ pub(crate) struct MergeTicketArtifactSignedPayload<'a> {
     pub(crate) prev_history_commitment_id: &'a [u8; 32],
     pub(crate) history_seq: u64,
     pub(crate) barrier_version: u64,
-    pub(crate) cover_leaf_index: u64,
+    pub(crate) slot_index: u64,
     pub(crate) slot_generation: u64,
     pub(crate) n_max: u64,
     pub(crate) max_barrier_update_bytes: u64,
@@ -780,7 +780,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         ));
     }
     if artifact.barrier_version != response.barrier_version
-        || artifact.cover_leaf_index != response.slot_index
+        || artifact.slot_index != response.slot_index
         || artifact.slot_generation != response.slot_generation
         || artifact.n_max != response.n_max
         || artifact.max_barrier_update_bytes != response.max_barrier_update_bytes
@@ -845,7 +845,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         })
         .collect::<Vec<_>>();
     let payload = encode_cbor_det(&JoinProvisioningArtifactSignedPayload {
-        label: "cityg/join-provisioning-artifact-v1",
+        label: "cityg/join-provisioning-artifact-v2",
         scope_id: &authority.scope_id,
         history_authority_extension: history_authority_extension.as_str(),
         gid: &gid,
@@ -856,7 +856,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         prev_history_commitment_id: &current_history_commitment.prev_history_commitment_id,
         history_seq: current_history_commitment.history_seq,
         barrier_version: response.barrier_version,
-        cover_leaf_index: response.slot_index,
+        slot_index: response.slot_index,
         slot_generation: response.slot_generation,
         n_max: response.n_max,
         max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -948,7 +948,7 @@ pub(crate) fn verify_merge_ticket_artifact(
         ));
     }
     if artifact.barrier_version != response.barrier_version
-        || artifact.cover_leaf_index != slot_lease.slot_index
+        || artifact.slot_index != slot_lease.slot_index
         || artifact.slot_generation != slot_lease.slot_generation
         || artifact.n_max != response.n_max
         || artifact.max_barrier_update_bytes != response.max_barrier_update_bytes
@@ -1010,7 +1010,7 @@ pub(crate) fn verify_merge_ticket_artifact(
     let tswe_salt_hash = array32(&response.tswe_salt_hash)?;
     let pox_r_commit = array32(&response.pox_r_commit)?;
     let payload = encode_cbor_det(&MergeTicketArtifactSignedPayload {
-        label: "cityg/merge-ticket-artifact-v1",
+        label: "cityg/merge-ticket-artifact-v2",
         scope_id: &authority.scope_id,
         history_authority_extension: history_authority_extension.as_str(),
         profile_version: response.profile_version.as_str(),
@@ -1021,7 +1021,7 @@ pub(crate) fn verify_merge_ticket_artifact(
         prev_history_commitment_id: &current_history_commitment.prev_history_commitment_id,
         history_seq: current_history_commitment.history_seq,
         barrier_version: response.barrier_version,
-        cover_leaf_index: response.slot_index,
+        slot_index: response.slot_index,
         slot_generation: response.slot_generation,
         n_max: response.n_max,
         max_barrier_update_bytes: response.max_barrier_update_bytes,
