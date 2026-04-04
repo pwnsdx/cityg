@@ -541,6 +541,24 @@ pub struct BarrierRevokedLeafRecord {
     pub slot_generation: u64,
 }
 
+fn to_core_revoked_snapshot_record(
+    record: &BarrierRevokedLeafRecord,
+) -> cityg_client::barrier::BarrierRevokedSnapshotRecord {
+    cityg_client::barrier::BarrierRevokedSnapshotRecord {
+        leaf_index: record.leaf_index,
+        slot_generation: record.slot_generation,
+    }
+}
+
+pub fn to_core_revoked_snapshot_records(
+    revoked_records: &[BarrierRevokedLeafRecord],
+) -> Vec<cityg_client::barrier::BarrierRevokedSnapshotRecord> {
+    revoked_records
+        .iter()
+        .map(to_core_revoked_snapshot_record)
+        .collect()
+}
+
 /// Revoked-leaf response bound to a specific authenticated history view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierResolvedRevokedLeaves {

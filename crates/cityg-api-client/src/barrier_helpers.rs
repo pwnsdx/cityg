@@ -137,10 +137,13 @@ impl CitygApiClient {
 
         let reclaims_cover_leaf_index = barrier_update_reason == 0
             && header.contains_key(&msphf_orchestrator::hdr::HDR_JOIN_FINALIZE_AUTH);
+        let revoked_records_core =
+            to_core_revoked_snapshot_records(revoked_resolution.records.as_slice());
         let witness_selection = derive_barrier_snapshot_witness_selection(
             barrier_update_reason,
             cover_leaf_index,
-            revoked_resolution.leaf_indices.as_slice(),
+            slot_generation,
+            revoked_records_core.as_slice(),
             ticket_fields.revocation_roots_hash,
             ticket_fields.committed_revocation_roots_hash,
             !reclaims_cover_leaf_index,
@@ -171,7 +174,7 @@ impl CitygApiClient {
             current_global_history_attestation_bytes,
             snapshot_pk_entries: barrier_tree_snapshot.pk_entries.as_slice(),
             join_records: join_records_core.as_slice(),
-            witness_revoked_leaf_indices: witness_selection.witness_revoked_leaf_indices.as_slice(),
+            witness_revoked_records: witness_selection.witness_revoked_records.as_slice(),
             revocation_roots_hash: ticket_fields.revocation_roots_hash,
             pop_secret_key,
         })
@@ -200,6 +203,7 @@ impl CitygApiClient {
                     merge_ticket_artifact_bytes,
                     barrier_update_reason,
                     prepared_snapshot.barrier_update.raw_update.as_slice(),
+                    cover_leaf_index,
                     barrier_n_max,
                     ticket_history_commitment,
                     history_authority_extension,
@@ -250,7 +254,8 @@ impl CitygApiClient {
         merge_ticket_artifact: &[u8],
         barrier_update_reason: u64,
         barrier_update: &[u8],
-        n_max: u64,
+        updater_leaf: u64,
+        _n_max: u64,
         current_history_commitment: &HistoryCommitment,
         history_authority_extension: HistoryAuthorityExtension,
         history_authority: &HistoryAuthorityDescriptor,
@@ -308,8 +313,6 @@ impl CitygApiClient {
         let response: BarrierIssueFullVerificationWitnessResponse = self
             .post_proto("/v1/barrier/issue_full_verification_witness", request)
             .await?;
-        let updater_leaf =
-            cover_leaf_index_for_n_max(revocation_target_leaf_id.unwrap_or(author_leaf_id), n_max);
         verify_full_verification_witness(
             response.full_verification_witness.as_slice(),
             history_authority,

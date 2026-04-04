@@ -1,6 +1,8 @@
 use super::*;
 use crate::barrier_shared::require_current_state_history_commitment;
-use cityg_api_client::{to_core_history_commitment, to_core_join_snapshot_records};
+use cityg_api_client::{
+    to_core_history_commitment, to_core_join_snapshot_records, to_core_revoked_snapshot_records,
+};
 use cityg_client::barrier_prevalidation::{
     BootstrapCurrentStateInput, prevalidate_bootstrap_current_state, prevalidate_full_chain_update,
     validate_bootstrap_provisioning, validate_full_chain_reason,
@@ -65,7 +67,7 @@ pub(super) async fn full_chain_check_barrier_update(
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
     let join_record_count = join_resolution.records.len();
-    let revoked_leaf_count = revoked_resolution.leaf_indices.len();
+    let revoked_record_count = revoked_resolution.records.len();
     let (snapshot_prev, snapshot_prev_history_commitment) =
         ensure_current_state_commitment_aligned_snapshot(
             client,
@@ -109,14 +111,15 @@ pub(super) async fn full_chain_check_barrier_update(
 
     let parsed_for_hash = parsed.clone();
     let snapshot_prev_entries = snapshot_prev.pk_entries.clone();
-    let revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
+    let revoked_records_core =
+        to_core_revoked_snapshot_records(revoked_resolution.records.as_slice());
     let (expected_before, expected_after, snapshot_post) =
         tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32], BarrierPublicTree)> {
             let transition = compute_barrier_snapshot_transition(
                 n_max,
                 snapshot_prev_entries.as_slice(),
                 join_records_core.as_slice(),
-                revoked_leaf_indices.as_slice(),
+                revoked_records_core.as_slice(),
                 &parsed_for_hash,
             )?;
             Ok((
@@ -138,7 +141,7 @@ pub(super) async fn full_chain_check_barrier_update(
             parsed_prev_barrier_version = parsed.prev_barrier_version,
             parsed_barrier_version = parsed.barrier_version,
             join_record_count,
-            revoked_leaf_count,
+            revoked_record_count,
             expected_before = %hex_encode(expected_before),
             parsed_before = %hex_encode(parsed.kem_tree_hash_before),
             snapshot_prev_hash = %hex_encode(prevalidated.expected_snapshot_hash),
@@ -235,11 +238,12 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     validate_barrier_tree_snapshot_auth(&predecessor_hash, n_max, &snapshot_base)?;
 
     let join_records = session.barrier_state.bootstrap_join_records.clone();
-    let revoked_leaf_indices = session.barrier_state.bootstrap_revoked_leaf_indices.clone();
+    let revoked_records = session.barrier_state.bootstrap_revoked_records.clone();
     let join_records_core = to_core_join_snapshot_records(join_records.as_slice());
+    let revoked_records_core = to_core_revoked_snapshot_records(revoked_records.as_slice());
     validate_bootstrap_provisioning(
         join_records_core.as_slice(),
-        revoked_leaf_indices.as_slice(),
+        revoked_records_core.as_slice(),
         &parsed,
     )?;
 
@@ -251,7 +255,7 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
                 n_max,
                 snapshot_base_entries.as_slice(),
                 join_records_core.as_slice(),
-                revoked_leaf_indices.as_slice(),
+                revoked_records_core.as_slice(),
                 &parsed_for_hash,
             )?;
             Ok((transition.expected_before, transition.expected_after))

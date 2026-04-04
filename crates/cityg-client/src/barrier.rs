@@ -34,6 +34,12 @@ pub struct BarrierJoinSnapshotRecord {
     pub ek_leaf: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BarrierRevokedSnapshotRecord {
+    pub leaf_index: u32,
+    pub slot_generation: u64,
+}
+
 #[derive(Serialize)]
 struct BarrierRootsPreimage<'a>(
     #[serde(with = "serde_bytes")] &'a [u8; 32],
@@ -473,6 +479,27 @@ pub fn apply_revoked_set_to_snapshot(
     Ok(())
 }
 
+pub fn revoked_leaf_indices_from_records(
+    revoked_records: &[BarrierRevokedSnapshotRecord],
+) -> Vec<u32> {
+    let mut revoked_indices = revoked_records
+        .iter()
+        .map(|record| record.leaf_index)
+        .collect::<Vec<_>>();
+    revoked_indices.sort_unstable();
+    revoked_indices.dedup();
+    revoked_indices
+}
+
+pub fn apply_revoked_records_to_snapshot(
+    snapshot: &mut [Vec<u8>],
+    n_max: u64,
+    revoked_records: &[BarrierRevokedSnapshotRecord],
+) -> Result<()> {
+    let revoked_indices = revoked_leaf_indices_from_records(revoked_records);
+    apply_revoked_set_to_snapshot(snapshot, n_max, revoked_indices.as_slice())
+}
+
 pub fn apply_join_set_to_snapshot(
     snapshot: &mut [Vec<u8>],
     n_max: u64,
@@ -685,6 +712,37 @@ mod tests {
         )?;
         assert_eq!(snapshot[4], vec![0xCC; 8]);
         assert!(snapshot[1].is_empty());
+        assert!(snapshot[0].is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_revoked_records_to_snapshot_dedups_shared_slot_indices() -> Result<()> {
+        let mut snapshot = vec![
+            vec![0xA0],
+            vec![0xA1],
+            vec![0xA2],
+            vec![0xA3],
+            vec![0xA4],
+            vec![0xA5],
+            vec![0xA6],
+        ];
+        apply_revoked_records_to_snapshot(
+            snapshot.as_mut_slice(),
+            4,
+            &[
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 2,
+                    slot_generation: 0,
+                },
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 2,
+                    slot_generation: 3,
+                },
+            ],
+        )?;
+        assert!(snapshot[5].is_empty());
+        assert!(snapshot[2].is_empty());
         assert!(snapshot[0].is_empty());
         Ok(())
     }

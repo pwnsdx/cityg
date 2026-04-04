@@ -545,12 +545,6 @@ pub(crate) fn verify_ml_dsa_signature(
         .map_err(|_| Error::Parse("history authority signature verification failed".to_string()))
 }
 
-pub(crate) fn cover_leaf_index_for_n_max(leaf_id: &[u8; 32], n_max: u64) -> u64 {
-    let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
-    let leaf_suffix: [u8; 4] = leaf_id[28..32].try_into().unwrap_or_default();
-    u64::from(u32::from_be_bytes(leaf_suffix) % n_max)
-}
-
 pub(crate) fn compute_full_verification_barrier_update_digest(
     barrier_update: &[u8],
 ) -> Result<[u8; 32], Error> {

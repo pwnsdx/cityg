@@ -1011,6 +1011,16 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             slot_generation: 0,
             ek_leaf: vec![0x42; cityg_client::barrier_crypto::barrier_leaf_public_key_bytes()],
         }],
+        bootstrap_revoked_records: vec![
+            BarrierRevokedLeafRecord {
+                leaf_index: 1,
+                slot_generation: 0,
+            },
+            BarrierRevokedLeafRecord {
+                leaf_index: 2,
+                slot_generation: 4,
+            },
+        ],
         bootstrap_revoked_leaf_indices: vec![1, 2],
         bootstrap_join_finalize_auth_token: array(0x34),
         k_barrier: Zeroizing::new(array(0x21)),
@@ -1235,6 +1245,10 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         loaded.barrier_state.bootstrap_join_records,
         session.barrier_state.bootstrap_join_records
+    );
+    assert_eq!(
+        loaded.barrier_state.bootstrap_revoked_records,
+        session.barrier_state.bootstrap_revoked_records
     );
     assert_eq!(
         loaded.barrier_state.bootstrap_revoked_leaf_indices,

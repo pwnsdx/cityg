@@ -6,10 +6,11 @@ use hex::encode as hex_encode;
 use msphf_orchestrator::{PivotParity, hdr};
 
 use crate::barrier::{
-    BarrierHistoryCommitment, BarrierJoinSnapshotRecord, apply_join_set_to_snapshot,
-    apply_revoked_set_to_snapshot, compute_barrier_tree_hash, compute_revocation_roots_hash,
-    encode_full_verification_receipt, encode_history_commitment_header,
-    require_current_state_history_commitment, require_same_history_commitment,
+    BarrierHistoryCommitment, BarrierJoinSnapshotRecord, BarrierRevokedSnapshotRecord,
+    apply_join_set_to_snapshot, apply_revoked_records_to_snapshot, compute_barrier_tree_hash,
+    compute_revocation_roots_hash, encode_full_verification_receipt,
+    encode_history_commitment_header, require_current_state_history_commitment,
+    require_same_history_commitment, revoked_leaf_indices_from_records,
 };
 use crate::barrier_build::{BarrierUpdateBuildResult, build_barrier_update_bytes};
 use crate::barrier_update::normalize_max_barrier_update_bytes;
@@ -30,6 +31,7 @@ pub struct BarrierSnapshotTicketFields {
 }
 
 pub struct BarrierSnapshotWitnessSelection {
+    pub witness_revoked_records: Vec<BarrierRevokedSnapshotRecord>,
     pub witness_revoked_leaf_indices: Vec<u32>,
     pub witness_revocation_roots_hash: [u8; 32],
 }
@@ -56,7 +58,7 @@ pub struct BarrierSnapshotArtifactsInput<'a> {
     pub current_global_history_attestation_bytes: &'a [u8],
     pub snapshot_pk_entries: &'a [Vec<u8>],
     pub join_records: &'a [BarrierJoinSnapshotRecord],
-    pub witness_revoked_leaf_indices: &'a [u32],
+    pub witness_revoked_records: &'a [BarrierRevokedSnapshotRecord],
     pub revocation_roots_hash: [u8; 32],
     pub pop_secret_key: &'a [u8],
 }
@@ -102,26 +104,33 @@ pub fn derive_barrier_snapshot_ticket_fields(
 pub fn derive_barrier_snapshot_witness_selection(
     barrier_update_reason: u64,
     updater_leaf: u64,
-    resolved_revoked_leaf_indices: &[u32],
+    updater_slot_generation: u64,
+    resolved_revoked_records: &[BarrierRevokedSnapshotRecord],
     revocation_roots_hash: [u8; 32],
     committed_revocation_roots_hash: [u8; 32],
     include_updater_in_revoked_set: bool,
 ) -> Result<BarrierSnapshotWitnessSelection> {
-    let mut witness_revoked_leaf_indices = resolved_revoked_leaf_indices.to_vec();
+    let mut witness_revoked_records = resolved_revoked_records.to_vec();
     let witness_revocation_roots_hash = if barrier_update_reason == 0 {
         if include_updater_in_revoked_set {
             let updater_leaf = u32::try_from(updater_leaf)
                 .map_err(|_| anyhow!("cover_leaf_index out of range"))?;
-            if let Err(insert_at) = witness_revoked_leaf_indices.binary_search(&updater_leaf) {
-                witness_revoked_leaf_indices.insert(insert_at, updater_leaf);
-            }
+            witness_revoked_records.push(BarrierRevokedSnapshotRecord {
+                leaf_index: updater_leaf,
+                slot_generation: updater_slot_generation,
+            });
         }
         revocation_roots_hash
     } else {
         committed_revocation_roots_hash
     };
+    witness_revoked_records.sort_by_key(|record| (record.leaf_index, record.slot_generation));
+    witness_revoked_records.dedup();
     Ok(BarrierSnapshotWitnessSelection {
-        witness_revoked_leaf_indices,
+        witness_revoked_records: witness_revoked_records.clone(),
+        witness_revoked_leaf_indices: revoked_leaf_indices_from_records(
+            witness_revoked_records.as_slice(),
+        ),
         witness_revocation_roots_hash,
     })
 }
@@ -146,7 +155,7 @@ pub fn prepare_barrier_snapshot_artifacts(
         current_global_history_attestation_bytes,
         snapshot_pk_entries,
         join_records,
-        witness_revoked_leaf_indices,
+        witness_revoked_records,
         revocation_roots_hash,
         pop_secret_key,
     } = input;
@@ -191,10 +200,10 @@ pub fn prepare_barrier_snapshot_artifacts(
 
     let mut snapshot_pre = snapshot_pk_entries.to_vec();
     apply_join_set_to_snapshot(snapshot_pre.as_mut_slice(), barrier_n_max, join_records)?;
-    apply_revoked_set_to_snapshot(
+    apply_revoked_records_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        witness_revoked_leaf_indices,
+        witness_revoked_records,
     )?;
 
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
@@ -328,11 +337,38 @@ mod tests {
         let selection = derive_barrier_snapshot_witness_selection(
             0,
             4,
-            &[1, 7],
+            9,
+            &[
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                },
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 7,
+                    slot_generation: 2,
+                },
+            ],
             fields.revocation_roots_hash,
             fields.committed_revocation_roots_hash,
             true,
         )?;
+        assert_eq!(
+            selection.witness_revoked_records,
+            vec![
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                },
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 4,
+                    slot_generation: 9,
+                },
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 7,
+                    slot_generation: 2,
+                },
+            ]
+        );
         assert_eq!(selection.witness_revoked_leaf_indices, vec![1, 4, 7]);
         assert_eq!(
             selection.witness_revocation_roots_hash,
@@ -364,7 +400,7 @@ mod tests {
             current_global_history_attestation_bytes: &[],
             snapshot_pk_entries: snapshot_entries.as_slice(),
             join_records: &[],
-            witness_revoked_leaf_indices: &[],
+            witness_revoked_records: &[],
             revocation_roots_hash,
             pop_secret_key: &[],
         })?;
@@ -393,11 +429,42 @@ mod tests {
         let selection = derive_barrier_snapshot_witness_selection(
             0,
             4,
-            &[1, 4, 7],
+            3,
+            &[
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                },
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 4,
+                    slot_generation: 1,
+                },
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 7,
+                    slot_generation: 2,
+                },
+            ],
             [0x44; 32],
             [0x55; 32],
             false,
         )?;
+        assert_eq!(
+            selection.witness_revoked_records,
+            vec![
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 1,
+                    slot_generation: 0,
+                },
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 4,
+                    slot_generation: 1,
+                },
+                BarrierRevokedSnapshotRecord {
+                    leaf_index: 7,
+                    slot_generation: 2,
+                },
+            ]
+        );
         assert_eq!(selection.witness_revoked_leaf_indices, vec![1, 4, 7]);
         assert_eq!(selection.witness_revocation_roots_hash, [0x44; 32]);
         Ok(())
@@ -427,7 +494,7 @@ mod tests {
             current_global_history_attestation_bytes: &[0xCC, 0xDD],
             snapshot_pk_entries: snapshot_entries.as_slice(),
             join_records: &[],
-            witness_revoked_leaf_indices: &[],
+            witness_revoked_records: &[],
             revocation_roots_hash,
             pop_secret_key: pop_secret_key.as_bytes(),
         })?;

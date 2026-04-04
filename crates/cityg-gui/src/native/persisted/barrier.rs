@@ -32,6 +32,8 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) bootstrap_join_records: Vec<PersistedBarrierJoinRecord>,
     #[serde(default)]
+    pub(in crate::native) bootstrap_revoked_records: Vec<PersistedBarrierRevokedRecord>,
+    #[serde(default)]
     pub(in crate::native) bootstrap_revoked_leaf_indices: Vec<u32>,
     #[serde(default)]
     pub(in crate::native) bootstrap_join_finalize_auth_token_hex: String,
@@ -95,6 +97,14 @@ pub(in crate::native) struct PersistedBarrierJoinRecord {
     pub(in crate::native) slot_generation: u64,
     #[serde(default)]
     pub(in crate::native) ek_leaf_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub(in crate::native) struct PersistedBarrierRevokedRecord {
+    #[serde(default)]
+    pub(in crate::native) leaf_index: u32,
+    #[serde(default)]
+    pub(in crate::native) slot_generation: u64,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -248,6 +258,22 @@ impl PersistedBarrierJoinRecord {
                 &self.ek_leaf_hex,
             )?,
         })
+    }
+}
+
+impl PersistedBarrierRevokedRecord {
+    pub(in crate::native) fn from_runtime(record: &BarrierRevokedLeafRecord) -> Self {
+        Self {
+            leaf_index: record.leaf_index,
+            slot_generation: record.slot_generation,
+        }
+    }
+
+    pub(in crate::native) fn into_runtime(self) -> BarrierRevokedLeafRecord {
+        BarrierRevokedLeafRecord {
+            leaf_index: self.leaf_index,
+            slot_generation: self.slot_generation,
+        }
     }
 }
 
@@ -443,6 +469,11 @@ impl PersistedBarrierState {
                 .iter()
                 .map(PersistedBarrierJoinRecord::from_runtime)
                 .collect(),
+            bootstrap_revoked_records: state
+                .bootstrap_revoked_records
+                .iter()
+                .map(PersistedBarrierRevokedRecord::from_runtime)
+                .collect(),
             bootstrap_revoked_leaf_indices: state.bootstrap_revoked_leaf_indices.clone(),
             bootstrap_join_finalize_auth_token_hex: hex_encode(
                 state.bootstrap_join_finalize_auth_token,
@@ -519,6 +550,11 @@ impl PersistedBarrierState {
                 .into_iter()
                 .map(PersistedBarrierJoinRecord::into_runtime)
                 .collect::<Result<Vec<_>>>()?,
+            bootstrap_revoked_records: self
+                .bootstrap_revoked_records
+                .into_iter()
+                .map(PersistedBarrierRevokedRecord::into_runtime)
+                .collect(),
             bootstrap_revoked_leaf_indices: self.bootstrap_revoked_leaf_indices,
             bootstrap_join_finalize_auth_token: decode_hex32_or_zero(
                 "barrier_state.bootstrap_join_finalize_auth_token_hex",

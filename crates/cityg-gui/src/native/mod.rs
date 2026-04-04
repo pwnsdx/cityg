@@ -30,9 +30,9 @@ use ciborium::value::Value;
 #[cfg(test)]
 use cityg_api_client::room_admin_public_key_bytes;
 use cityg_api_client::{
-    BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError,
-    HistoryAuthorityExtension, HistoryCommitment, MergeAcceptanceStatus, MergeTicket,
-    RoomAdminIdentity as RoomIdentity, RoomAdminOperation,
+    BarrierJoinRecord, BarrierPublicTree, BarrierRevokedLeafRecord, CitygApiClient,
+    Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment, MergeAcceptanceStatus,
+    MergeTicket, RoomAdminIdentity as RoomIdentity, RoomAdminOperation,
 };
 use cityg_client::ClientEpochBundle;
 #[cfg(test)]

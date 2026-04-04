@@ -60,6 +60,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 - [~] Persist local `slot_generation` alongside the local slot index
 - [ ] Update bootstrap/join-finalize state
+- [~] Update bootstrap/join-finalize state to persist versioned revoked records
 - [ ] Update barrier recovery to compare full leases
 - [ ] Update tests and fixtures
 
@@ -74,3 +75,4 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 1. Replace ticket/runtime `cover_leaf_index` naming with an explicit lease shape.
 2. Carry full lease comparisons through recovery/bootstrap state instead of mixing indexed fallback paths.
 3. Finish helper/API cleanup so all occupancy surfaces speak in versioned records only.
+4. Drop the remaining client/runtime dependence on derived `current_revoked_leaf_indices` outside attestations.

@@ -1,8 +1,9 @@
 use anyhow::{Result, anyhow};
 
 use crate::barrier::{
-    BarrierHistoryCommitment, BarrierJoinSnapshotRecord, compute_revocation_roots_hash,
-    expected_same_rrh_barrier_reason, require_same_history_commitment,
+    BarrierHistoryCommitment, BarrierJoinSnapshotRecord, BarrierRevokedSnapshotRecord,
+    compute_revocation_roots_hash, expected_same_rrh_barrier_reason,
+    require_same_history_commitment,
 };
 use crate::barrier_update::{
     ParsedBarrierUpdate, normalize_max_barrier_update_bytes, parse_barrier_update_for_recover,
@@ -138,11 +139,11 @@ pub fn prevalidate_bootstrap_current_state(
 
 pub fn validate_bootstrap_provisioning(
     join_records: &[BarrierJoinSnapshotRecord],
-    revoked_leaf_indices: &[u32],
+    revoked_records: &[BarrierRevokedSnapshotRecord],
     parsed: &ParsedBarrierUpdate,
 ) -> Result<()> {
     if join_records.is_empty()
-        && revoked_leaf_indices.is_empty()
+        && revoked_records.is_empty()
         && (parsed.prev_barrier_version != 0 || parsed.revocation_roots_hash != [0u8; 32])
     {
         return Err(anyhow!(

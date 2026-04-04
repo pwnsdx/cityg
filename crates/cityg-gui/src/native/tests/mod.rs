@@ -8306,6 +8306,7 @@ async fn perform_join_existing_room_can_self_finalize_without_room_secret()
             && bob.barrier_state.bootstrap_history_commitment.is_none()
             && bob.barrier_state.bootstrap_predecessor_kem_tree_hash_after == [0u8; 32]
             && bob.barrier_state.bootstrap_join_records.is_empty()
+            && bob.barrier_state.bootstrap_revoked_records.is_empty()
             && bob.barrier_state.bootstrap_revoked_leaf_indices.is_empty()
             && bob.barrier_state.bootstrap_join_finalize_auth_token == [0u8; 32],
         "post-finalize session should clear bootstrap provisioning artifacts"

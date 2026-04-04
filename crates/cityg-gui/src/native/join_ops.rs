@@ -288,6 +288,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 bootstrap_predecessor_kem_tree_hash_after: prepared_runtime
                     .current_predecessor_kem_tree_hash_after,
                 bootstrap_join_records: prepared_runtime.current_join_records,
+                bootstrap_revoked_records: prepared_runtime.current_revoked_records.clone(),
                 bootstrap_revoked_leaf_indices: prepared_runtime.current_revoked_leaf_indices,
                 bootstrap_join_finalize_auth_token: prepared_runtime.join_finalize_auth_token,
                 k_barrier: Zeroizing::new([0u8; 32]),
