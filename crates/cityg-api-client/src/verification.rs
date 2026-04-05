@@ -14,10 +14,10 @@ use crate::{
     EXPECTED_MSPHF_PARAMS_ID, EXPECTED_PROFILE_VERSION, EXPECTED_PROOF_MODE, EXPECTED_VRF_ID,
     Error, FsForwardLeapPolicy, FullVerificationWitness, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
     GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, GlobalHistoryAttestation, HELPER_KIND_FETCH_PUBLIC_TREE,
-    HELPER_KIND_JOINS_SINCE, HELPER_KIND_REVOKED_LEAVES, HelperCompletenessAttestation,
-    HistoryAuthorityDescriptor, HistoryAuthorityExtension, HistoryCommitment,
-    LOCAL_HISTORY_ATTESTATION_FINALITY_KIND, LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
-    MAX_BARRIER_N_MAX, MergeAcceptanceStatus, SlotLease,
+    HELPER_KIND_JOIN_OCCUPANCIES_SINCE, HELPER_KIND_REVOKED_OCCUPANCIES,
+    HelperCompletenessAttestation, HistoryAuthorityDescriptor, HistoryAuthorityExtension,
+    HistoryCommitment, LOCAL_HISTORY_ATTESTATION_FINALITY_KIND,
+    LOCAL_HISTORY_AUTHORITY_EXTENSION_ID, MAX_BARRIER_N_MAX, MergeAcceptanceStatus, SlotLease,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -1338,18 +1338,18 @@ pub(crate) fn parse_helper_completeness_attestation_bytes(
     }))
 }
 
-pub fn parse_revoked_leaves_completeness_attestation_bytes(
+pub fn parse_revoked_occupancies_completeness_attestation_bytes(
     raw: &[u8],
     authority: &HistoryAuthorityDescriptor,
 ) -> Result<Option<HelperCompletenessAttestation>, Error> {
-    parse_helper_completeness_attestation_bytes(raw, authority, HELPER_KIND_REVOKED_LEAVES)
+    parse_helper_completeness_attestation_bytes(raw, authority, HELPER_KIND_REVOKED_OCCUPANCIES)
 }
 
-pub fn parse_joins_since_completeness_attestation_bytes(
+pub fn parse_join_occupancies_since_completeness_attestation_bytes(
     raw: &[u8],
     authority: &HistoryAuthorityDescriptor,
 ) -> Result<Option<HelperCompletenessAttestation>, Error> {
-    parse_helper_completeness_attestation_bytes(raw, authority, HELPER_KIND_JOINS_SINCE)
+    parse_helper_completeness_attestation_bytes(raw, authority, HELPER_KIND_JOIN_OCCUPANCIES_SINCE)
 }
 
 pub fn parse_fetch_public_tree_completeness_attestation_bytes(
@@ -1359,7 +1359,7 @@ pub fn parse_fetch_public_tree_completeness_attestation_bytes(
     parse_helper_completeness_attestation_bytes(raw, authority, HELPER_KIND_FETCH_PUBLIC_TREE)
 }
 
-pub fn verify_revoked_leaves_completeness_attestation(
+pub fn verify_revoked_occupancies_completeness_attestation(
     attestation: &HelperCompletenessAttestation,
     authority: &HistoryAuthorityDescriptor,
     history_commitment: &HistoryCommitment,
@@ -1388,7 +1388,7 @@ pub fn verify_revoked_leaves_completeness_attestation(
     )
 }
 
-pub fn verify_joins_since_completeness_attestation(
+pub fn verify_join_occupancies_since_completeness_attestation(
     attestation: &HelperCompletenessAttestation,
     authority: &HistoryAuthorityDescriptor,
     history_commitment: &HistoryCommitment,

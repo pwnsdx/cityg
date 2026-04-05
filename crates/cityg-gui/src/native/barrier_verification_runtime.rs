@@ -108,7 +108,7 @@ pub(super) async fn full_chain_check_barrier_update(
         barrier_reason,
         join_records_core.as_slice(),
         CoreBarrierSlotLease {
-            slot_index: parsed.updater_leaf,
+            slot_index: parsed.updater_slot_index,
             slot_generation: parsed.updater_slot_generation,
         },
     )?;

@@ -40,13 +40,12 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Replace naked revoked leaf indices with revoked occupancy records
 - [~] Rework `ResolveJoinsSince` and `ResolveRevokedLeaves`
 - [x] Update completeness attestations to cover occupancy records
-  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; the remaining legacy is now mostly in helper-kind identifiers and CBOR wire labels, not in helper routes/messages or runtime call sites.
+  Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; `helper_kind` completeness-attestation identifiers now also use the occupancy-oriented names, so the remaining legacy is mostly in selected CBOR field labels.
 
 ### 4. Barrier validation
 
-- [ ] Replace `updater_leaf` binding with lease binding in the wire profile
-  `api-client` mappe désormais explicitement le champ wire legacy `updater_leaf` vers `updater_slot_index` dans les adaptateurs de vérification, mais le format CBOR reste inchangé.
-  `cityg-client` consomme désormais `updater_slot_index` en interne pour `ParsedBarrierUpdate` et les chemins de build/recovery associés.
+- [~] Replace `updater_leaf` binding with lease binding in the wire profile
+  `api-client`, `cityg-client`, `cityg-gui` et `msphf-orchestrator` consomment désormais `updater_slot_index` en interne; le reliquat restant est le label CBOR wire `updater_leaf`, conservé explicitement via `serde(rename = "updater_leaf")`.
 - [x] Update `join_finalize_auth` validation to match the current leased slot
 - [x] Update receipts and full-verification witness payloads
   `BarrierIssueFullVerificationWitnessRequest` transporte désormais des records `Occupancy` versionnés.
@@ -58,7 +57,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 - [x] Add protobuf `v2` helper request/response messages for occupancy-oriented barrier helpers
 - [x] Remove legacy helper `v1` routes/messages once `v2` occupancies are in place
 - [x] Remove orphaned protobuf `*LeafRecord` messages once all helper/ticket/witness wire paths consume `OccupancyRecord`
-- [ ] Replace `cover_leaf_index` fields in tickets with `slot_index` + `slot_generation`
+- [x] Replace `cover_leaf_index` fields in tickets with `slot_index` + `slot_generation`
 - [x] Rename internal server/runtime ticket bundle fields from `cover_leaf_index` to `slot_index`
 - [x] Align migrated ticket/runtime error terminology from `cover_leaf_index` to `slot_index`
 - [x] Rename join/merge provisioning artifact CBOR fields from `cover_leaf_index` to `slot_index` and bump artifact labels to `v2`
@@ -100,6 +99,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Decide whether `helper_kind` and the CBOR wire label `updater_leaf` stay as documented legacy identifiers or also move in a hard `v0.2` cut.
+1. Decide whether the CBOR wire label `updater_leaf` also moves in a hard `v0.2` cut.
 2. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.
-3. Finish the remaining ticket/profile rename work sur les champs publics encore marqués `cover_leaf_index` et autres labels legacy du provisioning path.
+3. Finish the remaining documentation sweep for historical `cover_leaf_index` wording and other explicitly legacy labels.

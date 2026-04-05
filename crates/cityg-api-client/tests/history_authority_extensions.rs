@@ -4,17 +4,19 @@ use cityg_api_client::{
     BarrierJoinOccupancyRecord, BarrierRevokedOccupancyRecord, GlobalHistoryAttestation,
     HelperCompletenessAttestation, HistoryAuthorityDescriptor, HistoryCommitment,
     parse_fetch_public_tree_completeness_attestation_bytes, parse_global_history_attestation_bytes,
-    parse_history_authority_descriptor_bytes, parse_joins_since_completeness_attestation_bytes,
-    parse_revoked_leaves_completeness_attestation_bytes,
-    verify_fetch_public_tree_completeness_attestation, verify_joins_since_completeness_attestation,
-    verify_revoked_leaves_completeness_attestation,
+    parse_history_authority_descriptor_bytes,
+    parse_join_occupancies_since_completeness_attestation_bytes,
+    parse_revoked_occupancies_completeness_attestation_bytes,
+    verify_fetch_public_tree_completeness_attestation,
+    verify_join_occupancies_since_completeness_attestation,
+    verify_revoked_occupancies_completeness_attestation,
 };
 use pqcrypto_dilithium::dilithium5;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 use serde::{Deserialize, Serialize};
 
-const HELPER_KIND_REVOKED_LEAVES: &str = "resolve_revoked_leaves";
-const HELPER_KIND_JOINS_SINCE: &str = "resolve_joins_since";
+const HELPER_KIND_REVOKED_OCCUPANCIES: &str = "resolve_revoked_occupancies";
+const HELPER_KIND_JOIN_OCCUPANCIES_SINCE: &str = "resolve_join_occupancies_since";
 const HELPER_KIND_FETCH_PUBLIC_TREE: &str = "fetch_public_tree";
 
 #[derive(Serialize, Deserialize)]
@@ -239,7 +241,7 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
     let revoked_bytes = sign_helper_completeness_attestation(
         &authority,
         &secret_key,
-        HELPER_KIND_REVOKED_LEAVES,
+        HELPER_KIND_REVOKED_OCCUPANCIES,
         &history_commitment,
         0,
         2,
@@ -258,17 +260,17 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         },
     )?;
     let revoked_attestation =
-        parse_revoked_leaves_completeness_attestation_bytes(&revoked_bytes, &authority)?
+        parse_revoked_occupancies_completeness_attestation_bytes(&revoked_bytes, &authority)?
             .ok_or("revoked helper attestation should parse")?;
     assert_eq!(
         revoked_attestation,
         HelperCompletenessAttestation {
             scope_id: authority.scope_id,
-            helper_kind: HELPER_KIND_REVOKED_LEAVES.to_string(),
+            helper_kind: HELPER_KIND_REVOKED_OCCUPANCIES.to_string(),
             signature: revoked_attestation.signature.clone(),
         }
     );
-    verify_revoked_leaves_completeness_attestation(
+    verify_revoked_occupancies_completeness_attestation(
         &revoked_attestation,
         &authority,
         &history_commitment,
@@ -296,7 +298,7 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
     let joins_bytes = sign_helper_completeness_attestation(
         &authority,
         &secret_key,
-        HELPER_KIND_JOINS_SINCE,
+        HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
         &history_commitment,
         0,
         1,
@@ -306,9 +308,9 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         },
     )?;
     let joins_attestation =
-        parse_joins_since_completeness_attestation_bytes(&joins_bytes, &authority)?
+        parse_join_occupancies_since_completeness_attestation_bytes(&joins_bytes, &authority)?
             .ok_or("joins helper attestation should parse")?;
-    verify_joins_since_completeness_attestation(
+    verify_join_occupancies_since_completeness_attestation(
         &joins_attestation,
         &authority,
         &history_commitment,
@@ -370,7 +372,7 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
     let revoked_bytes = sign_helper_completeness_attestation(
         &authority,
         &secret_key,
-        HELPER_KIND_REVOKED_LEAVES,
+        HELPER_KIND_REVOKED_OCCUPANCIES,
         &history_commitment,
         0,
         2,
@@ -380,9 +382,9 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
         },
     )?;
     let revoked_attestation =
-        parse_revoked_leaves_completeness_attestation_bytes(&revoked_bytes, &authority)?
+        parse_revoked_occupancies_completeness_attestation_bytes(&revoked_bytes, &authority)?
             .ok_or("revoked helper attestation should parse")?;
-    verify_revoked_leaves_completeness_attestation(
+    verify_revoked_occupancies_completeness_attestation(
         &revoked_attestation,
         &authority,
         &history_commitment,
@@ -394,7 +396,7 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
     let mut tampered_revoked_records = revoked_records;
     tampered_revoked_records[1].slot_generation = 3;
     assert!(
-        verify_revoked_leaves_completeness_attestation(
+        verify_revoked_occupancies_completeness_attestation(
             &revoked_attestation,
             &authority,
             &history_commitment,
@@ -416,7 +418,7 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
     let joins_bytes = sign_helper_completeness_attestation(
         &authority,
         &secret_key,
-        HELPER_KIND_JOINS_SINCE,
+        HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
         &history_commitment,
         0,
         1,
@@ -426,9 +428,9 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
         },
     )?;
     let joins_attestation =
-        parse_joins_since_completeness_attestation_bytes(&joins_bytes, &authority)?
+        parse_join_occupancies_since_completeness_attestation_bytes(&joins_bytes, &authority)?
             .ok_or("joins helper attestation should parse")?;
-    verify_joins_since_completeness_attestation(
+    verify_join_occupancies_since_completeness_attestation(
         &joins_attestation,
         &authority,
         &history_commitment,
@@ -440,7 +442,7 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
     let mut tampered_join_record = join_record.clone();
     tampered_join_record.slot_generation = 3;
     assert!(
-        verify_joins_since_completeness_attestation(
+        verify_join_occupancies_since_completeness_attestation(
             &joins_attestation,
             &authority,
             &history_commitment,

@@ -463,7 +463,7 @@ impl CitygApiClient {
                 let attestation = parse_helper_completeness_attestation_bytes(
                     response.helper_completeness_attestation.as_slice(),
                     authority,
-                    HELPER_KIND_REVOKED_LEAVES,
+                    HELPER_KIND_REVOKED_OCCUPANCIES,
                 )?
                 .ok_or_else(|| {
                     Error::Parse(
@@ -471,7 +471,7 @@ impl CitygApiClient {
                             .to_string(),
                     )
                 })?;
-                verify_revoked_leaves_completeness_attestation(
+                verify_revoked_occupancies_completeness_attestation(
                     &attestation,
                     authority,
                     &history_commitment,
@@ -683,7 +683,7 @@ impl CitygApiClient {
                     let helper_attestation = parse_helper_completeness_attestation_bytes(
                         response.helper_completeness_attestation.as_slice(),
                         authority,
-                        HELPER_KIND_JOINS_SINCE,
+                        HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
                     )?
                     .ok_or_else(|| {
                         Error::Parse(
@@ -691,7 +691,7 @@ impl CitygApiClient {
                                 .to_string(),
                         )
                     })?;
-                    verify_joins_since_completeness_attestation(
+                    verify_join_occupancies_since_completeness_attestation(
                         &helper_attestation,
                         authority,
                         &history_commitment,

@@ -3046,7 +3046,7 @@ mod tests {
 
     fn build_valid_barrier_update_bytes(
         n_max: u64,
-        updater_leaf: u64,
+        updater_slot_index: u64,
         barrier_version: u64,
         prev_barrier_version: u64,
         revocation_roots_hash: [u8; 32],
@@ -3085,12 +3085,14 @@ mod tests {
         );
 
         let malformed = || AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED);
-        if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
+        if n_max == 0 || !n_max.is_power_of_two() || updater_slot_index >= n_max {
             return Err(malformed());
         }
 
         let leaf_base = n_max.checked_sub(1).ok_or_else(malformed)?;
-        let leaf_node = leaf_base.checked_add(updater_leaf).ok_or_else(malformed)?;
+        let leaf_node = leaf_base
+            .checked_add(updater_slot_index)
+            .ok_or_else(malformed)?;
         let mut path_nodes = vec![leaf_node];
         while let Some(&node) = path_nodes.last() {
             if node == 0 {
@@ -3111,7 +3113,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let cover = TestKemTreeCoverPayloadWire(
-            updater_leaf,
+            updater_slot_index,
             path_nodes,
             None,
             Vec::<TestNodeCiphertextWire>::new(),
@@ -3134,7 +3136,7 @@ mod tests {
     fn insert_valid_barrier_update(
         header: &mut BTreeMap<u64, Value>,
         n_max: u64,
-        updater_leaf: u64,
+        updater_slot_index: u64,
         barrier_version: u64,
         prev_barrier_version: u64,
         revocation_roots_hash: [u8; 32],
@@ -3142,7 +3144,7 @@ mod tests {
     ) -> Result<(), AcceptanceError> {
         let barrier_update = build_valid_barrier_update_bytes(
             n_max,
-            updater_leaf,
+            updater_slot_index,
             barrier_version,
             prev_barrier_version,
             revocation_roots_hash,

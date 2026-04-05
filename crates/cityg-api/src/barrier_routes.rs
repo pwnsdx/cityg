@@ -11,7 +11,8 @@ use cityg_api_schema::{
     decode_full_verification_witness_request as schema_decode_full_verification_witness_request,
     encode_full_verification_witness_response, encode_prepared_barrier_public_tree_response,
     encode_prepared_merge_acceptance_lookup_response,
-    encode_prepared_resolved_join_occupancies_response, encode_prepared_resolved_revoked_occupancies_response,
+    encode_prepared_resolved_join_occupancies_response,
+    encode_prepared_resolved_revoked_occupancies_response,
 };
 use cityg_runtime::{
     prepare_barrier_public_tree as runtime_prepare_barrier_public_tree,

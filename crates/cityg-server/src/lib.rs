@@ -1312,27 +1312,29 @@ impl CityGServer {
                 "current barrier predecessor hash missing for join provisioning",
             ));
         }
-        let (current_join_occupancies, current_revoked_occupancies) = if requires_current_barrier_update {
-            let BarrierUpdateWire(
-                _mode,
-                _barrier_version,
-                prev_barrier_version,
-                _tree_size,
-                revocation_roots_hash,
-                _kem_tree_hash_before,
-                _kem_tree_hash_after,
-                _cover_payload,
-            ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
-            let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
-            let resolved_revoked = self.resolve_revoked_occupancies(gid, &revocation_roots_hash)?;
-            (
-                self.resolve_join_occupancies_since(gid, prev_barrier_version)?
-                    .records,
-                resolved_revoked.records,
-            )
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let (current_join_occupancies, current_revoked_occupancies) =
+            if requires_current_barrier_update {
+                let BarrierUpdateWire(
+                    _mode,
+                    _barrier_version,
+                    prev_barrier_version,
+                    _tree_size,
+                    revocation_roots_hash,
+                    _kem_tree_hash_before,
+                    _kem_tree_hash_after,
+                    _cover_payload,
+                ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
+                let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
+                let resolved_revoked =
+                    self.resolve_revoked_occupancies(gid, &revocation_roots_hash)?;
+                (
+                    self.resolve_join_occupancies_since(gid, prev_barrier_version)?
+                        .records,
+                    resolved_revoked.records,
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
         let join_finalize_auth_token = fresh_join_finalize_auth_token();
         let provisioning_nonce = fresh_join_provisioning_nonce();
         let provisioning_issued_at_ms = current_timestamp_ms();
@@ -4716,7 +4718,7 @@ fn encode_helper_completeness_attestation_revoked(
     total_entries: u32,
     leaf_indices: &[u32],
 ) -> Result<Vec<u8>, CityGError> {
-    let helper_kind = "resolve_revoked_leaves";
+    let helper_kind = "resolve_revoked_occupancies";
     let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
         label: "cityg/helper-completeness-attestation-v1",
         scope_id: &state.descriptor.scope_id,
@@ -4746,7 +4748,7 @@ fn encode_helper_completeness_attestation_revoked_records(
     total_entries: u32,
     records: &[BarrierRevokedOccupancyRecord],
 ) -> Result<Vec<u8>, CityGError> {
-    let helper_kind = "resolve_revoked_leaves";
+    let helper_kind = "resolve_revoked_occupancies";
     let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
         label: "cityg/helper-completeness-attestation-v1",
         scope_id: &state.descriptor.scope_id,
@@ -4776,7 +4778,7 @@ fn encode_helper_completeness_attestation_joins(
     total_entries: u32,
     records: &[BarrierJoinOccupancyRecord],
 ) -> Result<Vec<u8>, CityGError> {
-    let helper_kind = "resolve_joins_since";
+    let helper_kind = "resolve_join_occupancies_since";
     let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
         label: "cityg/helper-completeness-attestation-v1",
         scope_id: &state.descriptor.scope_id,

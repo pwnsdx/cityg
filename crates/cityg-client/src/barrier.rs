@@ -277,7 +277,7 @@ pub fn verify_full_verification_receipt(
     gid: &[u8; 32],
     expected_author_leaf_id: &[u8; 32],
     expected_barrier_update_reason: u64,
-    expected_updater_leaf: u64,
+    expected_updater_slot_index: u64,
     expected_updater_slot_generation: Option<u64>,
     barrier_history_commitment: &[u8],
     global_history_attestation: &[u8],
@@ -298,7 +298,7 @@ pub fn verify_full_verification_receipt(
         .map_err(|_| anyhow!("full verification receipt author_leaf_id must be 32 bytes"))?;
     if author_leaf_id != *expected_author_leaf_id
         || decoded.barrier_update_reason != expected_barrier_update_reason
-        || decoded.updater_slot_index != expected_updater_leaf
+        || decoded.updater_slot_index != expected_updater_slot_index
         || expected_updater_slot_generation
             .is_some_and(|slot_generation| decoded.updater_slot_generation != slot_generation)
     {
@@ -309,7 +309,7 @@ pub fn verify_full_verification_receipt(
         gid,
         author_leaf_id: expected_author_leaf_id,
         barrier_update_reason: expected_barrier_update_reason,
-        updater_slot_index: expected_updater_leaf,
+        updater_slot_index: expected_updater_slot_index,
         updater_slot_generation: decoded.updater_slot_generation,
         barrier_history_commitment,
         global_history_attestation,

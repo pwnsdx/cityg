@@ -144,7 +144,7 @@ const LEAVE_ACCEPT_RETRY_MAX_ATTEMPTS: u32 = 2;
 fn build_barrier_update_bytes(
     gid: &[u8],
     n_max: u64,
-    updater_leaf: u64,
+    updater_slot_index: u64,
     updater_slot_generation: u64,
     barrier_version: u64,
     prev_barrier_version: u64,
@@ -156,7 +156,7 @@ fn build_barrier_update_bytes(
     cityg_client::barrier_build::build_barrier_update_bytes(
         &gid,
         n_max,
-        updater_leaf,
+        updater_slot_index,
         updater_slot_generation,
         barrier_version,
         prev_barrier_version,

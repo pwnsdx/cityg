@@ -177,7 +177,7 @@ impl CitygApiClient {
                         .current_join_occupancies_completeness_attestation
                         .as_slice(),
                     authority,
-                    HELPER_KIND_JOINS_SINCE,
+                    HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
                 )?
                 .ok_or_else(|| {
                     Error::Parse(
@@ -195,14 +195,16 @@ impl CitygApiClient {
                         ek_leaf: record.ek_leaf.clone(),
                     })
                     .collect::<Vec<_>>();
-                verify_joins_since_completeness_attestation(
+                verify_join_occupancies_since_completeness_attestation(
                     &join_attestation,
                     authority,
                     commitment,
                     response.barrier_version.saturating_sub(1),
                     0,
                     u32::try_from(join_records.len()).map_err(|_| {
-                        Error::Parse("join ticket current_join_occupancies length overflow".to_string())
+                        Error::Parse(
+                            "join ticket current_join_occupancies length overflow".to_string(),
+                        )
                     })?,
                     join_records.as_slice(),
                 )?;
@@ -211,7 +213,7 @@ impl CitygApiClient {
                         .current_revoked_occupancies_completeness_attestation
                         .as_slice(),
                     authority,
-                    HELPER_KIND_REVOKED_LEAVES,
+                    HELPER_KIND_REVOKED_OCCUPANCIES,
                 )?
                 .ok_or_else(|| {
                     Error::Parse(
@@ -227,7 +229,7 @@ impl CitygApiClient {
                         slot_generation: record.slot_generation,
                     })
                     .collect::<Vec<_>>();
-                verify_revoked_leaves_completeness_attestation(
+                verify_revoked_occupancies_completeness_attestation(
                     &revoked_attestation,
                     authority,
                     commitment,

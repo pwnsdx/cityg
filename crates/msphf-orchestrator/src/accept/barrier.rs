@@ -17,7 +17,7 @@ pub(super) struct ParsedBarrierUpdate {
     pub barrier_version: u64,
     pub prev_barrier_version: u64,
     pub tree_size: u64,
-    pub updater_leaf: u64,
+    pub updater_slot_index: u64,
     pub revocation_roots_hash: [u8; 32],
     pub kem_tree_hash_before: [u8; 32],
     pub kem_tree_hash_after: [u8; 32],
@@ -99,19 +99,21 @@ fn validate_revoked_hint(hint: Option<&[u64]>) -> Result<(), AcceptanceError> {
 
 fn validate_path_nodes(
     path_nodes: &[u64],
-    updater_leaf: u64,
+    updater_slot_index: u64,
     n_max: u64,
     max_index: u64,
 ) -> Result<(), AcceptanceError> {
     if path_nodes.is_empty() {
         return Err(malformed());
     }
-    if updater_leaf >= n_max {
+    if updater_slot_index >= n_max {
         return Err(malformed());
     }
 
     let leaf_base = n_max.saturating_sub(1);
-    let expected_first = leaf_base.checked_add(updater_leaf).ok_or_else(malformed)?;
+    let expected_first = leaf_base
+        .checked_add(updater_slot_index)
+        .ok_or_else(malformed)?;
     if path_nodes.first().copied() != Some(expected_first) {
         return Err(malformed());
     }
@@ -242,7 +244,7 @@ pub(super) fn parse_barrier_update_from_header(
     }
 
     let KemTreeCoverPayloadWire(
-        updater_leaf,
+        updater_slot_index,
         path_nodes,
         revoked_leaf_indices_hint,
         node_ciphertexts,
@@ -257,7 +259,7 @@ pub(super) fn parse_barrier_update_from_header(
     validate_revoked_hint(revoked_leaf_indices_hint.as_deref())?;
     validate_path_nodes(
         path_nodes.as_slice(),
-        updater_leaf,
+        updater_slot_index,
         expected_n_max,
         max_index,
     )?;
@@ -273,7 +275,7 @@ pub(super) fn parse_barrier_update_from_header(
         barrier_version,
         prev_barrier_version,
         tree_size,
-        updater_leaf,
+        updater_slot_index,
         revocation_roots_hash: vec32(revocation_roots_hash)?,
         kem_tree_hash_before: vec32(kem_tree_hash_before)?,
         kem_tree_hash_after: vec32(kem_tree_hash_after)?,

@@ -470,7 +470,8 @@ message JoinTicketResponse {
   uint64 kbroad_generation = 22;
   uint64 barrier_version = 23;
   string profile_version = 24;
-  uint64 cover_leaf_index = 25;
+  uint64 slot_index = 25;
+  uint64 slot_generation = 51;
   reserved 26;                               // Legacy k_barrier field id
   bytes kem_tree_hash_after = 27;
   uint64 n_max = 28;
@@ -479,8 +480,7 @@ message JoinTicketResponse {
   optional HistoryCommitment current_history_commitment = 31;
   bytes current_barrier_update = 32;
   bytes current_predecessor_kem_tree_hash_after = 33;
-  repeated BarrierJoinLeafRecord current_join_occupancies = 34;
-  repeated uint32 current_revoked_leaf_indices = 35;
+  repeated BarrierJoinOccupancyRecord current_join_occupancies = 34;
   bytes join_finalize_auth_token = 36;
   bytes provisioning_nonce = 37;
   uint64 provisioning_issued_at_ms = 38;
@@ -490,7 +490,8 @@ message JoinTicketResponse {
   bytes history_authority_descriptor = 42;
   bytes current_global_history_attestation = 43;
   bytes current_join_occupancies_completeness_attestation = 44;
-  bytes current_revoked_leaf_indices_completeness_attestation = 45;
+  repeated BarrierRevokedOccupancyRecord current_revoked_occupancies = 49;
+  bytes current_revoked_occupancies_completeness_attestation = 50;
   string history_authority_extension = 46;  // "global-history-authority-v1" in the base profile
   bytes provisioning_artifact = 47;         // Signed artifact over the delivered current-state provisioning fields
   bytes deployment_profile_manifest = 48;   // Signed artifact over delivered profile/config fields
@@ -581,7 +582,8 @@ message MergeTicketResponse {
   uint64 kbroad_generation = 20;
   uint64 barrier_version = 21;
   string profile_version = 22;
-  uint64 cover_leaf_index = 23;
+  uint64 slot_index = 23;
+  uint64 slot_generation = 37;
   reserved 24;                               // Legacy k_barrier field id
   bytes kem_tree_hash_after = 25;
   uint64 n_max = 26;

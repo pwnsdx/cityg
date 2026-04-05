@@ -1332,9 +1332,7 @@ impl CloudflareRoomDurableObject {
             Ok(prepared) => prepared,
             Err(error) => return barrier_helper_error_response(error),
         };
-        protobuf_response_bytes(encode_prepared_resolved_join_occupancies_response(
-            prepared,
-        ))
+        protobuf_response_bytes(encode_prepared_resolved_join_occupancies_response(prepared))
     }
 
     async fn handle_barrier_fetch_public_tree(

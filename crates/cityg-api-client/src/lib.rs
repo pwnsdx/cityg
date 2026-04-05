@@ -181,18 +181,20 @@ use verification::*;
 
 pub use verification::{
     parse_fetch_public_tree_completeness_attestation_bytes, parse_global_history_attestation_bytes,
-    parse_history_authority_descriptor_bytes, parse_joins_since_completeness_attestation_bytes,
-    parse_revoked_leaves_completeness_attestation_bytes,
-    verify_fetch_public_tree_completeness_attestation, verify_joins_since_completeness_attestation,
-    verify_revoked_leaves_completeness_attestation,
+    parse_history_authority_descriptor_bytes,
+    parse_join_occupancies_since_completeness_attestation_bytes,
+    parse_revoked_occupancies_completeness_attestation_bytes,
+    verify_fetch_public_tree_completeness_attestation,
+    verify_join_occupancies_since_completeness_attestation,
+    verify_revoked_occupancies_completeness_attestation,
 };
 
 const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 const JOIN_PROVISIONING_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 const MAX_BARRIER_HELPER_PAGE_ENTRIES: u32 = 512;
-const HELPER_KIND_REVOKED_LEAVES: &str = "resolve_revoked_leaves";
-const HELPER_KIND_JOINS_SINCE: &str = "resolve_joins_since";
+const HELPER_KIND_REVOKED_OCCUPANCIES: &str = "resolve_revoked_occupancies";
+const HELPER_KIND_JOIN_OCCUPANCIES_SINCE: &str = "resolve_join_occupancies_since";
 const HELPER_KIND_FETCH_PUBLIC_TREE: &str = "fetch_public_tree";
 const LOCAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "local-history-authority-v1";
 const GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "global-history-authority-v1";
@@ -2390,7 +2392,7 @@ mod tests {
         let revoked_records = Vec::<BarrierRevokedOccupancyRecord>::new();
         let join_helper_attestation = build_test_helper_completeness_attestation(
             &authority,
-            HELPER_KIND_JOINS_SINCE,
+            HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
             &history_commitment,
             0,
             0,
@@ -2401,7 +2403,7 @@ mod tests {
         );
         let revoked_records_helper_attestation = build_test_helper_completeness_attestation(
             &authority,
-            HELPER_KIND_REVOKED_LEAVES,
+            HELPER_KIND_REVOKED_OCCUPANCIES,
             &history_commitment,
             0,
             0,
@@ -2451,7 +2453,8 @@ mod tests {
             current_join_occupancies: Vec::new(),
             current_revoked_occupancies: Vec::new(),
             current_join_occupancies_completeness_attestation: join_helper_attestation,
-            current_revoked_occupancies_completeness_attestation: revoked_records_helper_attestation,
+            current_revoked_occupancies_completeness_attestation:
+                revoked_records_helper_attestation,
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
             last_accepted_ec: 21,
             ..JoinTicketResponse::default()
@@ -2587,7 +2590,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 let helper_completeness_attestation = build_test_helper_completeness_attestation(
                     &authority,
-                    HELPER_KIND_REVOKED_LEAVES,
+                    HELPER_KIND_REVOKED_OCCUPANCIES,
                     &history_commitment,
                     request.page_offset,
                     u32::try_from(all.len()).unwrap_or(u32::MAX),
@@ -2666,7 +2669,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 let helper_completeness_attestation = build_test_helper_completeness_attestation(
                     &authority,
-                    HELPER_KIND_JOINS_SINCE,
+                    HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
                     &history_commitment,
                     request.page_offset,
                     u32::try_from(all.len()).unwrap_or(u32::MAX),
@@ -5100,7 +5103,7 @@ mod tests {
         );
         let helper_attestation_page_0 = build_test_helper_completeness_attestation(
             &authority,
-            HELPER_KIND_REVOKED_LEAVES,
+            HELPER_KIND_REVOKED_OCCUPANCIES,
             &history_commitment,
             0,
             2,
@@ -5114,7 +5117,7 @@ mod tests {
         );
         let helper_attestation_page_1 = build_test_helper_completeness_attestation(
             &authority,
-            HELPER_KIND_REVOKED_LEAVES,
+            HELPER_KIND_REVOKED_OCCUPANCIES,
             &history_commitment,
             1,
             2,
@@ -5243,7 +5246,7 @@ mod tests {
         );
         let helper_attestation_page_0 = build_test_helper_completeness_attestation(
             &authority,
-            HELPER_KIND_REVOKED_LEAVES,
+            HELPER_KIND_REVOKED_OCCUPANCIES,
             &history_commitment,
             0,
             2,
@@ -5257,7 +5260,7 @@ mod tests {
         );
         let helper_attestation_page_1 = build_test_helper_completeness_attestation(
             &authority,
-            HELPER_KIND_REVOKED_LEAVES,
+            HELPER_KIND_REVOKED_OCCUPANCIES,
             &history_commitment,
             1,
             2,
@@ -5535,7 +5538,7 @@ mod tests {
         );
         let helper_attestation_page_0 = build_test_helper_completeness_attestation(
             &authority_page_0,
-            HELPER_KIND_JOINS_SINCE,
+            HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
             &history_commitment,
             0,
             2,
@@ -5551,7 +5554,7 @@ mod tests {
         );
         let helper_attestation_page_1 = build_test_helper_completeness_attestation(
             &authority_page_0,
-            HELPER_KIND_JOINS_SINCE,
+            HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
             &history_commitment,
             1,
             2,
