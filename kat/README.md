@@ -51,6 +51,14 @@ and persisted client-state invariants to deterministic tests and property tests.
 It is validated by `client_state_manifest_is_well_formed_and_complete` and is the
 release-facing audit bridge for client recovery hardening.
 
+# City-G Slot-Lease Conformance Manifest
+
+`kat-slot-lease-conformance-v0.2.json` maps the reusable-slot invariants to the
+current deterministic server/client/public-wire tests. It is validated by
+`slot_lease_manifest_is_well_formed_and_complete`, and
+`scripts/run_slot_lease_conformance.sh` is the named runner for the current
+slot-lease suite.
+
 ## Plan → vectors workflow
 
 1. Edit `plan-rlwe-annex-k.json` if new scenarios are required. The schema matches the
