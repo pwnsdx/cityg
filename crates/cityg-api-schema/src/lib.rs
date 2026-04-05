@@ -1069,8 +1069,7 @@ pub fn decode_barrier_resolve_revoked_occupancies_request(
 ) -> Result<
     DecodedBarrierResolveRevokedOccupanciesRequest,
     ResolveRevokedOccupanciesRequestDecodeError,
->
-{
+> {
     if request.revocation_roots_hash.len() != 32 {
         return Err(ResolveRevokedOccupanciesRequestDecodeError::InvalidRevocationRootsHash);
     }

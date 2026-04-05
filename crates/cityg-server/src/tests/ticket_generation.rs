@@ -5,7 +5,8 @@ use crate::{
 };
 
 #[test]
-fn build_join_ticket_requires_kbroad_and_allocates_distinct_slot_leases() -> Result<(), CityGError> {
+fn build_join_ticket_requires_kbroad_and_allocates_distinct_slot_leases() -> Result<(), CityGError>
+{
     let mut server = CityGServer::new(ServerConfig::new());
     let gid = [0x42; 32];
 

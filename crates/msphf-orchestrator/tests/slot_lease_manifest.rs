@@ -30,13 +30,11 @@ struct SlotLeaseCoverage {
 }
 
 fn manifest_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../kat/kat-slot-lease-conformance-v0.2.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../kat/kat-slot-lease-conformance-v0.2.json")
 }
 
 fn runner_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/run_slot_lease_conformance.sh")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run_slot_lease_conformance.sh")
 }
 
 fn crate_root(crate_name: &str) -> PathBuf {
@@ -99,6 +97,7 @@ fn slot_lease_manifest_is_well_formed_and_complete() -> Result<(), Box<dyn std::
         "SL3".to_string(),
         "SL4".to_string(),
         "SL5".to_string(),
+        "SL6".to_string(),
     ]);
 
     assert_eq!(manifest.requirements.len(), expected.len());

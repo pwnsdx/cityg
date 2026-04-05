@@ -5,9 +5,8 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use ciborium::value::Value;
 use cityg_api_client::{
     CitygApiClient, Error, IdentityBinding, MergeAcceptanceStatus, RoomAdminOperation,
-    RoomAdminProof, SlotLease,
-    build_room_admin_leaf_pair_proof, build_room_admin_listing_proof, build_room_admin_proof,
-    build_room_admin_target_proof, generate_room_admin_keypair,
+    RoomAdminProof, SlotLease, build_room_admin_leaf_pair_proof, build_room_admin_listing_proof,
+    build_room_admin_proof, build_room_admin_target_proof, generate_room_admin_keypair,
 };
 use cityg_client::{
     CityGClient, ClientEpochBundle,
@@ -51,6 +50,19 @@ fn test_client(base_url: impl Into<String>) -> CitygApiClient {
     CitygApiClient::new(base_url)
         .with_admin_token(TEST_ADMIN_TOKEN)
         .with_message_auth_token(TEST_MESSAGE_TOKEN)
+}
+
+async fn wait_until_healthy(client: &CitygApiClient, context: &str) -> Result<()> {
+    for _ in 0..20 {
+        if timeout(Duration::from_secs(1), client.health())
+            .await
+            .is_ok_and(|result| result.is_ok())
+        {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    Err(anyhow!("server readiness timed out before {context}"))
 }
 
 async fn bootstrap_room(
@@ -428,21 +440,17 @@ async fn build_join_finalize_bundle(
     barrier_update_reason: u64,
 ) -> Result<PreparedBarrierMergeBundle> {
     let gid = array32("gid", &hex::decode(room_id)?)?;
-    let ticket = client.merge_ticket_refresh(room_id, &member.leaf_id).await?;
+    let ticket = client
+        .merge_ticket_refresh(room_id, &member.leaf_id)
+        .await?;
     let fs_ec = header_u64_field(&member.bundle, hdr::HDR_FS_EC, "fs_ec")?;
-    let fs_epoch_commit = header_bytes32_field(
-        &member.bundle,
-        hdr::HDR_FS_EPOCH_COMMIT,
-        "fs_epoch_commit",
-    )?;
-    let fs_dev_prev_commit = header_bytes32_field(
-        &member.bundle,
-        hdr::HDR_FS_DEV_COMMIT,
-        "fs_dev_prev_commit",
-    )?;
+    let fs_epoch_commit =
+        header_bytes32_field(&member.bundle, hdr::HDR_FS_EPOCH_COMMIT, "fs_epoch_commit")?;
+    let fs_dev_prev_commit =
+        header_bytes32_field(&member.bundle, hdr::HDR_FS_DEV_COMMIT, "fs_dev_prev_commit")?;
 
-    let prepared_runtime = ticket.prepare_origin_runtime(
-        cityg_api_client::PrepareOriginMergeTicketInput {
+    let prepared_runtime =
+        ticket.prepare_origin_runtime(cityg_api_client::PrepareOriginMergeTicketInput {
             operation_label: "join_finalize",
             local_barrier_version: ticket.barrier_version,
             local_kem_tree_hash_after: ticket.kem_tree_hash_after,
@@ -453,8 +461,7 @@ async fn build_join_finalize_bundle(
             fs_dev_prev_commit,
             stored_max_barrier_update_bytes: 0,
             join_finalize_auth_token: Some(join_finalize_auth_token),
-        },
-    )?;
+        })?;
     let prepared_snapshot = client
         .barrier_prepare_snapshot(prepared_runtime.snapshot_preparation_request(
             room_id,
@@ -505,19 +512,13 @@ async fn build_leave_bundle(
     let gid = array32("gid", &hex::decode(room_id)?)?;
     let ticket = client.merge_ticket(room_id, &member.leaf_id).await?;
     let fs_ec = header_u64_field(&member.bundle, hdr::HDR_FS_EC, "fs_ec")?;
-    let fs_epoch_commit = header_bytes32_field(
-        &member.bundle,
-        hdr::HDR_FS_EPOCH_COMMIT,
-        "fs_epoch_commit",
-    )?;
-    let fs_dev_prev_commit = header_bytes32_field(
-        &member.bundle,
-        hdr::HDR_FS_DEV_COMMIT,
-        "fs_dev_prev_commit",
-    )?;
+    let fs_epoch_commit =
+        header_bytes32_field(&member.bundle, hdr::HDR_FS_EPOCH_COMMIT, "fs_epoch_commit")?;
+    let fs_dev_prev_commit =
+        header_bytes32_field(&member.bundle, hdr::HDR_FS_DEV_COMMIT, "fs_dev_prev_commit")?;
 
-    let prepared_runtime = ticket.prepare_revocation_runtime(
-        cityg_api_client::PrepareRevocationMergeTicketInput {
+    let prepared_runtime =
+        ticket.prepare_revocation_runtime(cityg_api_client::PrepareRevocationMergeTicketInput {
             operation_label: "leave",
             local_barrier_version: ticket.barrier_version,
             local_kem_tree_hash_after: ticket.kem_tree_hash_after,
@@ -527,8 +528,7 @@ async fn build_leave_bundle(
             fs_epoch_commit,
             fs_dev_prev_commit,
             stored_max_barrier_update_bytes: 0,
-        },
-    )?;
+        })?;
     let prepared_snapshot = client
         .barrier_prepare_snapshot(prepared_runtime.snapshot_preparation_request(
             room_id,
@@ -626,14 +626,9 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
         .accept_epoch_bundle(&alice.bundle)
         .await
         .expect("accept alice");
-    let alice_finalize = build_join_finalize_bundle(
-        &client,
-        &room_id,
-        &alice,
-        alice.join_finalize_auth_token,
-        2,
-    )
-    .await?;
+    let alice_finalize =
+        build_join_finalize_bundle(&client, &room_id, &alice, alice.join_finalize_auth_token, 2)
+            .await?;
     client
         .accept_epoch_bundle(&alice_finalize.bundle)
         .await
@@ -687,8 +682,14 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
         1,
         "historical join helper should prune the superseded occupancy"
     );
-    assert_eq!(u64::from(joins.records[0].slot_index), alice.slot_lease.slot_index);
-    assert_eq!(u64::from(joins.records[0].slot_index), bob.slot_lease.slot_index);
+    assert_eq!(
+        u64::from(joins.records[0].slot_index),
+        alice.slot_lease.slot_index
+    );
+    assert_eq!(
+        u64::from(joins.records[0].slot_index),
+        bob.slot_lease.slot_index
+    );
     assert_eq!(
         joins.records[0].slot_generation,
         bob.slot_lease.slot_generation
@@ -733,14 +734,9 @@ async fn public_stale_join_finalize_auth_rejected_after_slot_reuse() -> Result<(
         .accept_epoch_bundle(&alice.bundle)
         .await
         .expect("accept alice");
-    let alice_finalize = build_join_finalize_bundle(
-        &client,
-        &room_id,
-        &alice,
-        alice.join_finalize_auth_token,
-        2,
-    )
-    .await?;
+    let alice_finalize =
+        build_join_finalize_bundle(&client, &room_id, &alice, alice.join_finalize_auth_token, 2)
+            .await?;
     client
         .accept_epoch_bundle(&alice_finalize.bundle)
         .await
@@ -754,14 +750,9 @@ async fn public_stale_join_finalize_auth_rejected_after_slot_reuse() -> Result<(
         .await
         .expect("accept bob");
 
-    let bob_finalize = build_join_finalize_bundle(
-        &client,
-        &room_id,
-        &bob,
-        bob.join_finalize_auth_token,
-        2,
-    )
-    .await?;
+    let bob_finalize =
+        build_join_finalize_bundle(&client, &room_id, &bob, bob.join_finalize_auth_token, 2)
+            .await?;
     assert_eq!(
         header_u64_field(
             &bob_finalize.bundle,
@@ -847,18 +838,7 @@ async fn public_lookup_merge_acceptance_tracks_reclaim_join_finalize() -> Result
     sleep(Duration::from_millis(250)).await;
 
     let client = test_client(format!("http://127.0.0.1:{port}"));
-    let mut ready = false;
-    for _ in 0..20 {
-        if timeout(Duration::from_secs(1), client.health()).await.is_ok_and(|result| result.is_ok())
-        {
-            ready = true;
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    if !ready {
-        return Err(anyhow!("server readiness timed out before slot-lease lookup test"));
-    }
+    wait_until_healthy(&client, "slot-lease lookup test").await?;
     let room_id = hex::encode([0xA8u8; 32]);
     timeout(
         Duration::from_secs(10),
@@ -872,14 +852,9 @@ async fn public_lookup_merge_acceptance_tracks_reclaim_join_finalize() -> Result
         .accept_epoch_bundle(&alice.bundle)
         .await
         .expect("accept alice");
-    let alice_finalize = build_join_finalize_bundle(
-        &client,
-        &room_id,
-        &alice,
-        alice.join_finalize_auth_token,
-        2,
-    )
-    .await?;
+    let alice_finalize =
+        build_join_finalize_bundle(&client, &room_id, &alice, alice.join_finalize_auth_token, 2)
+            .await?;
     client
         .accept_epoch_bundle(&alice_finalize.bundle)
         .await
@@ -960,6 +935,94 @@ async fn public_lookup_merge_acceptance_tracks_reclaim_join_finalize() -> Result
     assert_eq!(
         accepted_lookup.accepted_digest,
         Some(pending_barrier_update_digest)
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn public_telemetry_tracks_slot_capacity_after_reclaim_join_finalize() -> Result<()> {
+    let port = next_free_local_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    wait_until_healthy(&client, "slot-lease telemetry test").await?;
+    let room_id = hex::encode([0xA9u8; 32]);
+    timeout(
+        Duration::from_secs(10),
+        bootstrap_room(&client, &room_id, kbroad_public()),
+    )
+    .await
+    .map_err(|_| anyhow!("bootstrap room timed out for slot-lease telemetry test"))??;
+
+    let mut alice = join_room_member(&client, &room_id, "alice", 0xC3).await?;
+    client
+        .accept_epoch_bundle(&alice.bundle)
+        .await
+        .expect("accept alice");
+    let alice_finalize =
+        build_join_finalize_bundle(&client, &room_id, &alice, alice.join_finalize_auth_token, 2)
+            .await?;
+    client
+        .accept_epoch_bundle(&alice_finalize.bundle)
+        .await
+        .expect("accept alice finalize");
+    alice.bundle = alice_finalize.bundle.clone();
+    alice.forward_state = alice_finalize.forward_state_after;
+
+    let alice_leave = build_leave_bundle(&client, &room_id, &alice).await?;
+    client
+        .accept_epoch_bundle(&alice_leave)
+        .await
+        .expect("accept alice leave");
+
+    let mut bob = join_room_member(&client, &room_id, "bob", 0xC4).await?;
+    client
+        .accept_epoch_bundle(&bob.bundle)
+        .await
+        .expect("accept bob");
+
+    let bob_reclaim = timeout(
+        Duration::from_secs(10),
+        build_join_finalize_bundle(&client, &room_id, &bob, bob.join_finalize_auth_token, 0),
+    )
+    .await
+    .map_err(|_| anyhow!("build bob reclaim finalize timed out"))??;
+    client
+        .accept_epoch_bundle(&bob_reclaim.bundle)
+        .await
+        .expect("accept bob reclaim finalize");
+    bob.bundle = bob_reclaim.bundle.clone();
+    bob.forward_state = bob_reclaim.forward_state_after;
+
+    let room_gid = hex::decode(&room_id)?;
+    let telemetry = timeout(Duration::from_secs(10), client.telemetry())
+        .await
+        .map_err(|_| anyhow!("telemetry lookup timed out after reclaim"))??;
+    let entry = telemetry
+        .entries
+        .iter()
+        .find(|entry| entry.gid == room_gid)
+        .ok_or_else(|| anyhow!("missing telemetry entry for reclaim room"))?;
+
+    assert_eq!(entry.barrier_active_leaf_count, 1);
+    assert_eq!(entry.barrier_revoked_leaf_count, 0);
+    assert_eq!(entry.barrier_pending_join_ticket_count, 0);
+    assert_eq!(entry.barrier_reserved_cover_leaf_count, 1);
+    assert_eq!(
+        entry.barrier_remaining_cover_leaf_slots + entry.barrier_reserved_cover_leaf_count,
+        entry.barrier_n_max
+    );
+    assert_eq!(
+        entry.barrier_leaf_utilization_basis_points,
+        entry
+            .barrier_reserved_cover_leaf_count
+            .saturating_mul(10_000)
+            / entry.barrier_n_max
     );
 
     handle.abort();

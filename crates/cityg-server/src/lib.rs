@@ -8486,13 +8486,14 @@ mod tests {
         let leave_delta = leave_bundle
             .membership_delta()
             .map_err(|_| CityGError::InvalidInput("leave bundle missing membership delta"))?;
-        let state_before_leave_accept = server
-            .roster
-            .groups
-            .get(gid.as_slice())
-            .ok_or(CityGError::InvalidInput(
-                "missing roster state before leave accept",
-            ))?;
+        let state_before_leave_accept =
+            server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput(
+                    "missing roster state before leave accept",
+                ))?;
         validate_barrier_update_against_roster(
             state_before_leave_accept,
             &leave_bundle.header_map,
@@ -8689,12 +8690,13 @@ mod tests {
                 .contains_key(&bob.leaf_id),
             "reclaim join_finalize must still be backed by a pending capability before acceptance"
         );
-        assert!(validate_barrier_update_against_roster(
-            state_before_reclaim_accept,
-            &reclaim_bundle.header_map,
-            &reclaim_delta
-        )?
-        .is_some(),
+        assert!(
+            validate_barrier_update_against_roster(
+                state_before_reclaim_accept,
+                &reclaim_bundle.header_map,
+                &reclaim_delta
+            )?
+            .is_some(),
             "reclaim bundle must pass server-side barrier validation before acceptance"
         );
 

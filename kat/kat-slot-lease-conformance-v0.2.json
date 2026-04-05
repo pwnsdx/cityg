@@ -3,7 +3,7 @@
   "kind": "slot-lease-conformance-manifest",
   "notes": [
     "This manifest links the reusable-slot lease invariants to deterministic implementation tests.",
-    "Coverage spans server acceptance, authenticated helper outputs, and public join/merge ticket verification."
+    "Coverage spans server acceptance, authenticated helper outputs, public join/merge ticket verification, and live API reclaim telemetry."
   ],
   "requirements": [
     {
@@ -88,6 +88,17 @@
           "crate": "cityg-api",
           "test": "public_lookup_merge_acceptance_tracks_reclaim_join_finalize",
           "expectation": "pending_then_accepted_reclaim_lookup"
+        }
+      ]
+    },
+    {
+      "id": "SL6",
+      "title": "Public telemetry reflects concurrent slot capacity after reclaim",
+      "coverage": [
+        {
+          "crate": "cityg-api",
+          "test": "public_telemetry_tracks_slot_capacity_after_reclaim_join_finalize",
+          "expectation": "active_reserved_counts_match_reclaimed_slot_state"
         }
       ]
     }
