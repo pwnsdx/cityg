@@ -608,7 +608,7 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
     let room_id = hex::encode([0xA6u8; 32]);
     bootstrap_room(&client, &room_id, kbroad_public()).await?;
 
-    let alice = join_room_member(&client, &room_id, "alice", 0xA6).await?;
+    let mut alice = join_room_member(&client, &room_id, "alice", 0xA6).await?;
     assert_eq!(
         alice.slot_lease.slot_index, 0,
         "first join should consume the first free slot"
@@ -617,6 +617,20 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
         .accept_epoch_bundle(&alice.bundle)
         .await
         .expect("accept alice");
+    let alice_finalize = build_join_finalize_bundle(
+        &client,
+        &room_id,
+        &alice,
+        alice.join_finalize_auth_token,
+        2,
+    )
+    .await?;
+    client
+        .accept_epoch_bundle(&alice_finalize.bundle)
+        .await
+        .expect("accept alice finalize");
+    alice.bundle = alice_finalize.bundle.clone();
+    alice.forward_state = alice_finalize.forward_state_after;
 
     let leave_bundle = build_leave_bundle(&client, &room_id, &alice).await?;
     client
@@ -624,7 +638,7 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
         .await
         .expect("accept alice leave");
 
-    let bob = join_room_member(&client, &room_id, "bob", 0xA7).await?;
+    let mut bob = join_room_member(&client, &room_id, "bob", 0xA7).await?;
     assert_eq!(
         bob.current_revoked_occupancies,
         vec![alice.slot_lease],
@@ -634,6 +648,29 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
         .accept_epoch_bundle(&bob.bundle)
         .await
         .expect("accept bob");
+    let bob_reclaim = build_join_finalize_bundle(
+        &client,
+        &room_id,
+        &bob,
+        bob.join_finalize_auth_token,
+        0,
+    )
+    .await?;
+    assert_eq!(
+        header_u64_field(
+            &bob_reclaim.bundle,
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            "barrier_update_reason",
+        )?,
+        0,
+        "reused-slot joiner finalize should publish reason=0",
+    );
+    client
+        .accept_epoch_bundle(&bob_reclaim.bundle)
+        .await
+        .expect("accept bob reclaim finalize");
+    bob.bundle = bob_reclaim.bundle.clone();
+    bob.forward_state = bob_reclaim.forward_state_after;
 
     let joins = client
         .barrier_resolve_join_occupancies_since(&room_id, 0)
@@ -684,11 +721,25 @@ async fn public_stale_join_finalize_auth_rejected_after_slot_reuse() -> Result<(
     let room_id = hex::encode([0xA7u8; 32]);
     bootstrap_room(&client, &room_id, kbroad_public()).await?;
 
-    let alice = join_room_member(&client, &room_id, "alice", 0xB1).await?;
+    let mut alice = join_room_member(&client, &room_id, "alice", 0xB1).await?;
     client
         .accept_epoch_bundle(&alice.bundle)
         .await
         .expect("accept alice");
+    let alice_finalize = build_join_finalize_bundle(
+        &client,
+        &room_id,
+        &alice,
+        alice.join_finalize_auth_token,
+        2,
+    )
+    .await?;
+    client
+        .accept_epoch_bundle(&alice_finalize.bundle)
+        .await
+        .expect("accept alice finalize");
+    alice.bundle = alice_finalize.bundle.clone();
+    alice.forward_state = alice_finalize.forward_state_after;
 
     let mut bob = join_room_member(&client, &room_id, "bob", 0xB2).await?;
     client

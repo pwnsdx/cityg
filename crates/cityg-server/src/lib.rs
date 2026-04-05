@@ -1803,6 +1803,11 @@ impl CityGServer {
         history_authority: Option<&HistoryAuthorityState>,
         replaying: bool,
     ) -> Result<ServerOutcome, CityGError> {
+        let delta = bundle.membership_delta()?;
+        let implicit_genesis_slot_leases = {
+            let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
+            derive_implicit_genesis_slot_leases(state, &bundle.header_map, &delta)?
+        };
         let mut state_before = {
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
             if bundle.header_map.contains_key(&hdr::HDR_BARRIER_UPDATE) {
@@ -1810,10 +1815,12 @@ impl CityGServer {
             }
             state.clone()
         };
+        for (leaf_id, lease) in &implicit_genesis_slot_leases {
+            state_before.activate_slot_lease(*leaf_id, *lease)?;
+        }
         if replaying {
             rehydrate_replay_join_finalize_auth(&mut state_before, &bundle.header_map)?;
         }
-        let delta = bundle.membership_delta()?;
         ensure_distinct_active_slot_indices(&state_before)?;
         ensure_join_slot_indices_available(&state_before, delta.joined.as_slice())?;
         let barrier_validation =
@@ -1852,6 +1859,9 @@ impl CityGServer {
             .ok_or(CityGError::InvalidInput("context barrier state missing"))?
             .clone();
         let group = roster.groups.entry(bundle.gid().to_vec()).or_default();
+        for (leaf_id, lease) in &implicit_genesis_slot_leases {
+            group.activate_slot_lease(*leaf_id, *lease)?;
+        }
         group.barrier_initialized = barrier_state.barrier_initialized;
         group.barrier_version = barrier_state.barrier_version;
         group.barrier_roots_hash = barrier_state.barrier_roots_hash;
@@ -5555,6 +5565,73 @@ fn ensure_join_slot_indices_available(
     Ok(())
 }
 
+fn derive_implicit_genesis_slot_leases(
+    state: &GroupState,
+    header: &BTreeMap<u64, Value>,
+    delta: &MembershipDelta,
+) -> Result<Vec<([u8; 32], SlotLease)>, CityGError> {
+    if delta.joined.is_empty() {
+        return Ok(Vec::new());
+    }
+    let missing_lease = delta.joined.iter().any(|leaf| {
+        !state.pending_join_finalize_auth.contains_key(leaf)
+            && !state.leaf_slot_leases.contains_key(leaf)
+    });
+    if !missing_lease {
+        return Ok(Vec::new());
+    }
+    let has_existing_group_state = state.barrier_version != 0
+        || !state.leaf_slot_leases.is_empty()
+        || !state.pending_join_finalize_auth.is_empty()
+        || !state.revoked_slot_leases.is_empty()
+        || !state.leaf_device_pk.is_empty()
+        || !state.join_history.is_empty()
+        || state
+            .latest_snapshot()
+            .is_some_and(|snapshot| snapshot.members().next().is_some());
+    if has_existing_group_state {
+        return Ok(Vec::new());
+    }
+    if !delta.revoked.is_empty() || delta.joined.len() != 1 {
+        if parse_barrier_update(header, state.n_max)?.is_some() {
+            return Err(CityGError::InvalidInput(
+                "genesis barrier update without slot lease must contain exactly one joined leaf",
+            ));
+        }
+    }
+    if let Some(parsed) = parse_barrier_update(header, state.n_max)? {
+        let slot_index = u32::try_from(parsed.updater_slot_index)
+            .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
+        if slot_index >= state.slot_capacity() {
+            return Err(CityGError::InvalidInput("slot_index out of range"));
+        }
+        return Ok(vec![(
+            delta.joined[0],
+            SlotLease {
+                slot_index,
+                slot_generation: parsed.updater_slot_generation,
+            },
+        )]);
+    }
+    let mut leases = Vec::with_capacity(delta.joined.len());
+    let slot_capacity = state.slot_capacity();
+    for (offset, leaf_id) in delta.joined.iter().enumerate() {
+        let slot_index = u32::try_from(offset)
+            .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
+        if slot_index >= slot_capacity {
+            return Err(CityGError::InvalidInput("slot allocator exhausted"));
+        }
+        leases.push((
+            *leaf_id,
+            SlotLease {
+                slot_index,
+                slot_generation: 0,
+            },
+        ));
+    }
+    Ok(leases)
+}
+
 fn build_fallback_pk_entries<'a, T, F>(
     state: &'a GroupState,
     empty: T,
@@ -7571,10 +7648,7 @@ mod tests {
         let mut witness_revoked_records = committed_revoked.records.clone();
         if barrier_update_reason == 0 {
             if reclaims_revoked_slot {
-                witness_revoked_records.retain(|record| {
-                    record.slot_index != updater_slot_index
-                        || record.slot_generation != ticket.slot_generation
-                });
+                witness_revoked_records.retain(|record| record.slot_index != updater_slot_index);
             } else {
                 let updater_record = BarrierRevokedOccupancyRecord {
                     slot_index: updater_slot_index,
@@ -8310,6 +8384,35 @@ mod tests {
         let predecessor_entries = super::build_all_blank_pk_entries(n_max)?;
         let predecessor_hash =
             super::compute_barrier_tree_hash(n_max, predecessor_entries.as_slice())?;
+        let updater_lease = group
+            .leaf_slot_leases
+            .values()
+            .min_by_key(|lease| lease.slot_index)
+            .copied()
+            .ok_or(CityGError::InvalidInput(
+                "missing active slot lease for seeded barrier update",
+            ))?;
+        let leaf_base = n_max.saturating_sub(1);
+        let mut path_nodes = vec![leaf_base.saturating_add(u64::from(updater_lease.slot_index))];
+        while let Some(&node) = path_nodes.last() {
+            if node == 0 {
+                break;
+            }
+            path_nodes.push((node - 1) / 2);
+        }
+        let mut new_public_key_nodes: Vec<u64> = path_nodes.iter().copied().skip(1).collect();
+        new_public_key_nodes.sort_unstable();
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            u64::from(updater_lease.slot_index),
+            updater_lease.slot_generation,
+            path_nodes,
+            None,
+            Vec::new(),
+            new_public_key_nodes
+                .into_iter()
+                .map(|node| super::NewPublicKeyWire(node, vec![node as u8; 1184]))
+                .collect(),
+        );
         let barrier_update = super::BarrierUpdateWire(
             "barrier-v1".to_string(),
             group.barrier_version,
@@ -8318,7 +8421,7 @@ mod tests {
             group.barrier_roots_hash.to_vec(),
             predecessor_hash.to_vec(),
             group.kem_tree_hash_after.to_vec(),
-            Vec::new(),
+            super::to_cbor_vec(&cover_payload)?,
         );
         group.current_accepted_barrier_update = super::to_cbor_vec(&barrier_update)?;
         group.current_accepted_barrier_predecessor_hash = predecessor_hash;
@@ -8367,6 +8470,7 @@ mod tests {
         let mut server = super::demo::demo_server();
         let alice = build_genesis_member_bundle(0x75)?;
         server.accept_epoch(&alice.bundle)?;
+        let _ = advance_committed_tree_for_tests(&mut server, &gid, 0x75)?;
         let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
         let alice_slot = server
             .roster
@@ -8379,6 +8483,27 @@ mod tests {
             ))?;
 
         let leave_bundle = build_leave_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+        let leave_delta = leave_bundle
+            .membership_delta()
+            .map_err(|_| CityGError::InvalidInput("leave bundle missing membership delta"))?;
+        let state_before_leave_accept = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput(
+                "missing roster state before leave accept",
+            ))?;
+        validate_barrier_update_against_roster(
+            state_before_leave_accept,
+            &leave_bundle.header_map,
+            &leave_delta,
+        )?;
+        super::validate_history_authority_headers(
+            server.history_authority.as_ref(),
+            &gid,
+            state_before_leave_accept,
+            &leave_bundle.header_map,
+        )?;
         server.accept_epoch(&leave_bundle)?;
         {
             let state_after_leave = server
@@ -8520,6 +8645,12 @@ mod tests {
             Some(alice_slot),
             "committed revoked slot must remain until reclaim join_finalize is accepted"
         );
+        assert!(
+            state_before_reclaim
+                .pending_join_finalize_auth
+                .contains_key(&bob.leaf_id),
+            "accepted join must retain pending join_finalize capability until reclaim finalize"
+        );
 
         let (reclaim_bundle, _) = build_refresh_bundle_for_member(&mut server, &bob, &bob.bundle)?;
         assert_eq!(
@@ -8536,6 +8667,14 @@ mod tests {
         let reclaim_delta = reclaim_bundle
             .membership_delta()
             .map_err(|_| CityGError::InvalidInput("reclaim bundle missing membership delta"))?;
+        assert!(
+            reclaim_delta.joined.is_empty(),
+            "reclaim join_finalize must not replay the join delta once the join is already committed"
+        );
+        assert!(
+            reclaim_delta.revoked.is_empty(),
+            "reclaim join_finalize must not introduce an extra revocation delta"
+        );
         let state_before_reclaim_accept =
             server
                 .roster
@@ -8545,12 +8684,17 @@ mod tests {
                     "missing roster state before reclaim validation",
                 ))?;
         assert!(
-            validate_barrier_update_against_roster(
-                state_before_reclaim_accept,
-                &reclaim_bundle.header_map,
-                &reclaim_delta
-            )?
-            .is_some(),
+            state_before_reclaim_accept
+                .pending_join_finalize_auth
+                .contains_key(&bob.leaf_id),
+            "reclaim join_finalize must still be backed by a pending capability before acceptance"
+        );
+        assert!(validate_barrier_update_against_roster(
+            state_before_reclaim_accept,
+            &reclaim_bundle.header_map,
+            &reclaim_delta
+        )?
+        .is_some(),
             "reclaim bundle must pass server-side barrier validation before acceptance"
         );
 
@@ -8603,6 +8747,8 @@ mod tests {
 
         let alice = build_genesis_member_bundle(0x7A)?;
         server.accept_epoch(&alice.bundle)?;
+        let _ = advance_committed_tree_for_tests(&mut server, &gid, 0x7A)?;
+        let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
 
         let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x7B, false)?;
         let bob_pending_lease = server

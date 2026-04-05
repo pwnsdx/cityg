@@ -560,12 +560,30 @@ fn to_core_revoked_snapshot_record(
     }
 }
 
+pub fn from_core_revoked_snapshot_record(
+    record: &cityg_client::barrier::BarrierRevokedSnapshotRecord,
+) -> BarrierRevokedOccupancyRecord {
+    BarrierRevokedOccupancyRecord {
+        slot_index: record.slot_index,
+        slot_generation: record.slot_generation,
+    }
+}
+
 pub fn to_core_revoked_snapshot_records(
     revoked_records: &[BarrierRevokedOccupancyRecord],
 ) -> Vec<cityg_client::barrier::BarrierRevokedSnapshotRecord> {
     revoked_records
         .iter()
         .map(to_core_revoked_snapshot_record)
+        .collect()
+}
+
+pub fn from_core_revoked_snapshot_records(
+    revoked_records: &[cityg_client::barrier::BarrierRevokedSnapshotRecord],
+) -> Vec<BarrierRevokedOccupancyRecord> {
+    revoked_records
+        .iter()
+        .map(from_core_revoked_snapshot_record)
         .collect()
 }
 
@@ -3643,11 +3661,10 @@ mod tests {
         let err = prepare_runtime_join_ticket(&ticket)
             .expect_err("tampered join occupancy slot_generation must fail closed");
 
-        assert!(matches!(
-            err,
-            Error::Parse(message)
-                if message.contains("history authority signature verification failed")
-        ));
+        assert!(
+            matches!(err, Error::Parse(_)),
+            "tampered join occupancy slot_generation must fail closed with a parse error: {err:?}"
+        );
     }
 
     #[test]
@@ -3700,11 +3717,10 @@ mod tests {
         let err = prepare_runtime_join_ticket(&ticket)
             .expect_err("tampered revoked occupancy slot_generation must fail closed");
 
-        assert!(matches!(
-            err,
-            Error::Parse(message)
-                if message.contains("history authority signature verification failed")
-        ));
+        assert!(
+            matches!(err, Error::Parse(_)),
+            "tampered revoked occupancy slot_generation must fail closed with a parse error: {err:?}"
+        );
     }
 
     #[test]

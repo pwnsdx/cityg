@@ -117,6 +117,10 @@ pub fn derive_barrier_snapshot_witness_selection(
                 slot_index: updater_slot_index,
                 slot_generation: updater_slot_lease.slot_generation,
             });
+        } else {
+            let updater_slot_index = u32::try_from(updater_slot_lease.slot_index)
+                .map_err(|_| anyhow!("slot_index out of range"))?;
+            witness_revoked_records.retain(|record| record.slot_index != updater_slot_index);
         }
         revocation_roots_hash
     } else {
@@ -459,16 +463,12 @@ mod tests {
                     slot_generation: 0,
                 },
                 BarrierRevokedSnapshotRecord {
-                    slot_index: 4,
-                    slot_generation: 1,
-                },
-                BarrierRevokedSnapshotRecord {
                     slot_index: 7,
                     slot_generation: 2,
                 },
             ]
         );
-        assert_eq!(selection.witness_revoked_slot_indices, vec![1, 4, 7]);
+        assert_eq!(selection.witness_revoked_slot_indices, vec![1, 7]);
         assert_eq!(selection.witness_revocation_roots_hash, [0x44; 32]);
         Ok(())
     }

@@ -163,6 +163,9 @@ impl CitygApiClient {
         let revoked_history_commitment_core =
             to_core_history_commitment(&revoked_resolution.history_commitment);
         let join_records_core = to_core_join_snapshot_records(join_resolution.records.as_slice());
+        let witness_revoked_occupancies = from_core_revoked_snapshot_records(
+            witness_selection.witness_revoked_records.as_slice(),
+        );
         let prepared_snapshot = prepare_barrier_snapshot_artifacts(BarrierSnapshotArtifactsInput {
             header,
             gid,
@@ -219,7 +222,7 @@ impl CitygApiClient {
                     barrier_version,
                     join_resolution.records.as_slice(),
                     &witness_selection.witness_revocation_roots_hash,
-                    revoked_resolution.records.as_slice(),
+                    witness_revoked_occupancies.as_slice(),
                     !reclaims_slot_index,
                     deployment_profile_manifest_bytes,
                 )

@@ -18,6 +18,7 @@ pub(super) struct ParsedBarrierUpdate {
     pub prev_barrier_version: u64,
     pub tree_size: u64,
     pub updater_slot_index: u64,
+    pub updater_slot_generation: u64,
     pub revocation_roots_hash: [u8; 32],
     pub kem_tree_hash_before: [u8; 32],
     pub kem_tree_hash_after: [u8; 32],
@@ -37,6 +38,7 @@ struct BarrierUpdateWire(
 
 #[derive(Serialize, Deserialize)]
 struct KemTreeCoverPayloadWire(
+    u64,
     u64,
     Vec<u64>,
     Option<Vec<u64>>,
@@ -245,6 +247,7 @@ pub(super) fn parse_barrier_update_from_header(
 
     let KemTreeCoverPayloadWire(
         updater_slot_index,
+        updater_slot_generation,
         path_nodes,
         revoked_leaf_indices_hint,
         node_ciphertexts,
@@ -276,6 +279,7 @@ pub(super) fn parse_barrier_update_from_header(
         prev_barrier_version,
         tree_size,
         updater_slot_index,
+        updater_slot_generation,
         revocation_roots_hash: vec32(revocation_roots_hash)?,
         kem_tree_hash_before: vec32(kem_tree_hash_before)?,
         kem_tree_hash_after: vec32(kem_tree_hash_after)?,
@@ -289,6 +293,7 @@ mod tests {
     fn make_valid_header() -> Result<BTreeMap<u64, Value>, AcceptanceError> {
         let cover = KemTreeCoverPayloadWire(
             3,
+            0,
             vec![10, 4, 1, 0],
             None,
             Vec::new(),
@@ -354,7 +359,7 @@ mod tests {
         let mut header = make_valid_header()?;
         let mut update = extract_update(&header)?;
         let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
-        cover.4.pop(); // missing one expected node
+        cover.5.pop(); // missing one expected node
         update.7 = to_cbor_vec(&cover).map_err(|_| malformed())?;
         replace_update(&mut header, &update)?;
 
@@ -384,7 +389,7 @@ mod tests {
         let mut header = make_valid_header()?;
         let mut update = extract_update(&header)?;
         let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
-        cover.1 = vec![10, 1, 0]; // invalid parent chain for n_max=8
+        cover.2 = vec![10, 1, 0]; // invalid parent chain for n_max=8
         update.7 = to_cbor_vec(&cover).map_err(|_| malformed())?;
         replace_update(&mut header, &update)?;
         assert!(parse_barrier_update_from_header(&header, 8, 1_000_000).is_err());
@@ -396,7 +401,7 @@ mod tests {
         let mut header = make_valid_header()?;
         let mut update = extract_update(&header)?;
         let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
-        cover.2 = Some(vec![1, 1]);
+        cover.3 = Some(vec![1, 1]);
         update.7 = to_cbor_vec(&cover).map_err(|_| malformed())?;
         replace_update(&mut header, &update)?;
         assert!(parse_barrier_update_from_header(&header, 8, 1_000_000).is_err());
@@ -408,7 +413,7 @@ mod tests {
         let mut header = make_valid_header()?;
         let mut update = extract_update(&header)?;
         let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
-        cover.3 = vec![NodeCiphertextWire(
+        cover.4 = vec![NodeCiphertextWire(
             4,
             3,
             vec![0xAA; 16],
@@ -450,7 +455,7 @@ mod tests {
         let mut header = make_valid_header()?;
         let mut update = extract_update(&header)?;
         let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
-        cover.3 = vec![
+        cover.4 = vec![
             NodeCiphertextWire(
                 4,
                 3,
@@ -477,7 +482,7 @@ mod tests {
         let mut header = make_valid_header()?;
         let mut update = extract_update(&header)?;
         let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
-        cover.4 = vec![
+        cover.5 = vec![
             NewPublicKeyWire(0, vec![0xA1; ml_kem_public_key_bytes()]),
             NewPublicKeyWire(1, vec![0xA2; ml_kem_public_key_bytes()]),
             NewPublicKeyWire(7, vec![0xA3; ml_kem_public_key_bytes()]), // leaf index for n_max=8
@@ -515,7 +520,7 @@ mod tests {
         let mut header = make_valid_header()?;
         let mut update = extract_update(&header)?;
         let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
-        cover.2 = Some(vec![0, 2, 7]);
+        cover.3 = Some(vec![0, 2, 7]);
         update.7 = to_cbor_vec(&cover).map_err(|_| malformed())?;
         replace_update(&mut header, &update)?;
         let parsed = parse_barrier_update_from_header(&header, 8, 1_000_000)?;
@@ -528,7 +533,7 @@ mod tests {
         let mut header = make_valid_header()?;
         let mut update = extract_update(&header)?;
         let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
-        cover.3 = vec![NodeCiphertextWire(
+        cover.4 = vec![NodeCiphertextWire(
             15, // max index for n_max=8 is 14
             3,
             vec![0xAA; 16],

@@ -954,26 +954,51 @@ pub fn prepare_full_verification_witness(
     request: FullVerificationWitnessRequest,
     profile_version: &str,
 ) -> Result<Vec<u8>, RoomFullVerificationWitnessPreparationError> {
-    let bundle = if request.barrier_update_reason == 0 {
-        match request.revocation_target_leaf_id {
-            Some(target_leaf_id) if target_leaf_id != request.author_leaf_id => server
-                .build_merge_ticket_for_targeted_revocation(
-                    gid,
-                    &request.author_leaf_id,
-                    &target_leaf_id,
-                )?,
-            _ => server.build_merge_ticket(gid, &request.author_leaf_id)?,
-        }
-    } else {
-        server.build_merge_ticket_for_refresh(gid, &request.author_leaf_id)?
-    };
     let PreparedMergeTicket {
         bundle,
         current_global_history_attestation: expected_attestation,
         merge_ticket_artifact: expected_merge_ticket_artifact,
         deployment_profile_manifest: expected_manifest,
         ..
-    } = prepare_merge_ticket_from_bundle(server, gid, bundle, profile_version)?;
+    } = if request.barrier_update_reason == 0 {
+        match request.revocation_target_leaf_id {
+            Some(target_leaf_id) if target_leaf_id != request.author_leaf_id => {
+                let bundle = server.build_merge_ticket_for_targeted_revocation(
+                    gid,
+                    &request.author_leaf_id,
+                    &target_leaf_id,
+                )?;
+                prepare_merge_ticket_from_bundle(server, gid, bundle, profile_version)?
+            }
+            _ => {
+                let leave_bundle = server.build_merge_ticket(gid, &request.author_leaf_id)?;
+                let leave_ticket =
+                    prepare_merge_ticket_from_bundle(server, gid, leave_bundle, profile_version)?;
+                if request.merge_ticket_artifact == leave_ticket.merge_ticket_artifact {
+                    leave_ticket
+                } else {
+                    let refresh_bundle =
+                        server.build_merge_ticket_for_refresh(gid, &request.author_leaf_id)?;
+                    let refresh_ticket = prepare_merge_ticket_from_bundle(
+                        server,
+                        gid,
+                        refresh_bundle,
+                        profile_version,
+                    )?;
+                    if request.merge_ticket_artifact == refresh_ticket.merge_ticket_artifact {
+                        refresh_ticket
+                    } else {
+                        return Err(
+                            RoomFullVerificationWitnessPreparationError::MergeTicketArtifactMismatch,
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        let refresh_bundle = server.build_merge_ticket_for_refresh(gid, &request.author_leaf_id)?;
+        prepare_merge_ticket_from_bundle(server, gid, refresh_bundle, profile_version)?
+    };
     let committed_revocation_roots_hash = server
         .barrier_roots_hash(gid)
         .ok_or(RoomFullVerificationWitnessPreparationError::GroupNotFound)?;
@@ -1030,6 +1055,8 @@ pub fn prepare_full_verification_witness(
             ) {
                 records.insert(insert_at, updater_record);
             }
+        } else {
+            records.retain(|record| record.slot_index != slot_index);
         }
         records
     } else {

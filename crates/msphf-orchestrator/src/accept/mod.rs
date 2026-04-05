@@ -3066,6 +3066,7 @@ mod tests {
         #[derive(Serialize)]
         struct TestKemTreeCoverPayloadWire(
             u64,
+            u64,
             Vec<u64>,
             Option<Vec<u64>>,
             Vec<TestNodeCiphertextWire>,
@@ -3114,6 +3115,7 @@ mod tests {
 
         let cover = TestKemTreeCoverPayloadWire(
             updater_slot_index,
+            0,
             path_nodes,
             None,
             Vec::<TestNodeCiphertextWire>::new(),

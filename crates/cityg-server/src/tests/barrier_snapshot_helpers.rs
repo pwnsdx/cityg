@@ -38,6 +38,27 @@ fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<
     let latest_root = [0xA1; 32];
     state.latest_root = Some(latest_root);
     state.snapshots.insert(latest_root, membership);
+    state.leaf_slot_leases.insert(
+        leaf_v2,
+        crate::SlotLease {
+            slot_index: 8,
+            slot_generation: 0,
+        },
+    );
+    state.leaf_slot_leases.insert(
+        leaf_v3a,
+        crate::SlotLease {
+            slot_index: 10,
+            slot_generation: 0,
+        },
+    );
+    state.leaf_slot_leases.insert(
+        leaf_v3b,
+        crate::SlotLease {
+            slot_index: 9,
+            slot_generation: 0,
+        },
+    );
     state.join_history = vec![
         crate::JoinLeafHistoryRecord {
             leaf_id: colliding_cover_leaf(7),
@@ -101,6 +122,13 @@ fn resolve_join_occupancies_since_prunes_resolved_and_revoked_join_history()
     state.barrier_version = 5;
     state.latest_root = Some(latest_root);
     state.snapshots.insert(latest_root, membership);
+    state.leaf_slot_leases.insert(
+        leaf_active,
+        crate::SlotLease {
+            slot_index: 11,
+            slot_generation: 0,
+        },
+    );
     state.join_history = vec![
         crate::JoinLeafHistoryRecord {
             leaf_id: leaf_active,
@@ -166,6 +194,13 @@ fn resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot() -> R
     state.barrier_version = 6;
     state.latest_root = Some(latest_root);
     state.snapshots.insert(latest_root, membership);
+    state.leaf_slot_leases.insert(
+        new_leaf,
+        crate::SlotLease {
+            slot_index: 1,
+            slot_generation: 1,
+        },
+    );
     state.join_history = vec![
         crate::JoinLeafHistoryRecord {
             leaf_id: old_leaf,
@@ -221,6 +256,20 @@ fn resolve_join_occupancies_since_rejects_duplicate_active_cover_allocations()
     let state = server.roster.groups.entry(gid.to_vec()).or_default();
     state.snapshots.insert(root, membership);
     state.latest_root = Some(root);
+    state.leaf_slot_leases.insert(
+        leaf_a,
+        crate::SlotLease {
+            slot_index: 5,
+            slot_generation: 0,
+        },
+    );
+    state.leaf_slot_leases.insert(
+        leaf_b,
+        crate::SlotLease {
+            slot_index: 5,
+            slot_generation: 1,
+        },
+    );
 
     let err = server
         .resolve_join_occupancies_since(&gid, 0)
@@ -352,6 +401,20 @@ fn fetch_barrier_public_tree_rejects_duplicate_active_cover_allocations() -> Res
     let state = server.roster.groups.entry(gid.to_vec()).or_default();
     state.snapshots.insert(root, membership);
     state.latest_root = Some(root);
+    state.leaf_slot_leases.insert(
+        leaf_a,
+        crate::SlotLease {
+            slot_index: 5,
+            slot_generation: 0,
+        },
+    );
+    state.leaf_slot_leases.insert(
+        leaf_b,
+        crate::SlotLease {
+            slot_index: 5,
+            slot_generation: 1,
+        },
+    );
     state.leaf_barrier_public.insert(leaf_a, vec![0x11; 1184]);
     state.leaf_barrier_public.insert(leaf_b, vec![0x22; 1184]);
 
