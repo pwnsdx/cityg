@@ -45,6 +45,9 @@ cargo test --locked -p cityg-api --test integration \
 cargo test --locked -p cityg-api --test integration \
   public_telemetry_tracks_slot_capacity_after_reclaim_join_finalize \
   -- --exact --nocapture
+cargo test --locked -p cityg-api --test integration \
+  public_telemetry_tracks_pending_reclaim_capacity_before_acceptance \
+  -- --exact --nocapture
 cargo test --locked -p cityg-api-client --lib \
   tests::prepare_runtime_join_ticket_rejects_tampered_join_occupancy_slot_generation \
   -- --exact --nocapture

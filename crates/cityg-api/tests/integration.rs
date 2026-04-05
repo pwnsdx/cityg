@@ -1032,6 +1032,94 @@ async fn public_telemetry_tracks_slot_capacity_after_reclaim_join_finalize() -> 
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
+async fn public_telemetry_tracks_pending_reclaim_capacity_before_acceptance() -> Result<()> {
+    let port = next_free_local_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    wait_until_healthy(&client, "pending slot-lease telemetry test").await?;
+    let room_id = hex::encode([0xAAu8; 32]);
+    timeout(
+        Duration::from_secs(10),
+        bootstrap_room(&client, &room_id, kbroad_public()),
+    )
+    .await
+    .map_err(|_| anyhow!("bootstrap room timed out for pending slot-lease telemetry test"))??;
+
+    let mut alice = join_room_member(&client, &room_id, "alice", 0xC5).await?;
+    client
+        .accept_epoch_bundle(&alice.bundle)
+        .await
+        .expect("accept alice");
+    let alice_finalize =
+        build_join_finalize_bundle(&client, &room_id, &alice, alice.join_finalize_auth_token, 2)
+            .await?;
+    client
+        .accept_epoch_bundle(&alice_finalize.bundle)
+        .await
+        .expect("accept alice finalize");
+    alice.bundle = alice_finalize.bundle.clone();
+    alice.forward_state = alice_finalize.forward_state_after;
+
+    let alice_leave = build_leave_bundle(&client, &room_id, &alice).await?;
+    client
+        .accept_epoch_bundle(&alice_leave)
+        .await
+        .expect("accept alice leave");
+
+    let bob = join_room_member(&client, &room_id, "bob", 0xC6).await?;
+    client
+        .accept_epoch_bundle(&bob.bundle)
+        .await
+        .expect("accept bob");
+
+    let _bob_reclaim = timeout(
+        Duration::from_secs(10),
+        build_join_finalize_bundle(&client, &room_id, &bob, bob.join_finalize_auth_token, 0),
+    )
+    .await
+    .map_err(|_| anyhow!("build pending bob reclaim finalize timed out"))??;
+
+    let room_gid = hex::decode(&room_id)?;
+    let telemetry = timeout(Duration::from_secs(10), client.telemetry())
+        .await
+        .map_err(|_| anyhow!("telemetry lookup timed out during pending reclaim"))??;
+    let entry = telemetry
+        .entries
+        .iter()
+        .find(|entry| entry.gid == room_gid)
+        .ok_or_else(|| anyhow!("missing telemetry entry for pending reclaim room"))?;
+
+    assert_eq!(entry.barrier_active_leaf_count, 1);
+    assert_eq!(
+        entry.barrier_revoked_leaf_count, 1,
+        "the superseded revoked occupancy should remain visible until reclaim finalize is accepted"
+    );
+    assert_eq!(
+        entry.barrier_pending_join_ticket_count, 1,
+        "the reclaiming member should still consume one pending join-finalize capability"
+    );
+    assert_eq!(entry.barrier_reserved_cover_leaf_count, 1);
+    assert_eq!(
+        entry.barrier_remaining_cover_leaf_slots + entry.barrier_reserved_cover_leaf_count,
+        entry.barrier_n_max
+    );
+    assert_eq!(
+        entry.barrier_leaf_utilization_basis_points,
+        entry
+            .barrier_reserved_cover_leaf_count
+            .saturating_mul(10_000)
+            / entry.barrier_n_max
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
 async fn accept_epoch_rejects_oversized_body() {
     let port = next_free_local_port();
     let handle = spawn_server_on(port).await;

@@ -98,6 +98,7 @@ fn slot_lease_manifest_is_well_formed_and_complete() -> Result<(), Box<dyn std::
         "SL4".to_string(),
         "SL5".to_string(),
         "SL6".to_string(),
+        "SL7".to_string(),
     ]);
 
     assert_eq!(manifest.requirements.len(), expected.len());

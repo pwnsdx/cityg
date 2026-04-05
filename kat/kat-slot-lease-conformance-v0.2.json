@@ -101,6 +101,17 @@
           "expectation": "active_reserved_counts_match_reclaimed_slot_state"
         }
       ]
+    },
+    {
+      "id": "SL7",
+      "title": "Public telemetry exposes pending reclaim state before acceptance",
+      "coverage": [
+        {
+          "crate": "cityg-api",
+          "test": "public_telemetry_tracks_pending_reclaim_capacity_before_acceptance",
+          "expectation": "pending_reclaim_keeps_revoked_and_pending_counts_until_accept"
+        }
+      ]
     }
   ]
 }
