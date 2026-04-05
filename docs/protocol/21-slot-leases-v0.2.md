@@ -95,8 +95,8 @@ removes the superseded revoked occupancy for that slot.
 The authenticated helper surface now treats revocations and joins as occupancy
 records, not naked indices:
 
-- joins carry `leaf_index` plus `slot_generation`
-- revoked records carry `leaf_index` plus `slot_generation`
+- joins carry `slot_index` plus `slot_generation`
+- revoked records carry `slot_index` plus `slot_generation`
 
 This matters because a revoked `(slot_index=5, generation=0)` must not revoke a
 later occupant `(slot_index=5, generation=1)`.

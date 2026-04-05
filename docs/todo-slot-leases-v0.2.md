@@ -91,7 +91,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 ### 7. KAT and conformance
 
 - [~] Add KATs for slot reuse after leave/revoke
-  `kat/kat-slot-lease-conformance-v0.2.json` now maps the shipped deterministic tests for reclaim clearing, stale `join_finalize_auth` rejection, helper generation binding, and public join/merge ticket tamper rejection. `scripts/run_slot_lease_conformance.sh` provides a repeatable runner for the current slot-lease suite, `slot_lease_manifest_is_well_formed_and_complete` validates that the manifest still points at real tests, and `slot_lease_conformance_runner_covers_manifest_tests` validates that the runner still covers every manifest entry; broader end-to-end vectors are still pending.
+  `kat/kat-slot-lease-conformance-v0.2.json` now maps the shipped deterministic tests for reclaim clearing, stale `join_finalize_auth` rejection, helper generation binding, public join/merge ticket tamper rejection, and API-level stale `join_finalize_auth` rejection after slot reuse. `scripts/run_slot_lease_conformance.sh` provides a repeatable runner for the current slot-lease suite, `slot_lease_manifest_is_well_formed_and_complete` validates that the manifest still points at real tests, and `slot_lease_conformance_runner_covers_manifest_tests` validates that the runner still covers every manifest entry; broader end-to-end vectors are still pending.
 - [~] Add replay rejection tests for stale `join_finalize_auth`
 - [~] Add historical chain-check tests where one slot has multiple generations
   Server helper coverage now exercises join-helper pruning across reused-slot generations, and `api-client` now checks that paginated `v2` revoked occupancies preserve distinct `slot_generation` values for one reused slot, rejects tampered `current_join_occupancies` and `current_revoked_occupancies` in join provisioning, and rejects tampered merge-ticket `slot_generation`. `cityg-client` snapshot/transition tests also cover reused-slot joins and versioned revocations; end-to-end client/history KATs still need to follow.
@@ -100,6 +100,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Extend slot-lease coverage beyond deterministic/unit-style tests into fuller end-to-end vectors/KAT fixtures.
+1. Extend slot-lease coverage beyond deterministic/unit-style tests into fuller end-to-end vectors/KAT fixtures that actually run cleanly under `cargo test` on CI.
 2. Sweep archived historical docs/changelogs only where the old terminology is still presented as active behavior rather than explicitly historical context.
-3. Rename lingering local test variable names that still obscure the slot-lease model.
+3. Keep future additions on `slot_index` / `slot_generation` terminology only; the active code in `crates/` is now free of legacy `leaf_index` naming.
