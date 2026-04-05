@@ -13,6 +13,7 @@ pub(super) use store::*;
 pub(super) const ROOM_IDENTITY_VERSION: u32 = 1;
 pub(super) const ALIAS_STORE_VERSION: u32 = 2;
 pub(super) const SECURITY_LOG_VERSION: u32 = 1;
+pub(super) const REPLAY_PROGRESS_VERSION: u32 = 1;
 pub(super) const MAX_SECURITY_EVENTS: usize = 128;
 pub(super) const MAX_ACTIVITY_EVENTS: usize = 256;
 pub(super) const ENCRYPTED_SESSION_ENVELOPE_VERSION: u32 = 1;

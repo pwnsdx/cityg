@@ -5547,6 +5547,22 @@ async fn pending_join_finalize_history_lookup_retains_state_after_history_404()
         session.barrier_state.barrier_recovery_issue.is_none(),
         "plain 404 without a newer committed barrier version should stay pending, not escalate to recovery-required"
     );
+    assert_eq!(
+        session.barrier_state.last_pending_history_trace,
+        Some(BarrierPendingHistoryTrace {
+            pending_barrier_version: 5,
+            pending_we_epoch_id: [0xD1; 32],
+            current_barrier_version: 5,
+            lookup_status: BarrierPendingLookupTraceStatus::NotFound,
+            accepted_barrier_version: None,
+            accepted_fs_ec: None,
+            accepted_reason: None,
+            accepted_digest: None,
+            decision: BarrierPendingTraceDecision::Unchanged,
+            recovery_issue: None,
+            detail: None,
+        })
+    );
 
     handle.abort();
     let _ = handle.await;
@@ -5604,6 +5620,22 @@ async fn pending_join_finalize_history_lookup_404_after_newer_version_requires_r
     assert_eq!(
         session.barrier_state.barrier_recovery_issue,
         Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory)
+    );
+    assert_eq!(
+        session.barrier_state.last_pending_history_trace,
+        Some(BarrierPendingHistoryTrace {
+            pending_barrier_version: 5,
+            pending_we_epoch_id: [0xD1; 32],
+            current_barrier_version: 6,
+            lookup_status: BarrierPendingLookupTraceStatus::NotFound,
+            accepted_barrier_version: None,
+            accepted_fs_ec: None,
+            accepted_reason: None,
+            accepted_digest: None,
+            decision: BarrierPendingTraceDecision::RecoveryRequired,
+            recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
+            detail: None,
+        })
     );
 
     handle.abort();
@@ -5710,6 +5742,22 @@ async fn pending_barrier_history_lookup_discards_superseded_locator()
         session.barrier_state.pending.is_none(),
         "superseded authenticated locator must discard stale pending state"
     );
+    assert_eq!(
+        session.barrier_state.last_pending_history_trace,
+        Some(BarrierPendingHistoryTrace {
+            pending_barrier_version: 7,
+            pending_we_epoch_id: [0xA1; 32],
+            current_barrier_version: 6,
+            lookup_status: BarrierPendingLookupTraceStatus::Superseded,
+            accepted_barrier_version: None,
+            accepted_fs_ec: None,
+            accepted_reason: None,
+            accepted_digest: None,
+            decision: BarrierPendingTraceDecision::Discarded,
+            recovery_issue: None,
+            detail: None,
+        })
+    );
 
     tokio::time::timeout(Duration::from_secs(1), server).await???;
     Ok(())
@@ -5812,6 +5860,22 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
     assert!(
         session.barrier_state.pending.is_none(),
         "final_rejected authenticated locator must discard stale pending state"
+    );
+    assert_eq!(
+        session.barrier_state.last_pending_history_trace,
+        Some(BarrierPendingHistoryTrace {
+            pending_barrier_version: 7,
+            pending_we_epoch_id: [0xA1; 32],
+            current_barrier_version: 8,
+            lookup_status: BarrierPendingLookupTraceStatus::FinalRejected,
+            accepted_barrier_version: None,
+            accepted_fs_ec: None,
+            accepted_reason: None,
+            accepted_digest: None,
+            decision: BarrierPendingTraceDecision::Discarded,
+            recovery_issue: None,
+            detail: None,
+        })
     );
 
     tokio::time::timeout(Duration::from_secs(1), server).await???;
@@ -5924,6 +5988,34 @@ async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
     assert_eq!(
         session.barrier_state.barrier_recovery_issue,
         Some(BarrierRecoveryIssue::ContradictoryAuthenticatedHistory)
+    );
+    let trace = session
+        .barrier_state
+        .last_pending_history_trace
+        .clone()
+        .ok_or_else(|| anyhow!("expected pending history trace after contradictory acceptance"))?;
+    assert_eq!(trace.pending_barrier_version, 9);
+    assert_eq!(trace.pending_we_epoch_id, [0xA1; 32]);
+    assert_eq!(trace.current_barrier_version, 9);
+    assert_eq!(
+        trace.lookup_status,
+        BarrierPendingLookupTraceStatus::Accepted
+    );
+    assert_eq!(
+        trace.decision,
+        BarrierPendingTraceDecision::RecoveryRequired
+    );
+    assert_eq!(
+        trace.recovery_issue,
+        Some(BarrierRecoveryIssue::ContradictoryAuthenticatedHistory)
+    );
+    assert!(
+        trace
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("contradicted"),
+        "trace should preserve the contradictory-acceptance reason"
     );
 
     tokio::time::timeout(Duration::from_secs(1), server).await???;

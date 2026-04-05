@@ -82,8 +82,8 @@ impl AppModel {
                             .session
                             .as_ref()
                             .map(Self::barrier_recovery_message_for_session)
-                            .unwrap_or_else(Self::barrier_recovery_wait_message);
-                        self.info_message = Some(message.to_string());
+                            .unwrap_or_else(|| Self::barrier_recovery_wait_message().to_string());
+                        self.info_message = Some(message);
                         cx.notify();
                     } else if fetch_after_epoch_sync {
                         self.schedule_fetch(cx, Duration::ZERO);
@@ -118,8 +118,7 @@ impl AppModel {
                         self.session
                             .as_ref()
                             .map(Self::barrier_recovery_message_for_session)
-                            .unwrap_or_else(Self::barrier_recovery_wait_message)
-                            .to_string(),
+                            .unwrap_or_else(|| Self::barrier_recovery_wait_message().to_string()),
                     );
                     self.record_activity(
                         ActivityKind::Sync,

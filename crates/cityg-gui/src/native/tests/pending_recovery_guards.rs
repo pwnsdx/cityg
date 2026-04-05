@@ -219,6 +219,72 @@ fn persisted_barrier_state_roundtrip_preserves_global_history_authority_extensio
 }
 
 #[test]
+fn persisted_barrier_state_roundtrip_preserves_pending_history_trace()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = BarrierSecretState {
+        barrier_initialized: true,
+        barrier_version: 9,
+        barrier_recovery_pending: true,
+        barrier_recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
+        last_pending_history_trace: Some(BarrierPendingHistoryTrace {
+            pending_barrier_version: 8,
+            pending_we_epoch_id: [0x71; 32],
+            current_barrier_version: 9,
+            lookup_status: BarrierPendingLookupTraceStatus::NotFound,
+            accepted_barrier_version: None,
+            accepted_fs_ec: None,
+            accepted_reason: None,
+            accepted_digest: None,
+            decision: BarrierPendingTraceDecision::RecoveryRequired,
+            recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
+            detail: Some("history 404 after newer committed barrier".to_string()),
+        }),
+        ..BarrierSecretState::default()
+    };
+
+    let roundtrip = PersistedBarrierState::from_runtime(&runtime).into_runtime()?;
+    assert_eq!(
+        roundtrip.last_pending_history_trace,
+        runtime.last_pending_history_trace
+    );
+    Ok(())
+}
+
+#[test]
+fn barrier_recovery_message_includes_last_pending_trace_summary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xA18, "http://127.0.0.1:9", "room-a8", "alice")?;
+    session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.last_pending_history_trace = Some(BarrierPendingHistoryTrace {
+        pending_barrier_version: 8,
+        pending_we_epoch_id: [0x81; 32],
+        current_barrier_version: 9,
+        lookup_status: BarrierPendingLookupTraceStatus::NotFound,
+        accepted_barrier_version: None,
+        accepted_fs_ec: None,
+        accepted_reason: None,
+        accepted_digest: None,
+        decision: BarrierPendingTraceDecision::RecoveryRequired,
+        recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
+        detail: None,
+    });
+
+    let message = AppModel::barrier_recovery_message_for_session(&session);
+    assert!(
+        message.contains(
+            "Barrier recovery requires authenticated history before messaging can resume."
+        ),
+        "base recovery guidance must stay visible"
+    );
+    assert!(
+        message
+            .contains("acceptance record is still missing after a newer barrier version appeared"),
+        "last pending trace summary should be surfaced in user-visible recovery guidance"
+    );
+    Ok(())
+}
+
+#[test]
 fn persisted_barrier_state_roundtrip_drops_current_public_tree_cache()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = BarrierSecretState {

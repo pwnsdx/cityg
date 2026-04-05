@@ -96,7 +96,7 @@ fn gpui_handle_fetch_result_requires_replay_persistence_before_release(cx: &mut 
     let mut session = session;
     session.last_fetch_timestamp_ms = None;
     let blocking_path =
-        session_file_path(&session.server_url, &session.room_id).expect("session path");
+        replay_progress_file_path(&session.server_url, &session.room_id).expect("replay path");
     fs::create_dir_all(&blocking_path).expect("create blocking path");
 
     view.update(cx, |model, view_cx| {
@@ -128,7 +128,7 @@ fn gpui_handle_fetch_result_requires_replay_persistence_before_release(cx: &mut 
                 .last_error
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Failed to persist session after fetch update"),
+                .contains("Failed to persist replay progress after fetch update"),
             "persist failure must surface as fetch persistence failure"
         );
         assert_eq!(

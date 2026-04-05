@@ -119,6 +119,20 @@ pub(super) fn decode_persisted_room_identity(
     decode_persisted_payload(data, path, "room identity payload")
 }
 
+pub(super) fn encrypt_persisted_replay_progress(
+    persisted: &PersistedReplayProgress,
+    path: &std::path::Path,
+) -> Result<Vec<u8>> {
+    encrypt_persisted_payload(persisted, path, "replay progress payload")
+}
+
+pub(super) fn decode_persisted_replay_progress(
+    data: &[u8],
+    path: &std::path::Path,
+) -> Result<PersistedReplayProgress> {
+    decode_persisted_payload(data, path, "replay progress payload")
+}
+
 pub(super) fn session_encryption_key(
     session_path: &std::path::Path,
 ) -> Result<([u8; 32], SessionKeySource)> {

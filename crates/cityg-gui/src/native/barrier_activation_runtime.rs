@@ -30,6 +30,48 @@ fn map_pending_barrier_recovery_reason(
     }
 }
 
+fn trace_from_pending_history_resolution(
+    pending: &BarrierPendingState,
+    current_barrier_version: u64,
+    lookup_status: BarrierPendingLookupTraceStatus,
+    accepted_barrier_version: Option<u64>,
+    accepted_fs_ec: Option<u64>,
+    accepted_reason: Option<u64>,
+    accepted_digest: Option<[u8; 32]>,
+    resolution: CorePendingBarrierHistoryResolution,
+    detail: Option<String>,
+) -> BarrierPendingHistoryTrace {
+    let (decision, recovery_issue) = match resolution {
+        CorePendingBarrierHistoryResolution::Unchanged => {
+            (BarrierPendingTraceDecision::Unchanged, None)
+        }
+        CorePendingBarrierHistoryResolution::Activate { .. } => {
+            (BarrierPendingTraceDecision::Activated, None)
+        }
+        CorePendingBarrierHistoryResolution::Discard => {
+            (BarrierPendingTraceDecision::Discarded, None)
+        }
+        CorePendingBarrierHistoryResolution::RecoveryRequired(reason) => (
+            BarrierPendingTraceDecision::RecoveryRequired,
+            Some(map_pending_barrier_recovery_reason(reason)),
+        ),
+    };
+
+    BarrierPendingHistoryTrace {
+        pending_barrier_version: pending.barrier_version,
+        pending_we_epoch_id: pending.we_epoch_id,
+        current_barrier_version,
+        lookup_status,
+        accepted_barrier_version,
+        accepted_fs_ec,
+        accepted_reason,
+        accepted_digest,
+        decision,
+        recovery_issue,
+        detail,
+    }
+}
+
 pub(super) fn extract_barrier_update_digest(
     header: &BTreeMap<u64, Value>,
 ) -> Result<Option<[u8; 32]>> {
@@ -93,17 +135,22 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
         return Ok(PendingBarrierHistoryOutcome::Unchanged);
     };
 
-    let lookup_resolution = if pending.we_epoch_id == [0u8; 32] {
-        resolve_pending_barrier_history(CorePendingBarrierHistoryInput {
-            current_barrier_version,
-            pending_barrier_version: pending.barrier_version,
-            pending_we_epoch_id: pending.we_epoch_id,
-            status: CorePendingBarrierLookupStatus::Pending,
-            accepted_barrier_version: None,
-            accepted_fs_ec: None,
-            accepted_reason: None,
-            accepted_digest: None,
-        })?
+    let (
+        core_lookup_status,
+        trace_lookup_status,
+        accepted_barrier_version,
+        accepted_fs_ec,
+        accepted_reason,
+        accepted_digest,
+    ) = if pending.we_epoch_id == [0u8; 32] {
+        (
+            CorePendingBarrierLookupStatus::Pending,
+            BarrierPendingLookupTraceStatus::LegacyLocatorUnavailable,
+            None,
+            None,
+            None,
+            None,
+        )
     } else {
         match client
             .barrier_lookup_merge_acceptance(
@@ -115,44 +162,110 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
             .await
         {
             Ok(lookup) => {
-                let status = match lookup.status {
-                    MergeAcceptanceStatus::Pending => CorePendingBarrierLookupStatus::Pending,
-                    MergeAcceptanceStatus::Accepted => CorePendingBarrierLookupStatus::Accepted,
-                    MergeAcceptanceStatus::Superseded => CorePendingBarrierLookupStatus::Superseded,
-                    MergeAcceptanceStatus::FinalRejected => {
-                        CorePendingBarrierLookupStatus::FinalRejected
-                    }
+                let (core_status, trace_status) = match lookup.status {
+                    MergeAcceptanceStatus::Pending => (
+                        CorePendingBarrierLookupStatus::Pending,
+                        BarrierPendingLookupTraceStatus::Pending,
+                    ),
+                    MergeAcceptanceStatus::Accepted => (
+                        CorePendingBarrierLookupStatus::Accepted,
+                        BarrierPendingLookupTraceStatus::Accepted,
+                    ),
+                    MergeAcceptanceStatus::Superseded => (
+                        CorePendingBarrierLookupStatus::Superseded,
+                        BarrierPendingLookupTraceStatus::Superseded,
+                    ),
+                    MergeAcceptanceStatus::FinalRejected => (
+                        CorePendingBarrierLookupStatus::FinalRejected,
+                        BarrierPendingLookupTraceStatus::FinalRejected,
+                    ),
                 };
-                resolve_pending_barrier_history(CorePendingBarrierHistoryInput {
-                    current_barrier_version,
-                    pending_barrier_version: pending.barrier_version,
-                    pending_we_epoch_id: pending.we_epoch_id,
-                    status,
-                    accepted_barrier_version: lookup.accepted_barrier_version,
-                    accepted_fs_ec: lookup.accepted_fs_ec,
-                    accepted_reason: lookup.accepted_reason,
-                    accepted_digest: lookup.accepted_digest,
-                })?
+                (
+                    core_status,
+                    trace_status,
+                    lookup.accepted_barrier_version,
+                    lookup.accepted_fs_ec,
+                    lookup.accepted_reason,
+                    lookup.accepted_digest,
+                )
             }
-            Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
-                resolve_pending_barrier_history(CorePendingBarrierHistoryInput {
-                    current_barrier_version,
-                    pending_barrier_version: pending.barrier_version,
-                    pending_we_epoch_id: pending.we_epoch_id,
-                    status: CorePendingBarrierLookupStatus::NotFound,
-                    accepted_barrier_version: None,
-                    accepted_fs_ec: None,
-                    accepted_reason: None,
-                    accepted_digest: None,
-                })?
-            }
+            Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => (
+                CorePendingBarrierLookupStatus::NotFound,
+                BarrierPendingLookupTraceStatus::NotFound,
+                None,
+                None,
+                None,
+                None,
+            ),
             Err(err) => {
+                warn!(
+                    pending_barrier_version = pending.barrier_version,
+                    current_barrier_version,
+                    pending_we_epoch_id = %hex_encode(pending.we_epoch_id),
+                    pending_barrier_update_digest = %hex_encode(pending.barrier_update_digest),
+                    "pending barrier activation history lookup failed before authenticated resolution: {err}"
+                );
+                record_pending_history_trace(
+                    session,
+                    BarrierPendingHistoryTrace {
+                        pending_barrier_version: pending.barrier_version,
+                        pending_we_epoch_id: pending.we_epoch_id,
+                        current_barrier_version,
+                        lookup_status: BarrierPendingLookupTraceStatus::TransportError,
+                        accepted_barrier_version: None,
+                        accepted_fs_ec: None,
+                        accepted_reason: None,
+                        accepted_digest: None,
+                        decision: BarrierPendingTraceDecision::LookupFailed,
+                        recovery_issue: None,
+                        detail: Some(err.to_string()),
+                    },
+                );
                 return Err(anyhow!(
-                    "pending barrier activation history lookup failed (960.9): {err}"
+                    "pending barrier activation history lookup failed for barrier_version={} we_epoch_id={} digest={} (960.9): {err}",
+                    pending.barrier_version,
+                    hex_encode(pending.we_epoch_id),
+                    hex_encode(pending.barrier_update_digest),
                 ));
             }
         }
     };
+
+    let lookup_resolution = resolve_pending_barrier_history(CorePendingBarrierHistoryInput {
+        current_barrier_version,
+        pending_barrier_version: pending.barrier_version,
+        pending_we_epoch_id: pending.we_epoch_id,
+        status: core_lookup_status,
+        accepted_barrier_version,
+        accepted_fs_ec,
+        accepted_reason,
+        accepted_digest,
+    })?;
+
+    record_pending_history_trace(
+        session,
+        trace_from_pending_history_resolution(
+            &pending,
+            current_barrier_version,
+            trace_lookup_status,
+            accepted_barrier_version,
+            accepted_fs_ec,
+            accepted_reason,
+            accepted_digest,
+            lookup_resolution,
+            None,
+        ),
+    );
+    if let Some(trace) = session.barrier_state.last_pending_history_trace.as_ref() {
+        info!(
+            pending_barrier_version = trace.pending_barrier_version,
+            current_barrier_version = trace.current_barrier_version,
+            lookup_status = ?trace.lookup_status,
+            decision = ?trace.decision,
+            recovery_issue = ?trace.recovery_issue,
+            "resolved pending barrier history state"
+        );
+    }
 
     match lookup_resolution {
         CorePendingBarrierHistoryResolution::Unchanged => {
@@ -196,6 +309,27 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
             )? {
                 Ok(PendingBarrierHistoryOutcome::Activated(we_epoch_id))
             } else {
+                record_pending_history_trace(
+                    session,
+                    BarrierPendingHistoryTrace {
+                        pending_barrier_version: pending.barrier_version,
+                        pending_we_epoch_id: pending.we_epoch_id,
+                        current_barrier_version,
+                        lookup_status: trace_lookup_status,
+                        accepted_barrier_version,
+                        accepted_fs_ec,
+                        accepted_reason,
+                        accepted_digest,
+                        decision: BarrierPendingTraceDecision::RecoveryRequired,
+                        recovery_issue: Some(
+                            BarrierRecoveryIssue::ContradictoryAuthenticatedHistory,
+                        ),
+                        detail: Some(
+                            "accepted merge contradicted the locally persisted pending activation source"
+                                .to_string(),
+                        ),
+                    },
+                );
                 Ok(mark_barrier_recovery_required(
                     session,
                     BarrierRecoveryIssue::ContradictoryAuthenticatedHistory,

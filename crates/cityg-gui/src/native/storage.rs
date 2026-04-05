@@ -109,6 +109,13 @@ pub(super) fn persist_session(session: &AppSession) -> Result<()> {
         Some(path.as_path()),
     )?;
 
+    persist_replay_progress(
+        &session.server_url,
+        &session.room_id,
+        session.last_fetch_timestamp_ms,
+        &session.msg_replay_state,
+    )?;
+
     let pointer = LastSessionPointer {
         server_url: session.server_url.clone(),
         room_id: session.room_id.clone(),
@@ -137,6 +144,23 @@ pub(super) fn persist_session(session: &AppSession) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn persist_replay_progress(
+    server_url: &str,
+    room_id: &str,
+    last_fetch_timestamp_ms: Option<u64>,
+    msg_replay_state: &MsgReplayState,
+) -> Result<()> {
+    let persisted =
+        PersistedReplayProgress::from_runtime(last_fetch_timestamp_ms, msg_replay_state);
+    let path = replay_progress_file_path(server_url, room_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let data = encrypt_persisted_replay_progress(&persisted, &path)?;
+    write_file_atomic(&path, &data)
+}
+
 pub(super) fn persist_room_identity(
     server_url: &str,
     room_id: &str,
@@ -156,6 +180,11 @@ pub(super) fn remove_persisted_session(server_url: &str, room_id: &str) -> Resul
     let path = session_file_path(server_url, room_id)?;
     if path.exists() {
         fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    let replay_path = replay_progress_file_path(server_url, room_id)?;
+    if replay_path.exists() {
+        fs::remove_file(&replay_path)
+            .with_context(|| format!("failed to remove {}", replay_path.display()))?;
     }
 
     let pointer_path = last_session_pointer_path()?;
@@ -212,7 +241,14 @@ pub(super) fn load_session_at(server_url: &str, room_id: &str) -> Result<Option<
     }
     let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let persisted = decode_persisted_session(&data, &path)?;
-    persisted.into_app_session().map(Some)
+    let mut session = persisted.into_app_session()?;
+    if let Some((last_fetch_timestamp_ms, msg_replay_state)) =
+        load_replay_progress(server_url, room_id)?
+    {
+        session.last_fetch_timestamp_ms = last_fetch_timestamp_ms;
+        session.msg_replay_state = msg_replay_state;
+    }
+    Ok(Some(session))
 }
 
 pub(super) fn load_room_identity(server_url: &str, room_id: &str) -> Result<Option<RoomIdentity>> {
@@ -236,6 +272,19 @@ pub(super) fn load_or_create_room_identity(
     let identity = cityg_api_client::generate_room_admin_identity();
     persist_room_identity(server_url, room_id, &identity)?;
     Ok(identity)
+}
+
+fn load_replay_progress(
+    server_url: &str,
+    room_id: &str,
+) -> Result<Option<(Option<u64>, MsgReplayState)>> {
+    let path = replay_progress_file_path(server_url, room_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let persisted = decode_persisted_replay_progress(&data, &path)?;
+    persisted.into_runtime().map(Some)
 }
 
 pub(super) fn decode_hex32(name: &str, value: &str) -> Result<[u8; 32]> {

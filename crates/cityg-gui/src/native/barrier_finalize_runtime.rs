@@ -17,6 +17,7 @@ pub(super) fn persist_pending_barrier_state_before_publish(
         ));
     }
     session.barrier_state.pending = Some(pending);
+    reset_pending_history_trace(&mut session);
     persist_session(&session).context("persist pending barrier state before publish")?;
     Ok(())
 }
@@ -138,6 +139,7 @@ pub(super) fn apply_local_published_barrier_merge(
         validate_client_visible_activation_guards(session, &bundle.header_map)?;
     }
     session.barrier_state.pending = Some(pending_barrier_state.clone());
+    reset_pending_history_trace(session);
     session.we_epoch_id = bundle.we_epoch_id;
     session.xk_hash = bundle.hp_binding.xk_hash;
     session.epoch_key = bundle.epoch_key;

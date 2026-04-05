@@ -59,6 +59,8 @@ pub(in crate::native) struct PersistedBarrierState {
     pub(in crate::native) barrier_recovery_pending: bool,
     #[serde(default)]
     pub(in crate::native) barrier_recovery_issue: Option<BarrierRecoveryIssue>,
+    #[serde(default)]
+    pub(in crate::native) last_pending_history_trace: Option<PersistedBarrierPendingHistoryTrace>,
     #[serde(default = "super::default_current_barrier_full_verified")]
     pub(in crate::native) current_barrier_full_verified: bool,
 }
@@ -161,6 +163,32 @@ pub(in crate::native) struct PersistedBarrierPendingActivationSource {
     pub(in crate::native) fs_ec: u64,
     #[serde(default)]
     pub(in crate::native) fs_dev_prev_commit_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub(in crate::native) struct PersistedBarrierPendingHistoryTrace {
+    #[serde(default)]
+    pub(in crate::native) pending_barrier_version: u64,
+    #[serde(default)]
+    pub(in crate::native) pending_we_epoch_id_hex: String,
+    #[serde(default)]
+    pub(in crate::native) current_barrier_version: u64,
+    #[serde(default)]
+    pub(in crate::native) lookup_status: Option<BarrierPendingLookupTraceStatus>,
+    #[serde(default)]
+    pub(in crate::native) accepted_barrier_version: Option<u64>,
+    #[serde(default)]
+    pub(in crate::native) accepted_fs_ec: Option<u64>,
+    #[serde(default)]
+    pub(in crate::native) accepted_reason: Option<u64>,
+    #[serde(default)]
+    pub(in crate::native) accepted_digest_hex: String,
+    #[serde(default)]
+    pub(in crate::native) decision: Option<BarrierPendingTraceDecision>,
+    #[serde(default)]
+    pub(in crate::native) recovery_issue: Option<BarrierRecoveryIssue>,
+    #[serde(default)]
+    pub(in crate::native) detail: Option<String>,
 }
 
 impl PersistedBarrierNodeKeyMaterial {
@@ -452,6 +480,54 @@ impl PersistedBarrierPendingActivationSource {
     }
 }
 
+impl PersistedBarrierPendingHistoryTrace {
+    pub(in crate::native) fn from_runtime(trace: &BarrierPendingHistoryTrace) -> Self {
+        Self {
+            pending_barrier_version: trace.pending_barrier_version,
+            pending_we_epoch_id_hex: hex_encode(trace.pending_we_epoch_id),
+            current_barrier_version: trace.current_barrier_version,
+            lookup_status: Some(trace.lookup_status),
+            accepted_barrier_version: trace.accepted_barrier_version,
+            accepted_fs_ec: trace.accepted_fs_ec,
+            accepted_reason: trace.accepted_reason,
+            accepted_digest_hex: trace.accepted_digest.map(hex_encode).unwrap_or_default(),
+            decision: Some(trace.decision),
+            recovery_issue: trace.recovery_issue,
+            detail: trace.detail.clone(),
+        }
+    }
+
+    pub(in crate::native) fn into_runtime(self) -> Result<BarrierPendingHistoryTrace> {
+        Ok(BarrierPendingHistoryTrace {
+            pending_barrier_version: self.pending_barrier_version,
+            pending_we_epoch_id: decode_hex32_or_zero(
+                "barrier_state.last_pending_history_trace.pending_we_epoch_id_hex",
+                &self.pending_we_epoch_id_hex,
+            )?,
+            current_barrier_version: self.current_barrier_version,
+            lookup_status: self
+                .lookup_status
+                .unwrap_or(BarrierPendingLookupTraceStatus::LegacyLocatorUnavailable),
+            accepted_barrier_version: self.accepted_barrier_version,
+            accepted_fs_ec: self.accepted_fs_ec,
+            accepted_reason: self.accepted_reason,
+            accepted_digest: if self.accepted_digest_hex.is_empty() {
+                None
+            } else {
+                Some(decode_hex32(
+                    "barrier_state.last_pending_history_trace.accepted_digest_hex",
+                    &self.accepted_digest_hex,
+                )?)
+            },
+            decision: self
+                .decision
+                .unwrap_or(BarrierPendingTraceDecision::Unchanged),
+            recovery_issue: self.recovery_issue,
+            detail: self.detail,
+        })
+    }
+}
+
 impl PersistedBarrierState {
     pub(in crate::native) fn from_runtime(state: &BarrierSecretState) -> Self {
         let dk_nodes = state
@@ -514,6 +590,10 @@ impl PersistedBarrierState {
                 .map(PersistedBarrierPendingState::from_runtime),
             barrier_recovery_pending: state.barrier_recovery_pending,
             barrier_recovery_issue: state.barrier_recovery_issue,
+            last_pending_history_trace: state
+                .last_pending_history_trace
+                .as_ref()
+                .map(PersistedBarrierPendingHistoryTrace::from_runtime),
             current_barrier_full_verified: state.current_barrier_full_verified,
         }
     }
@@ -607,6 +687,10 @@ impl PersistedBarrierState {
                 .transpose()?,
             barrier_recovery_pending: self.barrier_recovery_pending,
             barrier_recovery_issue: self.barrier_recovery_issue,
+            last_pending_history_trace: self
+                .last_pending_history_trace
+                .map(PersistedBarrierPendingHistoryTrace::into_runtime)
+                .transpose()?,
             current_barrier_full_verified: self.current_barrier_full_verified,
         })
     }

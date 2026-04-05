@@ -40,8 +40,7 @@ impl AppModel {
                 self.fetch_in_flight = false;
                 self.fetch_status = FetchStatus::Idle;
                 if session.barrier_state.barrier_recovery_pending {
-                    self.info_message =
-                        Some(Self::barrier_recovery_message_for_session(&session).to_string());
+                    self.info_message = Some(Self::barrier_recovery_message_for_session(&session));
                     self.record_activity_with_detail(
                         ActivityKind::Message,
                         "Message fetch deferred",
@@ -134,10 +133,15 @@ impl AppModel {
                         }
                     }
                     if should_persist {
-                        if let Err(err) = persist_session(&updated_session) {
-                            warn!("failed to persist session after fetch update: {err:?}");
+                        if let Err(err) = persist_replay_progress(
+                            &updated_session.server_url,
+                            &updated_session.room_id,
+                            updated_session.last_fetch_timestamp_ms,
+                            &updated_session.msg_replay_state,
+                        ) {
+                            warn!("failed to persist replay progress after fetch update: {err:?}");
                             self.last_error = Some(format!(
-                                "Failed to persist session after fetch update: {err}"
+                                "Failed to persist replay progress after fetch update: {err}"
                             ));
                             self.record_activity_with_detail(
                                 ActivityKind::Message,

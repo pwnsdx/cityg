@@ -106,12 +106,17 @@ impl AppModel {
         "Joined room. Waiting for barrier recovery before messaging."
     }
 
-    pub(super) fn barrier_recovery_message_for_session(session: &AppSession) -> &'static str {
-        session
+    pub(super) fn barrier_recovery_message_for_session(session: &AppSession) -> String {
+        let base = session
             .barrier_state
             .barrier_recovery_issue
             .map(BarrierRecoveryIssue::user_message)
-            .unwrap_or_else(Self::barrier_recovery_wait_message)
+            .unwrap_or_else(Self::barrier_recovery_wait_message);
+        if let Some(trace) = session.barrier_state.last_pending_history_trace.as_ref() {
+            format!("{base} {}", trace.user_summary())
+        } else {
+            base.to_string()
+        }
     }
 
     pub(super) fn new(config: CityGConfig) -> Self {

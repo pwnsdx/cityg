@@ -13,6 +13,17 @@ pub(super) fn clear_join_finalize_bootstrap_artifact(state: &mut BarrierSecretSt
     state.bootstrap_current_barrier_update.clear();
 }
 
+pub(super) fn reset_pending_history_trace(session: &mut AppSession) {
+    session.barrier_state.last_pending_history_trace = None;
+}
+
+pub(super) fn record_pending_history_trace(
+    session: &mut AppSession,
+    trace: BarrierPendingHistoryTrace,
+) {
+    session.barrier_state.last_pending_history_trace = Some(trace);
+}
+
 pub(super) fn apply_recovered_barrier_state(
     session: &mut AppSession,
     recovered: BarrierRecoverResult,

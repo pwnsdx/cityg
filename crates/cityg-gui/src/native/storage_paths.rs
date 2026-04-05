@@ -16,6 +16,12 @@ pub(super) fn room_identity_file_path(server_url: &str, room_id: &str) -> Result
     Ok(base.join(format!("room-identity-{}.json", hash)))
 }
 
+pub(super) fn replay_progress_file_path(server_url: &str, room_id: &str) -> Result<PathBuf> {
+    let base = session_dir()?;
+    let hash = session_key_hash(server_url, room_id)?;
+    Ok(base.join(format!("replay-progress-{}.json", hash)))
+}
+
 pub(super) fn roster_file_path(server_url: &str, room_id: &str) -> Result<PathBuf> {
     let base = session_dir()?;
     let hash = session_key_hash(server_url, room_id)?;

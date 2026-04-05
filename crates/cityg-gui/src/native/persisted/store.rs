@@ -8,6 +8,15 @@ pub(in crate::native) struct PersistedRoomIdentity {
 }
 
 #[derive(Serialize, Deserialize, Default)]
+pub(in crate::native) struct PersistedReplayProgress {
+    pub(in crate::native) version: u32,
+    #[serde(default)]
+    pub(in crate::native) last_fetch_timestamp_ms: Option<u64>,
+    #[serde(default)]
+    pub(in crate::native) msg_replay_state: PersistedMsgReplayState,
+}
+
+#[derive(Serialize, Deserialize, Default)]
 pub(in crate::native) struct PersistedAliasStore {
     pub(in crate::native) version: u32,
     pub(in crate::native) bindings: AHashMap<String, PersistedAliasBinding>,
@@ -63,6 +72,33 @@ impl PersistedRoomIdentity {
         Ok(RoomIdentity::new(
             decode_hex_vec("pop_public_hex", &self.pop_public_hex)?,
             decode_hex_vec("pop_secret_hex", &self.pop_secret_hex)?,
+        ))
+    }
+}
+
+impl PersistedReplayProgress {
+    pub(in crate::native) fn from_runtime(
+        last_fetch_timestamp_ms: Option<u64>,
+        msg_replay_state: &MsgReplayState,
+    ) -> Self {
+        Self {
+            version: REPLAY_PROGRESS_VERSION,
+            last_fetch_timestamp_ms,
+            msg_replay_state: PersistedMsgReplayState::from_runtime(msg_replay_state),
+        }
+    }
+
+    pub(in crate::native) fn into_runtime(self) -> Result<(Option<u64>, MsgReplayState)> {
+        if self.version != REPLAY_PROGRESS_VERSION {
+            return Err(anyhow!(
+                "unsupported replay progress file version {} (expected {})",
+                self.version,
+                REPLAY_PROGRESS_VERSION
+            ));
+        }
+        Ok((
+            self.last_fetch_timestamp_ms,
+            self.msg_replay_state.into_runtime()?,
         ))
     }
 }

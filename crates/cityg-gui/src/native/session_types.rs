@@ -86,6 +86,7 @@ pub(super) struct BarrierSecretState {
     pub(super) pending: Option<BarrierPendingState>,
     pub(super) barrier_recovery_pending: bool,
     pub(super) barrier_recovery_issue: Option<BarrierRecoveryIssue>,
+    pub(super) last_pending_history_trace: Option<BarrierPendingHistoryTrace>,
     pub(super) current_barrier_full_verified: bool,
 }
 
@@ -121,6 +122,7 @@ impl Default for BarrierSecretState {
             pending: None,
             barrier_recovery_pending: false,
             barrier_recovery_issue: None,
+            last_pending_history_trace: None,
             current_barrier_full_verified: false,
         }
     }
@@ -195,6 +197,91 @@ pub(super) struct BarrierPendingState {
     pub(super) barrier_update_digest: [u8; 32],
     pub(super) on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
     pub(super) activation_source: Option<BarrierPendingActivationSource>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum BarrierPendingLookupTraceStatus {
+    LegacyLocatorUnavailable,
+    Pending,
+    Accepted,
+    Superseded,
+    FinalRejected,
+    NotFound,
+    TransportError,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum BarrierPendingTraceDecision {
+    Unchanged,
+    Activated,
+    Discarded,
+    RecoveryRequired,
+    LookupFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct BarrierPendingHistoryTrace {
+    pub(super) pending_barrier_version: u64,
+    pub(super) pending_we_epoch_id: [u8; 32],
+    pub(super) current_barrier_version: u64,
+    pub(super) lookup_status: BarrierPendingLookupTraceStatus,
+    pub(super) accepted_barrier_version: Option<u64>,
+    pub(super) accepted_fs_ec: Option<u64>,
+    pub(super) accepted_reason: Option<u64>,
+    pub(super) accepted_digest: Option<[u8; 32]>,
+    pub(super) decision: BarrierPendingTraceDecision,
+    pub(super) recovery_issue: Option<BarrierRecoveryIssue>,
+    pub(super) detail: Option<String>,
+}
+
+impl BarrierPendingHistoryTrace {
+    pub(super) fn user_summary(&self) -> String {
+        match (self.lookup_status, self.decision) {
+            (
+                BarrierPendingLookupTraceStatus::LegacyLocatorUnavailable,
+                BarrierPendingTraceDecision::Unchanged,
+            ) => "Last authenticated check: pending merge predates locator persistence; waiting for more history.".to_string(),
+            (
+                BarrierPendingLookupTraceStatus::LegacyLocatorUnavailable,
+                BarrierPendingTraceDecision::RecoveryRequired,
+            ) => "Last authenticated check: pending merge predates locator persistence and now requires explicit recovery.".to_string(),
+            (
+                BarrierPendingLookupTraceStatus::Pending,
+                BarrierPendingTraceDecision::Unchanged,
+            ) => "Last authenticated check: merge is still pending.".to_string(),
+            (
+                BarrierPendingLookupTraceStatus::Accepted,
+                BarrierPendingTraceDecision::Activated,
+            ) => "Last authenticated check: matching merge was accepted.".to_string(),
+            (
+                BarrierPendingLookupTraceStatus::Accepted,
+                BarrierPendingTraceDecision::RecoveryRequired,
+            ) => "Last authenticated check: accepted merge contradicted local pending state.".to_string(),
+            (
+                BarrierPendingLookupTraceStatus::Superseded,
+                BarrierPendingTraceDecision::Discarded,
+            ) => "Last authenticated check: pending merge was superseded.".to_string(),
+            (
+                BarrierPendingLookupTraceStatus::FinalRejected,
+                BarrierPendingTraceDecision::Discarded,
+            ) => "Last authenticated check: pending merge was finally rejected.".to_string(),
+            (
+                BarrierPendingLookupTraceStatus::NotFound,
+                BarrierPendingTraceDecision::Unchanged,
+            ) => "Last authenticated check: acceptance record not found yet; waiting for authenticated history.".to_string(),
+            (
+                BarrierPendingLookupTraceStatus::NotFound,
+                BarrierPendingTraceDecision::RecoveryRequired,
+            ) => "Last authenticated check: acceptance record is still missing after a newer barrier version appeared.".to_string(),
+            (BarrierPendingLookupTraceStatus::TransportError, BarrierPendingTraceDecision::LookupFailed) => {
+                let detail = self.detail.as_deref().unwrap_or("transport failure");
+                format!("Last authenticated check failed: {detail}.")
+            }
+            _ => "Last authenticated check: pending merge state changed.".to_string(),
+        }
+    }
 }
 
 #[derive(Clone)]

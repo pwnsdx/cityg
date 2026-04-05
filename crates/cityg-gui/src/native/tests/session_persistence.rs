@@ -1070,6 +1070,19 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         }),
         barrier_recovery_pending: true,
         barrier_recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
+        last_pending_history_trace: Some(BarrierPendingHistoryTrace {
+            pending_barrier_version: 6,
+            pending_we_epoch_id: array(0x2A),
+            current_barrier_version: 7,
+            lookup_status: BarrierPendingLookupTraceStatus::NotFound,
+            accepted_barrier_version: None,
+            accepted_fs_ec: None,
+            accepted_reason: None,
+            accepted_digest: None,
+            decision: BarrierPendingTraceDecision::RecoveryRequired,
+            recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
+            detail: Some("history 404 after newer committed barrier".to_string()),
+        }),
         current_barrier_full_verified: false,
     };
     let tuple_tag = array(0x30);
@@ -1307,6 +1320,10 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         expected_pending.barrier_update_digest
     );
     assert_eq!(
+        loaded.barrier_state.last_pending_history_trace,
+        session.barrier_state.last_pending_history_trace
+    );
+    assert_eq!(
         loaded_pending.on_path_key_material.len(),
         expected_pending.on_path_key_material.len()
     );
@@ -1323,5 +1340,95 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(decoded, capss_witness_bundle);
 
     remove_persisted_session(&session.server_url, &session.room_id)?;
+    Ok(())
+}
+
+#[test]
+fn load_session_overlays_replay_progress_sidecar() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let mut session = build_test_session(
+        0xC701,
+        "http://127.0.0.1:18083",
+        "33aabbccddeeff00112233445566778899aabbccddeeff001122334455667799",
+        "replay-sidecar",
+    )?;
+    session.last_fetch_timestamp_ms = Some(1_000);
+
+    let tuple_tag = MessageReplayTupleTag::new(
+        session.gid,
+        session.we_epoch_id,
+        session.fs_ec,
+        session.xk_hash,
+        session.epoch_key,
+        session.barrier_state.barrier_version,
+        session.leaf_id,
+    );
+    let replay_context = MessageReplayContext::new(
+        session.fs_ec,
+        session.xk_hash,
+        session.epoch_key,
+        session.leaf_id,
+    );
+    session
+        .msg_replay_state
+        .record(tuple_tag, replay_context, 1);
+    persist_session(&session)?;
+
+    let mut updated_replay_state = session.msg_replay_state.clone();
+    updated_replay_state.record(tuple_tag, replay_context, 2);
+    persist_replay_progress(
+        &session.server_url,
+        &session.room_id,
+        Some(2_000),
+        &updated_replay_state,
+    )?;
+
+    let loaded = load_session_at(&session.server_url, &session.room_id)?
+        .ok_or_else(|| anyhow!("expected persisted session to load"))?;
+    assert_eq!(
+        loaded.last_fetch_timestamp_ms,
+        Some(2_000),
+        "replay sidecar should override the stale fetch watermark stored in the session snapshot"
+    );
+    assert!(
+        PersistedMsgReplayState::from_runtime(&loaded.msg_replay_state).semantically_equivalent(
+            &PersistedMsgReplayState::from_runtime(&updated_replay_state)
+        ),
+        "replay sidecar should override the stale replay state stored in the session snapshot"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn remove_persisted_session_removes_replay_progress_sidecar()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let session = build_test_session(
+        0xC702,
+        "http://127.0.0.1:18084",
+        "44aabbccddeeff00112233445566778899aabbccddeeff001122334455667799",
+        "replay-cleanup",
+    )?;
+    persist_session(&session)?;
+
+    let replay_path = replay_progress_file_path(&session.server_url, &session.room_id)?;
+    assert!(
+        replay_path.exists(),
+        "persist_session should create replay sidecar"
+    );
+
+    remove_persisted_session(&session.server_url, &session.room_id)?;
+
+    assert!(
+        !replay_path.exists(),
+        "session cleanup should remove the replay sidecar alongside the main session file"
+    );
     Ok(())
 }
