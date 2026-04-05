@@ -11,10 +11,10 @@ source "$SCRIPT_DIR/cargo_repo_env.sh"
 cd "$REPO_ROOT"
 
 cargo test --locked -p cityg-server \
-  slot_reuse_join_finalize_reclaim_clears_committed_revocation \
+  tests::slot_reuse_join_finalize_reclaim_clears_committed_revocation \
   -- --nocapture
 cargo test --locked -p cityg-server \
-  slot_reuse_rejects_stale_join_finalize_auth_token \
+  tests::slot_reuse_rejects_stale_join_finalize_auth_token \
   -- --nocapture
 cargo test --locked -p cityg-api --test integration \
   public_stale_join_finalize_auth_rejected_after_slot_reuse \
@@ -38,6 +38,9 @@ cargo test --locked -p cityg-api-client --lib \
   -- --exact --nocapture
 cargo test --locked -p cityg-api --test integration \
   public_barrier_helpers_preserve_slot_generations_across_slot_reuse \
+  -- --exact --nocapture
+cargo test --locked -p cityg-api --test integration \
+  public_lookup_merge_acceptance_tracks_reclaim_join_finalize \
   -- --exact --nocapture
 cargo test --locked -p cityg-api-client --lib \
   tests::prepare_runtime_join_ticket_rejects_tampered_join_occupancy_slot_generation \

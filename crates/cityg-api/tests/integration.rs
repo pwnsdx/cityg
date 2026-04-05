@@ -4,7 +4,8 @@ use anyhow::{Result, anyhow};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use ciborium::value::Value;
 use cityg_api_client::{
-    CitygApiClient, Error, IdentityBinding, RoomAdminOperation, RoomAdminProof, SlotLease,
+    CitygApiClient, Error, IdentityBinding, MergeAcceptanceStatus, RoomAdminOperation,
+    RoomAdminProof, SlotLease,
     build_room_admin_leaf_pair_proof, build_room_admin_listing_proof, build_room_admin_proof,
     build_room_admin_target_proof, generate_room_admin_keypair,
 };
@@ -14,6 +15,7 @@ use cityg_client::{
     barrier_merge_bundle::{
         BarrierMergeBundleInputs, PreparedBarrierMergeBundle, build_barrier_merge_bundle,
     },
+    barrier_update::compute_barrier_update_digest,
     demo::{DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public},
     witness::SrxInputsOwned,
 };
@@ -30,7 +32,7 @@ use reqwest::StatusCode;
 use serde_bytes::ByteBuf;
 use std::sync::Once;
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 const TEST_ADMIN_TOKEN: &str = "integration-admin-token";
 const TEST_MESSAGE_TOKEN: &str = "integration-message-token";
@@ -204,6 +206,13 @@ fn header_u64_field(bundle: &ClientEpochBundle, key: u64, name: &str) -> Result<
 fn header_bytes32_field(bundle: &ClientEpochBundle, key: u64, name: &str) -> Result<[u8; 32]> {
     match bundle.header_map.get(&key) {
         Some(Value::Bytes(bytes)) => array32(name, bytes),
+        _ => Err(anyhow!("{name} missing")),
+    }
+}
+
+fn header_bytes_field(bundle: &ClientEpochBundle, key: u64, name: &str) -> Result<Vec<u8>> {
+    match bundle.header_map.get(&key) {
+        Some(Value::Bytes(bytes)) => Ok(bytes.clone()),
         _ => Err(anyhow!("{name} missing")),
     }
 }
@@ -648,14 +657,12 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
         .accept_epoch_bundle(&bob.bundle)
         .await
         .expect("accept bob");
-    let bob_reclaim = build_join_finalize_bundle(
-        &client,
-        &room_id,
-        &bob,
-        bob.join_finalize_auth_token,
-        0,
+    let bob_reclaim = timeout(
+        Duration::from_secs(10),
+        build_join_finalize_bundle(&client, &room_id, &bob, bob.join_finalize_auth_token, 0),
     )
-    .await?;
+    .await
+    .map_err(|_| anyhow!("build bob reclaim finalize timed out"))??;
     assert_eq!(
         header_u64_field(
             &bob_reclaim.bundle,
@@ -826,6 +833,134 @@ async fn public_stale_join_finalize_auth_rejected_after_slot_reuse() -> Result<(
     };
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(freeze_reason.as_deref(), Some("barrier_updater_invalid"));
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn public_lookup_merge_acceptance_tracks_reclaim_join_finalize() -> Result<()> {
+    let port = next_free_local_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let mut ready = false;
+    for _ in 0..20 {
+        if timeout(Duration::from_secs(1), client.health()).await.is_ok_and(|result| result.is_ok())
+        {
+            ready = true;
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    if !ready {
+        return Err(anyhow!("server readiness timed out before slot-lease lookup test"));
+    }
+    let room_id = hex::encode([0xA8u8; 32]);
+    timeout(
+        Duration::from_secs(10),
+        bootstrap_room(&client, &room_id, kbroad_public()),
+    )
+    .await
+    .map_err(|_| anyhow!("bootstrap room timed out for slot-lease lookup test"))??;
+
+    let mut alice = join_room_member(&client, &room_id, "alice", 0xC1).await?;
+    client
+        .accept_epoch_bundle(&alice.bundle)
+        .await
+        .expect("accept alice");
+    let alice_finalize = build_join_finalize_bundle(
+        &client,
+        &room_id,
+        &alice,
+        alice.join_finalize_auth_token,
+        2,
+    )
+    .await?;
+    client
+        .accept_epoch_bundle(&alice_finalize.bundle)
+        .await
+        .expect("accept alice finalize");
+    alice.bundle = alice_finalize.bundle.clone();
+    alice.forward_state = alice_finalize.forward_state_after;
+
+    let alice_leave = build_leave_bundle(&client, &room_id, &alice).await?;
+    client
+        .accept_epoch_bundle(&alice_leave)
+        .await
+        .expect("accept alice leave");
+
+    let mut bob = join_room_member(&client, &room_id, "bob", 0xC2).await?;
+    client
+        .accept_epoch_bundle(&bob.bundle)
+        .await
+        .expect("accept bob");
+
+    let bob_reclaim = timeout(
+        Duration::from_secs(10),
+        build_join_finalize_bundle(&client, &room_id, &bob, bob.join_finalize_auth_token, 0),
+    )
+    .await
+    .map_err(|_| anyhow!("build bob reclaim finalize timed out"))??;
+    let pending_barrier_version = header_u64_field(
+        &bob_reclaim.bundle,
+        hdr::HDR_BARRIER_VERSION,
+        "barrier_version",
+    )?;
+    let pending_barrier_update = header_bytes_field(
+        &bob_reclaim.bundle,
+        hdr::HDR_BARRIER_UPDATE,
+        "barrier_update",
+    )?;
+    let pending_barrier_update_digest = compute_barrier_update_digest(&pending_barrier_update)?;
+    let pending_lookup = timeout(
+        Duration::from_secs(10),
+        client.barrier_lookup_merge_acceptance(
+            &room_id,
+            pending_barrier_version,
+            &pending_barrier_update_digest,
+            &bob_reclaim.bundle.we_epoch_id,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("lookup pending reclaim acceptance timed out"))??;
+    assert_eq!(pending_lookup.status, MergeAcceptanceStatus::Pending);
+    assert_eq!(pending_lookup.accepted_barrier_version, None);
+    assert_eq!(pending_lookup.accepted_reason, None);
+
+    timeout(
+        Duration::from_secs(10),
+        client.accept_epoch_bundle(&bob_reclaim.bundle),
+    )
+    .await
+    .map_err(|_| anyhow!("accept bob reclaim finalize timed out"))??;
+    bob.bundle = bob_reclaim.bundle.clone();
+    bob.forward_state = bob_reclaim.forward_state_after;
+
+    let accepted_lookup = timeout(
+        Duration::from_secs(10),
+        client.barrier_lookup_merge_acceptance(
+            &room_id,
+            pending_barrier_version,
+            &pending_barrier_update_digest,
+            &bob.bundle.we_epoch_id,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("lookup accepted reclaim acceptance timed out"))??;
+    assert_eq!(accepted_lookup.status, MergeAcceptanceStatus::Accepted);
+    assert_eq!(
+        accepted_lookup.accepted_barrier_version,
+        Some(pending_barrier_version)
+    );
+    assert_eq!(accepted_lookup.accepted_reason, Some(0));
+    assert_eq!(
+        accepted_lookup.accepted_digest,
+        Some(pending_barrier_update_digest)
+    );
 
     handle.abort();
     let _ = handle.await;

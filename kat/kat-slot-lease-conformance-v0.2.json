@@ -79,6 +79,17 @@
           "expectation": "reject_merge_ticket_generation_tamper"
         }
       ]
+    },
+    {
+      "id": "SL5",
+      "title": "Public acceptance lookup tracks reclaim join-finalize lifecycle",
+      "coverage": [
+        {
+          "crate": "cityg-api",
+          "test": "public_lookup_merge_acceptance_tracks_reclaim_join_finalize",
+          "expectation": "pending_then_accepted_reclaim_lookup"
+        }
+      ]
     }
   ]
 }
