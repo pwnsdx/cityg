@@ -44,8 +44,8 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ### 4. Barrier validation
 
-- [~] Replace `updater_leaf` binding with lease binding in the wire profile
-  `api-client`, `cityg-client`, `cityg-gui` et `msphf-orchestrator` consomment désormais `updater_slot_index` en interne; le reliquat restant est le label CBOR wire `updater_leaf`, conservé explicitement via `serde(rename = "updater_leaf")`.
+- [x] Replace `updater_leaf` binding with lease binding in the wire profile
+  Les encodeurs/décodeurs runtime utilisent désormais `updater_slot_index` comme champ wire et comme nom interne; le reliquat restant est surtout un sweep documentaire plus large sur les anciennes formulations.
 - [x] Update `join_finalize_auth` validation to match the current leased slot
 - [x] Update receipts and full-verification witness payloads
   `BarrierIssueFullVerificationWitnessRequest` transporte désormais des records `Occupancy` versionnés.
@@ -99,6 +99,6 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ## Immediate next slice
 
-1. Decide whether the CBOR wire label `updater_leaf` also moves in a hard `v0.2` cut.
-2. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.
-3. Finish the remaining documentation sweep for historical `cover_leaf_index` wording and other explicitly legacy labels.
+1. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.
+2. Finish the remaining documentation sweep for historical `cover_leaf_index` wording and other explicitly legacy labels.
+3. Rename lingering local test variable names (`updater_leaf`, `ResolveJoinsSince`, etc.) where they still obscure the slot-lease model.

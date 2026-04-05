@@ -61,7 +61,6 @@ pub(crate) struct FullVerificationWitnessWire {
     #[serde(with = "serde_bytes")]
     pub(crate) author_leaf_id: Vec<u8>,
     pub(crate) barrier_update_reason: u64,
-    #[serde(rename = "updater_leaf")]
     pub(crate) updater_slot_index: u64,
     pub(crate) updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
@@ -388,7 +387,6 @@ pub(crate) struct FullVerificationWitnessSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     pub(crate) author_leaf_id: &'a [u8; 32],
     pub(crate) barrier_update_reason: u64,
-    #[serde(rename = "updater_leaf")]
     pub(crate) updater_slot_index: u64,
     pub(crate) updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]

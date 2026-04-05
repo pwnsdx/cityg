@@ -4055,7 +4055,6 @@ struct FullVerificationReceiptWire {
     #[serde(with = "serde_bytes")]
     author_leaf_id: Vec<u8>,
     barrier_update_reason: u64,
-    #[serde(rename = "updater_leaf")]
     updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
@@ -4070,7 +4069,6 @@ struct FullVerificationReceiptSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     author_leaf_id: &'a [u8; 32],
     barrier_update_reason: u64,
-    #[serde(rename = "updater_leaf")]
     updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
@@ -4101,7 +4099,6 @@ struct FullVerificationWitnessWire {
     #[serde(with = "serde_bytes")]
     author_leaf_id: Vec<u8>,
     barrier_update_reason: u64,
-    #[serde(rename = "updater_leaf")]
     updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]
@@ -4137,7 +4134,6 @@ struct FullVerificationWitnessSignedPayload<'a> {
     #[serde(with = "serde_bytes")]
     author_leaf_id: &'a [u8; 32],
     barrier_update_reason: u64,
-    #[serde(rename = "updater_leaf")]
     updater_slot_index: u64,
     updater_slot_generation: u64,
     #[serde(with = "serde_bytes")]

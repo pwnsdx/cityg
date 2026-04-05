@@ -1057,14 +1057,14 @@ BarrierUpdate = [
 `BarrierUpdate` MUST be a CBOR array of length exactly 8.
 KemTreeCoverPayload (CBOR bytes inside cover_payload):
 KemTreeCoverPayload = [
-  updater_leaf               : uint,
+  updater_slot_index               : uint,
   updater_slot_generation    : uint,
   path_nodes                 : [* uint],
   revoked_leaf_indices_hint  : null / [* uint],
   node_ciphertexts           : [* NodeCiphertext],
   new_public_keys            : [* [uint, bstr]]
 ]
-`updater_leaf` is the legacy wire field name; semantically it carries the updater `slot_index`.
+`updater_slot_index` is the wire field name and semantically binds the updater `slot_index`.
 `KemTreeCoverPayload` MUST be a CBOR array of length exactly 6.
 NodeCiphertext:
 NodeCiphertext = [
@@ -1136,7 +1136,7 @@ snapshot_pre construction (order is normative):
 kem_tree_hash_before := TreeHash(root_node) over snapshot_pre (per S11.4)
 
 S11.7 Mandatory path_nodes validation (normative)
-Let pn := path_nodes and u := updater_leaf.
+Let pn := path_nodes and u := updater_slot_index.
 All checks MUST hold:
 * len(pn) >= 1
 * pn[0] == leaf_node(u)
@@ -1170,7 +1170,7 @@ This subsection normatively specifies the updater procedure required for interop
 Definitions:
 * v_new := BarrierUpdate.barrier_version (the new barrier version to activate on acceptance)
 * RRH := revocation_roots_hash
-* u := cover_payload.updater_leaf
+* u := cover_payload.updater_slot_index
 * pn := cover_payload.path_nodes
 * snapshot_pre is constructed per S11.6 using the authenticated snapshot_base (see S11.11.1)
 Requirements (MUST):
@@ -1350,17 +1350,17 @@ Generic requirements on any such extension:
 
 Concrete extensions defined by this document:
 * `local-history-authority-v1` and `global-history-authority-v1` are two concrete extensions satisfying these requirements within one deployment-local or deployment-global `HistoryAuthorityScope`, respectively.
-* Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, updater_slot_generation:uint64, signature:bstr }` encoded as deterministic CBOR. `updater_leaf` is the legacy wire field name and semantically binds the updater `slot_index`.
-* Under `local-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, updater_slot_generation, header[180], header[182], header[175])`.
+* Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_slot_index:uint, updater_slot_generation:uint64, signature:bstr }` encoded as deterministic CBOR. `updater_slot_index` is the wire field name and semantically binds the updater `slot_index`.
+* Under `local-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_slot_index, updater_slot_generation, header[180], header[182], header[175])`.
 * Under `local-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the server's authenticated membership view.
-* Under `local-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_leaf`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
+* Under `local-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_slot_index`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
 * Under `local-history-authority-v1`, key `181` MUST NOT appear without a matching key `182` for the same current `HistoryCommitment`; receipt validation fails closed if the attestation or commitment differs.
 * Under `local-history-authority-v1`, any accepted `barrier_update` originated under that extension MUST carry both key `181` and key `182`; a bundle carrying key `182` without key `181`, or vice versa, is malformed for this extension.
 * Under `local-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact scope-local attested helper state. It does NOT upgrade that scope-local attestation into a globally canonical finality proof.
 * Under `global-history-authority-v1`, key `181` MUST carry the same `FullVerificationReceipt` object and deterministic CBOR form as above.
-* Under `global-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, updater_slot_generation, header[180], header[182], header[175])`.
+* Under `global-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_slot_index, updater_slot_generation, header[180], header[182], header[175])`.
 * Under `global-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the deployment-global authenticated membership view being used for acceptance.
-* Under `global-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_leaf`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
+* Under `global-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_slot_index`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
 * Under `global-history-authority-v1`, key `181` MUST NOT appear without a matching key `182` for the same current `HistoryCommitment`; receipt validation fails closed if the attestation or commitment differs.
 * Under `global-history-authority-v1`, any accepted `barrier_update` originated under that extension MUST carry both key `181` and key `182`; a bundle carrying key `182` without key `181`, or vice versa, is malformed for this extension.
 * Under `global-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact deployment-global attested helper state. It does NOT, by itself, prove federated consensus across multiple deployments.
@@ -1372,9 +1372,9 @@ S11.11.4A Full-verification witness
 Key `183` is the generic wire slot for an authority-issued `FullVerificationWitness` on `barrier_update` reasons `0` and `1`.
 Generic requirements:
 * The negotiated extension MUST define the exact witness object, signature suite, and negotiation/profile identifier.
-* The witness MUST bind at minimum `(HistoryAuthorityScope, gid, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author_leaf_id, barrier_update_reason, updater_leaf, updater_slot_generation, digest(header[175]), digest(ResolveJoinsSince result), digest(ResolveRevokedLeaves result), digest(deployment_profile_manifest))`.
+* The witness MUST bind at minimum `(HistoryAuthorityScope, gid, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author_leaf_id, barrier_update_reason, updater_slot_index, updater_slot_generation, digest(header[175]), digest(ResolveJoinsSince result), digest(ResolveRevokedLeaves result), digest(deployment_profile_manifest))`.
 * The signer/authenticator for key `183` MUST be able to replay the exact `reason in {0,1}` authoring decision against the authenticated current tree and authenticated helper outputs for that same current state. A static blob or pure client self-assertion is insufficient.
-* Under `global-history-authority-v1`, `FullVerificationWitness := { scope_id:bstr32, history_authority_extension:tstr, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, updater_slot_generation:uint64, barrier_update_digest:bstr32, joins_digest:bstr32, revoked_digest:bstr32, deployment_profile_manifest_digest:bstr32, signature:bstr }` encoded as deterministic CBOR. `updater_leaf` is the legacy wire field name and semantically binds the updater `slot_index`.
+* Under `global-history-authority-v1`, `FullVerificationWitness := { scope_id:bstr32, history_authority_extension:tstr, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, author_leaf_id:bstr32, barrier_update_reason:uint, updater_slot_index:uint, updater_slot_generation:uint64, barrier_update_digest:bstr32, joins_digest:bstr32, revoked_digest:bstr32, deployment_profile_manifest_digest:bstr32, signature:bstr }` encoded as deterministic CBOR. `updater_slot_index` is the wire field name and semantically binds the updater `slot_index`.
 * Under `global-history-authority-v1`, the server/history authority MUST issue key `183` only after replaying the exact S11.11.2-style chain-check for the candidate `barrier_update` against the authenticated current public tree, the authenticated A/B helper outputs, and the authenticated deployment-profile manifest for that same current committed state.
 * Under `global-history-authority-v1`, accepted `barrier_update` bundles with reason `0` or `1` MUST carry key `183`; a missing, stale, or mismatched witness is malformed for this extension.
 * Under `global-history-authority-v1`, key `183` proves server-verifiable authoring eligibility for that exact `reason in {0,1}` bundle within one deployment-global `HistoryAuthorityScope`. It still does NOT, by itself, prove federated consensus across multiple independent deployments.
@@ -1450,21 +1450,21 @@ E) Contract for new_public_keys MUST
 * Require CP.new_public_keys contains exactly len(pn)-1 entries and exactly the nodes in ExpectedNodeSet; failure -> 960.7.
 
 F) Updater identity binding + updater-not-revoked
-* Define updater_leaf := CP.updater_leaf.
+* Define updater_slot_index := CP.updater_slot_index.
 * Define `current_slot_lease(header[108]) := (slot_index, slot_generation)` as the unique currently active or pending slot lease for the acting `leaf_id`.
-* Require `updater_leaf == current_slot_lease(header[108]).slot_index` and `CP.updater_slot_generation == current_slot_lease(header[108]).slot_generation`; else reject 960.1.
-* Require the exact updater lease `(updater_leaf, CP.updater_slot_generation)` NOT appear in RevokedLeafSet for this update; else reject 960.1.
+* Require `updater_slot_index == current_slot_lease(header[108]).slot_index` and `CP.updater_slot_generation == current_slot_lease(header[108]).slot_generation`; else reject 960.1.
+* Require the exact updater lease `(updater_slot_index, CP.updater_slot_generation)` NOT appear in RevokedLeafSet for this update; else reject 960.1.
 * Let JoinSet := ResolveJoinsSince(BU.prev_barrier_version).
 * Let JoinLeafSet := the set of active `leaf_index` values carried by JoinSet.
 * The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `HistoryCommitment`; inability to establish a single common commitment -> reject 960.9.
 * The server MUST require `header[180]` to equal that same authenticated current-state `HistoryCommitment`; mismatch -> reject 960.9.
 * These checks establish helper-state coherence only. They MUST NOT be documented or relied upon as proof that the client performed FULL verification, unless a deployment-defined extension adds such a proof.
 * If header[178] == 1:
-  * Require updater_leaf NOT IN JoinLeafSet, else reject 960.5.
+  * Require updater_slot_index NOT IN JoinLeafSet, else reject 960.5.
   * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
 * If header[178] == 2:
-  * Require updater_leaf IN JoinLeafSet, else reject 960.5.
-  * Require `header[179]` to match one server-issued pending `join_finalize_auth` capability bound to the acting `(gid, leaf_id, updater_leaf, CP.updater_slot_generation)`; otherwise reject 960.1.
+  * Require updater_slot_index IN JoinLeafSet, else reject 960.5.
+  * Require `header[179]` to match one server-issued pending `join_finalize_auth` capability bound to the acting `(gid, leaf_id, updater_slot_index, CP.updater_slot_generation)`; otherwise reject 960.1.
   * join_finalize MUST NOT execute S10.4B PCS rate-limit checks.
 
 G) Hash-chain checks MUST
@@ -1505,7 +1505,7 @@ Definitions (normative)
 let self_slot_lease := the locally provisioned or persisted `(slot_index, slot_generation)` for `self_device_pk`
 SelfPath := direct_path(leaf_node(self_slot_lease.slot_index))     /* node indices */
 own_barrier_update := (header[108] == self_device_pk)
-  AND (CP.updater_leaf == self_slot_lease.slot_index)
+  AND (CP.updater_slot_index == self_slot_lease.slot_index)
   AND (CP.updater_slot_generation == self_slot_lease.slot_generation)
 
 Updater exclusion (normative, MUST):
@@ -1546,8 +1546,8 @@ Clients MUST enforce:
 * Local barrier_update_reason mirror:
   * if local `barrier_roots_hash != BU.revocation_roots_hash`, then `header[178] MUST equal 0`,
   * else let `JoinSet_local := ResolveJoinsSince(BU.prev_barrier_version)` and `JoinLeafSet_local := { leaf_index | record in JoinSet_local }`,
-  * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_leaf IN JoinLeafSet_local`, then `header[178] MUST equal 2`,
-  * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_leaf NOT IN JoinLeafSet_local`, then `header[178] MUST equal 1`,
+  * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_slot_index IN JoinLeafSet_local`, then `header[178] MUST equal 2`,
+  * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_slot_index NOT IN JoinLeafSet_local`, then `header[178] MUST equal 1`,
   * except for the genesis-local case above, where `header[178] MUST equal 0`.
 * Clients MUST reject stale, duplicate, or gap barrier updates that do not satisfy the local version-adjacency rules above.
 * If a client is operating in a catch-up path outside this exact-adjacency recover rule because it has already learned that the current accepted head is newer than `local barrier_version + 1`, it MUST NOT best-effort apply or reseed `K_fs` across an unauthenticated `pcs_refresh` boundary. At minimum, if the currently observed accepted bundle itself carries `header[178] == 1`, the client MUST enter `recovery_required` or an equivalent non-active buffered state unless authenticated history proves the ordering and completeness of the intervening accepted lineage.
@@ -1556,7 +1556,7 @@ Failure -> reject barrier_update locally with 960.7.
 S11.13.4 Recover derivation (normative)
 Given the unique match (s, t) and the accepted BarrierUpdate with barrier_version=v_new:
 ss := ML-KEM-768.Decaps(dk_t, kem_ct)
-aad := CBOR_det([gid, v_new, BU.prev_barrier_version, BU.tree_size, revocation_roots_hash, BU.kem_tree_hash_before, BU.kem_tree_hash_after, CP.updater_leaf, s, t, pkhash_t])
+aad := CBOR_det([gid, v_new, BU.prev_barrier_version, BU.tree_size, revocation_roots_hash, BU.kem_tree_hash_before, BU.kem_tree_hash_after, CP.updater_slot_index, s, t, pkhash_t])
 nonce := H_L("barrier/wrap/nonce", [s, t])[0..11]
 pt := AEAD_Open(key=ss, nonce=nonce, aad=aad, ct=wrapped_ps)
 If AEAD_Open fails -> reject with 960.7.
@@ -1958,15 +1958,15 @@ The test suite MUST include:
 * Positive case:
   * RRH == GroupState.barrier_roots_hash,
   * MERGE with header[175], header[178]=2, header[176]=BV+1,
-  * updater_leaf is in the unresolved JoinSet for BU.prev_barrier_version,
+  * updater_slot_index is in the unresolved JoinSet for BU.prev_barrier_version,
   * server accepts,
   * updater activation via S11.14.2 clears `pending_barrier_recovery`,
   * `K_barrier` advances,
   * `K_fs` remains unchanged across the activation.
 * Negative cases:
-  * header[175] present with header[178]=2 while updater_leaf is not in the unresolved JoinSet -> reject 960.5,
+  * header[175] present with header[178]=2 while updater_slot_index is not in the unresolved JoinSet -> reject 960.5,
   * RRH changed with header[178]=2 -> reject 960.13,
-  * RRH unchanged, updater_leaf in unresolved JoinSet, but header[178]=1 -> reject 960.5.
+  * RRH unchanged, updater_slot_index in unresolved JoinSet, but header[178]=1 -> reject 960.5.
 
 S14.8 KAT: join_finalize race / loss behavior (MUST)
 The test suite MUST include a scenario where:
