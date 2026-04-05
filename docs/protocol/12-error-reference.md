@@ -516,6 +516,12 @@ kbroad_envelope[4] = "aes-gcm"; // Not chacha20-poly1305
 
 **Encoding note**: Dotted forms (e.g., `960.10`) are the documentation form. In machine fields, implementations encode as decimal digits without a dot (e.g., `96010`).
 
+**Operational note for `960.7`**: the external wire error intentionally remains generic. On the
+orchestrator, malformed barrier-update rejections now emit structured internal logs on target
+`accept.barrier.parse` with fields such as `stage`, `class`, `path`, `detail`, and optional
+`raw_len`. Operators should use those fields for CBOR/debug triage rather than expect more detail
+in the freeze returned to clients.
+
 #### FS/acceptance codes
 
 | Code | Name |
