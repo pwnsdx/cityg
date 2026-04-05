@@ -34,6 +34,11 @@ fn manifest_path() -> PathBuf {
         .join("../../kat/kat-slot-lease-conformance-v0.2.json")
 }
 
+fn runner_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/run_slot_lease_conformance.sh")
+}
+
 fn crate_root(crate_name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../crates")
@@ -135,5 +140,25 @@ fn slot_lease_manifest_is_well_formed_and_complete() -> Result<(), Box<dyn std::
     }
 
     assert_eq!(seen, expected);
+    Ok(())
+}
+
+#[test]
+fn slot_lease_conformance_runner_covers_manifest_tests() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = fs::read(manifest_path())?;
+    let manifest: SlotLeaseManifest = serde_json::from_slice(&bytes)?;
+    let runner = fs::read_to_string(runner_path())?;
+
+    for requirement in manifest.requirements {
+        for coverage in requirement.coverage {
+            assert!(
+                runner.contains(coverage.test.as_str()),
+                "slot-lease runner is missing manifest coverage entry {}::{}",
+                coverage.crate_name,
+                coverage.test
+            );
+        }
+    }
+
     Ok(())
 }

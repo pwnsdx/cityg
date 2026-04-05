@@ -55,7 +55,8 @@ release-facing audit bridge for client recovery hardening.
 
 `kat-slot-lease-conformance-v0.2.json` maps the reusable-slot invariants to the
 current deterministic server/client/public-wire tests. It is validated by
-`slot_lease_manifest_is_well_formed_and_complete`, and
+`slot_lease_manifest_is_well_formed_and_complete`; the named runner is further
+checked by `slot_lease_conformance_runner_covers_manifest_tests`, and
 `scripts/run_slot_lease_conformance.sh` is the named runner for the current
 slot-lease suite.
 
