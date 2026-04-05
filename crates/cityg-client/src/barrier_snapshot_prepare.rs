@@ -10,7 +10,7 @@ use crate::barrier::{
     BarrierSlotLease, apply_join_set_to_snapshot, apply_revoked_records_to_snapshot,
     compute_barrier_tree_hash, compute_revocation_roots_hash, encode_full_verification_receipt,
     encode_history_commitment_header, require_current_state_history_commitment,
-    require_same_history_commitment, revoked_leaf_indices_from_records,
+    require_same_history_commitment, revoked_slot_indices_from_records,
 };
 use crate::barrier_build::{BarrierUpdateBuildResult, build_barrier_update_bytes};
 use crate::barrier_update::normalize_max_barrier_update_bytes;
@@ -32,7 +32,7 @@ pub struct BarrierSnapshotTicketFields {
 
 pub struct BarrierSnapshotWitnessSelection {
     pub witness_revoked_records: Vec<BarrierRevokedSnapshotRecord>,
-    pub witness_revoked_leaf_indices: Vec<u32>,
+    pub witness_revoked_slot_indices: Vec<u32>,
     pub witness_revocation_roots_hash: [u8; 32],
 }
 
@@ -114,7 +114,7 @@ pub fn derive_barrier_snapshot_witness_selection(
             let updater_slot_index = u32::try_from(updater_slot_lease.slot_index)
                 .map_err(|_| anyhow!("slot_index out of range"))?;
             witness_revoked_records.push(BarrierRevokedSnapshotRecord {
-                leaf_index: updater_slot_index,
+                slot_index: updater_slot_index,
                 slot_generation: updater_slot_lease.slot_generation,
             });
         }
@@ -122,11 +122,11 @@ pub fn derive_barrier_snapshot_witness_selection(
     } else {
         committed_revocation_roots_hash
     };
-    witness_revoked_records.sort_by_key(|record| (record.leaf_index, record.slot_generation));
+    witness_revoked_records.sort_by_key(|record| (record.slot_index, record.slot_generation));
     witness_revoked_records.dedup();
     Ok(BarrierSnapshotWitnessSelection {
         witness_revoked_records: witness_revoked_records.clone(),
-        witness_revoked_leaf_indices: revoked_leaf_indices_from_records(
+        witness_revoked_slot_indices: revoked_slot_indices_from_records(
             witness_revoked_records.as_slice(),
         ),
         witness_revocation_roots_hash,
@@ -339,11 +339,11 @@ mod tests {
             },
             &[
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 },
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 7,
+                    slot_index: 7,
                     slot_generation: 2,
                 },
             ],
@@ -355,20 +355,20 @@ mod tests {
             selection.witness_revoked_records,
             vec![
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 },
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 4,
+                    slot_index: 4,
                     slot_generation: 9,
                 },
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 7,
+                    slot_index: 7,
                     slot_generation: 2,
                 },
             ]
         );
-        assert_eq!(selection.witness_revoked_leaf_indices, vec![1, 4, 7]);
+        assert_eq!(selection.witness_revoked_slot_indices, vec![1, 4, 7]);
         assert_eq!(
             selection.witness_revocation_roots_hash,
             fields.revocation_roots_hash
@@ -435,15 +435,15 @@ mod tests {
             },
             &[
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 },
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 4,
+                    slot_index: 4,
                     slot_generation: 1,
                 },
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 7,
+                    slot_index: 7,
                     slot_generation: 2,
                 },
             ],
@@ -455,20 +455,20 @@ mod tests {
             selection.witness_revoked_records,
             vec![
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 },
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 4,
+                    slot_index: 4,
                     slot_generation: 1,
                 },
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 7,
+                    slot_index: 7,
                     slot_generation: 2,
                 },
             ]
         );
-        assert_eq!(selection.witness_revoked_leaf_indices, vec![1, 4, 7]);
+        assert_eq!(selection.witness_revoked_slot_indices, vec![1, 4, 7]);
         assert_eq!(selection.witness_revocation_roots_hash, [0x44; 32]);
         Ok(())
     }

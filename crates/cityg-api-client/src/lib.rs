@@ -523,7 +523,7 @@ fn to_core_join_snapshot_record(
     record: &BarrierJoinOccupancyRecord,
 ) -> cityg_client::barrier::BarrierJoinSnapshotRecord {
     cityg_client::barrier::BarrierJoinSnapshotRecord {
-        leaf_index: record.slot_index,
+        slot_index: record.slot_index,
         slot_generation: record.slot_generation,
         ek_leaf: record.ek_leaf.clone(),
     }
@@ -555,7 +555,7 @@ fn to_core_revoked_snapshot_record(
     record: &BarrierRevokedOccupancyRecord,
 ) -> cityg_client::barrier::BarrierRevokedSnapshotRecord {
     cityg_client::barrier::BarrierRevokedSnapshotRecord {
-        leaf_index: record.slot_index,
+        slot_index: record.slot_index,
         slot_generation: record.slot_generation,
     }
 }

@@ -49,7 +49,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::barrier::{expected_barrier_tree_nodes, revoked_leaf_indices_from_records};
+    use crate::barrier::{expected_barrier_tree_nodes, revoked_slot_indices_from_records};
     use pqcrypto_kyber::kyber768;
 
     #[test]
@@ -59,7 +59,7 @@ mod tests {
             usize::try_from(expected_barrier_tree_nodes(n_max)?).expect("tree size fits usize");
         let snapshot_base_entries = vec![Vec::new(); blank_len];
         let join_records = vec![BarrierJoinSnapshotRecord {
-            leaf_index: 1,
+            slot_index: 1,
             slot_generation: 0,
             ek_leaf: vec![0x11; kyber768::public_key_bytes()],
         }];
@@ -113,11 +113,11 @@ mod tests {
         let snapshot_base_entries = vec![Vec::new(); blank_len];
         let revoked_records = vec![
             BarrierRevokedSnapshotRecord {
-                leaf_index: 2,
+                slot_index: 2,
                 slot_generation: 0,
             },
             BarrierRevokedSnapshotRecord {
-                leaf_index: 2,
+                slot_index: 2,
                 slot_generation: 4,
             },
         ];
@@ -151,7 +151,7 @@ mod tests {
         let expected_before = compute_barrier_tree_hash(n_max, expected_snapshot_pre.as_slice())?;
 
         assert_eq!(
-            revoked_leaf_indices_from_records(revoked_records.as_slice()),
+            revoked_slot_indices_from_records(revoked_records.as_slice()),
             vec![2]
         );
         assert_eq!(transition.expected_before, expected_before);

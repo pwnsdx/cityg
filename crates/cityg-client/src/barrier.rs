@@ -28,7 +28,7 @@ pub struct BarrierHistoryCommitment {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BarrierJoinSnapshotRecord {
-    pub leaf_index: u32,
+    pub slot_index: u32,
     pub slot_generation: u64,
     #[serde(with = "serde_bytes")]
     pub ek_leaf: Vec<u8>,
@@ -36,7 +36,7 @@ pub struct BarrierJoinSnapshotRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BarrierRevokedSnapshotRecord {
-    pub leaf_index: u32,
+    pub slot_index: u32,
     pub slot_generation: u64,
 }
 
@@ -478,19 +478,19 @@ pub fn apply_revoked_set_to_snapshot(
     revoked_indices: &[u32],
 ) -> Result<()> {
     let leaf_base = n_max.saturating_sub(1);
-    for leaf_index in revoked_indices {
-        let leaf_node = leaf_base.saturating_add(u64::from(*leaf_index));
+    for slot_index in revoked_indices {
+        let leaf_node = leaf_base.saturating_add(u64::from(*slot_index));
         blank_leaf_and_path(snapshot, leaf_node)?;
     }
     Ok(())
 }
 
-pub fn revoked_leaf_indices_from_records(
+pub fn revoked_slot_indices_from_records(
     revoked_records: &[BarrierRevokedSnapshotRecord],
 ) -> Vec<u32> {
     let mut revoked_indices = revoked_records
         .iter()
-        .map(|record| record.leaf_index)
+        .map(|record| record.slot_index)
         .collect::<Vec<_>>();
     revoked_indices.sort_unstable();
     revoked_indices.dedup();
@@ -502,7 +502,7 @@ pub fn apply_revoked_records_to_snapshot(
     n_max: u64,
     revoked_records: &[BarrierRevokedSnapshotRecord],
 ) -> Result<()> {
-    let revoked_indices = revoked_leaf_indices_from_records(revoked_records);
+    let revoked_indices = revoked_slot_indices_from_records(revoked_records);
     apply_revoked_set_to_snapshot(snapshot, n_max, revoked_indices.as_slice())
 }
 
@@ -513,7 +513,7 @@ pub fn apply_join_set_to_snapshot(
 ) -> Result<()> {
     let leaf_base = n_max.saturating_sub(1);
     for record in join_records {
-        let leaf_node = leaf_base.saturating_add(u64::from(record.leaf_index));
+        let leaf_node = leaf_base.saturating_add(u64::from(record.slot_index));
         let index =
             usize::try_from(leaf_node).map_err(|_| anyhow!("barrier node index out of range"))?;
         let slot = snapshot
@@ -531,7 +531,7 @@ pub fn expected_same_rrh_barrier_reason(
 ) -> u64 {
     if join_records
         .iter()
-        .any(|record| u64::from(record.leaf_index) == updater_slot_index)
+        .any(|record| u64::from(record.slot_index) == updater_slot_index)
     {
         2
     } else {
@@ -711,7 +711,7 @@ mod tests {
             snapshot.as_mut_slice(),
             4,
             &[BarrierJoinSnapshotRecord {
-                leaf_index: 1,
+                slot_index: 1,
                 slot_generation: 0,
                 ek_leaf: vec![0xCC; 8],
             }],
@@ -738,12 +738,12 @@ mod tests {
             4,
             &[
                 BarrierJoinSnapshotRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                     ek_leaf: vec![0xCC; 8],
                 },
                 BarrierJoinSnapshotRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 3,
                     ek_leaf: vec![0xDD; 8],
                 },
@@ -771,11 +771,11 @@ mod tests {
             4,
             &[
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 2,
+                    slot_index: 2,
                     slot_generation: 0,
                 },
                 BarrierRevokedSnapshotRecord {
-                    leaf_index: 2,
+                    slot_index: 2,
                     slot_generation: 3,
                 },
             ],
@@ -789,7 +789,7 @@ mod tests {
     #[test]
     fn expected_same_rrh_barrier_reason_tracks_joiner_vs_refresh() {
         let join_records = vec![BarrierJoinSnapshotRecord {
-            leaf_index: 3,
+            slot_index: 3,
             slot_generation: 0,
             ek_leaf: vec![0xAA; 8],
         }];

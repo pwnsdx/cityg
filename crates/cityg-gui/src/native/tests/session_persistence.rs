@@ -1007,17 +1007,17 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         bootstrap_predecessor_kem_tree_hash_after: array(0x33),
         bootstrap_join_records: vec![BarrierJoinRecord {
             device_pk: vec![0x41; 32],
-            leaf_index: 3,
+            slot_index: 3,
             slot_generation: 0,
             ek_leaf: vec![0x42; cityg_client::barrier_crypto::barrier_leaf_public_key_bytes()],
         }],
         bootstrap_revoked_records: vec![
             BarrierRevokedOccupancyRecord {
-                leaf_index: 1,
+                slot_index: 1,
                 slot_generation: 0,
             },
             BarrierRevokedOccupancyRecord {
-                leaf_index: 2,
+                slot_index: 2,
                 slot_generation: 4,
             },
         ],
