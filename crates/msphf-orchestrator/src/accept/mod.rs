@@ -1983,22 +1983,57 @@ fn enforce_anchor_presence_rules(
 fn parse_barrier_update_reason(
     header: &BTreeMap<u64, Value>,
 ) -> Result<Option<u64>, AcceptanceError> {
+    fn malformed_at(
+        class: &'static str,
+        path: &'static str,
+        detail: impl std::fmt::Display,
+    ) -> AcceptanceError {
+        tracing::warn!(
+            target: "accept.barrier.parse",
+            freeze_code = FREEZE_BARRIER_UPDATE_MALFORMED.code,
+            freeze_reason = FREEZE_BARRIER_UPDATE_MALFORMED.reason,
+            stage = "barrier_headers.validate",
+            class,
+            path,
+            detail = %detail,
+            "barrier update malformed",
+        );
+        AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED)
+    }
+
     let has_update = header.contains_key(&HDR_BARRIER_UPDATE);
     let reason_value = header.get(&HDR_BARRIER_UPDATE_REASON);
     if !has_update {
         if reason_value.is_some() {
-            return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+            return Err(malformed_at(
+                "shape",
+                "hdr.barrier_update_reason",
+                "barrier_update_reason present without hdr.barrier_update",
+            ));
         }
         return Ok(None);
     }
 
     let Some(Value::Integer(reason_int)) = reason_value else {
-        return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+        return Err(malformed_at(
+            "type",
+            "hdr.barrier_update_reason",
+            "missing or non-integer barrier_update_reason",
+        ));
     };
-    let reason = u64::try_from(*reason_int)
-        .map_err(|_| AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED))?;
+    let reason = u64::try_from(*reason_int).map_err(|_| {
+        malformed_at(
+            "range",
+            "hdr.barrier_update_reason",
+            format!("barrier_update_reason must fit in u64, got {reason_int}"),
+        )
+    })?;
     if reason > 2 {
-        return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+        return Err(malformed_at(
+            "range",
+            "hdr.barrier_update_reason",
+            format!("barrier_update_reason must be in {{0,1,2}}, got {reason}"),
+        ));
     }
     Ok(Some(reason))
 }
@@ -2010,7 +2045,19 @@ fn compute_barrier_update_digest(
         None => Ok([0u8; 32]),
         Some(Value::Bytes(raw)) => h_l("barrier/update/digest", &BarrierUpdateDigestPreimage(raw))
             .map_err(AcceptanceError::from),
-        Some(_) => Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED)),
+        Some(_) => {
+            tracing::warn!(
+                target: "accept.barrier.parse",
+                freeze_code = FREEZE_BARRIER_UPDATE_MALFORMED.code,
+                freeze_reason = FREEZE_BARRIER_UPDATE_MALFORMED.reason,
+                stage = "barrier_headers.validate",
+                class = "type",
+                path = "hdr.barrier_update",
+                detail = "hdr.barrier_update must be bytes when present",
+                "barrier update malformed",
+            );
+            Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED))
+        }
     }
 }
 
