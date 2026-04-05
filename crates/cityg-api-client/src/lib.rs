@@ -3651,6 +3651,63 @@ mod tests {
     }
 
     #[test]
+    fn prepare_runtime_join_ticket_rejects_tampered_revoked_occupancy_slot_generation() {
+        let mut ticket = join_ticket_ok_payload();
+        let current_history_commitment = ticket
+            .current_history_commitment
+            .clone()
+            .expect("join ticket current_history_commitment");
+        let history_commitment = HistoryCommitment {
+            history_view_id: array32(&current_history_commitment.history_view_id)
+                .expect("history_view_id"),
+            history_commitment_id: array32(&current_history_commitment.history_commitment_id)
+                .expect("history_commitment_id"),
+            prev_history_commitment_id: array32(
+                &current_history_commitment.prev_history_commitment_id,
+            )
+            .expect("prev_history_commitment_id"),
+            history_seq: current_history_commitment.history_seq,
+        };
+        let authority = build_test_history_authority(
+            history_commitment,
+            [0x41; 32],
+            ticket.barrier_version,
+            array32(&ticket.kem_tree_hash_after).expect("kem_tree_hash_after"),
+        );
+        let revoked_record = BarrierRevokedOccupancyRecord {
+            leaf_index: 7,
+            slot_generation: 2,
+        };
+        ticket.current_revoked_occupancies = vec![pb::BarrierRevokedOccupancyRecord {
+            slot_index: revoked_record.leaf_index,
+            slot_generation: revoked_record.slot_generation,
+        }];
+        ticket.current_revoked_occupancies_completeness_attestation =
+            build_test_helper_completeness_attestation(
+                &authority,
+                HELPER_KIND_REVOKED_OCCUPANCIES,
+                &history_commitment,
+                0,
+                1,
+                RevokedLeavesSelector {
+                    revocation_roots_hash: &[0x00; 32],
+                    records: std::slice::from_ref(&revoked_record),
+                },
+            );
+        ticket = finalize_join_ticket_payload(ticket);
+        ticket.current_revoked_occupancies[0].slot_generation = 3;
+
+        let err = prepare_runtime_join_ticket(&ticket)
+            .expect_err("tampered revoked occupancy slot_generation must fail closed");
+
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("history authority signature verification failed")
+        ));
+    }
+
+    #[test]
     fn ensure_supported_attested_current_state_extension_requires_matching_presence() {
         ensure_supported_attested_current_state_extension("join ticket", None, &[])
             .expect("empty attestation without extension must be allowed");
