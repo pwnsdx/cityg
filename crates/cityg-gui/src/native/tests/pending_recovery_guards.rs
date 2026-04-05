@@ -285,6 +285,36 @@ fn barrier_recovery_message_includes_last_pending_trace_summary()
 }
 
 #[test]
+fn pending_history_trace_technical_summary_captures_resolution_fields()
+-> Result<(), Box<dyn std::error::Error>> {
+    let trace = BarrierPendingHistoryTrace {
+        pending_barrier_version: 8,
+        pending_we_epoch_id: [0x81; 32],
+        current_barrier_version: 9,
+        lookup_status: BarrierPendingLookupTraceStatus::Accepted,
+        accepted_barrier_version: Some(9),
+        accepted_fs_ec: Some(31),
+        accepted_reason: Some(2),
+        accepted_digest: Some([0x91; 32]),
+        decision: BarrierPendingTraceDecision::RecoveryRequired,
+        recovery_issue: Some(BarrierRecoveryIssue::ContradictoryAuthenticatedHistory),
+        detail: Some("accepted merge contradicted local pending source".to_string()),
+    };
+
+    let summary = trace.technical_summary();
+    assert!(summary.contains("pending_version=8"));
+    assert!(summary.contains("current_version=9"));
+    assert!(summary.contains("lookup=Accepted"));
+    assert!(summary.contains("decision=RecoveryRequired"));
+    assert!(summary.contains("accepted_version=9"));
+    assert!(summary.contains("accepted_fs_ec=31"));
+    assert!(summary.contains("accepted_reason=2"));
+    assert!(summary.contains("recovery_issue=ContradictoryAuthenticatedHistory"));
+    assert!(summary.contains("contradicted"));
+    Ok(())
+}
+
+#[test]
 fn persisted_barrier_state_roundtrip_drops_current_public_tree_cache()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = BarrierSecretState {

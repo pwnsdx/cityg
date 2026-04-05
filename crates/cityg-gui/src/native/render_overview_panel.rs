@@ -50,6 +50,24 @@ impl AppModel {
         .child(self.session_row("VRF suite", &session.vrf_id))
         .child(self.session_row("Policy", &session.policy_version))
         .child(self.session_row("FS policy", &session.fs_policy_version))
+        .child(self.session_row(
+            "Barrier recovery",
+            if let Some(issue) = session.barrier_state.barrier_recovery_issue {
+                issue.user_message()
+            } else if session.barrier_state.barrier_recovery_pending {
+                "Pending"
+            } else {
+                "Ready"
+            },
+        ))
+        .when_some(
+            session.barrier_state.last_pending_history_trace.as_ref(),
+            |panel, trace| {
+                panel
+                    .child(self.session_row("Last pending check", trace.user_summary()))
+                    .child(self.session_row("Pending trace", trace.technical_summary()))
+            },
+        )
         .child(self.render_epoch_age_row(session))
         .child(self.session_row("KBROAD key (hex)", &hex_encode(&session.kbroad_public)))
     }

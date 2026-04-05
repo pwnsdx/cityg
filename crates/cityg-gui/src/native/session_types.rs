@@ -282,6 +282,31 @@ impl BarrierPendingHistoryTrace {
             _ => "Last authenticated check: pending merge state changed.".to_string(),
         }
     }
+
+    pub(super) fn technical_summary(&self) -> String {
+        let mut parts = vec![
+            format!("pending_version={}", self.pending_barrier_version),
+            format!("current_version={}", self.current_barrier_version),
+            format!("lookup={:?}", self.lookup_status),
+            format!("decision={:?}", self.decision),
+        ];
+        if let Some(version) = self.accepted_barrier_version {
+            parts.push(format!("accepted_version={version}"));
+        }
+        if let Some(fs_ec) = self.accepted_fs_ec {
+            parts.push(format!("accepted_fs_ec={fs_ec}"));
+        }
+        if let Some(reason) = self.accepted_reason {
+            parts.push(format!("accepted_reason={reason}"));
+        }
+        if let Some(issue) = self.recovery_issue {
+            parts.push(format!("recovery_issue={issue:?}"));
+        }
+        if let Some(detail) = self.detail.as_deref().filter(|detail| !detail.is_empty()) {
+            parts.push(detail.to_string());
+        }
+        parts.join(" · ")
+    }
 }
 
 #[derive(Clone)]

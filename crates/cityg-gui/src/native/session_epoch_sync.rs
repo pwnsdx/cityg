@@ -84,6 +84,15 @@ impl AppModel {
                             .map(Self::barrier_recovery_message_for_session)
                             .unwrap_or_else(|| Self::barrier_recovery_wait_message().to_string());
                         self.info_message = Some(message);
+                        if let Some(trace) = self.session.as_ref().and_then(|session| {
+                            session.barrier_state.last_pending_history_trace.as_ref()
+                        }) {
+                            self.record_activity_with_detail(
+                                ActivityKind::Sync,
+                                "Epoch sync left barrier recovery pending",
+                                Some(trace.technical_summary()),
+                            );
+                        }
                         cx.notify();
                     } else if fetch_after_epoch_sync {
                         self.schedule_fetch(cx, Duration::ZERO);
@@ -107,22 +116,38 @@ impl AppModel {
                         "Barrier recovery completed after epoch sync",
                     );
                 } else if let Some(issue) = self.barrier_recovery_issue() {
+                    let detail = self
+                        .session
+                        .as_ref()
+                        .and_then(|session| {
+                            session.barrier_state.last_pending_history_trace.as_ref()
+                        })
+                        .map(BarrierPendingHistoryTrace::technical_summary)
+                        .or_else(|| Some(format!("{issue:?}")));
                     self.info_message = Some(issue.user_message().to_string());
                     self.record_activity_with_detail(
                         ActivityKind::Sync,
                         "Epoch sync requires explicit barrier recovery",
-                        Some(format!("{issue:?}")),
+                        detail,
                     );
                 } else if now_pending {
+                    let detail = self
+                        .session
+                        .as_ref()
+                        .and_then(|session| {
+                            session.barrier_state.last_pending_history_trace.as_ref()
+                        })
+                        .map(BarrierPendingHistoryTrace::technical_summary);
                     self.info_message = Some(
                         self.session
                             .as_ref()
                             .map(Self::barrier_recovery_message_for_session)
                             .unwrap_or_else(|| Self::barrier_recovery_wait_message().to_string()),
                     );
-                    self.record_activity(
+                    self.record_activity_with_detail(
                         ActivityKind::Sync,
                         "Epoch sync completed; barrier recovery still pending",
+                        detail,
                     );
                 } else {
                     self.info_message = Some("Adopted latest epoch head.".to_string());
