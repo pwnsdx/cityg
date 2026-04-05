@@ -146,4 +146,4 @@ What this does not solve:
 - extend the slot-lease conformance runner/manifest with heavier end-to-end
   vectors beyond the current deterministic coverage
 - keep archived historical docs clearly marked when they still mention
-  `cover_leaf_index`
+  legacy terms such as `cover_leaf_index`

@@ -1454,12 +1454,12 @@ F) Updater identity binding + updater-not-revoked
 * Require `updater_slot_index == current_slot_lease(header[108]).slot_index` and `CP.updater_slot_generation == current_slot_lease(header[108]).slot_generation`; else reject 960.1.
 * Require the exact updater lease `(updater_slot_index, CP.updater_slot_generation)` NOT appear in RevokedLeafSet for this update; else reject 960.1.
 * Let JoinSet := ResolveJoinOccupanciesSince(BU.prev_barrier_version).
-* Let JoinLeafSet := the set of active `leaf_index` values carried by JoinSet.
+* Let JoinSlotSet := the set of active `slot_index` values carried by JoinSet.
 * The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `HistoryCommitment`; inability to establish a single common commitment -> reject 960.9.
 * The server MUST require `header[180]` to equal that same authenticated current-state `HistoryCommitment`; mismatch -> reject 960.9.
 * These checks establish helper-state coherence only. They MUST NOT be documented or relied upon as proof that the client performed FULL verification, unless a deployment-defined extension adds such a proof.
 * If header[178] == 1:
-  * Require updater_slot_index NOT IN JoinLeafSet, else reject 960.5.
+  * Require updater_slot_index NOT IN JoinSlotSet, else reject 960.5.
   * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
 * If header[178] == 2:
   * Require updater_slot_index IN JoinLeafSet, else reject 960.5.
@@ -1721,9 +1721,9 @@ S12.0 Genesis provisioning artifact (normative)
 Before the first accepted MERGE when `barrier_initialized == false`, the deployment MUST establish the initial active leaf set as a genesis provisioning artifact. This artifact is the source consumed by `ResolveJoinOccupanciesSince(0)` in S11.6.
 Requirements:
 * it MUST contain the complete initial active set,
-* each entry MUST bind exactly one active device to exactly one `(leaf_index, slot_generation)` occupancy and one `ek_leaf`,
-* entries MUST be strictly sorted by increasing `leaf_index`,
-* `leaf_index` values MUST be unique and `< N_max`,
+* each entry MUST bind exactly one active device to exactly one `(slot_index, slot_generation)` occupancy and one `ek_leaf`,
+* entries MUST be strictly sorted by increasing `slot_index`,
+* `slot_index` values MUST be unique and `< N_max`,
 * `ek_leaf` MUST be exactly 1184 bytes for every entry,
 * the artifact MUST be authenticated and persisted before genesis MERGE acceptance.
 If the genesis provisioning artifact is absent, incomplete, or inconsistent, the server MUST reject genesis MERGE processing and MUST NOT claim this profile is fully implemented.
