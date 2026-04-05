@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fs, path::PathBuf, time::Duration};
 
 use anyhow::{Result, anyhow};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
@@ -28,6 +28,7 @@ use pqcrypto_dilithium::dilithium5;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use prost::Message as _;
 use reqwest::StatusCode;
+use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use std::sync::Once;
 use tokio::task::{JoinHandle, JoinSet};
@@ -50,6 +51,145 @@ fn test_client(base_url: impl Into<String>) -> CitygApiClient {
     CitygApiClient::new(base_url)
         .with_admin_token(TEST_ADMIN_TOKEN)
         .with_message_auth_token(TEST_MESSAGE_TOKEN)
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct FixtureSlotLease {
+    slot_index: u64,
+    slot_generation: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlotLeaseTelemetryFixture {
+    active_leaf_count: u64,
+    revoked_leaf_count: u64,
+    pending_join_ticket_count: u64,
+    reserved_cover_leaf_count: u64,
+    remaining_cover_leaf_slots: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlotLeaseHelperViewFixture {
+    join_occupancies: Vec<FixtureSlotLease>,
+    revoked_occupancies: Vec<FixtureSlotLease>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlotLeaseReclaimJoinFixture {
+    slot_index: u64,
+    slot_generation: u64,
+    current_revoked_occupancies: Vec<FixtureSlotLease>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlotLeaseReclaimExpectedFixture {
+    initial_join: FixtureSlotLease,
+    reclaim_join: SlotLeaseReclaimJoinFixture,
+    helper_view_after_reclaim: SlotLeaseHelperViewFixture,
+    lookup_pending_status: String,
+    lookup_accepted_status: String,
+    accepted_reason: u64,
+    telemetry_pending_reclaim: SlotLeaseTelemetryFixture,
+    telemetry_after_reclaim: SlotLeaseTelemetryFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlotLeaseReclaimFixture {
+    profile_version: String,
+    scenario_id: String,
+    room_id_hex: String,
+    alice_seed: u8,
+    bob_seed: u8,
+    expected: SlotLeaseReclaimExpectedFixture,
+}
+
+fn slot_lease_reclaim_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../kat/kat-slot-lease-reclaim-e2e-v0.2.json")
+}
+
+fn load_slot_lease_reclaim_fixture() -> Result<SlotLeaseReclaimFixture> {
+    let bytes = fs::read(slot_lease_reclaim_fixture_path())?;
+    let fixture: SlotLeaseReclaimFixture = serde_json::from_slice(&bytes)?;
+    if fixture.profile_version != "v0.2" {
+        return Err(anyhow!(
+            "unexpected slot-lease reclaim fixture profile_version: {}",
+            fixture.profile_version
+        ));
+    }
+    if fixture.scenario_id.trim().is_empty() {
+        return Err(anyhow!(
+            "slot-lease reclaim fixture must define scenario_id"
+        ));
+    }
+    Ok(fixture)
+}
+
+fn collect_slot_leases(leases: &[SlotLease]) -> Vec<FixtureSlotLease> {
+    leases
+        .iter()
+        .map(|lease| FixtureSlotLease {
+            slot_index: lease.slot_index,
+            slot_generation: lease.slot_generation,
+        })
+        .collect()
+}
+
+fn collect_join_record_leases(
+    records: &[cityg_api_client::BarrierJoinOccupancyRecord],
+) -> Vec<FixtureSlotLease> {
+    records
+        .iter()
+        .map(|record| FixtureSlotLease {
+            slot_index: u64::from(record.slot_index),
+            slot_generation: record.slot_generation,
+        })
+        .collect()
+}
+
+fn collect_revoked_record_leases(
+    records: &[cityg_api_client::BarrierRevokedOccupancyRecord],
+) -> Vec<FixtureSlotLease> {
+    records
+        .iter()
+        .map(|record| FixtureSlotLease {
+            slot_index: u64::from(record.slot_index),
+            slot_generation: record.slot_generation,
+        })
+        .collect()
+}
+
+fn assert_telemetry_matches_fixture(
+    entry: &cityg_api_schema::pb::TelemetryEntry,
+    expected: &SlotLeaseTelemetryFixture,
+) {
+    assert_eq!(entry.barrier_active_leaf_count, expected.active_leaf_count);
+    assert_eq!(
+        entry.barrier_revoked_leaf_count,
+        expected.revoked_leaf_count
+    );
+    assert_eq!(
+        entry.barrier_pending_join_ticket_count,
+        expected.pending_join_ticket_count
+    );
+    assert_eq!(
+        entry.barrier_reserved_cover_leaf_count,
+        expected.reserved_cover_leaf_count
+    );
+    assert_eq!(
+        entry.barrier_remaining_cover_leaf_slots,
+        expected.remaining_cover_leaf_slots
+    );
+    assert_eq!(
+        entry.barrier_remaining_cover_leaf_slots + entry.barrier_reserved_cover_leaf_count,
+        entry.barrier_n_max
+    );
+    assert_eq!(
+        entry.barrier_leaf_utilization_basis_points,
+        entry
+            .barrier_reserved_cover_leaf_count
+            .saturating_mul(10_000)
+            / entry.barrier_n_max
+    );
 }
 
 async fn wait_until_healthy(client: &CitygApiClient, context: &str) -> Result<()> {
@@ -1112,6 +1252,203 @@ async fn public_telemetry_tracks_pending_reclaim_capacity_before_acceptance() ->
             .saturating_mul(10_000)
             / entry.barrier_n_max
     );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn public_slot_lease_reclaim_fixture_matches_live_flow() -> Result<()> {
+    let fixture = load_slot_lease_reclaim_fixture()?;
+    let port = next_free_local_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    wait_until_healthy(&client, "slot-lease reclaim fixture test").await?;
+    timeout(
+        Duration::from_secs(10),
+        bootstrap_room(&client, &fixture.room_id_hex, kbroad_public()),
+    )
+    .await
+    .map_err(|_| anyhow!("bootstrap room timed out for slot-lease reclaim fixture test"))??;
+
+    let mut alice =
+        join_room_member(&client, &fixture.room_id_hex, "alice", fixture.alice_seed).await?;
+    assert_eq!(
+        FixtureSlotLease {
+            slot_index: alice.slot_lease.slot_index,
+            slot_generation: alice.slot_lease.slot_generation,
+        },
+        fixture.expected.initial_join
+    );
+    client
+        .accept_epoch_bundle(&alice.bundle)
+        .await
+        .expect("accept alice");
+    let alice_finalize = build_join_finalize_bundle(
+        &client,
+        &fixture.room_id_hex,
+        &alice,
+        alice.join_finalize_auth_token,
+        2,
+    )
+    .await?;
+    client
+        .accept_epoch_bundle(&alice_finalize.bundle)
+        .await
+        .expect("accept alice finalize");
+    alice.bundle = alice_finalize.bundle.clone();
+    alice.forward_state = alice_finalize.forward_state_after;
+
+    let alice_leave = build_leave_bundle(&client, &fixture.room_id_hex, &alice).await?;
+    client
+        .accept_epoch_bundle(&alice_leave)
+        .await
+        .expect("accept alice leave");
+
+    let mut bob = join_room_member(&client, &fixture.room_id_hex, "bob", fixture.bob_seed).await?;
+    assert_eq!(
+        FixtureSlotLease {
+            slot_index: bob.slot_lease.slot_index,
+            slot_generation: bob.slot_lease.slot_generation,
+        },
+        FixtureSlotLease {
+            slot_index: fixture.expected.reclaim_join.slot_index,
+            slot_generation: fixture.expected.reclaim_join.slot_generation,
+        }
+    );
+    assert_eq!(
+        collect_slot_leases(&bob.current_revoked_occupancies),
+        fixture.expected.reclaim_join.current_revoked_occupancies
+    );
+    client
+        .accept_epoch_bundle(&bob.bundle)
+        .await
+        .expect("accept bob");
+
+    let bob_reclaim = timeout(
+        Duration::from_secs(10),
+        build_join_finalize_bundle(
+            &client,
+            &fixture.room_id_hex,
+            &bob,
+            bob.join_finalize_auth_token,
+            0,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("build bob reclaim finalize timed out"))??;
+    let pending_barrier_version = header_u64_field(
+        &bob_reclaim.bundle,
+        hdr::HDR_BARRIER_VERSION,
+        "barrier_version",
+    )?;
+    let pending_barrier_update = header_bytes_field(
+        &bob_reclaim.bundle,
+        hdr::HDR_BARRIER_UPDATE,
+        "barrier_update",
+    )?;
+    let pending_barrier_update_digest = compute_barrier_update_digest(&pending_barrier_update)?;
+
+    let room_gid = hex::decode(&fixture.room_id_hex)?;
+    let pending_lookup = timeout(
+        Duration::from_secs(10),
+        client.barrier_lookup_merge_acceptance(
+            &fixture.room_id_hex,
+            pending_barrier_version,
+            &pending_barrier_update_digest,
+            &bob_reclaim.bundle.we_epoch_id,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("lookup pending fixture reclaim acceptance timed out"))??;
+    assert_eq!(
+        pending_lookup.status,
+        match fixture.expected.lookup_pending_status.as_str() {
+            "pending" => MergeAcceptanceStatus::Pending,
+            other => return Err(anyhow!("unsupported fixture pending status: {other}")),
+        }
+    );
+
+    let telemetry_pending = timeout(Duration::from_secs(10), client.telemetry())
+        .await
+        .map_err(|_| anyhow!("telemetry lookup timed out during fixture pending reclaim"))??;
+    let entry_pending = telemetry_pending
+        .entries
+        .iter()
+        .find(|entry| entry.gid == room_gid)
+        .ok_or_else(|| anyhow!("missing telemetry entry for fixture pending reclaim room"))?;
+    assert_telemetry_matches_fixture(entry_pending, &fixture.expected.telemetry_pending_reclaim);
+
+    timeout(
+        Duration::from_secs(10),
+        client.accept_epoch_bundle(&bob_reclaim.bundle),
+    )
+    .await
+    .map_err(|_| anyhow!("accept bob reclaim finalize timed out"))??;
+    bob.bundle = bob_reclaim.bundle.clone();
+    bob.forward_state = bob_reclaim.forward_state_after;
+
+    let accepted_lookup = timeout(
+        Duration::from_secs(10),
+        client.barrier_lookup_merge_acceptance(
+            &fixture.room_id_hex,
+            pending_barrier_version,
+            &pending_barrier_update_digest,
+            &bob.bundle.we_epoch_id,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("lookup accepted fixture reclaim acceptance timed out"))??;
+    assert_eq!(
+        accepted_lookup.status,
+        match fixture.expected.lookup_accepted_status.as_str() {
+            "accepted" => MergeAcceptanceStatus::Accepted,
+            other => return Err(anyhow!("unsupported fixture accepted status: {other}")),
+        }
+    );
+    assert_eq!(
+        accepted_lookup.accepted_reason,
+        Some(fixture.expected.accepted_reason)
+    );
+
+    let joins = client
+        .barrier_resolve_join_occupancies_since(&fixture.room_id_hex, 0)
+        .await?;
+    assert_eq!(
+        collect_join_record_leases(&joins.records),
+        fixture.expected.helper_view_after_reclaim.join_occupancies
+    );
+
+    let refresh = client
+        .merge_ticket_refresh(&fixture.room_id_hex, &bob.leaf_id)
+        .await
+        .expect("refresh ticket should be available after reclaim");
+    let current_revocation_roots_hash =
+        compute_revocation_roots_hash(&refresh.revoked_since_root, &refresh.revoked_root)?;
+    let revoked = client
+        .barrier_resolve_revoked_occupancies(&fixture.room_id_hex, &current_revocation_roots_hash)
+        .await?;
+    assert_eq!(
+        collect_revoked_record_leases(&revoked.records),
+        fixture
+            .expected
+            .helper_view_after_reclaim
+            .revoked_occupancies
+    );
+
+    let telemetry_after = timeout(Duration::from_secs(10), client.telemetry())
+        .await
+        .map_err(|_| anyhow!("telemetry lookup timed out after fixture reclaim"))??;
+    let entry_after = telemetry_after
+        .entries
+        .iter()
+        .find(|entry| entry.gid == room_gid)
+        .ok_or_else(|| anyhow!("missing telemetry entry for fixture reclaim room"))?;
+    assert_telemetry_matches_fixture(entry_after, &fixture.expected.telemetry_after_reclaim);
 
     handle.abort();
     let _ = handle.await;

@@ -145,6 +145,7 @@ What this does not solve:
 - cut a fully versioned `v0.2` spec profile in [`../specs.md`](../specs.md)
 - extend the slot-lease conformance runner/manifest with heavier end-to-end
   vectors beyond the current deterministic coverage; the current runner now
-  includes live reclaim lookup and telemetry assertions over the HTTP API
+  includes live reclaim lookup and telemetry assertions over the HTTP API plus
+  a serialized end-to-end reclaim fixture under `kat/`
 - keep archived historical docs clearly marked when they still mention
   legacy terms such as `cover_leaf_index`

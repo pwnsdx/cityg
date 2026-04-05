@@ -1,0 +1,49 @@
+{
+  "profile_version": "v0.2",
+  "scenario_id": "slot-reuse-reclaim-e2e",
+  "room_id_hex": "abababababababababababababababababababababababababababababababab",
+  "alice_seed": 199,
+  "bob_seed": 200,
+  "expected": {
+    "initial_join": {
+      "slot_index": 0,
+      "slot_generation": 0
+    },
+    "reclaim_join": {
+      "slot_index": 0,
+      "slot_generation": 1,
+      "current_revoked_occupancies": [
+        {
+          "slot_index": 0,
+          "slot_generation": 0
+        }
+      ]
+    },
+    "helper_view_after_reclaim": {
+      "join_occupancies": [
+        {
+          "slot_index": 0,
+          "slot_generation": 1
+        }
+      ],
+      "revoked_occupancies": []
+    },
+    "lookup_pending_status": "pending",
+    "lookup_accepted_status": "accepted",
+    "accepted_reason": 0,
+    "telemetry_pending_reclaim": {
+      "active_leaf_count": 1,
+      "revoked_leaf_count": 1,
+      "pending_join_ticket_count": 1,
+      "reserved_cover_leaf_count": 1,
+      "remaining_cover_leaf_slots": 1023
+    },
+    "telemetry_after_reclaim": {
+      "active_leaf_count": 1,
+      "revoked_leaf_count": 0,
+      "pending_join_ticket_count": 0,
+      "reserved_cover_leaf_count": 1,
+      "remaining_cover_leaf_slots": 1023
+    }
+  }
+}

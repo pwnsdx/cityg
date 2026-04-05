@@ -60,6 +60,12 @@ checked by `slot_lease_conformance_runner_covers_manifest_tests`, and
 `scripts/run_slot_lease_conformance.sh` is the named runner for the current
 slot-lease suite.
 
+`kat-slot-lease-reclaim-e2e-v0.2.json` is the serialized reference scenario for
+the live end-to-end reclaim flow used by
+`public_slot_lease_reclaim_fixture_matches_live_flow`. It pins the expected slot
+leases, helper outputs, lookup states, and telemetry counters for a deterministic
+leave -> rejoin -> reclaim sequence.
+
 ## Plan → vectors workflow
 
 1. Edit `plan-rlwe-annex-k.json` if new scenarios are required. The schema matches the

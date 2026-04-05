@@ -112,6 +112,17 @@
           "expectation": "pending_reclaim_keeps_revoked_and_pending_counts_until_accept"
         }
       ]
+    },
+    {
+      "id": "SL8",
+      "title": "Serialized slot-lease reclaim fixture matches a live end-to-end flow",
+      "coverage": [
+        {
+          "crate": "cityg-api",
+          "test": "public_slot_lease_reclaim_fixture_matches_live_flow",
+          "expectation": "fixture_matches_live_reclaim_flow"
+        }
+      ]
     }
   ]
 }
