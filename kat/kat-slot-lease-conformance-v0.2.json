@@ -1,0 +1,74 @@
+{
+  "profile_version": "v0.2",
+  "kind": "slot-lease-conformance-manifest",
+  "notes": [
+    "This manifest links the reusable-slot lease invariants to deterministic implementation tests.",
+    "Coverage spans server acceptance, authenticated helper outputs, and public join/merge ticket verification."
+  ],
+  "requirements": [
+    {
+      "id": "SL1",
+      "title": "Reclaim join-finalize clears superseded revoked occupancy",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "tests::slot_reuse_join_finalize_reclaim_clears_committed_revocation",
+          "expectation": "accept_reclaim_clears_revoked_slot"
+        }
+      ]
+    },
+    {
+      "id": "SL2",
+      "title": "Stale join_finalize_auth cannot authorize a later occupancy of the same slot",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "tests::slot_reuse_rejects_stale_join_finalize_auth_token",
+          "expectation": "reject_stale_join_finalize_auth"
+        }
+      ]
+    },
+    {
+      "id": "SL3",
+      "title": "Authenticated helper views preserve slot generations across slot reuse",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "barrier_snapshot_helpers::resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot",
+          "expectation": "accept_latest_generation_only"
+        },
+        {
+          "crate": "cityg-api-client",
+          "test": "tests::barrier_resolve_revoked_occupancies_preserves_multiple_generations_for_one_slot",
+          "expectation": "accept_multiple_generations_per_slot"
+        },
+        {
+          "crate": "cityg-api-client",
+          "test": "helper_completeness_attestation_binds_slot_generation",
+          "expectation": "reject_generation_tamper"
+        }
+      ]
+    },
+    {
+      "id": "SL4",
+      "title": "Public join/merge provisioning artifacts bind versioned occupancies",
+      "coverage": [
+        {
+          "crate": "cityg-api-client",
+          "test": "tests::prepare_runtime_join_ticket_rejects_tampered_join_occupancy_slot_generation",
+          "expectation": "reject_join_occupancy_generation_tamper"
+        },
+        {
+          "crate": "cityg-api-client",
+          "test": "tests::prepare_runtime_join_ticket_rejects_tampered_revoked_occupancy_slot_generation",
+          "expectation": "reject_revoked_occupancy_generation_tamper"
+        },
+        {
+          "crate": "cityg-api-client",
+          "test": "tests::merge_ticket_rejects_tampered_slot_generation",
+          "expectation": "reject_merge_ticket_generation_tamper"
+        }
+      ]
+    }
+  ]
+}

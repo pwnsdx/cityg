@@ -69,7 +69,7 @@ Room admin proof registry for `v0.1.4`:
   currently authorized for the requested room-scoped operation.
 
 External proof / suite registry fixed by this profile:
-* membership representation and verification (including `cover_leaf_index`
+* membership representation and verification (including current `slot_index`
   mapping) remain external, but their consumed outputs are fixed by the fields
   named in this document,
 * the in-profile generated ticket / provisioning suite identifiers are fixed to:
@@ -206,7 +206,6 @@ S3.1 Core identifiers (inputs)
 S3.2 Membership/SRX anchor roots (inputs)
 * header[110], header[111], header[112], header[113] : bstr32 roots (membership and revocation)
 * membership mapping: `current_slot_lease(device_pk) -> { slot_index:uint, slot_generation:uint64 }`, committed by membership state
-* For compatibility with legacy field names and helper identifiers, `cover_leaf_index(device_pk)` refers to `current_slot_lease(device_pk).slot_index` when a later section uses the older term.
 * membership state also defines the current per-group membership leaf identifier `leaf_id(device_pk) -> bstr32` for each active device. This 32-byte `leaf_id` is distinct from the current slot lease and is the canonical `sender_leaf_id` used in S8.
 * For this base profile, `leaf_id(device_pk)` MUST be a deterministic per-group function of `(gid, device_pk, device_pk_alg)` under the selected leaf-id mode. Re-deriving `leaf_id` for the same `(gid, device_pk, device_pk_alg)` tuple MUST yield the same 32-byte value.
 
@@ -704,7 +703,7 @@ Normative constants:
 * `MAX_CT_PAYLOAD_BYTES := 1048576`
 * `MAX_PAYLOAD_ENVELOPE_BYTES := 1048640`  /* total serialized PayloadEnvelope size, including CBOR wrapper */
 Define sender_leaf_id (normative):
-* sender_leaf_id is the authenticated 32-byte current membership `leaf_id` of the sending device for this group, supplied by the outer message transport / authenticated sender context for this payload. It is NOT the sender's current slot lease or `cover_leaf_index(device_pk)`.
+* sender_leaf_id is the authenticated 32-byte current membership `leaf_id` of the sending device for this group, supplied by the outer message transport / authenticated sender context for this payload. It is NOT the sender's current slot lease or current `slot_index`.
 * Every in-profile payload transport MUST carry an authenticated sender device identifier (for example `author_device_pk`) and an authenticated membership view sufficient to derive that device's current `leaf_id` for this group. A transport that omits authenticated sender device identity is out of profile for S8.
 * The same sender_leaf_id MUST be supplied to both the encrypt and decrypt paths for S8.3/S8.4 derivations.
 * If sender_leaf_id is missing, malformed, or not exactly 32 bytes, the implementation MUST fail closed and MUST NOT attempt payload decryption.

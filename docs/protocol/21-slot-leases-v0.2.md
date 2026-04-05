@@ -121,6 +121,7 @@ Relevant code:
 - [`../../crates/cityg-api-client/src/verification.rs`](../../crates/cityg-api-client/src/verification.rs)
 - [`../../crates/cityg-client/src/barrier.rs`](../../crates/cityg-client/src/barrier.rs)
 - [`../../crates/cityg-client/src/barrier_update.rs`](../../crates/cityg-client/src/barrier_update.rs)
+- [`../../kat/kat-slot-lease-conformance-v0.2.json`](../../kat/kat-slot-lease-conformance-v0.2.json)
 
 ## Operational Consequences
 
@@ -135,14 +136,15 @@ What this does not solve:
 
 - increasing concurrent capacity beyond `N_max`
 - in-place migration from old `v0.1.x` groups
-- spec-wide replacement of all historical `cover_leaf_index` terminology in the
-  unified spec text
+- migration of historical archived docs/changelogs that intentionally retain
+  pre-`v0.2` terminology for audit traceability
 
 ## Remaining Work
 
 - cut a fully versioned `v0.2` spec profile in [`../specs.md`](../specs.md)
-- add KATs for slot reuse across multiple generations
+- extend the slot-lease conformance manifest with additional end-to-end vectors
+  beyond the current deterministic test links
 - add historical chain-check tests where the same `slot_index` appears in
   multiple occupancies
-- finish removing legacy `cover_leaf_index` wording from compatibility/error
-  surfaces that still use it as a retry signal
+- keep archived historical docs clearly marked when they still mention
+  `cover_leaf_index`

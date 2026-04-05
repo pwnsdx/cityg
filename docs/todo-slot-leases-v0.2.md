@@ -90,7 +90,8 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 ### 7. KAT and conformance
 
-- [ ] Add KATs for slot reuse after leave/revoke
+- [~] Add KATs for slot reuse after leave/revoke
+  `kat/kat-slot-lease-conformance-v0.2.json` now maps the shipped deterministic tests for reclaim clearing, stale `join_finalize_auth` rejection, helper generation binding, and public join/merge ticket tamper rejection; broader end-to-end vectors are still pending.
 - [~] Add replay rejection tests for stale `join_finalize_auth`
 - [~] Add historical chain-check tests where one slot has multiple generations
   Server helper coverage now exercises join-helper pruning across reused-slot generations, and `api-client` now checks that paginated `v2` revoked occupancies preserve distinct `slot_generation` values for one reused slot, rejects tampered `current_join_occupancies` and `current_revoked_occupancies` in join provisioning, and rejects tampered merge-ticket `slot_generation`; end-to-end client/history KATs still need to follow.
@@ -100,5 +101,5 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 ## Immediate next slice
 
 1. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.
-2. Finish the remaining documentation sweep for historical `cover_leaf_index` wording and other explicitly legacy labels.
+2. Extend slot-lease coverage beyond deterministic test links into fuller end-to-end vectors/KAT fixtures.
 3. Rename lingering local test variable names (`updater_leaf`, `ResolveJoinsSince`, etc.) where they still obscure the slot-lease model.
