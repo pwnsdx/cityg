@@ -1021,12 +1021,12 @@ pub fn prepare_full_verification_witness(
             .map_err(|_| RoomFullVerificationWitnessPreparationError::SlotIndexOutOfRange)?;
         if request.include_updater_in_revoked_set {
             let updater_record = BarrierRevokedOccupancyRecord {
-                leaf_index: slot_index,
+                slot_index,
                 slot_generation: bundle.slot_generation,
             };
             if let Err(insert_at) = records.binary_search_by_key(
-                &(updater_record.leaf_index, updater_record.slot_generation),
-                |record| (record.leaf_index, record.slot_generation),
+                &(updater_record.slot_index, updater_record.slot_generation),
+                |record| (record.slot_index, record.slot_generation),
             ) {
                 records.insert(insert_at, updater_record);
             }

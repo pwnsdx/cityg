@@ -12,7 +12,7 @@ fn resolve_join_occupancies_since_reports_join_metadata() -> Result<(), CityGErr
         "expected at least one join record"
     );
     let record = &records.records[0];
-    assert!(record.leaf_index > 0);
+    assert!(record.slot_index > 0);
     assert!(!record.device_pk.is_empty());
     assert!(
         record.ek_leaf.len() == 1184,
@@ -75,11 +75,11 @@ fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<
 
     let records = server.resolve_join_occupancies_since(&gid, 1)?;
     assert_eq!(records.records.len(), 3);
-    assert_eq!(records.records[0].leaf_index, 8);
+    assert_eq!(records.records[0].slot_index, 8);
     assert_eq!(records.records[0].device_pk, vec![0x12; 4]);
     assert_eq!(records.records[0].ek_leaf, vec![0x22; 1184]);
-    assert_eq!(records.records[1].leaf_index, 9);
-    assert_eq!(records.records[2].leaf_index, 10);
+    assert_eq!(records.records[1].slot_index, 9);
+    assert_eq!(records.records[2].slot_index, 10);
     Ok(())
 }
 
@@ -130,7 +130,7 @@ fn resolve_join_occupancies_since_prunes_resolved_and_revoked_join_history()
 
     let records = server.resolve_join_occupancies_since(&gid, 1)?;
     assert_eq!(records.records.len(), 1);
-    assert_eq!(records.records[0].leaf_index, 11);
+    assert_eq!(records.records[0].slot_index, 11);
     assert_eq!(records.records[0].device_pk, vec![0x15; 4]);
     assert_eq!(records.records[0].ek_leaf, vec![0x25; 1184]);
 
@@ -187,7 +187,7 @@ fn resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot() -> R
 
     let records = server.resolve_join_occupancies_since(&gid, 3)?;
     assert_eq!(records.records.len(), 1);
-    assert_eq!(records.records[0].leaf_index, 1);
+    assert_eq!(records.records[0].slot_index, 1);
     assert_eq!(records.records[0].slot_generation, 1);
     assert_eq!(records.records[0].device_pk, vec![0x32; 4]);
     assert_eq!(records.records[0].ek_leaf, vec![0x42; 1184]);
@@ -643,7 +643,7 @@ fn resolve_revoked_occupancies_requires_matching_roots_hash() -> Result<(), City
     assert_eq!(
         indices.records,
         vec![crate::BarrierRevokedOccupancyRecord {
-            leaf_index: crate::slot_index_for_leaf(&leaf, n_max),
+            slot_index: crate::slot_index_for_leaf(&leaf, n_max),
             slot_generation: 0,
         }]
     );

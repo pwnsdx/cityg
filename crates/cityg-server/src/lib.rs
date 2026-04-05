@@ -497,7 +497,7 @@ struct HistoryAuthorityState {
 /// Revoked slot-occupancy enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BarrierRevokedOccupancyRecord {
-    pub leaf_index: u32,
+    pub slot_index: u32,
     pub slot_generation: u64,
 }
 
@@ -582,8 +582,8 @@ pub enum MergeTicketIntent {
 pub struct BarrierJoinOccupancyRecord {
     /// Device public key associated with the join leaf.
     pub device_pk: Vec<u8>,
-    /// Cover leaf index (0-based) for the member.
-    pub leaf_index: u32,
+    /// Slot index (0-based) for the member.
+    pub slot_index: u32,
     /// Lease generation for this slot occupancy.
     pub slot_generation: u64,
     /// Barrier leaf ML-KEM public key (ek, 1184 bytes when provisioned).
@@ -2926,7 +2926,7 @@ impl CityGServer {
                     .revoked_slot_leases
                     .values()
                     .map(|lease| BarrierRevokedOccupancyRecord {
-                        leaf_index: lease.slot_index,
+                        slot_index: lease.slot_index,
                         slot_generation: lease.slot_generation,
                     })
                     .collect()
@@ -2938,13 +2938,13 @@ impl CityGServer {
                         let lease = require_revoked_slot_lease(state, leaf)
                             .expect("revoked slot lease presence checked above");
                         BarrierRevokedOccupancyRecord {
-                            leaf_index: lease.slot_index,
+                            slot_index: lease.slot_index,
                             slot_generation: lease.slot_generation,
                         }
                     })
                     .collect()
             };
-        records.sort_by_key(|record| (record.leaf_index, record.slot_generation));
+        records.sort_by_key(|record| (record.slot_index, record.slot_generation));
         records.dedup();
         Ok(ResolvedRevokedOccupancies {
             history_view_id: history_commitment.history_view_id,
@@ -2988,7 +2988,7 @@ impl CityGServer {
                             .get(leaf)
                             .cloned()
                             .unwrap_or_else(|| leaf.to_vec()),
-                        leaf_index,
+                        slot_index: leaf_index,
                         slot_generation: lease.slot_generation,
                         ek_leaf: state
                             .leaf_barrier_public
@@ -3014,7 +3014,7 @@ impl CityGServer {
                     record.leaf_index,
                     BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
-                        leaf_index: record.leaf_index,
+                        slot_index: record.leaf_index,
                         slot_generation: record.slot_generation,
                         ek_leaf: record.ek_leaf.clone(),
                     },
@@ -6490,7 +6490,7 @@ fn apply_join_records_to_snapshot(
     for record in join_records {
         let leaf_node = leaf_base
             .checked_add(
-                usize::try_from(record.leaf_index)
+                usize::try_from(record.slot_index)
                     .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
             )
             .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
@@ -6512,12 +6512,12 @@ fn apply_revoked_records_to_snapshot(
         .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
     let mut seen = BTreeSet::new();
     for record in revoked_records {
-        if !seen.insert(record.leaf_index) {
+        if !seen.insert(record.slot_index) {
             continue;
         }
         let leaf_node = leaf_base
             .checked_add(
-                usize::try_from(record.leaf_index)
+                usize::try_from(record.slot_index)
                     .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
             )
             .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
@@ -7307,7 +7307,7 @@ mod tests {
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         for record in records {
             let leaf_node = leaf_base.saturating_add(
-                usize::try_from(record.leaf_index)
+                usize::try_from(record.slot_index)
                     .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?,
             );
             if let Some(slot) = snapshot.get_mut(leaf_node) {
@@ -7327,11 +7327,11 @@ mod tests {
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let mut seen = BTreeSet::new();
         for record in revoked_records {
-            if !seen.insert(record.leaf_index) {
+            if !seen.insert(record.slot_index) {
                 continue;
             }
             let leaf_node = leaf_base.saturating_add(
-                usize::try_from(record.leaf_index)
+                usize::try_from(record.slot_index)
                     .map_err(|_| CityGError::InvalidInput("revoked index overflow"))?,
             );
             super::blank_leaf_and_path(snapshot, leaf_node);
@@ -7355,11 +7355,11 @@ mod tests {
             4,
             &[
                 super::BarrierRevokedOccupancyRecord {
-                    leaf_index: 2,
+                    slot_index: 2,
                     slot_generation: 0,
                 },
                 super::BarrierRevokedOccupancyRecord {
-                    leaf_index: 2,
+                    slot_index: 2,
                     slot_generation: 4,
                 },
             ],
@@ -7553,7 +7553,7 @@ mod tests {
         let unresolved_join_leaf_indices: BTreeSet<u32> = join_records
             .records
             .iter()
-            .map(|record| record.leaf_index)
+            .map(|record| record.slot_index)
             .collect();
         let updater_slot_index = u32::try_from(ticket.slot_index)
             .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
@@ -7572,17 +7572,17 @@ mod tests {
         if barrier_update_reason == 0 {
             if reclaims_revoked_slot {
                 witness_revoked_records.retain(|record| {
-                    record.leaf_index != updater_slot_index
+                    record.slot_index != updater_slot_index
                         || record.slot_generation != ticket.slot_generation
                 });
             } else {
                 let updater_record = BarrierRevokedOccupancyRecord {
-                    leaf_index: updater_slot_index,
+                    slot_index: updater_slot_index,
                     slot_generation: ticket.slot_generation,
                 };
                 if let Err(record_insert_at) = witness_revoked_records.binary_search_by_key(
-                    &(updater_record.leaf_index, updater_record.slot_generation),
-                    |record| (record.leaf_index, record.slot_generation),
+                    &(updater_record.slot_index, updater_record.slot_generation),
+                    |record| (record.slot_index, record.slot_generation),
                 ) {
                     witness_revoked_records.insert(record_insert_at, updater_record);
                 }
@@ -7820,12 +7820,12 @@ mod tests {
         let mut post_revoked_records = committed_revoked.records.clone();
         {
             let revoked_record = BarrierRevokedOccupancyRecord {
-                leaf_index: revoked_slot_index,
+                slot_index: revoked_slot_index,
                 slot_generation: ticket.slot_generation,
             };
             if let Err(record_insert_at) = post_revoked_records.binary_search_by_key(
-                &(revoked_record.leaf_index, revoked_record.slot_generation),
-                |record| (record.leaf_index, record.slot_generation),
+                &(revoked_record.slot_index, revoked_record.slot_generation),
+                |record| (record.slot_index, record.slot_generation),
             ) {
                 post_revoked_records.insert(record_insert_at, revoked_record);
             }
@@ -8050,12 +8050,12 @@ mod tests {
         let mut post_revoked_records = committed_revoked.records.clone();
         {
             let revoked_record = BarrierRevokedOccupancyRecord {
-                leaf_index: revoked_slot_index,
+                slot_index: revoked_slot_index,
                 slot_generation: ticket.slot_generation,
             };
             if let Err(record_insert_at) = post_revoked_records.binary_search_by_key(
-                &(revoked_record.leaf_index, revoked_record.slot_generation),
-                |record| (record.leaf_index, record.slot_generation),
+                &(revoked_record.slot_index, revoked_record.slot_generation),
+                |record| (record.slot_index, record.slot_generation),
             ) {
                 post_revoked_records.insert(record_insert_at, revoked_record);
             }

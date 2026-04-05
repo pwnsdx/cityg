@@ -512,7 +512,7 @@ fn pb_barrier_join_occupancy_record(
 ) -> pb::BarrierJoinOccupancyRecord {
     pb::BarrierJoinOccupancyRecord {
         device_pk: record.device_pk,
-        slot_index: record.leaf_index,
+        slot_index: record.slot_index,
         ek_leaf: record.ek_leaf,
         slot_generation: record.slot_generation,
     }
@@ -522,7 +522,7 @@ fn pb_barrier_revoked_occupancy_record(
     record: ServerBarrierRevokedOccupancyRecord,
 ) -> pb::BarrierRevokedOccupancyRecord {
     pb::BarrierRevokedOccupancyRecord {
-        slot_index: record.leaf_index,
+        slot_index: record.slot_index,
         slot_generation: record.slot_generation,
     }
 }
@@ -961,7 +961,7 @@ pub fn decode_full_verification_witness_request(
         .into_iter()
         .map(|record| ServerBarrierJoinOccupancyRecord {
             device_pk: record.device_pk,
-            leaf_index: record.slot_index,
+            slot_index: record.slot_index,
             slot_generation: record.slot_generation,
             ek_leaf: record.ek_leaf,
         })
@@ -970,7 +970,7 @@ pub fn decode_full_verification_witness_request(
         .revoked_records
         .into_iter()
         .map(|record| ServerBarrierRevokedOccupancyRecord {
-            leaf_index: record.slot_index,
+            slot_index: record.slot_index,
             slot_generation: record.slot_generation,
         })
         .collect();
@@ -2315,7 +2315,7 @@ mod tests {
         assert_eq!(decoded.revocation_roots_hash, [0x41; 32]);
         assert_eq!(decoded.revocation_target_leaf_id, Some([0x42; 32]));
         assert_eq!(decoded.join_records.len(), 1);
-        assert_eq!(decoded.join_records[0].leaf_index, 52);
+        assert_eq!(decoded.join_records[0].slot_index, 52);
         assert_eq!(decoded.updater_slot_generation, 63);
         assert_eq!(decoded.revoked_records.len(), 1);
         assert_eq!(decoded.revoked_records[0].slot_generation, 64);
@@ -2864,13 +2864,13 @@ mod tests {
                     history_view_id: [0x21; 32],
                     history_commitment,
                     records: vec![cityg_server::BarrierRevokedOccupancyRecord {
-                        leaf_index: 6,
+                        slot_index: 6,
                         slot_generation: 5,
                     }],
                 },
                 page: cityg_runtime::BarrierPage {
                     items: vec![cityg_server::BarrierRevokedOccupancyRecord {
-                        leaf_index: 6,
+                        slot_index: 6,
                         slot_generation: 5,
                     }],
                     page_offset: 0,
@@ -2920,7 +2920,7 @@ mod tests {
                     history_commitment,
                     records: vec![cityg_server::BarrierJoinOccupancyRecord {
                         device_pk: vec![0x71; 32],
-                        leaf_index: 3,
+                        slot_index: 3,
                         slot_generation: 2,
                         ek_leaf: vec![0x72; 1184],
                     }],
@@ -2928,7 +2928,7 @@ mod tests {
                 page: cityg_runtime::BarrierPage {
                     items: vec![cityg_server::BarrierJoinOccupancyRecord {
                         device_pk: vec![0x71; 32],
-                        leaf_index: 3,
+                        slot_index: 3,
                         slot_generation: 2,
                         ek_leaf: vec![0x72; 1184],
                     }],
