@@ -4,7 +4,7 @@ use prost::Message;
 use cityg_api_schema::{
     API_PROFILE_VERSION, FetchPublicTreeRequestDecodeError,
     FullVerificationWitnessRequestDecodeError, LookupMergeAcceptanceRequestDecodeError,
-    MAX_BARRIER_HELPER_PAGE_ENTRIES, ResolveRevokedLeavesRequestDecodeError,
+    MAX_BARRIER_HELPER_PAGE_ENTRIES, ResolveRevokedOccupanciesRequestDecodeError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
     decode_barrier_resolve_revoked_occupancies_request as schema_decode_barrier_resolve_revoked_occupancies_request,
@@ -101,7 +101,7 @@ pub(crate) async fn barrier_resolve_revoked_occupancies(
     )
     .await?;
     let request = schema_decode_barrier_resolve_revoked_occupancies_request(request).map_err(
-        |error: ResolveRevokedLeavesRequestDecodeError| {
+        |error: ResolveRevokedOccupanciesRequestDecodeError| {
             ApiError::InvalidRequest(error.api_message())
         },
     )?;

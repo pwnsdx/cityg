@@ -415,7 +415,7 @@ pub(crate) struct HelperCompletenessSignedPayload<'a, T> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct RevokedLeavesSelector<'a> {
+pub(crate) struct RevokedOccupanciesSelector<'a> {
     #[serde(with = "serde_bytes")]
     pub(crate) revocation_roots_hash: &'a [u8; 32],
     pub(crate) records: &'a [BarrierRevokedOccupancyRecord],
@@ -1374,7 +1374,7 @@ pub fn verify_revoked_occupancies_completeness_attestation(
         history_commitment_id: &history_commitment.history_commitment_id,
         page_offset,
         total_entries,
-        selector: RevokedLeavesSelector {
+        selector: RevokedOccupanciesSelector {
             revocation_roots_hash,
             records,
         },

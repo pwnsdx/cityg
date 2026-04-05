@@ -628,11 +628,11 @@ pub(crate) fn leaf_index(leaf: &[u8; 32]) -> u32 {
     u32::from_be_bytes(bytes)
 }
 
-/// Test helper for the S3.2 slot-index mapping.
+/// Historical test helper for the pre-slot-lease deterministic slot mapping.
 ///
-/// The mapping is deterministic across components:
-/// `cover_leaf_index(device_pk) = leaf_index(device_pk) mod n_max`.
-/// We clamp `n_max` to `[1, u32::MAX]` before applying modulo.
+/// This exists only to exercise archived behavior and migration assertions in
+/// tests. The live model now allocates reusable `SlotLease` values instead of
+/// deriving the active slot from `leaf_id`.
 #[cfg(test)]
 pub(crate) fn slot_index_for_leaf(leaf: &[u8; 32], n_max: u64) -> u32 {
     let n_max = n_max.max(1).min(u32::MAX as u64) as u32;

@@ -11,7 +11,7 @@ use cityg_api_schema::{
     GetBundleRequestValidationError, JoinTicketRequestPreparationError,
     LookupMergeAcceptanceRequestDecodeError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
     MembersRequestValidationError, MergeTicketRequestValidationError,
-    ResolveRevokedLeavesRequestDecodeError, RoomAdminProofValidationError,
+    ResolveRevokedOccupanciesRequestDecodeError, RoomAdminProofValidationError,
     RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
     RoomScopedRoutingKey, SearchMembersRequestValidationError, SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
@@ -1242,7 +1242,7 @@ impl CloudflareRoomDurableObject {
             Ok(request) => request,
             Err(error) => {
                 return Response::error(
-                    ResolveRevokedLeavesRequestDecodeError::api_message(&error),
+                    ResolveRevokedOccupanciesRequestDecodeError::api_message(&error),
                     400,
                 );
             }

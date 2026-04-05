@@ -38,13 +38,13 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 
 - [x] Replace `BarrierJoinLeafRecord` with occupancy records
 - [x] Replace naked revoked leaf indices with revoked occupancy records
-- [~] Rework `ResolveJoinsSince` and `ResolveRevokedLeaves`
+- [~] Rework `ResolveJoinOccupanciesSince` and `ResolveRevokedOccupancies`
 - [x] Update completeness attestations to cover occupancy records
   Rust runtime/schema/client surfaces now expose occupancy-oriented types and versioned revoked records; `helper_kind` completeness-attestation identifiers now also use the occupancy-oriented names, so the remaining legacy is mostly in selected CBOR field labels.
 
 ### 4. Barrier validation
 
-- [x] Replace `updater_leaf` binding with lease binding in the wire profile
+- [x] Replace legacy `updater_leaf` binding with lease binding in the wire profile
   Les encodeurs/décodeurs runtime utilisent désormais `updater_slot_index` comme champ wire et comme nom interne; le reliquat restant est surtout un sweep documentaire plus large sur les anciennes formulations.
 - [x] Update `join_finalize_auth` validation to match the current leased slot
 - [x] Update receipts and full-verification witness payloads
@@ -81,7 +81,7 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 ### 6. Client and GUI
 
 - [x] Persist the local slot as an explicit `SlotLease`
-- [~] Replace prepared/runtime `cover_leaf_index` + `slot_generation` pairs with `SlotLease`
+- [~] Replace prepared/runtime legacy `slot_index` + `slot_generation` pairs with `SlotLease`
 - [~] Update bootstrap/join-finalize state
 - [x] Update bootstrap/join-finalize state to persist versioned revoked records
 - [x] Drop duplicated bootstrap/current revoked leaf-index caches where versioned records are already present
@@ -91,15 +91,15 @@ Replace barrier leaf single-assignment with reusable slot leases so that:
 ### 7. KAT and conformance
 
 - [~] Add KATs for slot reuse after leave/revoke
-  `kat/kat-slot-lease-conformance-v0.2.json` now maps the shipped deterministic tests for reclaim clearing, stale `join_finalize_auth` rejection, helper generation binding, and public join/merge ticket tamper rejection; broader end-to-end vectors are still pending.
+  `kat/kat-slot-lease-conformance-v0.2.json` now maps the shipped deterministic tests for reclaim clearing, stale `join_finalize_auth` rejection, helper generation binding, and public join/merge ticket tamper rejection. `scripts/run_slot_lease_conformance.sh` provides a repeatable runner for the current slot-lease suite; broader end-to-end vectors are still pending.
 - [~] Add replay rejection tests for stale `join_finalize_auth`
 - [~] Add historical chain-check tests where one slot has multiple generations
-  Server helper coverage now exercises join-helper pruning across reused-slot generations, and `api-client` now checks that paginated `v2` revoked occupancies preserve distinct `slot_generation` values for one reused slot, rejects tampered `current_join_occupancies` and `current_revoked_occupancies` in join provisioning, and rejects tampered merge-ticket `slot_generation`; end-to-end client/history KATs still need to follow.
+  Server helper coverage now exercises join-helper pruning across reused-slot generations, and `api-client` now checks that paginated `v2` revoked occupancies preserve distinct `slot_generation` values for one reused slot, rejects tampered `current_join_occupancies` and `current_revoked_occupancies` in join provisioning, and rejects tampered merge-ticket `slot_generation`. `cityg-client` snapshot/transition tests also cover reused-slot joins and versioned revocations; end-to-end client/history KATs still need to follow.
 - [~] Update the primary spec text from single-assignment to versioned `SlotLease` semantics
   `docs/specs.md` now reflects reusable slots, versioned revoked/join records, and lease-bound `join_finalize_auth` / receipt / witness validation in the key barrier sections; full document sweep is still pending.
 
 ## Immediate next slice
 
-1. Add KAT/conformance coverage that exercises reused-slot generations through the public helper/profile boundary.
-2. Extend slot-lease coverage beyond deterministic test links into fuller end-to-end vectors/KAT fixtures.
-3. Rename lingering local test variable names (`updater_leaf`, `ResolveJoinsSince`, etc.) where they still obscure the slot-lease model.
+1. Extend slot-lease coverage beyond deterministic/unit-style tests into fuller end-to-end vectors/KAT fixtures.
+2. Sweep archived historical docs/changelogs only where the old terminology is still presented as active behavior rather than explicitly historical context.
+3. Rename lingering local test variable names that still obscure the slot-lease model.

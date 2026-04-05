@@ -620,9 +620,10 @@ profile_version)`, `n_max`, `max_barrier_update_bytes`, and the FLG window under
 history-authority extension.
 
 Barrier helper/current-state note:
-- Base-profile `ResolveRevokedLeaves`, `ResolveJoinsSince`, `FetchBarrierPublicTree`, and
-  `LookupMergeAcceptance` responses also carry `profile_version`, `n_max`,
-  `max_barrier_update_bytes`, `fs_forward_leap_policy`, and `deployment_profile_manifest`.
+- Base-profile `resolve_revoked_occupancies`, `resolve_join_occupancies_since`,
+  `FetchBarrierPublicTree`, and `LookupMergeAcceptance` responses also carry
+  `profile_version`, `n_max`, `max_barrier_update_bytes`,
+  `fs_forward_leap_policy`, and `deployment_profile_manifest`.
 - Clients MUST verify `deployment_profile_manifest` before consuming those delivered helper/current
   profile/config fields, and MUST fail closed if paginated helper pages disagree on the manifest.
 

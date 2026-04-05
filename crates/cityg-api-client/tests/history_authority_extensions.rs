@@ -78,7 +78,7 @@ struct HelperCompletenessSignedPayload<'a, T> {
 }
 
 #[derive(Serialize)]
-struct RevokedLeavesSelector<'a> {
+struct RevokedOccupanciesSelector<'a> {
     #[serde(with = "serde_bytes")]
     revocation_roots_hash: &'a [u8; 32],
     records: &'a [BarrierRevokedOccupancyRecord],
@@ -245,7 +245,7 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         &history_commitment,
         0,
         2,
-        RevokedLeavesSelector {
+        RevokedOccupanciesSelector {
             revocation_roots_hash: &[0xDD; 32],
             records: &[
                 BarrierRevokedOccupancyRecord {
@@ -376,7 +376,7 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
         &history_commitment,
         0,
         2,
-        RevokedLeavesSelector {
+        RevokedOccupanciesSelector {
             revocation_roots_hash: &[0x91; 32],
             records: &revoked_records,
         },

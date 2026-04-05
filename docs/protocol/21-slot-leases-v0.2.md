@@ -122,6 +122,7 @@ Relevant code:
 - [`../../crates/cityg-client/src/barrier.rs`](../../crates/cityg-client/src/barrier.rs)
 - [`../../crates/cityg-client/src/barrier_update.rs`](../../crates/cityg-client/src/barrier_update.rs)
 - [`../../kat/kat-slot-lease-conformance-v0.2.json`](../../kat/kat-slot-lease-conformance-v0.2.json)
+- [`../../scripts/run_slot_lease_conformance.sh`](../../scripts/run_slot_lease_conformance.sh)
 
 ## Operational Consequences
 
@@ -142,9 +143,7 @@ What this does not solve:
 ## Remaining Work
 
 - cut a fully versioned `v0.2` spec profile in [`../specs.md`](../specs.md)
-- extend the slot-lease conformance manifest with additional end-to-end vectors
-  beyond the current deterministic test links
-- add historical chain-check tests where the same `slot_index` appears in
-  multiple occupancies
+- extend the slot-lease conformance runner/manifest with heavier end-to-end
+  vectors beyond the current deterministic coverage
 - keep archived historical docs clearly marked when they still mention
   `cover_leaf_index`

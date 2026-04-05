@@ -3239,27 +3239,6 @@ impl CityGServer {
         )
     }
 
-    pub fn helper_completeness_attestation_revoked_bytes(
-        &self,
-        history_commitment: &HistoryCommitment,
-        revocation_roots_hash: &[u8; 32],
-        page_offset: u32,
-        total_entries: u32,
-        leaf_indices: &[u32],
-    ) -> Result<Vec<u8>, CityGError> {
-        let Some(authority) = self.history_authority.as_ref() else {
-            return Ok(Vec::new());
-        };
-        encode_helper_completeness_attestation_revoked(
-            authority,
-            history_commitment,
-            revocation_roots_hash,
-            page_offset,
-            total_entries,
-            leaf_indices,
-        )
-    }
-
     pub fn helper_completeness_attestation_revoked_records_bytes(
         &self,
         history_commitment: &HistoryCommitment,
@@ -4024,14 +4003,7 @@ struct HelperCompletenessSignedPayload<'a, T> {
 }
 
 #[derive(Serialize)]
-struct RevokedLeavesSelector<'a> {
-    #[serde(with = "serde_bytes")]
-    revocation_roots_hash: &'a [u8; 32],
-    leaf_indices: &'a [u32],
-}
-
-#[derive(Serialize)]
-struct RevokedLeafRecordsSelector<'a> {
+struct RevokedOccupanciesSelector<'a> {
     #[serde(with = "serde_bytes")]
     revocation_roots_hash: &'a [u8; 32],
     records: &'a [BarrierRevokedOccupancyRecord],
@@ -4706,36 +4678,6 @@ fn encode_deployment_profile_manifest(
     })?)
 }
 
-fn encode_helper_completeness_attestation_revoked(
-    state: &HistoryAuthorityState,
-    history_commitment: &HistoryCommitment,
-    revocation_roots_hash: &[u8; 32],
-    page_offset: u32,
-    total_entries: u32,
-    leaf_indices: &[u32],
-) -> Result<Vec<u8>, CityGError> {
-    let helper_kind = "resolve_revoked_occupancies";
-    let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
-        label: "cityg/helper-completeness-attestation-v1",
-        scope_id: &state.descriptor.scope_id,
-        helper_kind,
-        history_view_id: &history_commitment.history_view_id,
-        history_commitment_id: &history_commitment.history_commitment_id,
-        page_offset,
-        total_entries,
-        selector: RevokedLeavesSelector {
-            revocation_roots_hash,
-            leaf_indices,
-        },
-    })?;
-    let signature = sign_history_authority_message(state, payload.as_slice())?;
-    Ok(to_cbor_vec(&HelperCompletenessAttestationWire(
-        state.descriptor.scope_id.to_vec(),
-        helper_kind.to_string(),
-        signature,
-    ))?)
-}
-
 fn encode_helper_completeness_attestation_revoked_records(
     state: &HistoryAuthorityState,
     history_commitment: &HistoryCommitment,
@@ -4753,7 +4695,7 @@ fn encode_helper_completeness_attestation_revoked_records(
         history_commitment_id: &history_commitment.history_commitment_id,
         page_offset,
         total_entries,
-        selector: RevokedLeafRecordsSelector {
+        selector: RevokedOccupanciesSelector {
             revocation_roots_hash,
             records,
         },

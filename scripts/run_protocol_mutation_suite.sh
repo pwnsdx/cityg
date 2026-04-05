@@ -27,10 +27,10 @@ cargo test --locked -p cityg-server \
   -- --nocapture
 
 cargo test --locked -p cityg-api-client --lib \
-  tests::barrier_resolve_revoked_leaves_rejects_deployment_profile_manifest_mismatch_across_pages \
+  tests::barrier_resolve_revoked_occupancies_rejects_deployment_profile_manifest_mismatch_across_pages \
   -- --exact --nocapture
 cargo test --locked -p cityg-api-client --lib \
-  tests::barrier_resolve_joins_since_rejects_global_history_attestation_mismatch_across_pages \
+  tests::barrier_resolve_join_occupancies_since_rejects_global_history_attestation_mismatch_across_pages \
   -- --exact --nocapture
 cargo test --locked -p cityg-api-client --lib \
   tests::barrier_fetch_public_tree_rejects_deployment_profile_manifest_mismatch_across_pages \

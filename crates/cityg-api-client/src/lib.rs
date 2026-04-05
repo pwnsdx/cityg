@@ -2407,7 +2407,7 @@ mod tests {
             &history_commitment,
             0,
             0,
-            RevokedLeavesSelector {
+            RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0x00; 32],
                 records: revoked_records.as_slice(),
             },
@@ -2594,7 +2594,7 @@ mod tests {
                     &history_commitment,
                     request.page_offset,
                     u32::try_from(all.len()).unwrap_or(u32::MAX),
-                    RevokedLeavesSelector {
+                    RevokedOccupanciesSelector {
                         revocation_roots_hash: &[0xCC; 32],
                         records: page_records_core.as_slice(),
                     },
@@ -3689,7 +3689,7 @@ mod tests {
                 &history_commitment,
                 0,
                 1,
-                RevokedLeavesSelector {
+                RevokedOccupanciesSelector {
                     revocation_roots_hash: &[0x00; 32],
                     records: std::slice::from_ref(&revoked_record),
                 },
@@ -5244,7 +5244,7 @@ mod tests {
             &history_commitment,
             0,
             2,
-            RevokedLeavesSelector {
+            RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0xCC; 32],
                 records: &[BarrierRevokedOccupancyRecord {
                     leaf_index: 1,
@@ -5258,7 +5258,7 @@ mod tests {
             &history_commitment,
             1,
             2,
-            RevokedLeavesSelector {
+            RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0xCC; 32],
                 records: &[BarrierRevokedOccupancyRecord {
                     leaf_index: 2,
@@ -5387,7 +5387,7 @@ mod tests {
             &history_commitment,
             0,
             2,
-            RevokedLeavesSelector {
+            RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0xCC; 32],
                 records: &[BarrierRevokedOccupancyRecord {
                     leaf_index: 1,
@@ -5401,7 +5401,7 @@ mod tests {
             &history_commitment,
             1,
             2,
-            RevokedLeavesSelector {
+            RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0xCC; 32],
                 records: &[BarrierRevokedOccupancyRecord {
                     leaf_index: 1,

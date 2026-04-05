@@ -994,12 +994,12 @@ pub fn decode_full_verification_witness_request(
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum ResolveRevokedLeavesRequestDecodeError {
+pub enum ResolveRevokedOccupanciesRequestDecodeError {
     #[error("revocation_roots_hash must be 32 bytes")]
     InvalidRevocationRootsHash,
 }
 
-impl ResolveRevokedLeavesRequestDecodeError {
+impl ResolveRevokedOccupanciesRequestDecodeError {
     #[must_use]
     pub const fn api_message(&self) -> &'static str {
         match self {
@@ -1066,10 +1066,13 @@ pub struct DecodedBarrierLookupMergeAcceptanceRequest {
 
 pub fn decode_barrier_resolve_revoked_occupancies_request(
     request: pb::BarrierResolveRevokedOccupanciesRequest,
-) -> Result<DecodedBarrierResolveRevokedOccupanciesRequest, ResolveRevokedLeavesRequestDecodeError>
+) -> Result<
+    DecodedBarrierResolveRevokedOccupanciesRequest,
+    ResolveRevokedOccupanciesRequestDecodeError,
+>
 {
     if request.revocation_roots_hash.len() != 32 {
-        return Err(ResolveRevokedLeavesRequestDecodeError::InvalidRevocationRootsHash);
+        return Err(ResolveRevokedOccupanciesRequestDecodeError::InvalidRevocationRootsHash);
     }
     let mut revocation_roots_hash = [0u8; 32];
     revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
