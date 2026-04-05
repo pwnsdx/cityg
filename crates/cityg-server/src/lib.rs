@@ -10024,7 +10024,7 @@ mod roster_tests {
         let mut leaf = [0u8; 32];
         leaf[28..32].copy_from_slice(&0xFFFF_FFFE_u32.to_be_bytes());
 
-        assert_eq!(super::leaf_index(&leaf), 0xFFFF_FFFE);
+        assert_eq!(super::leaf_suffix_u32(&leaf), 0xFFFF_FFFE);
         assert_eq!(super::slot_index_for_leaf(&leaf, 0), 0);
         assert_eq!(super::slot_index_for_leaf(&leaf, 1), 0);
         assert_eq!(super::slot_index_for_leaf(&leaf, 4), 2);

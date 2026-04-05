@@ -1,11 +1,11 @@
 use super::*;
 use crate::{
     BARRIER_LEAF_CAPACITY_EXHAUSTED_ERR, BARRIER_LEAF_CAPACITY_REFUSAL_THRESHOLD_REACHED_ERR,
-    GroupState, SlotLease, demo, leaf_index,
+    GroupState, SlotLease, demo,
 };
 
 #[test]
-fn build_join_ticket_requires_kbroad_and_advances_leaf_index() -> Result<(), CityGError> {
+fn build_join_ticket_requires_kbroad_and_allocates_distinct_slot_leases() -> Result<(), CityGError> {
     let mut server = CityGServer::new(ServerConfig::new());
     let gid = [0x42; 32];
 
@@ -20,7 +20,10 @@ fn build_join_ticket_requires_kbroad_and_advances_leaf_index() -> Result<(), Cit
     server.register_group(&gid, vec![0x55; 16])?;
     let first = server.build_join_ticket(&gid)?;
     let second = server.build_join_ticket(&gid)?;
-    assert!(leaf_index(&second.leaf_id) > leaf_index(&first.leaf_id));
+    assert_eq!(first.slot_index, 0);
+    assert_eq!(first.slot_generation, 0);
+    assert_eq!(second.slot_index, 1);
+    assert_eq!(second.slot_generation, 0);
 
     let mut demo_server = demo::demo_server();
     let bundle = cityg_client::demo::demo_bundle("alice")?;

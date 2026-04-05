@@ -395,7 +395,7 @@ impl GroupState {
         let max = self
             .snapshots
             .values()
-            .flat_map(|set| set.members().map(leaf_index))
+            .flat_map(|set| set.members().map(leaf_suffix_u32))
             .max()
             .unwrap_or(0);
         let candidate = max.saturating_add(1);
@@ -623,7 +623,7 @@ pub(crate) fn is_zero_root(root: &[u8; 32]) -> bool {
     root.iter().all(|byte| *byte == 0)
 }
 
-pub(crate) fn leaf_index(leaf: &[u8; 32]) -> u32 {
+pub(crate) fn leaf_suffix_u32(leaf: &[u8; 32]) -> u32 {
     let bytes: [u8; 4] = leaf[28..32].try_into().unwrap_or_default();
     u32::from_be_bytes(bytes)
 }
@@ -636,7 +636,7 @@ pub(crate) fn leaf_index(leaf: &[u8; 32]) -> u32 {
 #[cfg(test)]
 pub(crate) fn slot_index_for_leaf(leaf: &[u8; 32], n_max: u64) -> u32 {
     let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
-    leaf_index(leaf) % n_max
+    leaf_suffix_u32(leaf) % n_max
 }
 
 #[cfg(test)]

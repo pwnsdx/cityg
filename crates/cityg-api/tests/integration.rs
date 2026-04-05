@@ -4,12 +4,14 @@ use anyhow::{Result, anyhow};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use ciborium::value::Value;
 use cityg_api_client::{
-    CitygApiClient, Error, IdentityBinding, RoomAdminOperation, RoomAdminProof,
+    CitygApiClient, Error, IdentityBinding, RoomAdminOperation, RoomAdminProof, SlotLease,
     build_room_admin_leaf_pair_proof, build_room_admin_listing_proof, build_room_admin_proof,
     build_room_admin_target_proof, generate_room_admin_keypair,
 };
 use cityg_client::{
     CityGClient, ClientEpochBundle,
+    barrier::compute_revocation_roots_hash,
+    barrier_merge_bundle::{BarrierMergeBundleInputs, build_barrier_merge_bundle},
     demo::{DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public},
     witness::SrxInputsOwned,
 };
@@ -167,6 +169,13 @@ struct RawRoomAdminMutationRequest {
 struct JoinedMember {
     bundle: ClientEpochBundle,
     leaf_id: [u8; 32],
+    slot_lease: SlotLease,
+    current_revoked_occupancies: Vec<SlotLease>,
+    pop_public_key: Vec<u8>,
+    pop_secret_key: dilithium5::SecretKey,
+    vrf_secret_key: Vec<u8>,
+    vrf_public_key: Vec<u8>,
+    forward_state: ForwardSecrecyState,
 }
 
 fn array32(name: &str, bytes: &[u8]) -> Result<[u8; 32]> {
@@ -177,6 +186,23 @@ fn array32(name: &str, bytes: &[u8]) -> Result<[u8; 32]> {
 
 fn barrier_leaf_public_key() -> Vec<u8> {
     vec![0x42; 1_184]
+}
+
+fn header_u64_field(bundle: &ClientEpochBundle, key: u64, name: &str) -> Result<u64> {
+    match bundle.header_map.get(&key) {
+        Some(Value::Integer(value)) => value
+            .clone()
+            .try_into()
+            .map_err(|_| anyhow!("{name} must be a uint")),
+        _ => Err(anyhow!("{name} missing")),
+    }
+}
+
+fn header_bytes32_field(bundle: &ClientEpochBundle, key: u64, name: &str) -> Result<[u8; 32]> {
+    match bundle.header_map.get(&key) {
+        Some(Value::Bytes(bytes)) => array32(name, bytes),
+        _ => Err(anyhow!("{name} missing")),
+    }
 }
 
 fn demo_vrf_keys_for_seed(seed: u8) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -355,7 +381,104 @@ async fn join_room_member_with_identity(
         cityg_client::demo::attach_bootstrap(&mut bundle)?;
     }
 
-    Ok(JoinedMember { bundle, leaf_id })
+    Ok(JoinedMember {
+        bundle,
+        leaf_id,
+        slot_lease: SlotLease {
+            slot_index: ticket.slot_index,
+            slot_generation: ticket.slot_generation,
+        },
+        current_revoked_occupancies: ticket
+            .current_revoked_occupancies
+            .iter()
+            .map(|record| SlotLease {
+                slot_index: u64::from(record.slot_index),
+                slot_generation: record.slot_generation,
+            })
+            .collect(),
+        pop_public_key,
+        pop_secret_key: pop_sk,
+        vrf_secret_key,
+        vrf_public_key,
+        forward_state: fs_state,
+    })
+}
+
+async fn build_leave_bundle(
+    client: &CitygApiClient,
+    room_id: &str,
+    member: &JoinedMember,
+) -> Result<ClientEpochBundle> {
+    let gid = array32("gid", &hex::decode(room_id)?)?;
+    let ticket = client.merge_ticket(room_id, &member.leaf_id).await?;
+    let fs_ec = header_u64_field(&member.bundle, hdr::HDR_FS_EC, "fs_ec")?;
+    let fs_epoch_commit = header_bytes32_field(
+        &member.bundle,
+        hdr::HDR_FS_EPOCH_COMMIT,
+        "fs_epoch_commit",
+    )?;
+    let fs_dev_prev_commit = header_bytes32_field(
+        &member.bundle,
+        hdr::HDR_FS_DEV_COMMIT,
+        "fs_dev_prev_commit",
+    )?;
+
+    let prepared_runtime = ticket.prepare_revocation_runtime(
+        cityg_api_client::PrepareRevocationMergeTicketInput {
+            operation_label: "leave",
+            local_barrier_version: ticket.barrier_version,
+            local_kem_tree_hash_after: ticket.kem_tree_hash_after,
+            local_current_history_commitment: Some(&ticket.current_history_commitment),
+            local_current_history_authority_extension: ticket.history_authority_extension.clone(),
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+            stored_max_barrier_update_bytes: 0,
+        },
+    )?;
+    let prepared_snapshot = client
+        .barrier_prepare_snapshot(prepared_runtime.snapshot_preparation_request(
+            room_id,
+            &gid,
+            &member.leaf_id,
+            member.pop_secret_key.as_bytes(),
+            Some(member.leaf_id),
+            0,
+            "leave",
+        ))
+        .await?;
+
+    let next_barrier_version = prepared_runtime.barrier_version.saturating_add(1);
+    let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
+        &gid,
+        member.pop_public_key.as_slice(),
+        &member.pop_secret_key,
+        member.vrf_secret_key.as_slice(),
+        member.vrf_public_key.as_slice(),
+        fs_ec,
+        fs_epoch_commit,
+        fs_dev_prev_commit,
+        next_barrier_version,
+    );
+    let built = build_barrier_merge_bundle(BarrierMergeBundleInputs {
+        header: prepared_snapshot.header,
+        parts: prepared_orchestration.parts,
+        params: prepared_orchestration.params,
+        forward_state: member.forward_state.clone(),
+        parities: prepared_runtime.parities.as_slice(),
+        witness_bytes: prepared_runtime.witness_bytes.as_deref(),
+        pivot: &prepared_snapshot.pivot,
+        gid: &gid,
+        cat: &prepared_snapshot.cat,
+        parent_root: &prepared_snapshot.parent_root,
+        current_k_fs: None,
+        next_barrier_version,
+        barrier_key: &prepared_snapshot.barrier_update.k_barrier_new,
+        barrier_update_reason: 0,
+        disable_autonomic_evolve: false,
+    })?;
+
+    Ok(built.bundle)
 }
 
 #[tokio::test]
@@ -383,6 +506,82 @@ async fn bootstrapped_room_join_keeps_merge_ticket_refresh_available() -> Result
         refresh.kbroad_public,
         kbroad_public(),
         "merge refresh ticket must still carry the registered room kbroad key"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() -> Result<()> {
+    let port = next_free_local_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let room_id = hex::encode([0xA6u8; 32]);
+    bootstrap_room(&client, &room_id, kbroad_public()).await?;
+
+    let alice = join_room_member(&client, &room_id, "alice", 0xA6).await?;
+    assert_eq!(
+        alice.slot_lease.slot_index, 0,
+        "first join should consume the first free slot"
+    );
+    client
+        .accept_epoch_bundle(&alice.bundle)
+        .await
+        .expect("accept alice");
+
+    let leave_bundle = build_leave_bundle(&client, &room_id, &alice).await?;
+    client
+        .accept_epoch_bundle(&leave_bundle)
+        .await
+        .expect("accept alice leave");
+
+    let bob = join_room_member(&client, &room_id, "bob", 0xA7).await?;
+    assert_eq!(
+        bob.current_revoked_occupancies,
+        vec![alice.slot_lease],
+        "join provisioning should expose the revoked occupancy that the new join supersedes"
+    );
+    client
+        .accept_epoch_bundle(&bob.bundle)
+        .await
+        .expect("accept bob");
+
+    let joins = client
+        .barrier_resolve_join_occupancies_since(&room_id, 0)
+        .await?;
+    assert_eq!(
+        joins.records.len(),
+        1,
+        "historical join helper should prune the superseded occupancy"
+    );
+    assert_eq!(u64::from(joins.records[0].leaf_index), alice.slot_lease.slot_index);
+    assert_eq!(u64::from(joins.records[0].leaf_index), bob.slot_lease.slot_index);
+    assert_eq!(
+        joins.records[0].slot_generation,
+        bob.slot_lease.slot_generation
+    );
+    assert!(
+        joins.records[0].slot_generation > alice.slot_lease.slot_generation,
+        "slot reuse must advance slot_generation on the public helper surface"
+    );
+
+    let refresh = client
+        .merge_ticket_refresh(&room_id, &bob.leaf_id)
+        .await
+        .expect("refresh ticket should be available for bob");
+    let current_revocation_roots_hash =
+        compute_revocation_roots_hash(&refresh.revoked_since_root, &refresh.revoked_root)?;
+    let revoked = client
+        .barrier_resolve_revoked_occupancies(&room_id, &current_revocation_roots_hash)
+        .await?;
+    assert!(
+        revoked.records.is_empty(),
+        "reclaim join must clear the superseded revoked occupancy from the current helper view"
     );
 
     handle.abort();
