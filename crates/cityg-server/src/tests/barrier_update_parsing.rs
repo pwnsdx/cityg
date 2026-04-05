@@ -138,8 +138,8 @@ fn validate_barrier_update_uses_genesis_snapshot_joinset() -> Result<(), CityGEr
     state.latest_root = Some(root);
     state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
 
-    let updater_leaf = u64::from(super::slot_index_for_leaf(&leaf, state.n_max));
-    let leaf_node = state.n_max.saturating_sub(1) + updater_leaf;
+    let updater_slot_index = u64::from(super::slot_index_for_leaf(&leaf, state.n_max));
+    let leaf_node = state.n_max.saturating_sub(1) + updater_slot_index;
     let parent_node = (leaf_node - 1) / 2;
     let path_nodes = vec![leaf_node, parent_node, 0];
 
@@ -160,7 +160,7 @@ fn validate_barrier_update_uses_genesis_snapshot_joinset() -> Result<(), CityGEr
     let revocation_roots_hash =
         super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
     let cover_payload = super::KemTreeCoverPayloadWire(
-        updater_leaf,
+        updater_slot_index,
         0,
         path_nodes,
         None,

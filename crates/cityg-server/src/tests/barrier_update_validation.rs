@@ -18,11 +18,11 @@ fn validate_barrier_update_accepts_expected_pairs_and_pkhash_binding() -> Result
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
+    let updater_slot_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
-        + usize::try_from(updater_leaf)
+        + usize::try_from(updater_slot_index)
             .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
     let sibling_node = super::sibling_node(leaf_node)
         .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
@@ -48,7 +48,7 @@ fn validate_barrier_update_accepts_expected_pairs_and_pkhash_binding() -> Result
 
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
-        u64::from(updater_leaf),
+        u64::from(updater_slot_index),
         0,
         path_nodes,
         None,
@@ -128,11 +128,11 @@ fn validate_barrier_update_rejects_pcs_refresh_reason_for_unresolved_joiner()
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
+    let updater_slot_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
-        + usize::try_from(updater_leaf)
+        + usize::try_from(updater_slot_index)
             .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
     let sibling_node = super::sibling_node(leaf_node)
         .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
@@ -158,7 +158,7 @@ fn validate_barrier_update_rejects_pcs_refresh_reason_for_unresolved_joiner()
 
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
-        u64::from(updater_leaf),
+        u64::from(updater_slot_index),
         0,
         path_nodes,
         None,
@@ -341,11 +341,11 @@ fn validate_barrier_update_rejects_target_pkhash_mismatch() -> Result<(), CityGE
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
+    let updater_slot_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
-        + usize::try_from(updater_leaf)
+        + usize::try_from(updater_slot_index)
             .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
     let sibling_node = super::sibling_node(leaf_node)
         .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
@@ -368,7 +368,7 @@ fn validate_barrier_update_rejects_target_pkhash_mismatch() -> Result<(), CityGE
     let kem_after = super::compute_barrier_tree_hash(state.n_max, snapshot_post.as_slice())?;
 
     let cover_payload = super::KemTreeCoverPayloadWire(
-        u64::from(updater_leaf),
+        u64::from(updater_slot_index),
         0,
         path_nodes,
         None,
@@ -449,11 +449,11 @@ fn validate_barrier_update_rejects_expected_pairs_mismatch() -> Result<(), CityG
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
+    let updater_slot_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
-        + usize::try_from(updater_leaf)
+        + usize::try_from(updater_slot_index)
             .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
     let sibling_node = super::sibling_node(leaf_node)
         .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
@@ -477,7 +477,7 @@ fn validate_barrier_update_rejects_expected_pairs_mismatch() -> Result<(), CityG
         super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
     state.barrier_roots_hash = revocation_roots_hash;
     let cover_payload = super::KemTreeCoverPayloadWire(
-        u64::from(updater_leaf),
+        u64::from(updater_slot_index),
         0,
         path_nodes,
         None,
@@ -558,11 +558,11 @@ fn validate_barrier_update_rejects_updater_identity_mismatch() -> Result<(), Cit
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
+    let updater_slot_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
-        + usize::try_from(updater_leaf)
+        + usize::try_from(updater_slot_index)
             .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
     let sibling_node = super::sibling_node(leaf_node)
         .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
@@ -588,7 +588,7 @@ fn validate_barrier_update_rejects_updater_identity_mismatch() -> Result<(), Cit
 
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
-        u64::from(updater_leaf),
+        u64::from(updater_slot_index),
         0,
         path_nodes,
         None,
@@ -666,11 +666,11 @@ fn validate_barrier_update_rejects_missing_author_pop_pk() -> Result<(), CityGEr
         joined: vec![leaf],
         revoked: Vec::new(),
     };
-    let updater_leaf = super::slot_index_for_leaf(&leaf, state.n_max);
+    let updater_slot_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
-        + usize::try_from(updater_leaf)
+        + usize::try_from(updater_slot_index)
             .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
     let sibling_node = super::sibling_node(leaf_node)
         .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
@@ -696,7 +696,7 @@ fn validate_barrier_update_rejects_missing_author_pop_pk() -> Result<(), CityGEr
 
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
-        u64::from(updater_leaf),
+        u64::from(updater_slot_index),
         0,
         path_nodes,
         None,
@@ -799,8 +799,8 @@ fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), Cit
     state.latest_root = Some(root);
     state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
 
-    let updater_leaf = u64::from(super::slot_index_for_leaf(&leaf, state.n_max));
-    let leaf_node = state.n_max.saturating_sub(1) + updater_leaf;
+    let updater_slot_index = u64::from(super::slot_index_for_leaf(&leaf, state.n_max));
+    let leaf_node = state.n_max.saturating_sub(1) + updater_slot_index;
     let parent_node = (leaf_node - 1) / 2;
     let path_nodes = vec![leaf_node, parent_node, 0];
     let mut snapshot_pre = super::build_all_blank_pk_entries(state.n_max)?;
@@ -819,7 +819,7 @@ fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), Cit
     let revoked_root = [0u8; 32];
     let rrh = super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
     let cover_payload = super::KemTreeCoverPayloadWire(
-        updater_leaf,
+        updater_slot_index,
         0,
         path_nodes,
         None,

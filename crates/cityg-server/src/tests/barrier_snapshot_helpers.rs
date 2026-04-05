@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn resolve_joins_since_reports_join_metadata() -> Result<(), CityGError> {
+fn resolve_join_occupancies_since_reports_join_metadata() -> Result<(), CityGError> {
     let mut server = crate::demo::demo_server();
     let bundle = cityg_client::demo::demo_bundle("alice")?;
     server.accept_epoch(&bundle)?;
@@ -22,7 +22,7 @@ fn resolve_joins_since_reports_join_metadata() -> Result<(), CityGError> {
 }
 
 #[test]
-fn resolve_joins_since_filters_post_genesis_join_history() -> Result<(), CityGError> {
+fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<(), CityGError> {
     let gid = [0x82; 32];
     let mut server = CityGServer::new(ServerConfig::new());
     let state = server.roster.groups.entry(gid.to_vec()).or_default();
@@ -84,7 +84,8 @@ fn resolve_joins_since_filters_post_genesis_join_history() -> Result<(), CityGEr
 }
 
 #[test]
-fn resolve_joins_since_prunes_resolved_and_revoked_join_history() -> Result<(), CityGError> {
+fn resolve_join_occupancies_since_prunes_resolved_and_revoked_join_history()
+-> Result<(), CityGError> {
     let gid = [0x85; 32];
     let mut server = CityGServer::new(ServerConfig::new());
     let leaf_active = colliding_cover_leaf(11);
@@ -146,7 +147,8 @@ fn resolve_joins_since_prunes_resolved_and_revoked_join_history() -> Result<(), 
 }
 
 #[test]
-fn resolve_joins_since_keeps_latest_generation_for_reused_slot() -> Result<(), CityGError> {
+fn resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot() -> Result<(), CityGError>
+{
     let gid = [0x86; 32];
     let mut server = CityGServer::new(ServerConfig::new());
     let old_leaf = colliding_cover_leaf(13);
@@ -204,7 +206,8 @@ fn resolve_joins_since_keeps_latest_generation_for_reused_slot() -> Result<(), C
 }
 
 #[test]
-fn resolve_joins_since_rejects_duplicate_active_cover_allocations() -> Result<(), CityGError> {
+fn resolve_join_occupancies_since_rejects_duplicate_active_cover_allocations()
+-> Result<(), CityGError> {
     let gid = [0x84; 32];
     let mut server = CityGServer::new(ServerConfig::new());
     let leaf_a = colliding_cover_leaf(5);
@@ -230,8 +233,8 @@ fn resolve_joins_since_rejects_duplicate_active_cover_allocations() -> Result<()
 }
 
 #[test]
-fn resolve_joins_since_genesis_without_snapshot_rejects_missing_artifact() -> Result<(), CityGError>
-{
+fn resolve_join_occupancies_since_genesis_without_snapshot_rejects_missing_artifact()
+-> Result<(), CityGError> {
     let gid = [0x81; 32];
     let mut server = CityGServer::new(ServerConfig::new());
     server
