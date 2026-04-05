@@ -43,6 +43,11 @@
           "expectation": "accept_multiple_generations_per_slot"
         },
         {
+          "crate": "cityg-api",
+          "test": "public_barrier_helpers_preserve_slot_generations_across_slot_reuse",
+          "expectation": "accept_public_helper_slot_reuse_end_to_end"
+        },
+        {
           "crate": "cityg-api-client",
           "test": "helper_completeness_attestation_binds_slot_generation",
           "expectation": "reject_generation_tamper"

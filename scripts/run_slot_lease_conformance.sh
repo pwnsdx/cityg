@@ -33,6 +33,9 @@ cargo test --locked -p cityg-api-client --test history_authority_extensions \
 cargo test --locked -p cityg-api-client --lib \
   tests::barrier_resolve_revoked_occupancies_preserves_multiple_generations_for_one_slot \
   -- --exact --nocapture
+cargo test --locked -p cityg-api --test integration \
+  public_barrier_helpers_preserve_slot_generations_across_slot_reuse \
+  -- --exact --nocapture
 cargo test --locked -p cityg-api-client --lib \
   tests::prepare_runtime_join_ticket_rejects_tampered_join_occupancy_slot_generation \
   -- --exact --nocapture
