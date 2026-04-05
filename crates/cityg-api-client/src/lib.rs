@@ -3590,6 +3590,67 @@ mod tests {
     }
 
     #[test]
+    fn prepare_runtime_join_ticket_rejects_tampered_join_occupancy_slot_generation() {
+        let mut ticket = join_ticket_ok_payload();
+        let current_history_commitment = ticket
+            .current_history_commitment
+            .clone()
+            .expect("join ticket current_history_commitment");
+        let history_commitment = HistoryCommitment {
+            history_view_id: array32(&current_history_commitment.history_view_id)
+                .expect("history_view_id"),
+            history_commitment_id: array32(&current_history_commitment.history_commitment_id)
+                .expect("history_commitment_id"),
+            prev_history_commitment_id: array32(
+                &current_history_commitment.prev_history_commitment_id,
+            )
+            .expect("prev_history_commitment_id"),
+            history_seq: current_history_commitment.history_seq,
+        };
+        let authority = build_test_history_authority(
+            history_commitment,
+            [0x41; 32],
+            ticket.barrier_version,
+            array32(&ticket.kem_tree_hash_after).expect("kem_tree_hash_after"),
+        );
+        let join_record = BarrierJoinOccupancyRecord {
+            device_pk: vec![0xAA; 32],
+            leaf_index: 7,
+            slot_generation: 2,
+            ek_leaf: vec![0xBB; 1184],
+        };
+        ticket.current_join_occupancies = vec![pb::BarrierJoinOccupancyRecord {
+            device_pk: join_record.device_pk.clone(),
+            slot_index: join_record.leaf_index,
+            slot_generation: join_record.slot_generation,
+            ek_leaf: join_record.ek_leaf.clone(),
+        }];
+        ticket.current_join_occupancies_completeness_attestation =
+            build_test_helper_completeness_attestation(
+                &authority,
+                HELPER_KIND_JOIN_OCCUPANCIES_SINCE,
+                &history_commitment,
+                0,
+                1,
+                JoinsSinceSelector {
+                    prev_barrier_version: ticket.barrier_version,
+                    records: std::slice::from_ref(&join_record),
+                },
+            );
+        ticket = finalize_join_ticket_payload(ticket);
+        ticket.current_join_occupancies[0].slot_generation = 3;
+
+        let err = prepare_runtime_join_ticket(&ticket)
+            .expect_err("tampered join occupancy slot_generation must fail closed");
+
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("history authority signature verification failed")
+        ));
+    }
+
+    #[test]
     fn ensure_supported_attested_current_state_extension_requires_matching_presence() {
         ensure_supported_attested_current_state_extension("join ticket", None, &[])
             .expect("empty attestation without extension must be allowed");
