@@ -20,6 +20,11 @@ impl AppModel {
         } else {
             rgb(UI_PANEL_TEXT)
         };
+        let pending_trace_summary = self
+            .session
+            .as_ref()
+            .and_then(|session| session.barrier_state.last_pending_history_trace.as_ref())
+            .map(BarrierPendingHistoryTrace::user_summary);
 
         let placeholder = if let Some(issue) = recovery_issue {
             match issue {
@@ -52,38 +57,45 @@ impl AppModel {
             .border_color(rgb(UI_PANEL_BORDER))
             .bg(ui_toolbar_fill(self.window_active));
 
-        row = row.child(
-            div()
-                .flex_grow()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .px(px(14.0))
-                .py(px(12.0))
-                .rounded(px(14.0))
-                .border(px(1.0))
-                .border_color(border_color)
-                .bg(background)
-                .cursor(CursorStyle::IBeam)
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(UI_MUTED_TEXT))
-                        .child("Message"),
-                )
-                .child(
-                    div()
-                        .text_size(px(15.0))
-                        .line_height(px(20.0))
-                        .text_color(text_color)
-                        .child(self.render_native_text_field(
-                            cx,
-                            NativeTextFieldKind::Composer,
-                            placeholder,
-                        )),
-                ),
-        );
+        let mut composer_panel = div()
+            .flex_grow()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(14.0))
+            .py(px(12.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(border_color)
+            .bg(background)
+            .cursor(CursorStyle::IBeam)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(UI_MUTED_TEXT))
+                    .child("Message"),
+            )
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .line_height(px(20.0))
+                    .text_color(text_color)
+                    .child(self.render_native_text_field(
+                        cx,
+                        NativeTextFieldKind::Composer,
+                        placeholder,
+                    )),
+            );
+        if let Some(summary) = pending_trace_summary {
+            composer_panel = composer_panel.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
+                    .child(summary),
+            );
+        }
+        row = row.child(composer_panel);
 
         let send_disabled = barrier_pending
             || !self.composer.is_ready()
