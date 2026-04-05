@@ -249,11 +249,11 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
             revocation_roots_hash: &[0xDD; 32],
             records: &[
                 BarrierRevokedOccupancyRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 },
                 BarrierRevokedOccupancyRecord {
-                    leaf_index: 7,
+                    slot_index: 7,
                     slot_generation: 2,
                 },
             ],
@@ -279,11 +279,11 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         2,
         &[
             BarrierRevokedOccupancyRecord {
-                leaf_index: 1,
+                slot_index: 1,
                 slot_generation: 0,
             },
             BarrierRevokedOccupancyRecord {
-                leaf_index: 7,
+                slot_index: 7,
                 slot_generation: 2,
             },
         ],
@@ -291,7 +291,7 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
 
     let join_record = BarrierJoinOccupancyRecord {
         device_pk: vec![0xAA; 32],
-        leaf_index: 9,
+        slot_index: 9,
         slot_generation: 0,
         ek_leaf: vec![0xBB; 1184],
     };
@@ -361,11 +361,11 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
 
     let revoked_records = [
         BarrierRevokedOccupancyRecord {
-            leaf_index: 7,
+            slot_index: 7,
             slot_generation: 0,
         },
         BarrierRevokedOccupancyRecord {
-            leaf_index: 7,
+            slot_index: 7,
             slot_generation: 2,
         },
     ];
@@ -411,7 +411,7 @@ fn helper_completeness_attestation_binds_slot_generation() -> Result<(), Box<dyn
 
     let join_record = BarrierJoinOccupancyRecord {
         device_pk: vec![0xAA; 32],
-        leaf_index: 9,
+        slot_index: 9,
         slot_generation: 2,
         ek_leaf: vec![0xBB; 1184],
     };

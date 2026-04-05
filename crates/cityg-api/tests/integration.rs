@@ -559,8 +559,8 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
         1,
         "historical join helper should prune the superseded occupancy"
     );
-    assert_eq!(u64::from(joins.records[0].leaf_index), alice.slot_lease.slot_index);
-    assert_eq!(u64::from(joins.records[0].leaf_index), bob.slot_lease.slot_index);
+    assert_eq!(u64::from(joins.records[0].slot_index), alice.slot_lease.slot_index);
+    assert_eq!(u64::from(joins.records[0].slot_index), bob.slot_lease.slot_index);
     assert_eq!(
         joins.records[0].slot_generation,
         bob.slot_lease.slot_generation

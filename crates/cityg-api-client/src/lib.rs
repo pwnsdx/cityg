@@ -512,7 +512,7 @@ impl CitygApiClient {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BarrierJoinOccupancyRecord {
     pub device_pk: Vec<u8>,
-    pub leaf_index: u32,
+    pub slot_index: u32,
     pub slot_generation: u64,
     pub ek_leaf: Vec<u8>,
 }
@@ -523,7 +523,7 @@ fn to_core_join_snapshot_record(
     record: &BarrierJoinOccupancyRecord,
 ) -> cityg_client::barrier::BarrierJoinSnapshotRecord {
     cityg_client::barrier::BarrierJoinSnapshotRecord {
-        leaf_index: record.leaf_index,
+        leaf_index: record.slot_index,
         slot_generation: record.slot_generation,
         ek_leaf: record.ek_leaf.clone(),
     }
@@ -541,7 +541,7 @@ pub fn to_core_join_snapshot_records(
 /// Revoked slot occupancy returned by barrier revocation enumeration endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BarrierRevokedOccupancyRecord {
-    pub leaf_index: u32,
+    pub slot_index: u32,
     pub slot_generation: u64,
 }
 
@@ -555,7 +555,7 @@ fn to_core_revoked_snapshot_record(
     record: &BarrierRevokedOccupancyRecord,
 ) -> cityg_client::barrier::BarrierRevokedSnapshotRecord {
     cityg_client::barrier::BarrierRevokedSnapshotRecord {
-        leaf_index: record.leaf_index,
+        leaf_index: record.slot_index,
         slot_generation: record.slot_generation,
     }
 }
@@ -1943,7 +1943,7 @@ mod tests {
             .iter()
             .map(|record| BarrierJoinOccupancyRecord {
                 device_pk: record.device_pk.clone(),
-                leaf_index: record.slot_index,
+                slot_index: record.slot_index,
                 slot_generation: record.slot_generation,
                 ek_leaf: record.ek_leaf.clone(),
             })
@@ -1952,7 +1952,7 @@ mod tests {
             .current_revoked_occupancies
             .iter()
             .map(|record| BarrierRevokedOccupancyRecord {
-                leaf_index: record.slot_index,
+                slot_index: record.slot_index,
                 slot_generation: record.slot_generation,
             })
             .collect::<Vec<_>>();
@@ -2584,7 +2584,7 @@ mod tests {
                 let page_records_core = page_records
                     .iter()
                     .map(|record| BarrierRevokedOccupancyRecord {
-                        leaf_index: record.slot_index,
+                        slot_index: record.slot_index,
                         slot_generation: record.slot_generation,
                     })
                     .collect::<Vec<_>>();
@@ -2662,7 +2662,7 @@ mod tests {
                     .iter()
                     .map(|record| BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
-                        leaf_index: record.slot_index,
+                        slot_index: record.slot_index,
                         slot_generation: record.slot_generation,
                         ek_leaf: record.ek_leaf.clone(),
                     })
@@ -3574,15 +3574,15 @@ mod tests {
             prepared.current_revoked_occupancies,
             vec![
                 BarrierRevokedOccupancyRecord {
-                    leaf_index: 7,
+                    slot_index: 7,
                     slot_generation: 3,
                 },
                 BarrierRevokedOccupancyRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 },
                 BarrierRevokedOccupancyRecord {
-                    leaf_index: 7,
+                    slot_index: 7,
                     slot_generation: 1,
                 },
             ]
@@ -3615,13 +3615,13 @@ mod tests {
         );
         let join_record = BarrierJoinOccupancyRecord {
             device_pk: vec![0xAA; 32],
-            leaf_index: 7,
+            slot_index: 7,
             slot_generation: 2,
             ek_leaf: vec![0xBB; 1184],
         };
         ticket.current_join_occupancies = vec![pb::BarrierJoinOccupancyRecord {
             device_pk: join_record.device_pk.clone(),
-            slot_index: join_record.leaf_index,
+            slot_index: join_record.slot_index,
             slot_generation: join_record.slot_generation,
             ek_leaf: join_record.ek_leaf.clone(),
         }];
@@ -3675,11 +3675,11 @@ mod tests {
             array32(&ticket.kem_tree_hash_after).expect("kem_tree_hash_after"),
         );
         let revoked_record = BarrierRevokedOccupancyRecord {
-            leaf_index: 7,
+            slot_index: 7,
             slot_generation: 2,
         };
         ticket.current_revoked_occupancies = vec![pb::BarrierRevokedOccupancyRecord {
-            slot_index: revoked_record.leaf_index,
+            slot_index: revoked_record.slot_index,
             slot_generation: revoked_record.slot_generation,
         }];
         ticket.current_revoked_occupancies_completeness_attestation =
@@ -3924,11 +3924,11 @@ mod tests {
             revoked.records,
             vec![
                 BarrierRevokedOccupancyRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 },
                 BarrierRevokedOccupancyRecord {
-                    leaf_index: 7,
+                    slot_index: 7,
                     slot_generation: 3,
                 }
             ]
@@ -3942,8 +3942,8 @@ mod tests {
         assert_eq!(joins.history_view_id, [0xD1; 32]);
         assert_eq!(joins.history_commitment.history_commitment_id, [0xE1; 32]);
         assert_eq!(joins.records.len(), 2);
-        assert_eq!(joins.records[0].leaf_index, 9);
-        assert_eq!(joins.records[1].leaf_index, 10);
+        assert_eq!(joins.records[0].slot_index, 9);
+        assert_eq!(joins.records[1].slot_index, 10);
         assert_eq!(joins.records[0].ek_leaf.len(), 1184);
         let tree = client
             .barrier_fetch_public_tree(
@@ -5247,7 +5247,7 @@ mod tests {
             RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0xCC; 32],
                 records: &[BarrierRevokedOccupancyRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 }],
             },
@@ -5261,7 +5261,7 @@ mod tests {
             RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0xCC; 32],
                 records: &[BarrierRevokedOccupancyRecord {
-                    leaf_index: 2,
+                    slot_index: 2,
                     slot_generation: 0,
                 }],
             },
@@ -5390,7 +5390,7 @@ mod tests {
             RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0xCC; 32],
                 records: &[BarrierRevokedOccupancyRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 0,
                 }],
             },
@@ -5404,7 +5404,7 @@ mod tests {
             RevokedOccupanciesSelector {
                 revocation_roots_hash: &[0xCC; 32],
                 records: &[BarrierRevokedOccupancyRecord {
-                    leaf_index: 1,
+                    slot_index: 1,
                     slot_generation: 2,
                 }],
             },
@@ -5481,9 +5481,9 @@ mod tests {
             )
             .await?;
         assert_eq!(resolved.records.len(), 2);
-        assert_eq!(resolved.records[0].leaf_index, 1);
+        assert_eq!(resolved.records[0].slot_index, 1);
         assert_eq!(resolved.records[0].slot_generation, 0);
-        assert_eq!(resolved.records[1].leaf_index, 1);
+        assert_eq!(resolved.records[1].slot_index, 1);
         assert_eq!(resolved.records[1].slot_generation, 2);
 
         handle.abort();
@@ -5683,7 +5683,7 @@ mod tests {
                 prev_barrier_version: 0,
                 records: &[BarrierJoinOccupancyRecord {
                     device_pk: vec![0xAA; 32],
-                    leaf_index: 9,
+                    slot_index: 9,
                     slot_generation: 0,
                     ek_leaf: vec![0xBB; 1184],
                 }],
@@ -5699,7 +5699,7 @@ mod tests {
                 prev_barrier_version: 0,
                 records: &[BarrierJoinOccupancyRecord {
                     device_pk: vec![0xAB; 32],
-                    leaf_index: 10,
+                    slot_index: 10,
                     slot_generation: 0,
                     ek_leaf: vec![0xBC; 1184],
                 }],

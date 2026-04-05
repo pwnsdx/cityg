@@ -289,7 +289,7 @@ impl CitygApiClient {
                 .iter()
                 .map(|record| pb::BarrierJoinOccupancyRecord {
                     device_pk: record.device_pk.clone(),
-                    slot_index: record.leaf_index,
+                    slot_index: record.slot_index,
                     slot_generation: record.slot_generation,
                     ek_leaf: record.ek_leaf.clone(),
                 })
@@ -299,7 +299,7 @@ impl CitygApiClient {
             revoked_records: revoked_records
                 .iter()
                 .map(|record| pb::BarrierRevokedOccupancyRecord {
-                    slot_index: record.leaf_index,
+                    slot_index: record.slot_index,
                     slot_generation: record.slot_generation,
                 })
                 .collect(),
@@ -403,7 +403,7 @@ impl CitygApiClient {
                 .iter()
                 .map(
                     |record: &PbBarrierRevokedOccupancyRecord| BarrierRevokedOccupancyRecord {
-                        leaf_index: record.slot_index,
+                        slot_index: record.slot_index,
                         slot_generation: record.slot_generation,
                     },
                 )
@@ -639,7 +639,7 @@ impl CitygApiClient {
                 .map(
                     |record: &PbBarrierJoinOccupancyRecord| BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
-                        leaf_index: record.slot_index,
+                        slot_index: record.slot_index,
                         slot_generation: record.slot_generation,
                         ek_leaf: record.ek_leaf.clone(),
                     },
