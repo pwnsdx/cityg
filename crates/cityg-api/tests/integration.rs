@@ -11,7 +11,9 @@ use cityg_api_client::{
 use cityg_client::{
     CityGClient, ClientEpochBundle,
     barrier::compute_revocation_roots_hash,
-    barrier_merge_bundle::{BarrierMergeBundleInputs, build_barrier_merge_bundle},
+    barrier_merge_bundle::{
+        BarrierMergeBundleInputs, PreparedBarrierMergeBundle, build_barrier_merge_bundle,
+    },
     demo::{DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public},
     witness::SrxInputsOwned,
 };
@@ -170,6 +172,7 @@ struct JoinedMember {
     bundle: ClientEpochBundle,
     leaf_id: [u8; 32],
     slot_lease: SlotLease,
+    join_finalize_auth_token: [u8; 32],
     current_revoked_occupancies: Vec<SlotLease>,
     pop_public_key: Vec<u8>,
     pop_secret_key: dilithium5::SecretKey,
@@ -388,6 +391,10 @@ async fn join_room_member_with_identity(
             slot_index: ticket.slot_index,
             slot_generation: ticket.slot_generation,
         },
+        join_finalize_auth_token: array32(
+            "join_finalize_auth_token",
+            &ticket.join_finalize_auth_token,
+        )?,
         current_revoked_occupancies: ticket
             .current_revoked_occupancies
             .iter()
@@ -401,6 +408,83 @@ async fn join_room_member_with_identity(
         vrf_secret_key,
         vrf_public_key,
         forward_state: fs_state,
+    })
+}
+
+async fn build_join_finalize_bundle(
+    client: &CitygApiClient,
+    room_id: &str,
+    member: &JoinedMember,
+    join_finalize_auth_token: [u8; 32],
+    barrier_update_reason: u64,
+) -> Result<PreparedBarrierMergeBundle> {
+    let gid = array32("gid", &hex::decode(room_id)?)?;
+    let ticket = client.merge_ticket_refresh(room_id, &member.leaf_id).await?;
+    let fs_ec = header_u64_field(&member.bundle, hdr::HDR_FS_EC, "fs_ec")?;
+    let fs_epoch_commit = header_bytes32_field(
+        &member.bundle,
+        hdr::HDR_FS_EPOCH_COMMIT,
+        "fs_epoch_commit",
+    )?;
+    let fs_dev_prev_commit = header_bytes32_field(
+        &member.bundle,
+        hdr::HDR_FS_DEV_COMMIT,
+        "fs_dev_prev_commit",
+    )?;
+
+    let prepared_runtime = ticket.prepare_origin_runtime(
+        cityg_api_client::PrepareOriginMergeTicketInput {
+            operation_label: "join_finalize",
+            local_barrier_version: ticket.barrier_version,
+            local_kem_tree_hash_after: ticket.kem_tree_hash_after,
+            local_current_history_commitment: Some(&ticket.current_history_commitment),
+            local_current_history_authority_extension: ticket.history_authority_extension.clone(),
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+            stored_max_barrier_update_bytes: 0,
+            join_finalize_auth_token: Some(join_finalize_auth_token),
+        },
+    )?;
+    let prepared_snapshot = client
+        .barrier_prepare_snapshot(prepared_runtime.snapshot_preparation_request(
+            room_id,
+            &gid,
+            &member.leaf_id,
+            member.pop_secret_key.as_bytes(),
+            barrier_update_reason,
+            "join_finalize",
+        ))
+        .await?;
+
+    let next_barrier_version = prepared_runtime.barrier_version.saturating_add(1);
+    let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
+        &gid,
+        member.pop_public_key.as_slice(),
+        &member.pop_secret_key,
+        member.vrf_secret_key.as_slice(),
+        member.vrf_public_key.as_slice(),
+        fs_ec,
+        fs_epoch_commit,
+        fs_dev_prev_commit,
+        next_barrier_version,
+    );
+    build_barrier_merge_bundle(BarrierMergeBundleInputs {
+        header: prepared_snapshot.header,
+        parts: prepared_orchestration.parts,
+        params: prepared_orchestration.params,
+        forward_state: member.forward_state.clone(),
+        parities: prepared_runtime.parities.as_slice(),
+        witness_bytes: prepared_runtime.witness_bytes.as_deref(),
+        pivot: &prepared_snapshot.pivot,
+        gid: &gid,
+        cat: &prepared_snapshot.cat,
+        parent_root: &prepared_snapshot.parent_root,
+        current_k_fs: None,
+        next_barrier_version,
+        barrier_key: &prepared_snapshot.barrier_update.k_barrier_new,
+        barrier_update_reason,
+        disable_autonomic_evolve: false,
     })
 }
 
@@ -583,6 +667,114 @@ async fn public_barrier_helpers_preserve_slot_generations_across_slot_reuse() ->
         revoked.records.is_empty(),
         "reclaim join must clear the superseded revoked occupancy from the current helper view"
     );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn public_stale_join_finalize_auth_rejected_after_slot_reuse() -> Result<()> {
+    let port = next_free_local_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let room_id = hex::encode([0xA7u8; 32]);
+    bootstrap_room(&client, &room_id, kbroad_public()).await?;
+
+    let alice = join_room_member(&client, &room_id, "alice", 0xB1).await?;
+    client
+        .accept_epoch_bundle(&alice.bundle)
+        .await
+        .expect("accept alice");
+
+    let mut bob = join_room_member(&client, &room_id, "bob", 0xB2).await?;
+    client
+        .accept_epoch_bundle(&bob.bundle)
+        .await
+        .expect("accept bob");
+
+    let bob_finalize = build_join_finalize_bundle(
+        &client,
+        &room_id,
+        &bob,
+        bob.join_finalize_auth_token,
+        2,
+    )
+    .await?;
+    assert_eq!(
+        header_u64_field(
+            &bob_finalize.bundle,
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            "barrier_update_reason",
+        )?,
+        2,
+        "fresh joiner finalize should publish reason=2",
+    );
+    client
+        .accept_epoch_bundle(&bob_finalize.bundle)
+        .await
+        .expect("accept bob finalize");
+    bob.bundle = bob_finalize.bundle.clone();
+    bob.forward_state = bob_finalize.forward_state_after;
+
+    let bob_leave = build_leave_bundle(&client, &room_id, &bob).await?;
+    client
+        .accept_epoch_bundle(&bob_leave)
+        .await
+        .expect("accept bob leave");
+
+    let charlie = join_room_member(&client, &room_id, "charlie", 0xB3).await?;
+    assert_eq!(
+        charlie.current_revoked_occupancies,
+        vec![bob.slot_lease],
+        "reused-slot join should surface the revoked occupancy it supersedes"
+    );
+    client
+        .accept_epoch_bundle(&charlie.bundle)
+        .await
+        .expect("accept charlie");
+
+    let reclaim_bundle = build_join_finalize_bundle(
+        &client,
+        &room_id,
+        &charlie,
+        charlie.join_finalize_auth_token,
+        0,
+    )
+    .await?;
+    assert_eq!(
+        header_u64_field(
+            &reclaim_bundle.bundle,
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            "barrier_update_reason",
+        )?,
+        0,
+        "reused-slot joiner finalize should publish reason=0",
+    );
+    let mut stale_reclaim_bundle = reclaim_bundle.bundle.clone();
+    stale_reclaim_bundle.header_map.insert(
+        hdr::HDR_JOIN_FINALIZE_AUTH,
+        Value::Bytes(bob.join_finalize_auth_token.to_vec()),
+    );
+
+    let (status, freeze_reason) = match client.accept_epoch_bundle(&stale_reclaim_bundle).await {
+        Err(Error::HttpStatus {
+            status,
+            freeze_reason,
+            ..
+        }) => (status, freeze_reason),
+        other => {
+            return Err(anyhow!(
+                "expected stale join_finalize_auth rejection, got {:?}",
+                other
+            ));
+        }
+    };
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(freeze_reason.as_deref(), Some("barrier_updater_invalid"));
 
     handle.abort();
     let _ = handle.await;

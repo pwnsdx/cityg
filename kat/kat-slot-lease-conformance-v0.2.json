@@ -25,6 +25,11 @@
           "crate": "cityg-server",
           "test": "tests::slot_reuse_rejects_stale_join_finalize_auth_token",
           "expectation": "reject_stale_join_finalize_auth"
+        },
+        {
+          "crate": "cityg-api",
+          "test": "public_stale_join_finalize_auth_rejected_after_slot_reuse",
+          "expectation": "reject_stale_join_finalize_auth_over_api"
         }
       ]
     },

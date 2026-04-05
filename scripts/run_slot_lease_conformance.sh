@@ -16,6 +16,9 @@ cargo test --locked -p cityg-server \
 cargo test --locked -p cityg-server \
   slot_reuse_rejects_stale_join_finalize_auth_token \
   -- --nocapture
+cargo test --locked -p cityg-api --test integration \
+  public_stale_join_finalize_auth_rejected_after_slot_reuse \
+  -- --exact --nocapture
 cargo test --locked -p cityg-server \
   barrier_snapshot_helpers::resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot \
   -- --nocapture
