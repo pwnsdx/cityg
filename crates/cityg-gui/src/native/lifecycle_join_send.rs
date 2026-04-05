@@ -177,8 +177,13 @@ impl AppModel {
                         .unwrap_or(true);
                     if needs_update {
                         session.last_fetch_timestamp_ms = Some(ts);
-                        if let Err(err) = persist_session(session) {
-                            warn!("failed to persist session after send: {err:?}");
+                        if let Err(err) = persist_replay_progress(
+                            &session.server_url,
+                            &session.room_id,
+                            session.last_fetch_timestamp_ms,
+                            &session.msg_replay_state,
+                        ) {
+                            warn!("failed to persist replay progress after send: {err:?}");
                         }
                     }
                 }

@@ -143,6 +143,63 @@ fn gpui_handle_fetch_result_requires_replay_persistence_before_release(cx: &mut 
 }
 
 #[gpui::test]
+fn gpui_on_send_finished_persists_replay_progress_without_touching_session_snapshot(
+    cx: &mut TestAppContext,
+) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+    let mut session = build_test_session(
+        0xD15D,
+        "http://127.0.0.1:18083",
+        "23aabbccddeeff00112233445566778899aabbccddeeff001122334455667799",
+        "send-persist",
+    )
+    .expect("build session");
+    session.last_fetch_timestamp_ms = None;
+
+    let blocking_path =
+        session_file_path(&session.server_url, &session.room_id).expect("session path");
+    fs::create_dir_all(&blocking_path).expect("create blocking path");
+
+    view.update(cx, |model, view_cx| {
+        model.session = Some(session.clone());
+        let pending_id = model.queue_pending_message(&session, "hello");
+        model.on_send_finished(
+            Ok(ChatMessageEntry {
+                sender_leaf: Some(session.leaf_id),
+                fallback_label: session.alias.clone(),
+                plaintext: "hello".to_string(),
+                ciphertext_hex: "cafe".to_string(),
+                timestamp_ms: 2_100_000,
+                delivery: MessageDelivery::Sent,
+                pending_id: None,
+            }),
+            pending_id,
+            view_cx,
+        );
+
+        assert_eq!(
+            model
+                .session
+                .as_ref()
+                .and_then(|s| s.last_fetch_timestamp_ms),
+            Some(2_100_000),
+            "send completion should still advance the local watermark"
+        );
+        let replay_path =
+            replay_progress_file_path(&session.server_url, &session.room_id).expect("replay path");
+        assert!(
+            replay_path.exists(),
+            "send completion should persist replay progress without rewriting the main session snapshot"
+        );
+    });
+}
+
+#[gpui::test]
 fn gpui_keystroke_routing_covers_clipboard_shortcuts(cx: &mut TestAppContext) {
     cx.update(tokio_bridge::init);
     let temp_dir = TempDir::new().expect("create temp dir");
