@@ -219,7 +219,7 @@ pub(crate) fn prune_join_history(state: &mut GroupState) -> Result<(), CityGErro
         ));
     }
     let mut pruned: Vec<JoinLeafHistoryRecord> = latest_by_leaf.into_values().collect();
-    pruned.sort_by_key(|record| (record.leaf_index, record.barrier_version, record.leaf_id));
+    pruned.sort_by_key(|record| (record.slot_index, record.barrier_version, record.leaf_id));
     state.join_history = pruned;
     Ok(())
 }

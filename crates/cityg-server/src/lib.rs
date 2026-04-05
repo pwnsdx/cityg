@@ -1936,7 +1936,7 @@ impl CityGServer {
                 state.join_history.push(JoinLeafHistoryRecord {
                     leaf_id: *leaf,
                     barrier_version: barrier_version.saturating_add(1),
-                    leaf_index: lease.slot_index,
+                    slot_index: lease.slot_index,
                     slot_generation: lease.slot_generation,
                     device_pk: device_pk.clone(),
                     ek_leaf: ek_leaf.clone(),
@@ -2978,17 +2978,17 @@ impl CityGServer {
             )?;
             for leaf in snapshot.members() {
                 let lease = require_active_slot_lease(state, leaf)?;
-                let leaf_index = lease.slot_index;
+                let slot_index = lease.slot_index;
                 checked_insert_unique(
                     &mut by_leaf,
-                    leaf_index,
+                    slot_index,
                     BarrierJoinOccupancyRecord {
                         device_pk: state
                             .leaf_device_pk
                             .get(leaf)
                             .cloned()
                             .unwrap_or_else(|| leaf.to_vec()),
-                        slot_index: leaf_index,
+                        slot_index,
                         slot_generation: lease.slot_generation,
                         ek_leaf: state
                             .leaf_barrier_public
@@ -3011,10 +3011,10 @@ impl CityGServer {
             {
                 checked_insert_unique(
                     &mut by_leaf,
-                    record.leaf_index,
+                    record.slot_index,
                     BarrierJoinOccupancyRecord {
                         device_pk: record.device_pk.clone(),
-                        slot_index: record.leaf_index,
+                        slot_index: record.slot_index,
                         slot_generation: record.slot_generation,
                         ek_leaf: record.ek_leaf.clone(),
                     },
@@ -5387,10 +5387,10 @@ fn active_cover_leaf_allocations(
     let mut by_index = BTreeMap::new();
     if let Some(snapshot) = state.latest_snapshot() {
         for leaf in snapshot.members() {
-            let leaf_index = require_active_slot_lease(state, leaf)?.slot_index;
+            let slot_index = require_active_slot_lease(state, leaf)?.slot_index;
             checked_insert_unique(
                 &mut by_index,
-                leaf_index,
+                slot_index,
                 *leaf,
                 DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
             )?;
@@ -5545,8 +5545,8 @@ fn ensure_join_slot_indices_available(
         }
     }
     for leaf in joined {
-        let leaf_index = require_pending_or_active_slot_lease(state, leaf)?.slot_index;
-        if !reserved.insert(leaf_index) {
+        let slot_index = require_pending_or_active_slot_lease(state, leaf)?.slot_index;
+        if !reserved.insert(slot_index) {
             return Err(CityGError::InvalidInput(
                 COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR,
             ));
@@ -6077,7 +6077,7 @@ fn validate_barrier_update_against_roster(
                 barrier_genesis_required_freeze_error,
             )?;
             for leaf in snapshot.members() {
-                let leaf_index = require_active_slot_lease(state_before, leaf)?.slot_index;
+                let slot_index = require_active_slot_lease(state_before, leaf)?.slot_index;
                 let ek_leaf = state_before
                     .leaf_barrier_public
                     .get(leaf)
@@ -6085,7 +6085,7 @@ fn validate_barrier_update_against_roster(
                     .unwrap_or_default();
                 checked_insert_unique(
                     &mut by_leaf,
-                    leaf_index,
+                    slot_index,
                     ek_leaf,
                     DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
                 )?;
@@ -6097,7 +6097,7 @@ fn validate_barrier_update_against_roster(
                 {
                     checked_insert_unique(
                         &mut by_leaf,
-                        record.leaf_index,
+                        record.slot_index,
                         record.ek_leaf.clone(),
                         DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
                     )?;
@@ -6110,10 +6110,10 @@ fn validate_barrier_update_against_roster(
             .map(ToOwned::to_owned)
             .unwrap_or_default();
         for leaf in &delta.joined {
-            let leaf_index = require_pending_or_active_slot_lease(state_before, leaf)?.slot_index;
+            let slot_index = require_pending_or_active_slot_lease(state_before, leaf)?.slot_index;
             checked_insert_unique(
                 &mut by_leaf,
-                leaf_index,
+                slot_index,
                 join_ek.clone(),
                 DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
             )?;
@@ -6122,7 +6122,7 @@ fn validate_barrier_update_against_roster(
         // RevokedLeafSet for snapshot construction: committed revoked set plus current delta.
         let mut revoked_indices: BTreeSet<usize> = committed_revoked_slot_indices(state_before)
             .into_iter()
-            .map(|leaf_index| leaf_index as usize)
+            .map(|slot_index| slot_index as usize)
             .collect();
         for leaf in &delta.revoked {
             revoked_indices
@@ -6149,8 +6149,8 @@ fn validate_barrier_update_against_roster(
             } else {
                 build_all_blank_pk_entries_cow(tree_n_max)?
             };
-            for (leaf_index, ek_leaf) in &by_leaf_for_snapshot {
-                let leaf_node = leaf_base.saturating_add(*leaf_index as usize);
+            for (slot_index, ek_leaf) in &by_leaf_for_snapshot {
+                let leaf_node = leaf_base.saturating_add(*slot_index as usize);
                 if let Some(slot) = snapshot_base.get_mut(leaf_node) {
                     *slot = Cow::Owned(ek_leaf.clone());
                 }
@@ -6167,7 +6167,7 @@ fn validate_barrier_update_against_roster(
         let committed_revoked_indices: BTreeSet<usize> =
             committed_revoked_slot_indices(state_before)
                 .into_iter()
-                .map(|leaf_index| leaf_index as usize)
+                .map(|slot_index| slot_index as usize)
                 .collect();
 
         let author_pop_pk = header
@@ -6238,8 +6238,8 @@ fn validate_barrier_update_against_roster(
                 } else {
                     build_all_blank_pk_entries_cow(tree_n_max)?
                 };
-                for (leaf_index, ek_leaf) in &by_leaf_for_snapshot {
-                    let leaf_node = leaf_base.saturating_add(*leaf_index as usize);
+                for (slot_index, ek_leaf) in &by_leaf_for_snapshot {
+                    let leaf_node = leaf_base.saturating_add(*slot_index as usize);
                     if let Some(slot) = snapshot_base.get_mut(leaf_node) {
                         *slot = Cow::Owned(ek_leaf.clone());
                     }
@@ -8267,7 +8267,7 @@ mod tests {
                 let leaf_base = usize::try_from(group.n_max)
                     .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?
                     .saturating_sub(1);
-                let leaf_node = leaf_base.saturating_add(record.leaf_index as usize);
+                let leaf_node = leaf_base.saturating_add(record.slot_index as usize);
                 let slot = current_entries
                     .get_mut(leaf_node)
                     .ok_or(CityGError::InvalidInput("barrier leaf index out of bounds"))?;

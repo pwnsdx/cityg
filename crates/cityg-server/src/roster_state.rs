@@ -233,7 +233,7 @@ impl Default for GroupState {
 pub(crate) struct JoinLeafHistoryRecord {
     pub(crate) leaf_id: [u8; 32],
     pub(crate) barrier_version: u64,
-    pub(crate) leaf_index: u32,
+    pub(crate) slot_index: u32,
     pub(crate) slot_generation: u64,
     pub(crate) device_pk: Vec<u8>,
     pub(crate) ek_leaf: Vec<u8>,

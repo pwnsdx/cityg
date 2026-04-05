@@ -20,9 +20,9 @@ fn barrier_snapshot_helpers_cover_fallback_and_parser_paths() -> Result<(), City
 
     let pk_entries = super::build_pk_entries(&state)?;
     assert_eq!(pk_entries.len(), 7);
-    let leaf_index = usize::try_from(super::slot_index_for_leaf(&leaf, state.n_max))
+    let slot_index = usize::try_from(super::slot_index_for_leaf(&leaf, state.n_max))
         .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
-    assert_eq!(pk_entries[3 + leaf_index], leaf_ek);
+    assert_eq!(pk_entries[3 + slot_index], leaf_ek);
     let group_hash = super::compute_group_barrier_tree_hash(&state)?;
     let direct_hash = super::compute_barrier_tree_hash(state.n_max, pk_entries.as_slice())?;
     assert_eq!(group_hash, direct_hash);

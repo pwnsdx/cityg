@@ -229,11 +229,11 @@ fn validate_barrier_update_rejects_join_finalize_reason_for_non_joiner() -> Resu
     let leaf_ek = vec![0xA5; 1184];
     state.leaf_device_pk.insert(leaf, pop_pk.clone());
 
-    let leaf_index = super::slot_index_for_leaf(&leaf, state.n_max);
+    let slot_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
         .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
     let leaf_node = leaf_base
-        + usize::try_from(leaf_index)
+        + usize::try_from(slot_index)
             .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
     let sibling_node = super::sibling_node(leaf_node)
         .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
@@ -259,7 +259,7 @@ fn validate_barrier_update_rejects_join_finalize_reason_for_non_joiner() -> Resu
 
     let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
     let cover_payload = super::KemTreeCoverPayloadWire(
-        u64::from(leaf_index),
+        u64::from(slot_index),
         0,
         path_nodes,
         None,

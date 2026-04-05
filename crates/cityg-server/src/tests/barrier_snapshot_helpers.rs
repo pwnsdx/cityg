@@ -42,7 +42,7 @@ fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<
         crate::JoinLeafHistoryRecord {
             leaf_id: colliding_cover_leaf(7),
             barrier_version: 1,
-            leaf_index: 7,
+            slot_index: 7,
             slot_generation: 0,
             device_pk: vec![0x11; 4],
             ek_leaf: vec![0x21; 1184],
@@ -50,7 +50,7 @@ fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<
         crate::JoinLeafHistoryRecord {
             leaf_id: leaf_v2,
             barrier_version: 2,
-            leaf_index: 8,
+            slot_index: 8,
             slot_generation: 0,
             device_pk: vec![0x12; 4],
             ek_leaf: vec![0x22; 1184],
@@ -58,7 +58,7 @@ fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<
         crate::JoinLeafHistoryRecord {
             leaf_id: leaf_v3a,
             barrier_version: 3,
-            leaf_index: 10,
+            slot_index: 10,
             slot_generation: 0,
             device_pk: vec![0x13; 4],
             ek_leaf: vec![0x23; 1184],
@@ -66,7 +66,7 @@ fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<
         crate::JoinLeafHistoryRecord {
             leaf_id: leaf_v3b,
             barrier_version: 3,
-            leaf_index: 9,
+            slot_index: 9,
             slot_generation: 0,
             device_pk: vec![0x14; 4],
             ek_leaf: vec![0x24; 1184],
@@ -105,7 +105,7 @@ fn resolve_join_occupancies_since_prunes_resolved_and_revoked_join_history()
         crate::JoinLeafHistoryRecord {
             leaf_id: leaf_active,
             barrier_version: 2,
-            leaf_index: 11,
+            slot_index: 11,
             slot_generation: 0,
             device_pk: vec![0x11; 4],
             ek_leaf: vec![0x21; 1184],
@@ -113,7 +113,7 @@ fn resolve_join_occupancies_since_prunes_resolved_and_revoked_join_history()
         crate::JoinLeafHistoryRecord {
             leaf_id: leaf_active,
             barrier_version: 5,
-            leaf_index: 11,
+            slot_index: 11,
             slot_generation: 0,
             device_pk: vec![0x15; 4],
             ek_leaf: vec![0x25; 1184],
@@ -121,7 +121,7 @@ fn resolve_join_occupancies_since_prunes_resolved_and_revoked_join_history()
         crate::JoinLeafHistoryRecord {
             leaf_id: leaf_revoked,
             barrier_version: 4,
-            leaf_index: 12,
+            slot_index: 12,
             slot_generation: 0,
             device_pk: vec![0x12; 4],
             ek_leaf: vec![0x22; 1184],
@@ -170,7 +170,7 @@ fn resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot() -> R
         crate::JoinLeafHistoryRecord {
             leaf_id: old_leaf,
             barrier_version: 4,
-            leaf_index: 1,
+            slot_index: 1,
             slot_generation: 0,
             device_pk: vec![0x31; 4],
             ek_leaf: vec![0x41; 1184],
@@ -178,7 +178,7 @@ fn resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot() -> R
         crate::JoinLeafHistoryRecord {
             leaf_id: new_leaf,
             barrier_version: 6,
-            leaf_index: 1,
+            slot_index: 1,
             slot_generation: 1,
             device_pk: vec![0x32; 4],
             ek_leaf: vec![0x42; 1184],
@@ -200,7 +200,7 @@ fn resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot() -> R
         .join_history;
     assert_eq!(pruned.len(), 1);
     assert_eq!(pruned[0].leaf_id, new_leaf);
-    assert_eq!(pruned[0].leaf_index, 1);
+    assert_eq!(pruned[0].slot_index, 1);
     assert_eq!(pruned[0].slot_generation, 1);
     Ok(())
 }
