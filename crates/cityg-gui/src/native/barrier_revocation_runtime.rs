@@ -273,7 +273,7 @@ async fn perform_room_admin_expel_inner(
             if sync.session.barrier_state.barrier_recovery_pending {
                 return Err(anyhow!("barrier recovery still pending after expel merge"));
             }
-            sync.session.barrier_state.pending = None;
+            discard_pending_barrier_state(&mut sync.session);
             persist_activated_joined_session(&sync.session)
                 .context("persist room session after expel merge sync")?;
             Ok(sync.session)

@@ -24,6 +24,15 @@ pub(super) fn record_pending_history_trace(
     session.barrier_state.last_pending_history_trace = Some(trace);
 }
 
+pub(super) fn clear_barrier_recovery_issue(session: &mut AppSession) {
+    session.barrier_state.barrier_recovery_issue = None;
+}
+
+pub(super) fn discard_pending_barrier_state(session: &mut AppSession) {
+    session.barrier_state.pending = None;
+    clear_barrier_recovery_issue(session);
+}
+
 pub(super) fn apply_recovered_barrier_state(
     session: &mut AppSession,
     recovered: BarrierRecoverResult,

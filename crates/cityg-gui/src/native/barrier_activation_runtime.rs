@@ -272,8 +272,7 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
             Ok(PendingBarrierHistoryOutcome::Unchanged)
         }
         CorePendingBarrierHistoryResolution::Discard => {
-            session.barrier_state.pending = None;
-            session.barrier_state.barrier_recovery_issue = None;
+            discard_pending_barrier_state(session);
             Ok(PendingBarrierHistoryOutcome::Discarded)
         }
         CorePendingBarrierHistoryResolution::RecoveryRequired(reason) => {

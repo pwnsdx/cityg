@@ -94,7 +94,7 @@ async fn finalize_joined_room(session: AppSession, mode: BarrierMergeMode) -> Re
             if sync.session.barrier_state.barrier_recovery_pending {
                 return Err(anyhow!(mode.still_pending_message()));
             }
-            sync.session.barrier_state.pending = None;
+            discard_pending_barrier_state(&mut sync.session);
             persist_activated_joined_session(&sync.session).context(mode.persist_context())?;
             Ok(sync.session)
         }
@@ -246,7 +246,7 @@ pub(super) async fn ensure_join_finalize_bootstrap_verified(
 
     if session.parent_root == [0u8; 32] && session.barrier_state.barrier_version == 0 {
         session.barrier_state.current_barrier_full_verified = true;
-        session.barrier_state.barrier_recovery_issue = None;
+        clear_barrier_recovery_issue(&mut session);
         clear_join_finalize_bootstrap_artifact(&mut session.barrier_state);
         persist_session(&session)
             .context("persist genesis join_finalize bootstrap verification state")?;
@@ -256,7 +256,7 @@ pub(super) async fn ensure_join_finalize_bootstrap_verified(
     let client = new_api_client(&request.server_url);
     verify_join_finalize_bootstrap_current_state(&client, &request.room_id, &mut session).await?;
     session.barrier_state.current_barrier_full_verified = true;
-    session.barrier_state.barrier_recovery_issue = None;
+    clear_barrier_recovery_issue(&mut session);
     clear_join_finalize_bootstrap_artifact(&mut session.barrier_state);
     persist_session(&session).context("persist join_finalize bootstrap verification state")?;
     Ok(true)
