@@ -40,11 +40,17 @@ impl AppModel {
                 self.fetch_in_flight = false;
                 self.fetch_status = FetchStatus::Idle;
                 if session.barrier_state.barrier_recovery_pending {
+                    let detail = session
+                        .barrier_state
+                        .last_pending_history_trace
+                        .as_ref()
+                        .map(BarrierPendingHistoryTrace::technical_summary)
+                        .or_else(|| Some(err.to_string()));
                     self.info_message = Some(Self::barrier_recovery_message_for_session(&session));
                     self.record_activity_with_detail(
                         ActivityKind::Message,
                         "Message fetch deferred",
-                        Some(err.to_string()),
+                        detail,
                     );
                     return;
                 }

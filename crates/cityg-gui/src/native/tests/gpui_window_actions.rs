@@ -272,14 +272,28 @@ fn gpui_pending_barrier_recovery_surfaces_guidance_instead_of_errors(cx: &mut Te
     )
     .expect("build test session");
     session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.last_pending_history_trace = Some(BarrierPendingHistoryTrace {
+        pending_barrier_version: 7,
+        pending_we_epoch_id: [0x41; 32],
+        current_barrier_version: 8,
+        lookup_status: BarrierPendingLookupTraceStatus::NotFound,
+        accepted_barrier_version: None,
+        accepted_fs_ec: None,
+        accepted_reason: None,
+        accepted_digest: None,
+        decision: BarrierPendingTraceDecision::RecoveryRequired,
+        recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
+        detail: None,
+    });
     session.last_fetch_timestamp_ms = None;
+    let expected_message = AppModel::barrier_recovery_message_for_session(&session);
 
     cx.update(|_, app| {
         view.update(app, |model, view_cx| {
             model.on_join_finished(Ok(session.clone()), view_cx);
             assert_eq!(
                 model.info_message.as_deref(),
-                Some(AppModel::barrier_recovery_wait_message())
+                Some(expected_message.as_str())
             );
             assert!(
                 !model.fetch_in_flight,
@@ -295,12 +309,20 @@ fn gpui_pending_barrier_recovery_surfaces_guidance_instead_of_errors(cx: &mut Te
             assert!(matches!(model.send_status, SendStatus::Idle));
             assert_eq!(
                 model.info_message.as_deref(),
-                Some(AppModel::barrier_recovery_wait_message())
+                Some(expected_message.as_str())
             );
             assert!(
                 model.last_error.is_none(),
                 "blocked send should not become an error"
             );
+            assert!(model.activity_events.iter().any(|event| {
+                event.summary == "Message send blocked"
+                    && event
+                        .detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("lookup=NotFound")
+            }));
         });
     });
 }
@@ -321,6 +343,20 @@ fn gpui_pending_barrier_recovery_defers_fetch_without_setting_error(cx: &mut Tes
     )
     .expect("build test session");
     session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.last_pending_history_trace = Some(BarrierPendingHistoryTrace {
+        pending_barrier_version: 7,
+        pending_we_epoch_id: [0x42; 32],
+        current_barrier_version: 8,
+        lookup_status: BarrierPendingLookupTraceStatus::NotFound,
+        accepted_barrier_version: None,
+        accepted_fs_ec: None,
+        accepted_reason: None,
+        accepted_digest: None,
+        decision: BarrierPendingTraceDecision::RecoveryRequired,
+        recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
+        detail: None,
+    });
+    let expected_message = AppModel::barrier_recovery_message_for_session(&session);
 
     cx.update(|_, app| {
         view.update(app, |model, view_cx| {
@@ -333,12 +369,20 @@ fn gpui_pending_barrier_recovery_defers_fetch_without_setting_error(cx: &mut Tes
             );
             assert_eq!(
                 model.info_message.as_deref(),
-                Some(AppModel::barrier_recovery_wait_message())
+                Some(expected_message.as_str())
             );
             assert!(
                 model.last_error.is_none(),
                 "deferred fetch should not set an error"
             );
+            assert!(model.activity_events.iter().any(|event| {
+                event.summary == "Message fetch deferred"
+                    && event
+                        .detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("lookup=NotFound")
+            }));
         });
     });
 }

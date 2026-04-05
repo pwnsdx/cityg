@@ -54,13 +54,19 @@ impl AppModel {
             Ok(params) => params,
             Err(err) => {
                 if session_snapshot.barrier_state.barrier_recovery_pending {
+                    let detail = session_snapshot
+                        .barrier_state
+                        .last_pending_history_trace
+                        .as_ref()
+                        .map(BarrierPendingHistoryTrace::technical_summary)
+                        .or_else(|| Some(err.to_string()));
                     self.info_message = Some(Self::barrier_recovery_message_for_session(
                         &session_snapshot,
                     ));
                     self.record_activity_with_detail(
                         ActivityKind::Message,
                         "Message send blocked",
-                        Some(err.to_string()),
+                        detail,
                     );
                     cx.notify();
                     return;
