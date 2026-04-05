@@ -4596,6 +4596,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merge_ticket_rejects_tampered_slot_generation() -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        payload.slot_generation = payload.slot_generation.saturating_add(1);
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("tampered merge ticket slot_generation must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("merge ticket artifact barrier state mismatch")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn merge_ticket_rejects_missing_current_history_commitment()
     -> Result<(), Box<dyn StdError>> {
         let mut payload = merge_ticket_ok_payload();
