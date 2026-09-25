@@ -640,6 +640,18 @@ impl GroupSession {
         self.blocked.iter().copied().collect()
     }
 
+    /// Record one removal proposal read from the delivery-service log;
+    /// messages from its target are rejected from now on. Returns the
+    /// blocked leaf, or `None` if the proposal does not apply to the roster.
+    pub fn add_pending_removal(&mut self, proposal: &SignedRemoveProposal) -> Option<Digest> {
+        let target = proposal
+            .authorize(&self.state.gid, &self.state.roster)
+            .ok()?
+            .leaf_id;
+        self.blocked.insert(target);
+        Some(target)
+    }
+
     /// Sign a proposal removing the member in `slot` (an admin removal, or
     /// this member's own leave when `slot` is its slot).
     pub fn propose_removal(

@@ -94,6 +94,8 @@ use pqcrypto_kyber::kyber768;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
+pub mod v2;
+
 mod barrier_tree_state;
 mod history_authority_state;
 mod journal_io;

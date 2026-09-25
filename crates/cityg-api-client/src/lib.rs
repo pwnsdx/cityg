@@ -143,6 +143,7 @@ mod merge_tickets;
 mod observability;
 mod remove_proposals;
 mod room_admin;
+pub mod v2;
 mod verification;
 
 pub use epoch_routes::is_fs_forward_jump_group_http_error;

@@ -26,9 +26,13 @@ tokio = { version = "1.49", features = ["time"] }
 ciborium = "0.2"
 serde_bytes = "0.11"
 cityg-pqc = { path = "../cityg-pqc" }
+cityg-core = { path = "../cityg-core" }
+cityg-proto = { path = "../cityg-proto" }
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
 
 [dev-dependencies]
 cityg-pqc = { path = "../cityg-pqc", features = ["test-utils"] }
 tokio = { version = "1.49", features = ["macros", "rt-multi-thread"] }
-hex = "0.4"
 axum = "0.8"

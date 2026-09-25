@@ -63,6 +63,8 @@ impl SignatureContext {
     pub const MESSAGE_V3: Self = Self(b"city-g/msg/v3");
     /// Invitation delegating admission to an invite key (profile v0.2).
     pub const INVITE: Self = Self(b"city-g/invite/v1");
+    /// Request for a delivery-service session token (deployment binding).
+    pub const SESSION_AUTH: Self = Self(b"city-g/session-auth/v1");
 
     /// Context bytes passed to FIPS 204 as `ctx`.
     #[must_use]
@@ -351,7 +353,7 @@ mod tests {
 
     use super::*;
 
-    const ALL_CONTEXTS: [SignatureContext; 15] = [
+    const ALL_CONTEXTS: [SignatureContext; 16] = [
         SignatureContext::ANCHOR_POP,
         SignatureContext::ANCHOR,
         SignatureContext::ANCHOR_BOOTSTRAP,
@@ -367,6 +369,7 @@ mod tests {
         SignatureContext::POLICY,
         SignatureContext::MESSAGE_V3,
         SignatureContext::INVITE,
+        SignatureContext::SESSION_AUTH,
     ];
 
     #[test]

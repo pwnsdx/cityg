@@ -237,6 +237,14 @@ fn members_join_talk_and_leave() {
         Err(CoreError::Unauthorized(_))
     ));
     let pending = world.pending();
+    assert_eq!(
+        carol.session.add_pending_removal(&pending[0]),
+        Some(*bob.session.my_leaf_id())
+    );
+    assert!(matches!(
+        carol.session.decrypt(&late),
+        Err(CoreError::Unauthorized(_))
+    ));
     assert_eq!(alice.session.set_pending_removals(&pending).len(), 1);
     assert!(matches!(
         alice.session.decrypt(&late),

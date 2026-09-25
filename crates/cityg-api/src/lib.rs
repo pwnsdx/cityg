@@ -16,6 +16,7 @@ mod pivot_routes;
 mod proof_validation;
 mod removal_routes;
 mod ticket_routes;
+pub mod v2_routes;
 mod websocket_routes;
 
 #[cfg(test)]
@@ -826,9 +827,18 @@ pub async fn run_with_config(
             router_with_state.route("/metrics", get(|| async { "metrics not available" }));
     }
 
+    let v2_store =
+        cityg_runtime::v2::NativeRoomStore::for_state_path(config.server.state_path.as_deref())?;
+    let v2_state = v2_routes::V2State::new(
+        cityg_runtime::v2::ServiceConfig::default(),
+        v2_store,
+        config.server.websocket_capacity,
+    );
+
     let mut app: Router = router_with_state
         .with_state(state)
         .layer(DefaultBodyLimit::max(API_MAX_BODY_BYTES))
+        .merge(v2_routes::router(v2_state))
         .layer(axum_middleware::from_fn(
             middleware::request_tracing_middleware,
         ));

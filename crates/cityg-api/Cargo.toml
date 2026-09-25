@@ -29,6 +29,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 cityg-server = { path = "../cityg-server" }
 cityg-client = { path = "../cityg-client" }
+cityg-core = { path = "../cityg-core" }
+cityg-proto = { path = "../cityg-proto" }
+rand_core = { version = "0.6", features = ["getrandom"] }
 cityg-api-schema = { path = "../cityg-api-schema" }
 cityg-config = { path = "../cityg-config" }
 cityg-pqc = { path = "../cityg-pqc" }
@@ -50,6 +53,7 @@ cityg-api-client = { path = "../cityg-api-client" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tokio = { version = "1.49", features = ["macros", "rt-multi-thread"] }
 tokio-tungstenite = "0.29"
+tempfile = "3"
 chacha20poly1305 = "0.10"
 reqwest = "0.13"
 cityg-pqc = { path = "../cityg-pqc", features = ["test-utils"] }

@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod room;
 pub mod service;
 pub mod storage;
+pub mod v2;
 pub mod volatile;
 
 pub use alias::{

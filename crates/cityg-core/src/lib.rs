@@ -20,9 +20,12 @@
 //!   signed GroupInfo and the public commit transition;
 //! * [`message`]: message plane v3;
 //! * [`session`]: the member state machine;
-//! * [`ledger`]: the delivery-service state machine.
+//! * [`ledger`]: the delivery-service state machine;
+//! * [`binding`]: deployment binding objects (aliases, session tokens), which
+//!   are outside the group protocol.
 
 pub mod admission;
+pub mod binding;
 pub mod cbor;
 pub mod commit;
 pub mod cover;
