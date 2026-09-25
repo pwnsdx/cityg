@@ -15,8 +15,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use cityg_api_client::v2::cityg_core::identity::DeviceIdentity;
-use cityg_api_client::v2::{DsClient, Member};
+use cityg_api_client::cityg_core::identity::DeviceIdentity;
+use cityg_api_client::{DsClient, Member};
 use cityg_stress::metrics::{MetricsSnapshot, parse_metrics_snapshot};
 use clap::{ArgAction, Parser};
 use crossterm::{
@@ -39,12 +39,14 @@ use tracing_subscriber::EnvFilter;
 use ui::{AppState, draw};
 
 const DEFAULT_SERVER_BIND: &str = "127.0.0.1:18080";
-/// Slots of the rooms a worker reuses across rounds.
-const REUSED_ROOM_N_MAX: u32 = 256;
 /// Lifetime of the invite a worker hands to its rounds.
 const REUSED_ROOM_INVITE_TTL_MS: u64 = 24 * 3_600_000;
-const DEFAULT_WINDOW_TTL_SECS: u64 = 120;
-const DEFAULT_MAX_CONCURRENT_HEADS: u64 = 4;
+/// Largest group the managed server accepts, and the size of the rooms a
+/// worker reuses across rounds.
+const DEFAULT_MAX_GROUP_SIZE: u32 = 256;
+/// Journal length that triggers a room snapshot on the managed server (low,
+/// so that restarts exercise snapshot plus journal recovery).
+const DEFAULT_COMPACT_EVERY: usize = 32;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
 const DEFAULT_SERVER_READY_TIMEOUT_SECS: u64 = 180;
 const RESTART_RETRY_ATTEMPTS: usize = 3;
@@ -103,10 +105,10 @@ struct Cli {
     capture_client_state_artifacts: bool,
     #[arg(long, env = "CITYG_STRESS_REUSE_ROOM_PER_WORKER", action = ArgAction::SetTrue)]
     reuse_room_per_worker: bool,
-    #[arg(long, env = "CITYG_STRESS_WINDOW_TTL_SECS", default_value_t = DEFAULT_WINDOW_TTL_SECS)]
-    window_ttl_secs: u64,
-    #[arg(long, env = "CITYG_STRESS_MAX_CONCURRENT_HEADS", default_value_t = DEFAULT_MAX_CONCURRENT_HEADS)]
-    max_concurrent_heads: u64,
+    #[arg(long, env = "CITYG_STRESS_MAX_GROUP_SIZE", default_value_t = DEFAULT_MAX_GROUP_SIZE)]
+    max_group_size: u32,
+    #[arg(long, env = "CITYG_STRESS_COMPACT_EVERY", default_value_t = DEFAULT_COMPACT_EVERY)]
+    compact_every: usize,
     #[arg(long, env = "CITYG_STRESS_POLL_INTERVAL_MS", default_value_t = DEFAULT_POLL_INTERVAL_MS)]
     poll_interval_ms: u64,
     #[arg(
@@ -149,8 +151,8 @@ struct Config {
     client_restart_every_secs: u64,
     capture_client_state_artifacts: bool,
     reuse_room_per_worker: bool,
-    window_ttl_secs: u64,
-    max_concurrent_heads: u64,
+    max_group_size: u32,
+    compact_every: usize,
     poll_interval: Duration,
     server_ready_timeout: Duration,
     server_state_path: Option<PathBuf>,
@@ -272,16 +274,12 @@ impl ManagedServer {
         command
             .env("CITYG_SERVER_ADDRESS", &self.config.server_bind)
             .env(
-                "CITYG_PROTOCOL_WINDOW_DURATION_SECS",
-                self.config.window_ttl_secs.to_string(),
+                "CITYG_SERVER_MAX_GROUP_SIZE",
+                self.config.max_group_size.to_string(),
             )
             .env(
-                "CITYG_SERVER_WINDOW_TTL_SECS",
-                self.config.window_ttl_secs.to_string(),
-            )
-            .env(
-                "CITYG_PROTOCOL_MAX_CONCURRENT_HEADS",
-                self.config.max_concurrent_heads.to_string(),
+                "CITYG_SERVER_COMPACT_EVERY",
+                self.config.compact_every.to_string(),
             )
             .env("RUST_LOG", "warn")
             .stdout(Stdio::from(stdout))
@@ -523,7 +521,7 @@ impl Config {
         let artifact_dir = cli.artifact_dir.unwrap_or_else(default_artifact_dir);
         let server_state_path = cli
             .server_state_path
-            .or_else(|| (!cli.no_manage_server).then(|| artifact_dir.join("server.journal")));
+            .or_else(|| (!cli.no_manage_server).then(|| artifact_dir.join("server-rooms")));
 
         Ok(Self {
             server_bind: cli.server_bind,
@@ -546,8 +544,8 @@ impl Config {
             client_restart_every_secs: cli.client_restart_every_secs,
             capture_client_state_artifacts: cli.capture_client_state_artifacts,
             reuse_room_per_worker: cli.reuse_room_per_worker,
-            window_ttl_secs: cli.window_ttl_secs,
-            max_concurrent_heads: cli.max_concurrent_heads,
+            max_group_size: cli.max_group_size,
+            compact_every: cli.compact_every,
             poll_interval: Duration::from_millis(cli.poll_interval_ms),
             server_ready_timeout: Duration::from_secs(cli.server_ready_timeout_secs),
             server_state_path,
@@ -659,13 +657,13 @@ struct ReusedRoom {
     invite: String,
 }
 
-async fn create_reused_room(server_url: &str) -> Result<ReusedRoom> {
+async fn create_reused_room(server_url: &str, n_max: u32) -> Result<ReusedRoom> {
     let mut seed = [0u8; 32];
     rng().fill(&mut seed);
     let mut owner = Member::create(
         DsClient::new(server_url)?,
         DeviceIdentity::from_seed(&seed),
-        REUSED_ROOM_N_MAX,
+        n_max,
     )
     .await
     .context("create the worker's reused room")?;
@@ -1006,7 +1004,7 @@ async fn run_worker(
         .artifact_dir
         .join(format!("worker-{worker_id:02}.status"));
     let reused_room = if config.reuse_room_per_worker {
-        Some(create_reused_room(&config.server_url).await?)
+        Some(create_reused_room(&config.server_url, config.max_group_size).await?)
     } else {
         None
     };
@@ -1447,17 +1445,18 @@ async fn run_plain(
         }
         if last_print.elapsed() >= Duration::from_secs(1) {
             println!(
-                "elapsed={} rounds={}/{} failed_rounds={} worker_failures={} capacity={} accept_ok={} refresh_conflicts={} p95={}",
+                "elapsed={} rounds={}/{} failed_rounds={} worker_failures={} capacity={} commits_ok={} commit_conflicts={} messages_ok={} commit_p95={}",
                 humantime(app.elapsed()),
                 app.completed_rounds,
                 app.total_rounds,
                 app.failed_rounds,
                 app.worker_failures,
                 app.capacity_check_status,
-                app.metrics.accept_epoch_ok,
-                app.metrics.refresh_conflicts,
+                app.metrics.commits_ok,
+                app.metrics.commit_conflicts,
+                app.metrics.messages_ok,
                 app.metrics
-                    .accept_p95_ms
+                    .commit_p95_ms
                     .map(|value| format!("{value:.1}ms"))
                     .unwrap_or_else(|| "-".to_string())
             );
@@ -1605,16 +1604,13 @@ fn write_summary(artifact_dir: &Path, app: &AppState) -> Result<()> {
         "capacity_check_status={}",
         app.capacity_check_status
     );
+    let _ = writeln!(&mut summary, "commits_ok={}", app.metrics.commits_ok);
     let _ = writeln!(
         &mut summary,
-        "accept_epoch_ok={}",
-        app.metrics.accept_epoch_ok
+        "commit_conflicts={}",
+        app.metrics.commit_conflicts
     );
-    let _ = writeln!(
-        &mut summary,
-        "refresh_conflicts={}",
-        app.metrics.refresh_conflicts
-    );
+    let _ = writeln!(&mut summary, "messages_ok={}", app.metrics.messages_ok);
     let _ = writeln!(&mut summary, "artifact_dir={}", artifact_dir.display());
     let _ = writeln!(&mut summary, "elapsed_seconds={}", app.elapsed().as_secs());
     fs::write(artifact_dir.join("summary.txt"), summary)
@@ -1623,14 +1619,15 @@ fn write_summary(artifact_dir: &Path, app: &AppState) -> Result<()> {
 
 fn print_final_summary(app: &AppState) {
     println!(
-        "cityg-stress finished: workers_passed={} workers_failed={} rounds={}/{} capacity={} accept_ok={} refresh_conflicts={} artifacts={}",
+        "cityg-stress finished: workers_passed={} workers_failed={} rounds={}/{} capacity={} commits_ok={} commit_conflicts={} messages_ok={} artifacts={}",
         app.worker_passes,
         app.worker_failures,
         app.completed_rounds,
         app.total_rounds,
         app.capacity_check_status,
-        app.metrics.accept_epoch_ok,
-        app.metrics.refresh_conflicts,
+        app.metrics.commits_ok,
+        app.metrics.commit_conflicts,
+        app.metrics.messages_ok,
         app.artifact_dir.display()
     );
 }

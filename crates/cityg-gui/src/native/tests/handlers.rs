@@ -2,8 +2,8 @@
 //! sessions and synthetic outcomes.
 
 use anyhow::anyhow;
-use cityg_api_client::v2::ClientError;
-use cityg_api_client::v2::cityg_proto::{ApiError, ErrorCode};
+use cityg_api_client::ClientError;
+use cityg_api_client::cityg_proto::{ApiError, ErrorCode};
 
 use super::*;
 use crate::native::session_runtime::{MaintenanceAction, maintenance_action};

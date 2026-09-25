@@ -1,6 +1,6 @@
 [package]
 name = "cityg-gui"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "City-G graphical client built with gpui"
 default-run = "cityg-gui"
@@ -8,7 +8,6 @@ default-run = "cityg-gui"
 [features]
 default = []
 native-app = ["dep:gpui", "dep:gpui-macros"]
-debug-api = ["cityg-api-client/debug-api"]
 
 [dependencies]
 gpui = { version = "0.2.2", optional = true }
@@ -42,7 +41,6 @@ objc = "0.2.7"
 raw-window-handle = "0.6.2"
 
 [dev-dependencies]
-cityg-pqc = { path = "../cityg-pqc", features = ["test-utils"] }
 gpui = { version = "0.2.2", features = ["test-support"] }
 tempfile = "3"
 cityg-api = { path = "../cityg-api" }

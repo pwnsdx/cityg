@@ -1,6 +1,6 @@
 use super::*;
-use cityg_api_client::v2::cityg_core::identity::DeviceIdentity;
-use cityg_api_client::v2::{DsClient, StateSink};
+use cityg_api_client::cityg_core::identity::DeviceIdentity;
+use cityg_api_client::{DsClient, StateSink};
 use rand::{RngExt, rng};
 use std::{
     fs,
@@ -122,7 +122,7 @@ impl SessionFileContext {
     }
 
     /// Sink writing the session file whenever the member state must be
-    /// durable (see `cityg_api_client::v2::StateSink`).
+    /// durable (see `cityg_api_client::StateSink`).
     pub(super) fn sink(&self) -> StateSink {
         let context = self.clone();
         Arc::new(move |member_state: &[u8]| {

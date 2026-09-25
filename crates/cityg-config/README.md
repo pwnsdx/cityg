@@ -1,6 +1,6 @@
 # cityg-config
 
-Configuration management for CityG with support for TOML/JSON files, environment variables, and runtime validation.
+Configuration of the City-G v0.2 server, clients and GUI: TOML/JSON files, environment variables and validation.
 
 ## Features
 
@@ -32,64 +32,35 @@ let config = CityGConfig::from_file("production.toml")?;
 config.save("backup.json")?;
 ```
 
-## Configuration Structure
+## Configuration structure
 
-The configuration is organized into four main sections:
-- **`[server]`** - API server settings (address, WebSocket capacity, window TTL)
-- **`[client]`** - Client connection behavior (server URL, timeouts, polling)
-- **`[protocol]`** - Cryptographic protocol parameters (window duration, epoch rotation, proof size limits, forward-secrecy policy)
-- **`[gui]`** - Desktop application settings (window dimensions, pagination)
+- **`[server]`** - delivery service: bind address, state path, notification
+  capacity, largest group size, message and commit retention, log length,
+  session lifetime, SessionAuth clock skew, compaction threshold.
+- **`[client]`** - server URL proposed by the join form, poll, retry and
+  reconnect intervals.
+- **`[gui]`** - window size and maintenance interval.
 
-**For complete parameter reference**, see [docs/configuration.md](../../docs/configuration.md)
+Unknown keys are ignored: a v0.1.4 file with a `[protocol]` section loads,
+but its protocol settings have no v0.2 equivalent.
 
-## Example Configuration
+## Example
 
-**TOML:**
 ```toml
 [server]
 address = "0.0.0.0:8080"
-websocket_capacity = 1000
-window_ttl_secs = 120
+state_path = "/var/lib/cityg/rooms"
+max_group_size = 256
+message_retention_secs = 604800
 
-[protocol]
-window_duration_secs = 120
-fs_policy_version = "fs-demo-policy"
+[client]
+default_server_url = "https://cityg.example.com"
+fetch_poll_interval_secs = 3
 
-[protocol.fs_policy]
-h_seconds = 300
-checkpoint_interval_seconds = 3600
+[gui]
+maintenance_interval_secs = 30
 ```
 
-**JSON:**
-```json
-{
-  "server": {"address": "0.0.0.0:8080", "window_ttl_secs": 120},
-  "protocol": {"window_duration_secs": 120}
-}
-```
-
-**Environment Variables:**
-```bash
-export CITYG_SERVER_ADDRESS="0.0.0.0:9000"
-export CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS=600
-```
-
-## Crash Recovery & Journaling
-
-The `cityg-server` crate exposes an optional journaling path. When you set
-`ServerConfig.state_path`, every accepted bundle is appended and fsync'd, and
-the journal is replayed before the server accepts fresh traffic:
-
-```rust
-let mut cfg = cityg_server::ServerConfig::new();
-cfg.state_path = Some("/var/lib/cityg/journal.cbor".into());
-let server = cityg_server::CityGServer::new(cfg);
-```
-
-Use durable storage for the journal and include it in your backup/restore plan.
-This satisfies the spec's crash-recovery requirement without relying on
-wall-clock timestamps.
-
-## Documentation
-
-See [docs/configuration.md](../../docs/configuration.md) for comprehensive documentation.
+Every key has a `CITYG_<SECTION>_<KEY>` environment override, e.g.
+`CITYG_SERVER_MAX_GROUP_SIZE=512`. See [config/](../../config/) for complete
+examples.

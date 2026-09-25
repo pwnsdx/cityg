@@ -1,4 +1,4 @@
-# CityG Configuration Files
+# City-G configuration files
 
 This directory contains example configuration files for CityG.
 
@@ -8,7 +8,7 @@ This directory contains example configuration files for CityG.
 
 - **`development.toml`** - Development configuration with optimal settings for local development
 - **`production.toml`** - Production configuration optimized for production deployments
-- **`ha-bluegreen.toml`** - Reference configuration for active-active or blue/green rollouts
+- **`ha-bluegreen.toml`** - Reference configuration for blue/green hand-offs and sharded deployments (a room has a single writer)
 
 ## Quick Start
 
@@ -33,7 +33,7 @@ All configuration values can be overridden using environment variables:
 # Example: Override server address and capacity
 export CITYG_SERVER_ADDRESS="0.0.0.0:9000"
 export CITYG_SERVER_WEBSOCKET_CAPACITY=2000
-export CITYG_PROTOCOL_MAX_CONCURRENT_HEADS=32
+export CITYG_SERVER_MAX_GROUP_SIZE=512
 ```
 
 **Format**: `CITYG_<SECTION>_<KEY>=<value>`

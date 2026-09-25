@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
+# Client-state hardening: encrypted session files, refusal of damaged or
+# foreign state, spent message generations made durable before a message
+# leaves the device (no nonce reuse after a crash), resync after a lost
+# state.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 export CITYG_CARGO_TARGET_SLOT="${CITYG_CARGO_TARGET_SLOT:-client-state}"
 source "$(pwd)/scripts/cargo_repo_env.sh"
 
-cargo test --locked -p cityg-gui --features native-app native::tests::persist_session_fault_injection_truncates_session_file_after_write -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::persist_session_fault_injection_rewrites_pointer_to_missing_session -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::pending_barrier_activation_fault_injection_preserves_pending_state_on_error -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::join_finalize_fault_injection_persists_pending_state_before_publish -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::join_finalize_fault_injection_after_publish_recovers_via_epoch_sync -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::client_state_props::client_state_model_never_silently_clears_pending_recovery -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::client_state_props::client_state_model_never_activates_same_pending_twice -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::client_state_props::client_state_model_join_finalize_does_not_reseed_k_fs -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::client_state_props::client_state_model_restart_is_pre_or_post_transaction_only -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::client_state_props::client_state_model_insufficient_history_never_marks_ready -- --exact
-cargo test --locked -p cityg-gui --features native-app native::tests::client_state_props::persisted_pending_state_roundtrip_property_preserves_fields -- --exact
-cargo test --locked -p msphf-orchestrator client_state_manifest_is_well_formed_and_complete -- --exact
+cargo test --locked -p cityg-core -- \
+  a_member_that_lost_its_state_resyncs \
+  sessions_persist_and_resume \
+  identities_and_pending_states_are_checked
+cargo test --locked -p cityg-api --test integration -- \
+  the_state_sink_makes_spent_generations_durable \
+  concurrent_commits_retry_and_lost_state_resyncs \
+  members_wrap_only_their_own_sessions
+cargo test --locked -p cityg-gui --features native-app -- native::tests::persistence

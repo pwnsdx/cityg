@@ -180,8 +180,8 @@ run_host_checks() {
   cargo check --workspace --all-targets --locked
 
   if [[ "${CITYG_SKIP_NEXTEST:-0}" != "1" ]]; then
-    log_step "cargo nextest run --workspace --profile ci --exclude dudect-harness"
-    cargo nextest run --workspace --profile ci --exclude dudect-harness --locked
+    log_step "cargo nextest run --workspace --profile ci"
+    cargo nextest run --workspace --profile ci --locked
   fi
 
   if [[ "${CITYG_FAST:-0}" == "1" ]]; then
@@ -192,11 +192,8 @@ run_host_checks() {
   log_step "./scripts/verify_no_secrets.sh"
   ./scripts/verify_no_secrets.sh
 
-  log_step "cargo test -p cityg-server"
-  cargo test -p cityg-server --locked
-
-  log_step "cargo test -p cityg-api"
-  cargo test -p cityg-api --locked
+  log_step "cargo check -p cityg-worker --features cloudflare --target wasm32-unknown-unknown"
+  cargo check -p cityg-worker --features cloudflare --target wasm32-unknown-unknown --locked
 
   if [[ "${CITYG_SKIP_GUI:-0}" != "1" ]]; then
     log_step "cargo test -p cityg-gui --features native-app"

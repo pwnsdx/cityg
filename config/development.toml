@@ -1,76 +1,41 @@
-# CityG Development Configuration
-# This configuration is optimized for local development
+# City-G development configuration (profile v0.2).
 
 [server]
-# Server bind address
+# Bind address of the native delivery service.
 address = "127.0.0.1:8080"
-
-# WebSocket broadcast channel capacity
+# Room journals: without a state path rooms live in memory only.
+# state_path = "./cityg-state"
+# Capacity of the log-head notification channel.
 websocket_capacity = 1000
-
-# Window TTL (2 minutes in seconds)
-window_ttl_secs = 120
+# Largest n_max a new group may declare (the profile allows up to 1024).
+max_group_size = 256
+# How long message envelopes stay in a room log (7 days).
+message_retention_secs = 604800
+# How long commits stay in a room log (30 days; the latest always stays).
+commit_retention_secs = 2592000
+# Most entries kept in a room log; the oldest messages go first.
+max_log_entries = 50000
+# Lifetime of a member session token (1 hour).
+session_ttl_secs = 3600
+# Accepted clock difference of a signed session request (5 minutes).
+auth_skew_secs = 300
+# Journal length that triggers a room snapshot.
+compact_every = 256
 
 [client]
-# Default server URL for connections
+# Server URL proposed by the join form.
 default_server_url = "http://127.0.0.1:8080"
-
-# Polling interval for fetching updates (seconds)
-# Lower value = more frequent updates but more CPU usage
+# Interval between room log polls (seconds); log-head notices trigger
+# syncs sooner.
 fetch_poll_interval_secs = 3
-
-# Retry interval for failed fetch operations (seconds)
+# Delay before retrying a failed sync (seconds).
 fetch_retry_interval_secs = 10
-
-# WebSocket reconnection delay (seconds)
+# Delay before reconnecting the notification socket (seconds).
 websocket_reconnect_delay_secs = 5
 
-# API timeout for requests (seconds)
-api_timeout_secs = 30
-
-[protocol]
-# Time window duration (seconds)
-window_duration_secs = 120
-
-# Maximum concurrent heads in multi-head window
-max_concurrent_heads = 16
-
-# Epoch rotation interval (5 minutes in seconds)
-epoch_rotation_interval_secs = 300
-
-# Default maximum SRX payload size (1 MB in bytes)
-default_srx_max_bytes = 1048576
-
-# Maximum HP proof size (512 KB in bytes)
-max_hp_proof_bytes = 524288
-
-# Maximum VRF proof size (6 KB in bytes)
-max_vrf_proof_bytes = 6144
-
-# FS CAPSS maximum size (16 KB in bytes)
-fs_capss_max_bytes = 16384
-
-# SRX Smallwood maximum size (16 KB in bytes)
-srx_smallwood_max_bytes = 16384
-
-# Maximum HP envelope size (16 KB in bytes)
-max_hp_envelope_bytes = 16384
-
-# Minimum SRX maximum size (256 KB in bytes)
-min_srx_max_bytes = 262144
-
-# Cache TTL for receiver cache (seconds)
-receiver_cache_ttl_secs = 10
-
 [gui]
-# Default window dimensions (pixels)
 default_window_width = 1160.0
 default_window_height = 760.0
-
-# Members per page for pagination
-members_page_limit = 200
-
-# Card dimensions (pixels)
-min_card_width = 320.0
-max_card_width = 960.0
-max_card_height = 780.0
+# Maintenance tick: commits other members' leave requests, re-keys this
+# device every 24 hours, erases previous-epoch keys after the grace window.
+maintenance_interval_secs = 30

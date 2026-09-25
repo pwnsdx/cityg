@@ -1,5 +1,5 @@
-use cityg_api_client::v2::ClientError;
-use cityg_api_client::v2::cityg_proto::ErrorCode;
+use cityg_api_client::ClientError;
+use cityg_api_client::cityg_proto::ErrorCode;
 
 use super::{CategorizedError, ErrorCategory};
 
@@ -252,7 +252,7 @@ pub(super) fn categorize_error(err: &anyhow::Error, context: &str) -> Categorize
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
-    use cityg_api_client::v2::cityg_proto::ApiError;
+    use cityg_api_client::cityg_proto::ApiError;
 
     use super::*;
 
@@ -341,7 +341,7 @@ mod tests {
         let decode = categorize_error(&ClientError::Decode("x".into()).into(), "fetch");
         assert_eq!(decode.user_message, "Unexpected server reply");
         let protocol = categorize_error(
-            &ClientError::Protocol(cityg_api_client::v2::cityg_core::CoreError::Replay).into(),
+            &ClientError::Protocol(cityg_api_client::cityg_core::CoreError::Replay).into(),
             "fetch",
         );
         assert_eq!(protocol.category, ErrorCategory::Crypto);

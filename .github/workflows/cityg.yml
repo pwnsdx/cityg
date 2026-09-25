@@ -33,29 +33,9 @@ jobs:
       - name: Cargo check (cityg-worker cloudflare wasm32)
         run: cargo check -p cityg-worker --features cloudflare --target wasm32-unknown-unknown
       - name: Cargo nextest (workspace)
-        run: cargo nextest run --workspace --profile ci --exclude dudect-harness
+        run: cargo nextest run --workspace --profile ci
       - name: Security verification (server blindness)
-        run: ./scripts/verify_no_secrets.sh
-      - name: Dudect harness smoke tests
-        run: |
-          targets=(
-            barrett-reduce
-            montgomery-reduce
-            montgomery-add
-            montgomery-sub
-            expand-a
-            smallwood-prove
-            smallwood-verify
-          )
-          for target in "${targets[@]}"; do
-            echo "Running dudect target: $target"
-            if cargo run -p dudect-harness --release -- --target "$target" --samples 20000 --inner 16 --seed 4242 --fail-threshold 4.5; then
-              continue
-            fi
-            echo "Retrying dudect target after first suspicious sample: $target"
-            sleep 2
-            cargo run -p dudect-harness --release -- --target "$target" --samples 20000 --inner 16 --seed 4242 --fail-threshold 4.5
-          done
+        run: ./scripts/verify_no_secrets.sh --no-build
 
   release-matrix:
     name: Release Matrix (${{ matrix.name }})
@@ -64,12 +44,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: cityg-server
-            command: cargo test -p cityg-server
+          - name: cityg-core
+            command: cargo test -p cityg-core -p cityg-pqc
             needs_ripgrep: false
             needs_native_linux_deps: false
-          - name: cityg-api
-            command: cargo test -p cityg-api
+          - name: delivery-service
+            command: cargo test -p cityg-server -p cityg-runtime -p cityg-api -p cityg-worker
+            needs_ripgrep: false
+            needs_native_linux_deps: false
+          - name: protocol-mutations
+            command: ./scripts/run_protocol_mutation_suite.sh
             needs_ripgrep: false
             needs_native_linux_deps: false
           - name: cityg-gui-native

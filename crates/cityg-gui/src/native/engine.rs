@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
-use cityg_api_client::v2::cityg_core::identity::DeviceIdentity;
-use cityg_api_client::v2::cityg_core::message::ReceivedMessage;
-use cityg_api_client::v2::{ClientError, DsClient, InviteLink, Member, SyncReport};
+use cityg_api_client::cityg_core::identity::DeviceIdentity;
+use cityg_api_client::cityg_core::message::ReceivedMessage;
+use cityg_api_client::{ClientError, DsClient, InviteLink, Member, SyncReport};
 use tokio::sync::Mutex;
 
 /// The member driver shared between the UI and background tasks.
@@ -166,7 +166,7 @@ fn changes_of(report: &SyncReport) -> Vec<RosterChange> {
         }
         if let Some(entered) = &commit.entered {
             changes.push(match commit.kind {
-                cityg_api_client::v2::cityg_core::commit::CommitKind::Resync => {
+                cityg_api_client::cityg_core::commit::CommitKind::Resync => {
                     RosterChange::Resynced(entered.leaf_id)
                 }
                 _ => RosterChange::Joined(entered.leaf_id),
@@ -382,8 +382,8 @@ pub(crate) fn is_membership_loss(error: &anyhow::Error) -> bool {
             .is_some_and(|code| {
                 matches!(
                     code,
-                    cityg_api_client::v2::cityg_proto::ErrorCode::Forbidden
-                        | cityg_api_client::v2::cityg_proto::ErrorCode::NotFound
+                    cityg_api_client::cityg_proto::ErrorCode::Forbidden
+                        | cityg_api_client::cityg_proto::ErrorCode::NotFound
                 )
             })
     })
@@ -396,9 +396,9 @@ pub(crate) mod tests {
 
     /// Start an in-process v2 delivery service; returns its URL.
     pub(crate) async fn spawn_v2_server() -> String {
-        use cityg_api::v2_routes::{V2State, router};
-        use cityg_runtime::v2::{NativeRoomStore, ServiceConfig};
-        let state = V2State::new(
+        use cityg_api::routes::{ServiceState, router};
+        use cityg_runtime::{NativeRoomStore, ServiceConfig};
+        let state = ServiceState::new(
             ServiceConfig::default(),
             NativeRoomStore::for_state_path(None).unwrap(),
             64,
@@ -490,8 +490,8 @@ pub(crate) mod tests {
     #[test]
     fn membership_loss_detection() {
         let forbidden: anyhow::Error =
-            ClientError::Api(cityg_api_client::v2::cityg_proto::ApiError::new(
-                cityg_api_client::v2::cityg_proto::ErrorCode::Forbidden,
+            ClientError::Api(cityg_api_client::cityg_proto::ApiError::new(
+                cityg_api_client::cityg_proto::ErrorCode::Forbidden,
                 "not a member",
             ))
             .into();

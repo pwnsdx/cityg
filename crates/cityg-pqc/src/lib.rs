@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 //! FIPS 204 ML-DSA-87 signatures for City-G.
 //!
-//! Every City-G signature (anchor proof of possession, bootstrap CA, barrier
-//! receipts, history-authority attestations, room-admin proofs, identity
-//! bindings, chat messages, removal proposals) uses FIPS 204 ML-DSA-87 through
-//! this crate. The same pure-Rust backend (`fips204`) runs on native and wasm32
-//! targets, so signatures produced by one build verify on every other build.
+//! Every City-G v0.2 signature (anchors, group information, admissions and
+//! invitations, removal proposals, cover-failure reports, framed messages,
+//! alias bindings, session requests, policy documents) uses FIPS 204
+//! ML-DSA-87 through this crate. The same pure-Rust backend (`fips204`) runs
+//! on native and wasm32 targets, so signatures produced by one build verify
+//! on every other build.
 //!
 //! Each signed object type has its own FIPS 204 context string
 //! ([`SignatureContext`]). A signature produced for one usage therefore never
@@ -19,8 +20,6 @@ use rand_core::OsRng;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-/// Wire label carried in anchors (header key 107) and API payloads.
-pub const SIGNATURE_ALGORITHM: &str = "ML-DSA-87";
 pub const ML_DSA_87_PUBLIC_KEY_BYTES: usize = ml_dsa_87::PK_LEN;
 pub const ML_DSA_87_SECRET_KEY_BYTES: usize = ml_dsa_87::SK_LEN;
 pub const ML_DSA_87_SIGNATURE_BYTES: usize = ml_dsa_87::SIG_LEN;
@@ -33,35 +32,23 @@ pub const ML_DSA_87_SIGNATURE_BYTES: usize = ml_dsa_87::SIG_LEN;
 pub struct SignatureContext(&'static [u8]);
 
 impl SignatureContext {
-    /// Proof of possession carried by JOIN anchors (header key 109).
-    pub const ANCHOR_POP: Self = Self(b"city-g/anchor/pop/v1");
-    /// Signature over a whole anchor header (profile v0.2, header key 109).
+    /// Signature over a whole anchor header (commit, header key 109).
     pub const ANCHOR: Self = Self(b"city-g/anchor/v2");
-    /// Bootstrap certificate-authority signature (header key 171).
-    pub const ANCHOR_BOOTSTRAP: Self = Self(b"city-g/anchor/bootstrap/v1");
-    /// Author receipt over a barrier update (header key 181).
-    pub const BARRIER_RECEIPT: Self = Self(b"city-g/barrier/receipt/v1");
-    /// History-authority attestations, witnesses and helper responses.
-    pub const HISTORY_AUTHORITY: Self = Self(b"city-g/history-authority/v1");
-    /// Room-admin authorization proofs.
-    pub const ROOM_ADMIN: Self = Self(b"city-g/room-admin/v1");
     /// Alias to device-key identity bindings.
     pub const IDENTITY_BINDING: Self = Self(b"city-g/identity-binding/v1");
-    /// Authenticated chat message content.
-    pub const MESSAGE: Self = Self(b"city-g/msg/v2");
     /// Removal proposal (voluntary leave or admin removal).
     pub const REMOVE_PROPOSAL: Self = Self(b"city-g/remove/v1");
-    /// Group information published with an epoch (profile v0.2).
+    /// Group information published with an epoch.
     pub const GROUP_INFO: Self = Self(b"city-g/group-info/v2");
-    /// Admission of a joining device (profile v0.2).
+    /// Admission of a joining device.
     pub const ADMISSION: Self = Self(b"city-g/admission/v1");
-    /// Report that a barrier update did not cover a member (profile v0.2).
+    /// Report that a barrier update did not cover a member.
     pub const COVER_FAILURE: Self = Self(b"city-g/cover-failure/v1");
     /// Signed deployment policy documents.
     pub const POLICY: Self = Self(b"city-g/policy/v1");
-    /// Framed message content (profile v0.2 message plane v3).
+    /// Framed message content (message plane v3).
     pub const MESSAGE_V3: Self = Self(b"city-g/msg/v3");
-    /// Invitation delegating admission to an invite key (profile v0.2).
+    /// Invitation delegating admission to an invite key.
     pub const INVITE: Self = Self(b"city-g/invite/v1");
     /// Request for a delivery-service session token (deployment binding).
     pub const SESSION_AUTH: Self = Self(b"city-g/session-auth/v1");
@@ -197,19 +184,6 @@ pub fn sign(
         .map_err(|_| SignError::SigningFailed)
 }
 
-/// Deterministic FIPS 204 signature (`rnd = 0^256`), for test vectors only.
-pub fn sign_deterministic(
-    secret_key: &SecretKey,
-    context: SignatureContext,
-    message: &[u8],
-) -> Result<Vec<u8>, SignError> {
-    secret_key
-        .expanded
-        .try_sign_with_seed(&[0u8; 32], message, context.as_bytes())
-        .map(|signature| signature.to_vec())
-        .map_err(|_| SignError::SigningFailed)
-}
-
 /// FIPS 204 signature with caller-provided randomness `rnd` (hedged mode
 /// when `rnd` is fresh). Protocol cores that take an injectable RNG use this
 /// so that every random input comes from one source.
@@ -224,16 +198,6 @@ pub fn sign_with_randomness(
         .try_sign_with_seed(rnd, message, context.as_bytes())
         .map(|signature| signature.to_vec())
         .map_err(|_| SignError::SigningFailed)
-}
-
-/// Sign with a secret key given as serialized bytes.
-pub fn sign_with_secret_key_bytes(
-    secret_key: &[u8],
-    context: SignatureContext,
-    message: &[u8],
-) -> Result<Vec<u8>, SignError> {
-    let secret_key = SecretKey::from_bytes(secret_key).map_err(|_| SignError::SigningFailed)?;
-    sign(&secret_key, context, message)
 }
 
 /// Verify a FIPS 204 ML-DSA-87 signature under the given usage context.
@@ -268,100 +232,15 @@ pub fn is_signature_length(bytes: &[u8]) -> bool {
     bytes.len() == ML_DSA_87_SIGNATURE_BYTES
 }
 
-/// Helpers for test suites of dependent crates (feature `test-utils`).
-///
-/// They never fail: key generation falls back to a counter-derived seed if the
-/// OS RNG is unavailable, and signing falls back to the deterministic variant.
-#[cfg(any(test, feature = "test-utils"))]
-pub mod test_utils {
-    use super::{SecretKey, SignatureContext};
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-    /// `as_bytes()` on serialized keys and signatures, so test code written
-    /// against byte-array wrapper types keeps reading naturally.
-    pub trait AsBytes {
-        fn as_bytes(&self) -> &[u8];
-    }
-
-    impl AsBytes for Vec<u8> {
-        fn as_bytes(&self) -> &[u8] {
-            self.as_slice()
-        }
-    }
-
-    /// Fresh random key pair (infallible).
-    #[must_use]
-    pub fn keypair() -> (Vec<u8>, SecretKey) {
-        super::keypair().unwrap_or_else(|_| {
-            let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let mut seed = [0x5au8; 32];
-            seed[..8].copy_from_slice(&counter.to_le_bytes());
-            super::keypair_from_seed(&seed)
-        })
-    }
-
-    /// Hedged signature, or deterministic signature if the RNG fails (infallible).
-    #[must_use]
-    pub fn sign(secret_key: &SecretKey, context: SignatureContext, message: &[u8]) -> Vec<u8> {
-        super::sign(secret_key, context, message)
-            .or_else(|_| super::sign_deterministic(secret_key, context, message))
-            .unwrap_or_default()
-    }
-
-    /// Deterministic FIPS 204 signature (empty signature on failure), for
-    /// signers whose statements are re-derived and compared byte for byte.
-    #[must_use]
-    pub fn sign_deterministic(
-        secret_key: &SecretKey,
-        context: SignatureContext,
-        message: &[u8],
-    ) -> Vec<u8> {
-        super::sign_deterministic(secret_key, context, message).unwrap_or_default()
-    }
-
-    /// Deterministic signature with serialized secret key bytes (empty
-    /// signature on malformed key).
-    #[must_use]
-    pub fn sign_deterministic_with_secret_key_bytes(
-        secret_key: &[u8],
-        context: SignatureContext,
-        message: &[u8],
-    ) -> Vec<u8> {
-        SecretKey::from_bytes(secret_key)
-            .map(|secret_key| sign_deterministic(&secret_key, context, message))
-            .unwrap_or_default()
-    }
-
-    /// Sign with serialized secret key bytes (empty signature on malformed key).
-    #[must_use]
-    pub fn sign_with_secret_key_bytes(
-        secret_key: &[u8],
-        context: SignatureContext,
-        message: &[u8],
-    ) -> Vec<u8> {
-        SecretKey::from_bytes(secret_key)
-            .map(|secret_key| sign(&secret_key, context, message))
-            .unwrap_or_default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
     use super::*;
 
-    const ALL_CONTEXTS: [SignatureContext; 16] = [
-        SignatureContext::ANCHOR_POP,
+    const ALL_CONTEXTS: [SignatureContext; 10] = [
         SignatureContext::ANCHOR,
-        SignatureContext::ANCHOR_BOOTSTRAP,
-        SignatureContext::BARRIER_RECEIPT,
-        SignatureContext::HISTORY_AUTHORITY,
-        SignatureContext::ROOM_ADMIN,
         SignatureContext::IDENTITY_BINDING,
-        SignatureContext::MESSAGE,
         SignatureContext::REMOVE_PROPOSAL,
         SignatureContext::GROUP_INFO,
         SignatureContext::ADMISSION,
@@ -377,18 +256,28 @@ mod tests {
         assert_eq!(ML_DSA_87_PUBLIC_KEY_BYTES, 2592);
         assert_eq!(ML_DSA_87_SECRET_KEY_BYTES, 4896);
         assert_eq!(ML_DSA_87_SIGNATURE_BYTES, 4627);
-        assert_eq!(SIGNATURE_ALGORITHM, "ML-DSA-87");
     }
 
     #[test]
     fn sign_and_verify_round_trip() {
         let (public_key, secret_key) = keypair().expect("keypair");
         assert_eq!(secret_key.public_key(), public_key);
-        let signature = sign(&secret_key, SignatureContext::MESSAGE, b"hello").expect("sign");
+        let signature = sign(&secret_key, SignatureContext::MESSAGE_V3, b"hello").expect("sign");
         assert_eq!(signature.len(), ML_DSA_87_SIGNATURE_BYTES);
-        verify(&public_key, SignatureContext::MESSAGE, b"hello", &signature).expect("verify");
+        verify(
+            &public_key,
+            SignatureContext::MESSAGE_V3,
+            b"hello",
+            &signature,
+        )
+        .expect("verify");
         assert_eq!(
-            verify(&public_key, SignatureContext::MESSAGE, b"hellp", &signature),
+            verify(
+                &public_key,
+                SignatureContext::MESSAGE_V3,
+                b"hellp",
+                &signature
+            ),
             Err(VerifyError::VerificationFailed)
         );
     }
@@ -422,8 +311,10 @@ mod tests {
         let (pk_a, sk_a) = keypair_from_seed(&[1u8; 32]);
         let (pk_b, sk_b) = keypair_from_seed(&[1u8; 32]);
         assert_eq!(pk_a, pk_b);
-        let sig_a = sign_deterministic(&sk_a, SignatureContext::ANCHOR, b"m").expect("sign");
-        let sig_b = sign_deterministic(&sk_b, SignatureContext::ANCHOR, b"m").expect("sign");
+        let sig_a =
+            sign_with_randomness(&sk_a, SignatureContext::ANCHOR, b"m", &[0u8; 32]).expect("sign");
+        let sig_b =
+            sign_with_randomness(&sk_b, SignatureContext::ANCHOR, b"m", &[0u8; 32]).expect("sign");
         assert_eq!(sig_a, sig_b);
         verify(&pk_a, SignatureContext::ANCHOR, b"m", &sig_a).expect("verify");
 
@@ -431,9 +322,6 @@ mod tests {
         let hedged_b = sign(&sk_a, SignatureContext::ANCHOR, b"m").expect("sign");
         assert_ne!(hedged_a, hedged_b, "hedged signatures use fresh randomness");
 
-        let with_zero = sign_with_randomness(&sk_a, SignatureContext::ANCHOR, b"m", &[0u8; 32])
-            .expect("sign with randomness");
-        assert_eq!(with_zero, sig_a, "rnd = 0^256 is the deterministic variant");
         let with_rnd = sign_with_randomness(&sk_a, SignatureContext::ANCHOR, b"m", &[7u8; 32])
             .expect("sign with randomness");
         assert_ne!(with_rnd, sig_a);
@@ -448,50 +336,9 @@ mod tests {
         assert_eq!(secret_key.as_bytes(), bytes.as_slice());
         let restored = SecretKey::from_bytes(&bytes).expect("parse");
         assert_eq!(restored.public_key(), public_key);
-        let signature = sign_with_secret_key_bytes(&bytes, SignatureContext::ROOM_ADMIN, b"x")
-            .expect("sign with bytes");
-        verify(&public_key, SignatureContext::ROOM_ADMIN, b"x", &signature).expect("verify");
+        let signature = sign(&restored, SignatureContext::POLICY, b"x").expect("sign");
+        verify(&public_key, SignatureContext::POLICY, b"x", &signature).expect("verify");
         assert_eq!(format!("{secret_key:?}"), "SecretKey(ML-DSA-87, redacted)");
-    }
-
-    #[test]
-    fn test_utils_never_fail_and_verify() {
-        let (public_key, secret_key) = test_utils::keypair();
-        let signature = test_utils::sign(&secret_key, SignatureContext::MESSAGE, b"t");
-        verify(&public_key, SignatureContext::MESSAGE, b"t", &signature).expect("verify");
-        let from_bytes = test_utils::sign_with_secret_key_bytes(
-            &secret_key.to_bytes(),
-            SignatureContext::MESSAGE,
-            b"t",
-        );
-        verify(&public_key, SignatureContext::MESSAGE, b"t", &from_bytes).expect("verify");
-        assert!(
-            test_utils::sign_with_secret_key_bytes(&[0u8; 2], SignatureContext::MESSAGE, b"t")
-                .is_empty()
-        );
-        let first = test_utils::sign_deterministic_with_secret_key_bytes(
-            &secret_key.to_bytes(),
-            SignatureContext::HISTORY_AUTHORITY,
-            b"t",
-        );
-        let second =
-            test_utils::sign_deterministic(&secret_key, SignatureContext::HISTORY_AUTHORITY, b"t");
-        assert_eq!(first, second);
-        verify(
-            &public_key,
-            SignatureContext::HISTORY_AUTHORITY,
-            b"t",
-            &first,
-        )
-        .expect("verify");
-        assert!(
-            test_utils::sign_deterministic_with_secret_key_bytes(
-                &[0u8; 2],
-                SignatureContext::MESSAGE,
-                b"t"
-            )
-            .is_empty()
-        );
     }
 
     #[test]
@@ -501,14 +348,14 @@ mod tests {
             Some(SecretKeyError::InvalidSecretKeyLength)
         );
         assert_eq!(
-            verify(&[], SignatureContext::MESSAGE, b"m", &[]),
+            verify(&[], SignatureContext::MESSAGE_V3, b"m", &[]),
             Err(VerifyError::InvalidPublicKeyLength)
         );
         let (public_key, _) = keypair_from_seed(&[3u8; 32]);
         assert_eq!(
             verify(
                 &public_key,
-                SignatureContext::MESSAGE,
+                SignatureContext::MESSAGE_V3,
                 b"m",
                 &[0u8; ML_DSA_87_SIGNATURE_BYTES - 1]
             ),
@@ -517,13 +364,12 @@ mod tests {
         assert_eq!(
             verify(
                 &public_key,
-                SignatureContext::MESSAGE,
+                SignatureContext::MESSAGE_V3,
                 b"m",
                 &[0u8; ML_DSA_87_SIGNATURE_BYTES]
             ),
             Err(VerifyError::VerificationFailed)
         );
-        assert!(sign_with_secret_key_bytes(&[1u8; 3], SignatureContext::MESSAGE, b"m").is_err());
         assert!(is_public_key_length(&public_key));
         assert!(!is_public_key_length(&public_key[1..]));
         assert!(is_signature_length(&[0u8; ML_DSA_87_SIGNATURE_BYTES]));
@@ -535,8 +381,13 @@ mod tests {
     #[test]
     fn deterministic_known_answer_is_stable() {
         let (public_key, secret_key) = keypair_from_seed(&[0x42u8; 32]);
-        let signature =
-            sign_deterministic(&secret_key, SignatureContext::ANCHOR, b"city-g kat").expect("sign");
+        let signature = sign_with_randomness(
+            &secret_key,
+            SignatureContext::ANCHOR,
+            b"city-g kat",
+            &[0u8; 32],
+        )
+        .expect("sign");
         verify(
             &public_key,
             SignatureContext::ANCHOR,

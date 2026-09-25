@@ -5,11 +5,31 @@ use std::time::Instant;
 
 static METRICS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
 
+/// The `path` label of a request: the known routes by name, anything else
+/// as `unmatched`, so that arbitrary request paths cannot grow the metric
+/// registry.
+#[must_use]
+pub fn metric_path(path: &str) -> &str {
+    const FIXED: [&str; 6] = [
+        "/health",
+        "/health/live",
+        "/health/ready",
+        "/health/detailed",
+        "/metrics",
+        "/v2/ws",
+    ];
+    if FIXED.contains(&path) || cityg_proto::Route::from_path(path).is_some() {
+        path
+    } else {
+        "unmatched"
+    }
+}
+
 /// Middleware that records request metrics
 pub async fn metrics_middleware(request: Request, next: Next) -> Response {
     let start = Instant::now();
     let method = request.method().clone();
-    let path = request.uri().path().to_string();
+    let path = metric_path(request.uri().path()).to_string();
 
     // Increment request counter
     counter!("http_requests_total", "method" => method.to_string(), "path" => path.clone())
@@ -68,5 +88,19 @@ pub fn init_metrics_exporter() -> anyhow::Result<metrics_exporter_prometheus::Pr
                 Err(anyhow::anyhow!("Failed to install metrics recorder: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metric_paths_are_bounded() {
+        assert_eq!(metric_path("/v2/groups/commit"), "/v2/groups/commit");
+        assert_eq!(metric_path("/v2/ws"), "/v2/ws");
+        assert_eq!(metric_path("/health/ready"), "/health/ready");
+        assert_eq!(metric_path("/v2/groups/unknown"), "unmatched");
+        assert_eq!(metric_path("/random/0123456789"), "unmatched");
     }
 }

@@ -23,8 +23,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use cityg_api_client::v2::cityg_core::identity::DeviceIdentity;
-use cityg_api_client::v2::{DsClient, InviteLink, Member, SyncReport};
+use cityg_api_client::cityg_core::identity::DeviceIdentity;
+use cityg_api_client::{DsClient, InviteLink, Member, SyncReport};
 use cityg_config::CityGConfig;
 use rand::RngExt;
 use serde::Serialize;
@@ -126,7 +126,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
     let mut invite = None;
     let mut alias = None;
     for arg in positional {
-        if arg.starts_with(cityg_api_client::v2::INVITE_PREFIX) && invite.is_none() {
+        if arg.starts_with(cityg_api_client::INVITE_PREFIX) && invite.is_none() {
             invite = Some(arg);
         } else if alias.is_none() {
             alias = Some(arg);
@@ -264,7 +264,7 @@ async fn join_members(options: &CliOptions) -> Result<(Vec<Member>, Vec<String>)
         .invite
         .as_deref()
         .map(|raw| {
-            InviteLink::parse(raw)?.ok_or(cityg_api_client::v2::ClientError::InvalidInvite(
+            InviteLink::parse(raw)?.ok_or(cityg_api_client::ClientError::InvalidInvite(
                 "not an invite link",
             ))
         })
@@ -416,12 +416,12 @@ async fn main() -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use cityg_api::v2_routes::{V2State, router};
-    use cityg_runtime::v2::{NativeRoomStore, ServiceConfig};
+    use cityg_api::routes::{ServiceState, router};
+    use cityg_runtime::{NativeRoomStore, ServiceConfig};
     use std::net::SocketAddr;
 
     async fn server() -> String {
-        let state = V2State::new(
+        let state = ServiceState::new(
             ServiceConfig::default(),
             NativeRoomStore::for_state_path(None).unwrap(),
             64,

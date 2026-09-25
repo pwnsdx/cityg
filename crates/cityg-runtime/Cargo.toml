@@ -1,33 +1,19 @@
 [package]
 name = "cityg-runtime"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
+description = "Transport-neutral request handlers of the City-G v0.2 delivery service"
 
 [dependencies]
-ahash = "0.8"
-ciborium = "0.2"
 cityg-config = { path = "../cityg-config" }
 cityg-core = { path = "../cityg-core" }
 cityg-proto = { path = "../cityg-proto" }
 cityg-server = { path = "../cityg-server" }
 prost = "0.14"
 rand_core = "0.6"
-hex = "0.4"
-msphf-core = { path = "../msphf-core" }
-msphf-orchestrator = { path = "../msphf-orchestrator" }
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
 thiserror = "2"
-unicode-normalization = "0.1"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-cityg-client = { path = "../cityg-client" }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-cityg-client = { path = "../cityg-client", default-features = false }
 
 [dev-dependencies]
 rand_chacha = "0.3"
-tempfile = "3"

@@ -7,9 +7,9 @@ use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use tempfile::TempDir;
 
 use super::*;
-use cityg_api_client::v2::DsClient;
-use cityg_api_client::v2::cityg_core::identity::DeviceIdentity;
-use cityg_api_client::v2::cityg_core::session::GroupSession;
+use cityg_api_client::DsClient;
+use cityg_api_client::cityg_core::identity::DeviceIdentity;
+use cityg_api_client::cityg_core::session::GroupSession;
 
 mod flows;
 mod handlers;

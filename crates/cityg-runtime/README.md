@@ -1,8 +1,18 @@
 # cityg-runtime
 
-Shared runtime seams for City-G deployment adapters.
+Transport-neutral request handlers of the City-G v0.2 delivery service.
 
-This crate exists so reusable bootstrap and persistence contracts can be shared
-between the native `cityg-api` runtime and the Cloudflare-oriented
-`cityg-worker` runtime without making either depend on the other's
-platform-specific concerns.
+The native server (`cityg-api`) and the Cloudflare Worker (`cityg-worker`)
+route an HTTP path to a `Route`, pass the protobuf body, the bearer token and
+the clock to `handle_room_request` (or `create_room`), journal the returned
+record with `persist_record` before replying, and notify subscribers when
+the log head moved.
+
+- `ServiceConfig`: room limits, session lifetime, SessionAuth clock skew
+  and compaction threshold; `ServiceConfig::from_config` reads the
+  `[server]` section of a `CityGConfig`.
+- `SessionRegistry`: bearer tokens obtained with a signed `SessionAuth`;
+  a token stops working with the commit that removes its member.
+- `NativeRoomStore`: memory or file store selected by the state path.
+- `core_error` / `room_error`: the mapping of protocol and room errors to
+  API error codes.

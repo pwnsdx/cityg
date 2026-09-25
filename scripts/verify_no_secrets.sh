@@ -1,175 +1,113 @@
 #!/bin/bash
 set -euo pipefail
 
-# verify_no_secrets.sh — Syntactic guardrail: server code must not import
-# decryption helpers or secret key types.
-# Usage: ./scripts/verify_no_secrets.sh
+# verify_no_secrets.sh — syntactic guardrail: the delivery service must not
+# touch group secrets.
+# Usage: ./scripts/verify_no_secrets.sh [--no-build]
 #
-# This is a grep-based check, not a proof of server blindness: the
-# 2026-09-25 audit (C-01) shows the server can recompute E_k of JOIN anchors
-# from public data without importing any secret type.
+# The server-side crates (cityg-server, cityg-runtime, cityg-api,
+# cityg-worker) run cityg_core::ledger::GroupLedger, which verifies commits
+# against public state only. They must never use the member-side types that
+# hold secrets: GroupSession, DeviceIdentity, the key schedule, KEM
+# decapsulation or message decryption. Test code (tests.rs files and
+# everything after the first #[cfg(test)] of a file) builds members as
+# fixtures and is not scanned.
 #
-# IMPORTANT: The exclusion filters below must NOT use substring matching
-# (e.g. `grep -v "test"`) because that would hide hits in production files
-# whose paths happen to contain the substring "test" (like
-# `attestation_test_utils.rs`).  Instead we use ripgrep's glob exclusions
-# to skip only files inside known test/demo directories or with the
-# `_test.rs` / `_demo.rs` suffix.
+# This is a grep-based check, not a proof: the protocol argument is in
+# docs/specs.md (server blindness) and docs/formal/.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
-export CITYG_CARGO_TARGET_SLOT="${CITYG_CARGO_TARGET_SLOT:-verify-no-secrets}"
-source "$REPO_ROOT/scripts/cargo_repo_env.sh"
+
+BUILD=1
+if [[ "${1:-}" == "--no-build" ]]; then
+    BUILD=0
+fi
+
+SERVER_CRATES=(
+    crates/cityg-server/src
+    crates/cityg-runtime/src
+    crates/cityg-api/src
+    crates/cityg-worker/src
+)
+FORBIDDEN='GroupSession|DeviceIdentity|key_schedule|KeySchedule|decapsulate|DecapsulationKey|SecretKey|\.decrypt\(|decrypt_|epoch_secret|init_secret|encryption_secret|export_secret'
 
 echo "═══════════════════════════════════════════════════════════"
-echo "City-G guardrail — no secret types or decryption helpers in server code"
+echo "City-G guardrail — the delivery service holds no group secret"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
-
-# Check for required tools
-if ! command -v rg &> /dev/null; then
-    echo "ERROR: ripgrep (rg) is not installed"
-    echo "   Install with: cargo install ripgrep"
-    echo "   Or on macOS: brew install ripgrep"
-    echo "   Or on Ubuntu: apt install ripgrep"
-    exit 1
-fi
 
 FAILED=0
 
-# ── Exclusion globs ───────────────────────────────────────────────────
-# These ripgrep globs exclude only well-known test/demo/fixture locations
-# so that a production file containing "test" in its name is still scanned.
-EXCLUDE_GLOBS=(
-    --glob '!**/tests/**'
-    --glob '!**/test_fixtures/**'
-    --glob '!**/*_test.rs'
-    --glob '!**/fixtures.rs'
-    --glob '!**/demo.rs'
-    --glob '!**/demo/**'
-    --glob '!**/benches/**'
-)
-
-# ── Check helpers ─────────────────────────────────────────────────────
-# rg_prod: ripgrep in production paths only (excluding test/demo)
-rg_prod() {
-    rg "${EXCLUDE_GLOBS[@]}" "$@" 2>/dev/null
+# Production part of a Rust file: up to its first #[cfg(test)].
+production_lines() {
+    awk '/^[[:space:]]*#\[cfg\(test\)\]/ { exit } { printf "%s:%d:%s\n", FILENAME, FNR, $0 }' "$1"
 }
 
-# Check 1: No MlKemSecretKey in production code
-echo "Check 1: No MlKemSecretKey in AcceptanceContext..."
-if rg_prod "MlKemSecretKey" crates/msphf-orchestrator/src/accept crates/cityg-server/src/ > /dev/null; then
-    echo "  FAILED: Found MlKemSecretKey in production code"
+echo "Check 1: no secret-holding types in server-side production code..."
+HITS=""
+while IFS= read -r file; do
+    case "$file" in
+        */tests.rs | */tests/*) continue ;;
+    esac
+    found="$(production_lines "$file" | grep -E "$FORBIDDEN" || true)"
+    if [[ -n "$found" ]]; then
+        HITS+="$found"$'\n'
+    fi
+done < <(find "${SERVER_CRATES[@]}" -name '*.rs' | sort)
+if [[ -n "$HITS" ]]; then
+    echo "  FAILED:"
+    printf '%s' "$HITS" | sed 's/^/    /'
     FAILED=1
 else
-    echo "  PASSED: No MlKemSecretKey found"
+    echo "  PASSED"
 fi
 echo ""
 
-# Check 2: No decapsulate in server code
-echo "Check 2: No ml_kem_decapsulate in server code..."
-if rg_prod "ml_kem_decapsulate|decapsulate\(" crates/msphf-orchestrator/src/accept crates/cityg-server/src/ > /dev/null; then
-    echo "  FAILED: Found decapsulate in production code"
+echo "Check 2: the ledger verifies with public state only..."
+LEDGER=crates/cityg-core/src/ledger.rs
+found="$(production_lines "$LEDGER" | grep -E "$FORBIDDEN|use crate::(key_schedule|kem)" || true)"
+if [[ -n "$found" ]]; then
+    echo "  FAILED:"
+    printf '%s\n' "$found" | sed 's/^/    /'
     FAILED=1
 else
-    echo "  PASSED: No decapsulate found"
+    echo "  PASSED"
 fi
 echo ""
 
-# Check 3: No decrypt_hp_bytes in server code
-echo "Check 3: No decrypt_hp_bytes in server code..."
-if rg_prod "decrypt_hp_bytes|decrypt_hp\(" crates/msphf-orchestrator/src/accept crates/cityg-server/src/ > /dev/null; then
-    echo "  FAILED: Found decrypt_hp in production code"
-    FAILED=1
-else
-    echo "  PASSED: No decrypt_hp found"
+echo "Check 3: server-side crates do not depend on member-side crates..."
+for manifest in crates/cityg-server/Cargo.toml crates/cityg-runtime/Cargo.toml \
+    crates/cityg-api/Cargo.toml crates/cityg-worker/Cargo.toml; do
+    # Dev-dependencies (test fixtures) are allowed.
+    if sed '/^\[dev-dependencies\]/,$d' "$manifest" | grep -q "cityg-api-client"; then
+        echo "  FAILED: $manifest depends on cityg-api-client"
+        FAILED=1
+    fi
+done
+if [[ $FAILED -eq 0 ]]; then
+    echo "  PASSED"
 fi
 echo ""
 
-# Check 4: No unwrap_kbroad_envelope (old decryption function)
-echo "Check 4: No unwrap_kbroad_envelope (legacy decrypt)..."
-if rg_prod "unwrap_kbroad_envelope" crates/msphf-orchestrator/src/accept > /dev/null; then
-    echo "  FAILED: Found unwrap_kbroad_envelope (should be removed)"
-    FAILED=1
-else
-    echo "  PASSED: unwrap_kbroad_envelope not found"
+if [[ $BUILD -eq 1 ]]; then
+    echo "Check 4: the server-side crates build and their tests pass..."
+    LOG="$(mktemp)"
+    if cargo test --locked --quiet -p cityg-server -p cityg-runtime -p cityg-api -p cityg-worker > "$LOG" 2>&1; then
+        echo "  PASSED"
+    else
+        echo "  FAILED:"
+        tail -n 80 "$LOG"
+        FAILED=1
+    fi
+    rm -f "$LOG"
+    echo ""
 fi
-echo ""
 
-# Check 5: AcceptanceContext has no kbroad_secret field
-echo "Check 5: AcceptanceContext has no kbroad_secret field..."
-if rg "struct AcceptanceContext" crates/msphf-orchestrator/src/accept/mod.rs -A 30 | rg "kbroad_secret" > /dev/null 2>&1; then
-    echo "  FAILED: Found kbroad_secret in AcceptanceContext"
-    FAILED=1
-else
-    echo "  PASSED: No kbroad_secret in AcceptanceContext"
-fi
-echo ""
-
-# Check 6: kbroad_registry stores Vec<u8> (public keys), not secrets
-echo "Check 6: kbroad_registry type is public keys only..."
-if rg_prod "kbroad_registry.*MlKemSecretKey" crates/msphf-orchestrator/src/ > /dev/null; then
-    echo "  FAILED: kbroad_registry stores secret keys"
-    FAILED=1
-else
-    echo "  PASSED: kbroad_registry stores Vec<u8> (public keys)"
-fi
-echo ""
-
-# Check 7: ServerOutcome has no epoch_key field
-echo "Check 7: ServerOutcome has no epoch_key/eid fields..."
-if rg "struct ServerOutcome" crates/cityg-server/src/ -A 10 | rg "epoch_key|eid.*\[u8" > /dev/null 2>&1; then
-    echo "  FAILED: Found secret fields in ServerOutcome"
-    FAILED=1
-else
-    echo "  PASSED: ServerOutcome has only public fields"
-fi
-echo ""
-
-# Check 8: No with_defaults(secret) constructor
-echo "Check 8: AcceptanceContext constructors require no secrets..."
-if rg "fn (with_defaults|new|with_options)" crates/msphf-orchestrator/src/accept/mod.rs -A 5 | rg "MlKemSecretKey|kbroad_secret" > /dev/null 2>&1; then
-    echo "  FAILED: Constructor accepts secret keys"
-    FAILED=1
-else
-    echo "  PASSED: Constructors require no secret keys"
-fi
-echo ""
-
-# Check 9: Compile-time verification (cargo check)
-echo "Check 9: Code compiles (type safety)..."
-CHECK_LOG="$(mktemp)"
-if cargo check --locked --quiet > "$CHECK_LOG" 2>&1; then
-    echo "  PASSED: Code compiles (type-safe)"
-else
-    echo "  FAILED: Compilation errors"
-    tail -n 40 "$CHECK_LOG"
-    FAILED=1
-fi
-rm -f "$CHECK_LOG"
-echo ""
-
-# Check 10: Tests pass (functional verification)
-echo "Check 10: Tests pass (cargo test --all)..."
-TEST_LOG="$(mktemp)"
-if cargo test --locked --quiet --all > "$TEST_LOG" 2>&1; then
-    echo "  PASSED: All tests pass (exit code 0)"
-else
-    echo "  FAILED: Some tests failed"
-    tail -n 80 "$TEST_LOG"
-    FAILED=1
-fi
-rm -f "$TEST_LOG"
-echo ""
-
-# Summary
 echo "═══════════════════════════════════════════════════════════"
-if [ $FAILED -eq 0 ]; then
-    echo "ALL CHECKS PASSED — Server is blind to secrets"
-    echo "═══════════════════════════════════════════════════════════"
+if [[ $FAILED -eq 0 ]]; then
+    echo "ALL CHECKS PASSED"
     exit 0
-else
-    echo "SOME CHECKS FAILED — Review findings above"
-    echo "═══════════════════════════════════════════════════════════"
-    exit 1
 fi
+echo "SOME CHECKS FAILED — review the findings above"
+exit 1

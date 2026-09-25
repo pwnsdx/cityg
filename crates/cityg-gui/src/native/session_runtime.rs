@@ -53,7 +53,7 @@ impl AppModel {
     }
 
     pub(super) fn start_maintenance_task(&mut self, cx: &mut ViewContext<Self>) {
-        let interval = self.config.gui.members_refresh_interval();
+        let interval = self.config.gui.maintenance_interval();
         let task = cx.spawn(async move |this, cx| {
             loop {
                 let delay = match Tokio::spawn_result(cx, async move {

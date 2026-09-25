@@ -1,36 +1,17 @@
 [package]
 name = "cityg-server"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
-
-[features]
-debug-api = []
+description = "City-G v0.2 delivery service: rooms, their ordered log, journal and storage"
 
 [dependencies]
 cityg-core = { path = "../cityg-core" }
-cityg-pqc = { path = "../cityg-pqc" }
-thiserror = "2"
-msphf-core = { path = "../msphf-core" }
-msphf-orchestrator = { path = "../msphf-orchestrator" }
 ciborium = { version = "0.2", features = ["std"] }
-pqcrypto-kyber = { version = "0.8", default-features = false, features = ["std"] }
-rand = "0.10"
-serde = { version = "1.0", features = ["derive"] }
-serde_bytes = "0.11"
-hex = "0.4"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-cityg-client = { path = "../cityg-client" }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-cityg-client = { path = "../cityg-client", default-features = false }
+thiserror = "2"
 
 [dev-dependencies]
-cityg-pqc = { path = "../cityg-pqc", features = ["test-utils"] }
 rand_chacha = "0.3"
 rand_core = "0.6"
-pqcrypto-traits = "0.3"
 tempfile = "3.24"
-proptest = "1"

@@ -1,16 +1,12 @@
-// Health check types and handlers
-//
-// Note: These types are defined here for reusability, but the actual health
-// endpoints are implemented directly in lib.rs for simplicity. This module
-// provides the foundation for more sophisticated health checking in the future.
-
-#![allow(dead_code)]
+//! Health checks: `/health` and `/health/detailed` (status, version,
+//! uptime), `/health/live` and `/health/ready`.
 
 use axum::{
-    Json,
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
+    routing::get,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,6 +71,16 @@ fn status_code_for(status: HealthStatus) -> StatusCode {
         HealthStatus::Degraded => StatusCode::OK,
         HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
     }
+}
+
+/// The health routes.
+pub fn router() -> Router {
+    Router::new()
+        .route("/health", get(health_check_handler))
+        .route("/health/detailed", get(health_check_handler))
+        .route("/health/live", get(liveness_check_handler))
+        .route("/health/ready", get(readiness_check_handler))
+        .with_state(HealthState::new())
 }
 
 pub async fn health_check_handler(State(health_state): State<HealthState>) -> Response {

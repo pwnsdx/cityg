@@ -1,10 +1,11 @@
 [package]
 name = "cityg-worker"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
 readme = "README.md"
+description = "Cloudflare Worker transport of the City-G v0.2 delivery service"
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -14,35 +15,22 @@ default = []
 cloudflare = ["dep:wasm-bindgen", "dep:worker"]
 
 [dependencies]
-ahash = "0.8"
-ciborium = "0.2"
-cityg-api-schema = { path = "../cityg-api-schema" }
 cityg-config = { path = "../cityg-config" }
 cityg-core = { path = "../cityg-core" }
 cityg-proto = { path = "../cityg-proto" }
-rand_core = { version = "0.6", features = ["getrandom"] }
-cityg-pqc = { path = "../cityg-pqc" }
 cityg-runtime = { path = "../cityg-runtime" }
 cityg-server = { path = "../cityg-server" }
 hex = "0.4"
-msphf-core = { path = "../msphf-core" }
-msphf-orchestrator = { path = "../msphf-orchestrator" }
-prost = "0.14"
-pqcrypto-kyber = { version = "0.8", default-features = false, features = ["std"] }
-serde = "1"
+rand_core = { version = "0.6", features = ["getrandom"] }
 serde_json = "1"
 thiserror = "2"
 wasm-bindgen = { version = "0.2", optional = true }
 worker = { version = "0.7.5", optional = true }
 
 [dev-dependencies]
+prost = "0.14"
 rand_chacha = "0.3"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-cityg-client = { path = "../cityg-client" }
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-cityg-client = { path = "../cityg-client", default-features = false }
 getrandom = { version = "0.2", features = ["js"] }
 getrandom_v03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
-getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

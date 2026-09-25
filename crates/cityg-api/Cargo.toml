@@ -1,60 +1,36 @@
 [package]
 name = "cityg-api"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
+description = "Native HTTP server of the City-G v0.2 delivery service"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 
-[features]
-default = []
-debug-api = ["cityg-server/debug-api"]
-
 [dependencies]
+anyhow = "1"
 axum = { version = "0.8", features = ["macros", "ws"] }
-tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "sync"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
+cityg-config = { path = "../cityg-config" }
+cityg-core = { path = "../cityg-core" }
+cityg-proto = { path = "../cityg-proto" }
+cityg-runtime = { path = "../cityg-runtime" }
+cityg-server = { path = "../cityg-server" }
 futures = "0.3"
-tower = { version = "0.5", features = ["make"] }
-bytes = "1"
-prost = "0.14"
-prost-types = "0.14"
-thiserror = "2"
+hex = "0.4"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-metrics = "0.24"
-metrics-exporter-prometheus = "0.18"
-cityg-server = { path = "../cityg-server" }
-cityg-client = { path = "../cityg-client" }
-cityg-core = { path = "../cityg-core" }
-cityg-proto = { path = "../cityg-proto" }
-rand_core = { version = "0.6", features = ["getrandom"] }
-cityg-api-schema = { path = "../cityg-api-schema" }
-cityg-config = { path = "../cityg-config" }
-cityg-pqc = { path = "../cityg-pqc" }
-cityg-runtime = { path = "../cityg-runtime" }
-msphf-core = { path = "../msphf-core" }
-msphf-orchestrator = { path = "../msphf-orchestrator" }
-ciborium = "0.2"
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
-serde_json = "1"
-unicode-normalization = "0.1"
-hex = "0.4"
-pqcrypto-kyber = "0.8"
-ahash = { version = "0.8", features = ["serde"] }
 
 [dev-dependencies]
 cityg-api-client = { path = "../cityg-api-client" }
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-tokio = { version = "1.49", features = ["macros", "rt-multi-thread"] }
-tokio-tungstenite = "0.29"
 tempfile = "3"
-chacha20poly1305 = "0.10"
-reqwest = "0.13"
-cityg-pqc = { path = "../cityg-pqc", features = ["test-utils"] }
-pqcrypto-traits = "0.3"
+tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }

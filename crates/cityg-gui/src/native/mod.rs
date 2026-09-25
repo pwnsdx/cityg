@@ -6,7 +6,7 @@ use std::{
 
 use ahash::AHashMap;
 use anyhow::{Context as AnyhowContext, Result, anyhow};
-use cityg_api_client::v2::{INVITE_PREFIX, InviteLink, Member};
+use cityg_api_client::{INVITE_PREFIX, InviteLink, Member};
 use cityg_config::CityGConfig;
 #[cfg(not(test))]
 use gpui::Application;

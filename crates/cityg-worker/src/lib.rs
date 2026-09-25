@@ -1,22 +1,36 @@
 #![forbid(unsafe_code)]
 
-//! Worker-oriented runtime boundary for City-G.
+//! Cloudflare Worker transport of the City-G v0.2 delivery service.
 //!
-//! This crate intentionally starts small. Its current role is to define a
-//! Worker-facing bootstrap surface around `cityg-server` without inheriting the
-//! native runtime assumptions from `cityg-api`.
+//! The Worker routes each `/v2/groups/*` request and each `/v2/ws`
+//! subscription to the Durable Object of its room, named `v2-<gid hex>`.
+//! The object serves the request with [`WorkerRoomHost`] (the handlers of
+//! the native server, over the object's SQLite storage) and pushes log-head
+//! notices to the room's hibernatable WebSockets. Health checks and the
+//! route policy manifest are answered at the edge.
 
 #[cfg(feature = "cloudflare")]
 mod cloudflare;
+mod host;
+mod policy;
+mod storage;
+
+pub use host::{DoRoomStore, DoRoomStoreError, WorkerRoomHost};
+pub use policy::{
+    EdgeReply, HEALTH_ROUTES, POLICY_ROUTE, WEBSOCKET_PATH, durable_object_name, edge_reply,
+    is_legacy_path, is_room_path, route_policy_manifest, service_config_from_json,
+};
+pub use storage::{DurableObjectStorage, MemoryDurableObjectStorage};
+
+/// Durable Object namespace binding of the rooms.
+pub const ROOM_NAMESPACE_BINDING: &str = "CITYG_ROOM";
+/// Optional Worker variable with a serialized `CityGConfig`; its `[server]`
+/// limits apply to every room.
+pub const WORKER_CONFIG_JSON_ENV: &str = "CITYG_WORKER_CONFIG_JSON";
+
 #[cfg(feature = "cloudflare")]
-mod cloudflare_v2;
-mod do_store;
-mod rehydrate;
-mod v2_host;
+pub use cloudflare::CloudflareSqlDurableObjectStorage;
 
-use std::time::Duration;
-
-use msphf_orchestrator::AcceptanceOptions;
 #[cfg(feature = "cloudflare")]
 use worker::wasm_bindgen;
 #[cfg(feature = "cloudflare")]
@@ -25,231 +39,24 @@ use worker::{
     WebSocketIncomingMessage, durable_object, event,
 };
 
-pub use cityg_runtime::{
-    AcceptedBundleRecord, EpochLeafBindingRecord, EpochScopeRecord, MemberMetadataRecord,
-    MemoryRoomStateStore, RoomSnapshot, RoomStateCheckpoint, RoomStateStore, RoomVolatileSnapshot,
-    RuntimeRoom, StoredBundleRecord, aligned_fs_epoch_base_ts, lane_state_path,
-    server_config_from_cityg_config, server_from_cityg_config, server_from_cityg_config_for_lane,
-};
-use cityg_server::{CityGServer, HistoryAuthorityMode, ServerConfig};
-#[cfg(feature = "cloudflare")]
-pub use cloudflare::{
-    CLOUDFLARE_ALIAS_NAMESPACE_BINDING, CLOUDFLARE_ALIAS_ROUTE_PREFIX, CLOUDFLARE_POLICY_ROUTE,
-    CLOUDFLARE_ROOM_NAMESPACE_BINDING, CLOUDFLARE_ROOM_REGISTRY_NAMESPACE_BINDING,
-    CLOUDFLARE_ROOM_REGISTRY_ROUTE_PREFIX, CLOUDFLARE_ROOM_ROUTE_PREFIX,
-    CLOUDFLARE_ROUTING_NAMESPACE_BINDING, CLOUDFLARE_ROUTING_ROUTE_PREFIX,
-    CloudflareAliasDurableObject, CloudflareRoomDurableObject, CloudflareRoomRegistryDurableObject,
-    CloudflareRoutingDurableObject, CloudflareSqlDurableObjectStorage,
-    CloudflareWeEpochRoutingIndex, cloudflare_fetch,
-};
-pub use do_store::{
-    DurableObjectRoomStateStore, DurableObjectRoomStateStoreError, DurableObjectStorage,
-    MemoryDurableObjectStorage,
-};
-pub use rehydrate::{WorkerRoomRehydrationError, rehydrate_runtime_room_from_checkpoint};
-pub use v2_host::{DoRoomStore, DoRoomStoreError, WorkerRoomHost};
-
-/// Preferred room coordination model for Cloudflare-native deployment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RoomCoordinationModel {
-    /// One authoritative Durable Object per room/gid.
-    DurableObjectPerRoom,
-    /// A fallback deployment shape backed by an external transactional store.
-    ExternalTransactionalStore,
-}
-
-/// The recommended coordination model for the Worker migration.
-pub const RECOMMENDED_COORDINATION_MODEL: RoomCoordinationModel =
-    RoomCoordinationModel::DurableObjectPerRoom;
-
-/// Optional Worker binding carrying a serialized `CityGConfig`.
-pub const WORKER_CONFIG_JSON_ENV: &str = "CITYG_WORKER_CONFIG_JSON";
-/// Optional Worker binding overriding the room history authority mode.
-pub const WORKER_HISTORY_AUTHORITY_ENV: &str = "CITYG_WORKER_HISTORY_AUTHORITY";
-/// Optional Worker binding overriding the room multi-head window size.
-pub const WORKER_H_MAX_ENV: &str = "CITYG_WORKER_H_MAX";
-/// Optional Worker binding overriding the room window TTL in seconds.
-pub const WORKER_WINDOW_TTL_SECS_ENV: &str = "CITYG_WORKER_WINDOW_TTL_SECS";
-/// Optional Worker binding overriding the room FS epoch period in seconds.
-pub const WORKER_FS_EPOCH_PERIOD_SECS_ENV: &str = "CITYG_WORKER_FS_EPOCH_PERIOD_SECS";
-/// Optional Worker binding overriding the expected FS policy version label.
-pub const WORKER_FS_POLICY_VERSION_ENV: &str = "CITYG_WORKER_FS_POLICY_VERSION";
-/// Optional Worker binding carrying a JSON array of legacy room gids to seed the room registry.
-pub const WORKER_KNOWN_GIDS_JSON_ENV: &str = "CITYG_WORKER_KNOWN_GIDS_JSON";
-
-/// Worker-facing selection for history authority behavior.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum WorkerHistoryAuthority {
-    Disabled,
-    Local,
-    #[default]
-    Global,
-}
-
-/// Minimal room bootstrap surface for a Worker-hosted room engine.
-///
-/// This intentionally excludes native-only concerns such as bind addresses or
-/// filesystem journal paths. Cloudflare-specific storage will be introduced via
-/// explicit adapters in a later step.
-#[derive(Clone)]
-pub struct WorkerRoomBootstrap {
-    pub h_max: Option<usize>,
-    pub window_ttl: Option<Duration>,
-    pub barrier_leaf_capacity_warning_percent: u8,
-    pub barrier_leaf_capacity_refusal_percent: u8,
-    pub history_authority: WorkerHistoryAuthority,
-    pub fs_epoch_period_seconds: u64,
-    pub fs_policy_version: Option<String>,
-    pub acceptance_options: Option<AcceptanceOptions>,
-}
-
-impl Default for WorkerRoomBootstrap {
-    fn default() -> Self {
-        Self {
-            h_max: None,
-            window_ttl: None,
-            barrier_leaf_capacity_warning_percent:
-                cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_WARNING_PERCENT,
-            barrier_leaf_capacity_refusal_percent:
-                cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT,
-            history_authority: WorkerHistoryAuthority::Global,
-            fs_epoch_period_seconds: 1,
-            fs_policy_version: None,
-            acceptance_options: None,
-        }
-    }
-}
-
-impl WorkerRoomBootstrap {
-    /// Build a Worker bootstrap from the shared repository config shape.
-    #[must_use]
-    pub fn from_cityg_config(cfg: &cityg_config::CityGConfig) -> Self {
-        let mut bootstrap = Self::from_server_config(&server_config_from_cityg_config(cfg));
-        bootstrap.fs_epoch_period_seconds = cfg.protocol.fs_policy.h_seconds.max(1);
-        bootstrap.fs_policy_version = Some(cfg.protocol.fs_policy_version.clone());
-        bootstrap
-    }
-
-    /// Build a Worker bootstrap from an already-synthesized server config.
-    #[must_use]
-    pub fn from_server_config(config: &ServerConfig) -> Self {
-        let history_authority = match config.history_authority.as_ref().map(|value| value.mode) {
-            Some(HistoryAuthorityMode::Disabled) => WorkerHistoryAuthority::Disabled,
-            Some(HistoryAuthorityMode::Local) => WorkerHistoryAuthority::Local,
-            Some(HistoryAuthorityMode::Global) | None => WorkerHistoryAuthority::Global,
-        };
-        Self {
-            h_max: config.h_max,
-            window_ttl: config.window_ttl,
-            barrier_leaf_capacity_warning_percent: config
-                .barrier_leaf_capacity_warning_percent
-                .unwrap_or(cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_WARNING_PERCENT),
-            barrier_leaf_capacity_refusal_percent: config
-                .barrier_leaf_capacity_refusal_percent
-                .unwrap_or(cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT),
-            history_authority,
-            fs_epoch_period_seconds: 1,
-            fs_policy_version: None,
-            acceptance_options: config.acceptance_options.clone(),
-        }
-    }
-
-    /// Parse a Worker bootstrap from serialized `CityGConfig` JSON.
-    pub fn from_config_json(json: &str) -> serde_json::Result<Self> {
-        let config = serde_json::from_str::<cityg_config::CityGConfig>(json)?;
-        Ok(Self::from_cityg_config(&config))
-    }
-
-    /// Build the corresponding `cityg-server` configuration.
-    #[must_use]
-    pub fn to_server_config(&self) -> ServerConfig {
-        let mut config = ServerConfig::new();
-        config.h_max = self.h_max;
-        config.window_ttl = self.window_ttl;
-        config.barrier_leaf_capacity_warning_percent =
-            Some(self.barrier_leaf_capacity_warning_percent);
-        config.barrier_leaf_capacity_refusal_percent =
-            Some(self.barrier_leaf_capacity_refusal_percent);
-        config.acceptance_options = self.acceptance_options.clone();
-        match self.history_authority {
-            WorkerHistoryAuthority::Disabled => {
-                config.history_authority = Some(cityg_server::HistoryAuthorityConfig {
-                    mode: HistoryAuthorityMode::Disabled,
-                    require_full_verification_receipt: false,
-                });
-            }
-            WorkerHistoryAuthority::Local => config.enable_local_history_authority(),
-            WorkerHistoryAuthority::Global => config.enable_global_history_authority(),
-        }
-        config
-    }
-
-    /// Build a `CityGServer` and apply bootstrap-only acceptance context fields.
-    #[must_use]
-    pub fn build_server(&self) -> CityGServer {
-        let mut server = CityGServer::new(self.to_server_config());
-        if let Some(version) = self.fs_policy_version.as_ref() {
-            let ctx = server.context_mut();
-            ctx.set_allowed_fs_policy_version(Some(version.clone()));
-            ctx.set_fs_policy_version(Some(version.clone()));
-        }
-        server
-    }
-}
-
-/// Room-scoped engine that will eventually sit behind a Worker runtime adapter.
-///
-/// For now this wraps the shared `RuntimeRoom` core. That keeps the Worker path
-/// aligned with the same room abstraction the native API is gradually moving
-/// toward.
-pub struct WorkerRoomEngine {
-    room: RuntimeRoom,
-}
-
-impl WorkerRoomEngine {
-    #[must_use]
-    pub fn new(bootstrap: WorkerRoomBootstrap) -> Self {
-        Self {
-            room: RuntimeRoom::new(bootstrap.build_server()),
-        }
-    }
-
-    #[must_use]
-    pub fn server(&self) -> &CityGServer {
-        self.room.server()
-    }
-
-    pub fn server_mut(&mut self) -> &mut CityGServer {
-        self.room.server_mut()
-    }
-
-    #[must_use]
-    pub fn room(&self) -> &RuntimeRoom {
-        &self.room
-    }
-
-    pub fn room_mut(&mut self) -> &mut RuntimeRoom {
-        &mut self.room
-    }
-}
-
 #[cfg(feature = "cloudflare")]
 #[event(fetch, respond_with_errors)]
 pub async fn worker_fetch(req: Request, env: Env, _ctx: worker::Context) -> WorkerResult<Response> {
-    cloudflare_fetch(req, env).await
+    cloudflare::fetch(req, env).await
 }
 
+/// The Durable Object class of the rooms (binding [`ROOM_NAMESPACE_BINDING`]).
 #[cfg(feature = "cloudflare")]
 #[durable_object]
 pub struct CityGRoomDurableObject {
-    inner: CloudflareRoomDurableObject,
+    inner: cloudflare::RoomObject,
 }
 
 #[cfg(feature = "cloudflare")]
 impl DurableObject for CityGRoomDurableObject {
     fn new(state: State, env: Env) -> Self {
         Self {
-            inner: CloudflareRoomDurableObject::new(state, env),
+            inner: cloudflare::RoomObject::new(state, env),
         }
     }
 
@@ -279,196 +86,5 @@ impl DurableObject for CityGRoomDurableObject {
 
     async fn websocket_error(&self, ws: WebSocket, error: worker::Error) -> WorkerResult<()> {
         self.inner.websocket_error(ws, error).await
-    }
-}
-
-#[cfg(feature = "cloudflare")]
-#[durable_object]
-pub struct CityGRoutingDurableObject {
-    inner: CloudflareRoutingDurableObject,
-}
-
-#[cfg(feature = "cloudflare")]
-impl DurableObject for CityGRoutingDurableObject {
-    fn new(state: State, env: Env) -> Self {
-        Self {
-            inner: CloudflareRoutingDurableObject::new(state, env),
-        }
-    }
-
-    async fn fetch(&self, req: Request) -> WorkerResult<Response> {
-        self.inner.fetch(req).await
-    }
-}
-
-#[cfg(feature = "cloudflare")]
-#[durable_object]
-pub struct CityGRoomRegistryDurableObject {
-    inner: CloudflareRoomRegistryDurableObject,
-}
-
-#[cfg(feature = "cloudflare")]
-impl DurableObject for CityGRoomRegistryDurableObject {
-    fn new(state: State, env: Env) -> Self {
-        Self {
-            inner: CloudflareRoomRegistryDurableObject::new(state, env),
-        }
-    }
-
-    async fn fetch(&self, req: Request) -> WorkerResult<Response> {
-        self.inner.fetch(req).await
-    }
-}
-
-#[cfg(feature = "cloudflare")]
-#[durable_object]
-pub struct CityGAliasDurableObject {
-    inner: CloudflareAliasDurableObject,
-}
-
-#[cfg(feature = "cloudflare")]
-impl DurableObject for CityGAliasDurableObject {
-    fn new(state: State, env: Env) -> Self {
-        Self {
-            inner: CloudflareAliasDurableObject::new(state, env),
-        }
-    }
-
-    async fn fetch(&self, req: Request) -> WorkerResult<Response> {
-        self.inner.fetch(req).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-
-    use super::*;
-
-    #[test]
-    fn recommended_coordination_model_is_durable_object_per_room() {
-        assert_eq!(
-            RECOMMENDED_COORDINATION_MODEL,
-            RoomCoordinationModel::DurableObjectPerRoom
-        );
-    }
-
-    #[test]
-    fn bootstrap_defaults_to_global_history_authority() {
-        let config = WorkerRoomBootstrap::default().to_server_config();
-        let authority = config.history_authority.expect("history authority");
-        assert_eq!(authority.mode, HistoryAuthorityMode::Global);
-        assert!(authority.require_full_verification_receipt);
-        assert_eq!(
-            config.barrier_leaf_capacity_warning_percent,
-            Some(cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_WARNING_PERCENT)
-        );
-        assert_eq!(
-            config.barrier_leaf_capacity_refusal_percent,
-            Some(cityg_server::DEFAULT_BARRIER_LEAF_CAPACITY_REFUSAL_PERCENT)
-        );
-    }
-
-    #[test]
-    fn bootstrap_can_disable_history_authority() {
-        let config = WorkerRoomBootstrap {
-            history_authority: WorkerHistoryAuthority::Disabled,
-            ..WorkerRoomBootstrap::default()
-        }
-        .to_server_config();
-        let authority = config.history_authority.expect("history authority");
-        assert_eq!(authority.mode, HistoryAuthorityMode::Disabled);
-        assert!(!authority.require_full_verification_receipt);
-    }
-
-    #[test]
-    fn worker_room_engine_constructs_from_bootstrap() {
-        let _engine = WorkerRoomEngine::new(WorkerRoomBootstrap {
-            h_max: Some(8),
-            window_ttl: Some(Duration::from_secs(45)),
-            barrier_leaf_capacity_warning_percent: 73,
-            barrier_leaf_capacity_refusal_percent: 85,
-            history_authority: WorkerHistoryAuthority::Local,
-            fs_epoch_period_seconds: 60,
-            fs_policy_version: Some("worker-policy-v1".to_string()),
-            acceptance_options: None,
-        });
-    }
-
-    #[test]
-    fn bootstrap_from_cityg_config_preserves_demo_acceptance_options() {
-        let mut config = cityg_config::CityGConfig::default();
-        config.server.seed_demo_room = true;
-        config.server.barrier_leaf_capacity_warning_percent = 91;
-        config.server.barrier_leaf_capacity_refusal_percent = 95;
-        let bootstrap = WorkerRoomBootstrap::from_cityg_config(&config);
-        let acceptance = bootstrap
-            .acceptance_options
-            .expect("acceptance options should be set");
-
-        match acceptance.bootstrap_policy {
-            msphf_orchestrator::BootstrapPolicy::CaMlDsa { public_key } => {
-                assert_eq!(public_key, cityg_client::demo::bootstrap_public());
-            }
-            _ => panic!("expected seeded demo bootstrap policy"),
-        }
-        let registry = acceptance.kbroad_registry.expect("kbroad registry");
-        assert_eq!(
-            registry.get(cityg_client::demo::DEMO_GID.as_slice()),
-            Some(&cityg_client::demo::kbroad_public().to_vec())
-        );
-        assert_eq!(
-            bootstrap.barrier_leaf_capacity_warning_percent,
-            config.server.barrier_leaf_capacity_warning_percent
-        );
-        assert_eq!(
-            bootstrap.barrier_leaf_capacity_refusal_percent,
-            config.server.barrier_leaf_capacity_refusal_percent
-        );
-    }
-
-    #[test]
-    fn bootstrap_from_config_json_parses_serialized_cityg_config() {
-        let mut config = cityg_config::CityGConfig::default();
-        config.server.seed_demo_room = true;
-        let json = serde_json::to_string(&config).expect("serialize config");
-
-        let bootstrap = WorkerRoomBootstrap::from_config_json(&json).expect("parse config json");
-        assert_eq!(bootstrap.h_max, Some(config.protocol.max_concurrent_heads));
-        assert_eq!(
-            bootstrap.window_ttl,
-            Some(Duration::from_secs(config.server.window_ttl_secs))
-        );
-        assert_eq!(
-            bootstrap.fs_policy_version.as_deref(),
-            Some(config.protocol.fs_policy_version.as_str())
-        );
-        assert_eq!(
-            bootstrap.barrier_leaf_capacity_warning_percent,
-            config.server.barrier_leaf_capacity_warning_percent
-        );
-        assert_eq!(
-            bootstrap.barrier_leaf_capacity_refusal_percent,
-            config.server.barrier_leaf_capacity_refusal_percent
-        );
-        assert!(bootstrap.acceptance_options.is_some());
-    }
-
-    #[test]
-    fn build_server_applies_fs_policy_version_to_context() {
-        let bootstrap = WorkerRoomBootstrap {
-            fs_policy_version: Some("worker-policy-v2".to_string()),
-            ..WorkerRoomBootstrap::default()
-        };
-
-        let server = bootstrap.build_server();
-        assert_eq!(
-            server.context().fs_policy_version(),
-            Some("worker-policy-v2")
-        );
-        assert_eq!(
-            server.context().allowed_fs_policy_version(),
-            Some("worker-policy-v2")
-        );
     }
 }

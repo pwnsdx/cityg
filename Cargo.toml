@@ -1,29 +1,20 @@
 [workspace]
 members = [
-    "crates/msphf-core",
-    "crates/anchor-seed",
-    "crates/msphf-rlwe",
-    "crates/msphf-orchestrator",
-    "crates/msphf-lb-vrf",
     "crates/cityg-pqc",
     "crates/cityg-core",
     "crates/cityg-proto",
-    "crates/cityg-client",
     "crates/cityg-server",
-    "crates/cityg-api",
-    "crates/cityg-api-schema",
-    "crates/cityg-api-client",
-    "crates/dudect-harness", "crates/capss",
-    "crates/cityg-gui", "crates/cityg-config",
-    "crates/pqcrypto-kyber",
-    "crates/cityg-stress",
     "crates/cityg-runtime",
+    "crates/cityg-api",
+    "crates/cityg-api-client",
+    "crates/cityg-config",
+    "crates/cityg-gui",
+    "crates/cityg-stress",
     "crates/cityg-worker",
 ]
 resolver = "2"
 
 [patch.crates-io]
-pqcrypto-kyber = { path = "crates/pqcrypto-kyber" }
 # GPUI is now consumed from the maintained pwnsdx fork rather than the vendored
 # snapshot. This revision includes the semantic material surface layer, the
 # refined cross-platform fallback backend, and the first native macOS material
