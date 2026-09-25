@@ -61,11 +61,20 @@ scrape_configs:
 #           summary: "High error rate detected"
 #           description: "{{ $labels.instance }} has error rate {{ $value }}"
 #
-#       - alert: CircuitBreakerOpen
-#         expr: circuit_breaker_state{state="open"} == 1
-#         for: 1m
+#       - alert: CommitConflictsRising
+#         # Concurrent commits for the same epoch: clients rebuild and retry.
+#         expr: sum(rate(http_responses_total{path="/v2/groups/commit",status="409"}[5m])) > 1
+#         for: 10m
 #         labels:
 #           severity: warning
 #         annotations:
-#           summary: "Circuit breaker is open"
-#           description: "Circuit breaker opened on {{ $labels.instance }}"
+#           summary: "Many commits lose the race for their epoch"
+#
+#       - alert: VerificationFailures
+#         # Protocol objects failing verification (forged or buggy clients).
+#         expr: sum(rate(http_responses_total{status="422"}[5m])) > 0.1
+#         for: 10m
+#         labels:
+#           severity: warning
+#         annotations:
+#           summary: "Requests carry protocol objects that fail verification"

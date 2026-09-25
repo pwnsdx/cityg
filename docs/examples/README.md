@@ -1,6 +1,10 @@
 # City-G Deployment Examples
 
-This directory contains runnable deployment examples for `cityg-api`.
+This directory contains runnable deployment examples for `cityg-api`, the
+native delivery service of profile v0.2. A room has a single writer: run one
+instance per state path, and shard by group identifier to scale out (see
+[`docs/deployment.md`](../deployment.md)). The Cloudflare Worker deployment
+is described in [`crates/cityg-worker/README.md`](../../crates/cityg-worker/README.md).
 
 ## Contents
 
@@ -29,10 +33,10 @@ curl -fsS http://127.0.0.1:8080/health/ready
 curl -fsS http://127.0.0.1:8080/health/detailed
 ```
 
-Note on membership bootstrap:
-
-- `cityg.env.example` sets `CITYG_SERVER_SEED_DEMO_ROOM=false` so host GUI/CLI clients can join compose/systemd servers without sharing a container-local demo bootstrap key.
-- Set it to `true` only when clients and server share the same `demo-bootstrap.key` file.
+Rooms are journaled under `/var/lib/cityg/rooms` in the `cityg-data`
+volume. The service needs no token or bootstrap key: members authenticate
+with their device keys, and the creator of a room invites the others (see the
+[GUI user guide](../gui-user-guide.md)).
 
 Open dashboards:
 
@@ -89,6 +93,9 @@ kubectl get pods -n cityg
 kubectl get svc -n cityg
 ```
 
+The manifest runs one replica with the `Recreate` strategy on a
+`ReadWriteOnce` volume, so that two pods never serve the same rooms.
+
 ## Runtime Verification Scripts
 
 Use these scripts from the repository root:
@@ -97,7 +104,8 @@ Use these scripts from the repository root:
 # Security baseline (tests + server-blindness checks)
 ./scripts/security_review.sh
 
-# Runtime smoke (join/leave + capacity freeze behavior)
+# Runtime smoke: members join, talk and leave through invite links, then
+# the capacity check runs the full-group protocol test
 cargo run -p cityg-stress -- \
   --server-bind 127.0.0.1:18080 \
   --server-url http://127.0.0.1:18080 \
@@ -132,7 +140,9 @@ Before production promotion:
 - [ ] `./scripts/security_review.sh` passes.
 - [ ] Health probes wired to `/health/live` and `/health/ready`.
 - [ ] Service runs as non-root user.
-- [ ] Journal storage is on durable disk and backed up.
+- [ ] `CITYG_SERVER_STATE_PATH` is on durable disk and backed up.
+- [ ] TLS terminates in front of the service (session tokens are bearer secrets).
+- [ ] Only one instance serves a given state path.
 
 ## Troubleshooting
 
@@ -152,6 +162,6 @@ curl -fsS http://127.0.0.1:8080/metrics | head
 
 For deeper guidance:
 
-- `docs/protocol/14-deployment-guide.md`
-- `docs/OBSERVABILITY.md`
-- `docs/TROUBLESHOOTING.md`
+- [`docs/deployment.md`](../deployment.md)
+- [`docs/OBSERVABILITY.md`](../OBSERVABILITY.md)
+- [`docs/TROUBLESHOOTING.md`](../TROUBLESHOOTING.md)

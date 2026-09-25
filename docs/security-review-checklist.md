@@ -1,85 +1,60 @@
-# City-G Security Review Checklist
+# Security review checklist
 
-Use this checklist before cutting a release candidate or deploying a policy change.
+For a release candidate or a change that touches the protocol, the delivery
+service or client state. Each item names the check that backs it.
 
-## 1. Automated Baseline
+## Automated
 
-Run these commands from the repository root:
+- [ ] `./scripts/security_review.sh` passes: protocol core, delivery service,
+      client driver and GUI tests, then the server-blindness guardrail.
+- [ ] `./scripts/run_protocol_mutation_suite.sh` passes: tampered commits,
+      update paths, signatures and encodings, forged senders, forks, joins
+      without authority, genesis rules.
+- [ ] `./scripts/verify_client_state_hardening.sh` passes: encrypted state,
+      refusal of damaged state, durable spent generations, resyncs.
+- [ ] `cargo test -p cityg-core --test vectors --test conformance_manifest`
+      and `python3 kat/v0.2/verify_vectors.py` pass: the implementation
+      matches the published vectors, an independent implementation agrees,
+      and every requirement maps to existing tests.
+- [ ] `docs/formal/run.sh` (ProVerif 2.05) reports every scenario with its
+      expected verdicts: the security properties are proved and the sanity
+      scenarios still find their attacks.
+- [ ] `cargo audit` reports no unhandled advisory.
 
-```bash
-./scripts/security_review.sh
-./scripts/verify_client_state_hardening.sh
-```
+## Protocol changes
 
-If you want to run steps manually:
+- [ ] The change is specified in [`specs.md`](specs.md) first. A change to an
+      encoding, a label, a signature context, an algorithm or a parameter is
+      a new profile version.
+- [ ] New labels and contexts are registered (specs.md, section 16) and
+      distinct from existing ones.
+- [ ] The vectors are regenerated (`CITYG_WRITE_VECTORS=1 cargo test -p
+      cityg-core --test vectors`), the diff is reviewed, and
+      `verify_vectors.py` is updated so that it still recomputes them.
+- [ ] The conformance manifest maps the new requirement to its section,
+      vectors and tests.
+- [ ] The formal model in [`formal/`](formal/) still states the security
+      goals of the changed part, or is updated.
 
-```bash
-cargo test -p cityg-server
-cargo test -p cityg-api
-cargo test -p cityg-gui --features native-app
-cargo test -p msphf-orchestrator
-./scripts/verify_client_state_hardening.sh
-./scripts/verify_no_secrets.sh
-```
+## Invariants to re-check by reading the diff
 
-## 2. Server-Blindness Controls
+- [ ] Server blindness: the server-side crates use no secret-holding type
+      (`scripts/verify_no_secrets.sh` is a grep, not a proof).
+- [ ] A member never authors the commit that removes it.
+- [ ] Every signature uses the context of its usage, and every signed object
+      is verified before use.
+- [ ] Every decoded object is re-encoded and compared byte for byte
+      (deterministic CBOR), and relayed objects are never re-encoded.
+- [ ] No secret of epoch `n` is used before the confirmation tag of its
+      commit verified; secrets and message keys are erased as specified.
+- [ ] A client persists its state after encrypting a message and before
+      sending it.
+- [ ] Secret material is zeroized on drop and never logged; comparisons of
+      tags and secrets are constant time.
 
-- [ ] `./scripts/verify_no_secrets.sh` passes all checks.
-- [ ] No new server-side decryption helpers were introduced in `crates/msphf-orchestrator/src/accept` or `crates/cityg-server/src`.
-- [ ] No API endpoint returns plaintext keys or `hp` material.
+## Claims
 
-## 3. Forward-Secrecy Policy Review
-
-- [ ] `CITYG_PROTOCOL_FS_POLICY_VERSION` is pinned and matches client expectations.
-- [ ] `h_seconds`, checkpoint interval, and slack values are explicitly documented for the release.
-- [ ] Any change to FS policy has a rollback plan.
-
-## 4. Dependency and Supply-Chain
-
-- [ ] `cargo audit` is clean (or approved exceptions are documented).
-- [ ] `Cargo.lock` changes were reviewed for unexpected cryptography/runtime dependency drift.
-- [ ] CI workflow still runs `verify_no_secrets.sh` and release matrix tests.
-- [ ] CI workflow still runs `verify_client_state_hardening.sh` and validates `kat-client-state-manifest-v0.1.4.json`.
-
-## 5. Runtime Security Smoke
-
-- [ ] API health endpoints are reachable (`/health/live`, `/health/ready`, `/health/detailed`).
-- [ ] Membership join/leave runtime smoke succeeds:
-
-```bash
-cargo run -p cityg-stress -- \
-  --server-bind 127.0.0.1:18080 \
-  --server-url http://127.0.0.1:18080 \
-  --workers 1 \
-  --rounds-per-worker 2 \
-  --min-count 2 \
-  --max-count 2 \
-  --leaves-per-room 2 \
-  --watch-percent 100 \
-  --jitter-max-secs 0 \
-  --round-delay-secs 2 \
-  --message-burst-count 2 \
-  --message-burst-interval-ms 25 \
-  --restart-every-secs 45 \
-  --client-restart-every-secs 20 \
-  --capture-client-state-artifacts \
-  --require-metrics
-```
-
-- [ ] Capacity guard smoke shows a 925 freeze when `h_max` is intentionally exceeded.
-- [ ] Restart-chaos run produces `client-restarts.log` plus per-round client-state artifacts.
-
-## 6. Evidence Bundle
-
-Capture and store these artifacts with the release tag:
-
-- [ ] Security review command output (`scripts/security_review.sh` output).
-- [ ] Client-state hardening gate output (`scripts/verify_client_state_hardening.sh` output).
-- [ ] CI run URL for the release matrix workflow.
-- [ ] Forward-secrecy policy values shipped in deployment env/config.
-- [ ] Nightly/staging restart-chaos artifact bundle, including client-state snapshots.
-- [ ] Optional: `docs/evidence/` updates for timing or benchmark deltas.
-
-## Exit Criteria
-
-A release is security-ready only when all boxes above are checked or exceptions are documented with owner + deadline.
+- [ ] README, SECURITY.md and user-facing text claim no property beyond the
+      table of specs.md, section 2.2, for the stated adversary.
+- [ ] Known limits (metadata, availability, self-asserted aliases, bearer
+      invite links, insider access to group content) are stated.

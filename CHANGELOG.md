@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-25
+
+Profile `city-g/v0.2` replaces profile v0.1.4 after the
+[2026-09-25 audit](docs/audits/audit-crypto-conformite-2026-09-25.md), whose
+section 6 maps every finding and proposal to its fix. The two profiles do not
+interoperate; v0.1.4 groups are not migrated.
+
+### Added
+- Normative specification of profile v0.2 ([`docs/specs.md`](docs/specs.md)):
+  threat model with a table of guaranteed properties per adversary, epoch-chained
+  key schedule, barrier tree v2, commits with a closed key registry, removal
+  proposals, verifiable admission, GroupInfo, cover-failure reports, message
+  plane v3, delivery-service rules, deployment binding, parameters and registries
+  (audit P-1 to P-7).
+- `cityg-core`: the protocol core without I/O (deterministic CBOR, `H_L`,
+  BLAKE3 KDF, ML-KEM-768 tree, key schedule and external init, commits, roster,
+  admission, message plane v3, member session, delivery-service ledger).
+- Delivery service `/v2` (`cityg-proto`, `cityg-server` rooms with journals and
+  snapshots, `cityg-runtime` handlers shared by `cityg-api` and `cityg-worker`,
+  one Durable Object per room on Cloudflare), member sessions opened with signed
+  `SessionAuth`, WebSocket log-head notices.
+- `cityg-api-client`: the member driver (`Member`) used by the GUI, the
+  `join_leave` CLI and `cityg-stress`: create, join by invite link v4, sync,
+  send, leave, remove, admin changes, self-update, resync, persistence through a
+  state sink.
+- Conformance material: vectors (`kat/v0.2/vectors.json`), an independent
+  Python verifier (`kat/v0.2/verify_vectors.py`, run in CI), and a requirement
+  map (`kat/kat-v0.2-conformance-manifest.json`) checked by a test.
+- Documentation for v0.2: API reference, configuration, deployment,
+  observability, troubleshooting, GUI guide, workflows, fingerprints, glossary.
+- A symbolic model of the protocol in ProVerif (`docs/formal/`, audit P-8):
+  secrecy of epoch secrets, membership agreement, admission control, forward
+  secrecy, post-compromise security, post-removal secrecy and sender
+  authentication, with sanity scenarios for the attacks the rules prevent;
+  `docs/formal/run.sh` checks every verdict and a scheduled CI job runs it.
+
+### Changed
+- Signatures: FIPS 204 ML-DSA-87 on every target, with a context string per
+  usage (audit H-05).
+- The GUI shows the transcript security code and the roster hash, re-keys the
+  device at least daily, commits other members' leave requests, and erases
+  previous-epoch keys after the grace window.
+- Configuration: `[server]` holds the v0.2 limits (group size, retention, log
+  length, sessions); the `[protocol]` section and the operator tokens are gone.
+
+### Removed
+- Profile v0.1.4 and its code: SPHF / ME-OR, `E_k`, `K_fs`, KBROAD, CAPSS and
+  ZK-VRF transcripts, SRX witnesses, the multi-head window, the `/v1` API,
+  join tickets and slot leases, and the crates `msphf-*`, `capss`,
+  `anchor-seed`, `cityg-client`, `cityg-api-schema`. Their documentation and
+  known-answer files are archived under `docs/legacy/v0.1.4/` and
+  `kat/legacy/v0.1.4/`.
+
+### Fixed
+- The build of `main` (audit H-09) and the GUI test suite.
+- A full room log dropped the message being appended, answering 404 after the
+  ledger had accepted it.
+- `cityg-stress --final-capacity-check` ran a removed test and passed without
+  running anything.
+
+### Security
+- A member never commits its own removal (audit C-03); the server and members
+  enforce it.
+- Removed devices are retired: a removed member cannot join again with an
+  admission it kept.
+- The threat model separates the compromise of a device's state, healed by
+  its next self-update, from the theft of its device key, repaired only by
+  removing the device.
+- Joins need an admission chained to a current admin, checked by every member
+  (H-01); the server holds no group secret (C-01, C-02).
+- Every commit renews its author's leaf key (H-03); members re-key at least
+  every 24 hours (H-02).
+- Messages are signed under their own context, bound to the sender's chain, and
+  accepted only from current members (H-10, M-01 to M-03).
+- Commit sizes are bounded and group size is capped at 1024 (H-08).
+
+## [0.1.x] - unreleased changes, superseded by 0.2.0
+
 ### Added
 - Optional `unsafe-ntt` feature flag in `msphf-core` to re-enable unchecked NTT indexing when benchmarking or running production builds that demand maximum speed.
 - Index-schedule unit tests in `msphf-core::rlwe::ntt` to assert the forward and inverse transforms never walk past buffer bounds.
@@ -194,6 +272,8 @@ N/A - Initial release
 
 ## Version History
 
+- **0.2.0** (2026-09-25) - Profile `city-g/v0.2`
+- **0.1.2** (2026-02-11) - PRS barrier
 - **0.1.0** (2025-11-12) - Initial alpha release
 
 ---
@@ -224,7 +304,9 @@ Security-related changes and advisories
 
 ## Upgrade Guide
 
-See [UPGRADING.md](UPGRADING.md) for version-specific upgrade instructions (when available).
+Profile v0.2 cannot upgrade v0.1.4 groups in place: members create or join
+v0.2 groups. For servers, see [docs/deployment.md](docs/deployment.md#upgrading)
+and, on Cloudflare, [crates/cityg-worker/README.md](crates/cityg-worker/README.md).
 
 ## Contributing
 

@@ -1,22 +1,17 @@
-# Kubernetes deployment manifest for City-G API server
+# Kubernetes manifest for the City-G v0.2 delivery service (cityg-api).
 #
-# This manifest includes:
-# - Deployment with 3 replicas for high availability
-# - Service with LoadBalancer
-# - ConfigMap for configuration
-# - PersistentVolumeClaim for journal storage
-# - Horizontal Pod Autoscaler
+# A room has a single writer: the process that journals it orders its
+# commits. This manifest therefore runs one replica with a ReadWriteOnce
+# volume and the Recreate strategy, so that two pods never serve the same
+# state path. To scale out, run several such deployments and route each
+# request by group identifier (field 1 of every protobuf request body,
+# `gid` query parameter of /v2/ws), or use the Cloudflare Worker, where each
+# room is one Durable Object (crates/cityg-worker).
 #
 # Usage:
 #   kubectl apply -f kubernetes-deployment.yml
-#
-# Requirements:
-# - Kubernetes 1.19+
-# - Storage class for PVC (optional, for crash recovery)
-# - LoadBalancer support (or use NodePort/ClusterIP)
 
 ---
-# Namespace
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -25,33 +20,31 @@ metadata:
     name: cityg
 
 ---
-# ConfigMap for configuration
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cityg-config
   namespace: cityg
 data:
-  # Server configuration
   CITYG_SERVER_ADDRESS: "0.0.0.0:8080"
-  CITYG_SERVER_WEBSOCKET_CAPACITY: "1000"
-  CITYG_SERVER_WINDOW_TTL_SECS: "10"
-
-  # Protocol configuration
-  CITYG_PROTOCOL_WINDOW_DURATION_SECS: "10"
-  CITYG_PROTOCOL_MAX_CONCURRENT_HEADS: "16"
-  CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS: "3600"
-
-  # Logging
+  CITYG_SERVER_STATE_PATH: "/var/lib/cityg/rooms"
+  CITYG_SERVER_WEBSOCKET_CAPACITY: "2000"
+  CITYG_SERVER_MAX_GROUP_SIZE: "256"
+  CITYG_SERVER_MESSAGE_RETENTION_SECS: "604800"
+  CITYG_SERVER_COMMIT_RETENTION_SECS: "2592000"
+  CITYG_SERVER_MAX_LOG_ENTRIES: "50000"
+  CITYG_SERVER_SESSION_TTL_SECS: "3600"
+  CITYG_SERVER_AUTH_SKEW_SECS: "300"
+  CITYG_SERVER_COMPACT_EVERY: "256"
   LOG_FORMAT: "json"
   RUST_LOG: "info"
 
 ---
-# PersistentVolumeClaim for journal storage (optional)
+# Room journals and snapshots.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: cityg-journal-pvc
+  name: cityg-rooms
   namespace: cityg
 spec:
   accessModes:
@@ -59,11 +52,9 @@ spec:
   resources:
     requests:
       storage: 10Gi
-  # Uncomment and set your storage class
   # storageClassName: fast-ssd
 
 ---
-# Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -71,9 +62,12 @@ metadata:
   namespace: cityg
   labels:
     app: cityg-api
-    version: v0.1.4
+    version: v0.2.0
 spec:
-  replicas: 3
+  replicas: 1
+  strategy:
+    # Stop the old pod before the new one opens the same journals.
+    type: Recreate
   selector:
     matchLabels:
       app: cityg-api
@@ -81,15 +75,19 @@ spec:
     metadata:
       labels:
         app: cityg-api
-        version: v0.1.4
+        version: v0.2.0
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
       containers:
       - name: cityg-api
-        image: cityg-api:0.1.0
+        image: cityg-api:0.2.0
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
@@ -105,7 +103,6 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 30
           timeoutSeconds: 5
-          successThreshold: 1
           failureThreshold: 3
         readinessProbe:
           httpGet:
@@ -114,37 +111,35 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 5
-          successThreshold: 1
           failureThreshold: 3
         resources:
           requests:
             cpu: 500m
             memory: 512Mi
           limits:
-            cpu: 2000m
+            cpu: "2"
             memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
         volumeMounts:
-        - name: journal-storage
+        - name: rooms
           mountPath: /var/lib/cityg
       volumes:
-      - name: journal-storage
+      - name: rooms
         persistentVolumeClaim:
-          claimName: cityg-journal-pvc
-      # Optional: Use emptyDir for ephemeral storage
-      # - name: journal-storage
-      #   emptyDir: {}
+          claimName: cityg-rooms
 
 ---
-# Service
 apiVersion: v1
 kind: Service
 metadata:
-  name: cityg-api-service
+  name: cityg-api
   namespace: cityg
   labels:
     app: cityg-api
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   ports:
   - name: http
     port: 8080
@@ -154,35 +149,7 @@ spec:
     app: cityg-api
 
 ---
-# Horizontal Pod Autoscaler
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: cityg-api-hpa
-  namespace: cityg
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: cityg-api
-  minReplicas: 3
-  maxReplicas: 10
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 70
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 80
-
----
-# ServiceMonitor for Prometheus Operator (optional)
+# Optional, with the Prometheus Operator.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

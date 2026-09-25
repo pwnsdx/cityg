@@ -1,4 +1,4 @@
-# Docker Compose configuration for City-G development environment
+# Docker Compose stack for the City-G v0.2 delivery service
 #
 # This setup includes:
 # - City-G API server
@@ -25,12 +25,13 @@ services:
     environment:
       # Optional overrides. Defaults come from cityg.env.
       - CITYG_SERVER_ADDRESS=0.0.0.0:8080
+      - CITYG_SERVER_STATE_PATH=/var/lib/cityg/rooms
     volumes:
-      # Persistent state (journal for crash recovery)
+      # Room journals and snapshots
       - cityg-data:/var/lib/cityg
 
-      # Optional: Mount custom configuration
-      # - ./config-production.toml:/etc/cityg/config.toml:ro
+      # Optional: a configuration file, read from the working directory
+      # - ./config-production.toml:/var/lib/cityg/cityg.toml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
       interval: 30s
@@ -41,7 +42,7 @@ services:
       - cityg-network
     labels:
       - "com.cityg.service=api"
-      - "com.cityg.version=0.1.0"
+      - "com.cityg.version=0.2.0"
 
   # Prometheus for metrics collection
   prometheus:

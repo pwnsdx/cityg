@@ -1,581 +1,134 @@
 # Contributing to City-G
 
-Thank you for your interest in contributing to City-G! We welcome contributions from researchers, engineers, and developers.
+City-G is a research protocol for end-to-end encrypted groups with
+post-quantum primitives. Its current profile is `city-g/v0.2`, specified in
+[`docs/specs.md`](docs/specs.md). The [glossary](docs/GLOSSARY.md) defines
+its terms.
 
-> Last updated: **12 Nov 2025** (City-G v0.1.0). Need to brush up on terminology such as anchors, epochs, or server-blindness? See the [Glossary](docs/GLOSSARY.md) for quick definitions.
+## Code of conduct
 
-This guide will help you understand our development process, coding standards, and how to submit contributions effectively.
+Be respectful and constructive, focus on technical merit and correctness,
+help newcomers, and report concerning behavior to the maintainers.
 
----
+## Getting started
 
-## Table of Contents
-
-1. [Code of Conduct](#code-of-conduct)
-2. [Getting Started](#getting-started)
-3. [Development Workflow](#development-workflow)
-4. [Contribution Guidelines](#contribution-guidelines)
-5. [Testing Requirements](#testing-requirements)
-6. [Documentation Standards](#documentation-standards)
-7. [Security Considerations](#security-considerations)
-8. [Research Contributions](#research-contributions)
-9. [Review Process](#review-process)
-
----
-
-## Code of Conduct
-
-We are committed to providing a welcoming and inclusive environment. Please:
-
-- Be respectful and constructive in all interactions
-- Focus on technical merit and correctness
-- Welcome newcomers and help them learn
-- Report any concerning behavior to the maintainers
-
----
-
-## Getting Started
-
-### Prerequisites
-
-Before contributing, ensure you have:
-
-- **Rust toolchain** (1.70 or newer): [Install Rust](https://rustup.rs/)
-- **Git** for version control
-- **Basic understanding** of cryptographic protocols (for protocol changes)
-
-### Setup Your Environment
+Prerequisites: a recent stable Rust toolchain (the workspace uses edition
+2024), Git, and for the GUI on Linux the packages `pkg-config libxcb1-dev
+libxkbcommon-dev libxkbcommon-x11-dev`. Python 3 with the `blake3` package
+runs the independent vector check.
 
 ```bash
-# Clone the repository
 git clone https://github.com/pwnsdx/cityg.git
 cd cityg
-
-# Build the project
-cargo build --all
-
-# Run tests to verify your setup
-cargo test --all
-
-# Run security checks
-./scripts/verify_no_secrets.sh
+cargo test --workspace                                  # every crate
+cargo test -p cityg-gui --features native-app           # the GUI
+./scripts/verify_no_secrets.sh --no-build               # server-blindness guardrail
+python3 -m pip install blake3 && python3 kat/v0.2/verify_vectors.py
 ```
 
-### Understanding the Codebase
+### Where things are
+
+| Path | Content |
+| --- | --- |
+| `docs/specs.md` | Normative specification. |
+| `crates/cityg-pqc` | ML-DSA-87 (FIPS 204) with per-usage contexts. |
+| `crates/cityg-core` | Protocol core without I/O: encodings, KDF, tree, key schedule, commits, admission, messages, member session, delivery-service ledger. |
+| `crates/cityg-proto` | Protobuf schema and routes of the `/v2` API. |
+| `crates/cityg-server` | Rooms of the delivery service: log, journal, stores. |
+| `crates/cityg-runtime` | Request handlers and sessions, shared by the two transports. |
+| `crates/cityg-api` | Native HTTP server. |
+| `crates/cityg-worker` | Cloudflare Worker (one Durable Object per room). |
+| `crates/cityg-api-client` | HTTP client and member driver. |
+| `crates/cityg-gui` | Desktop client and the `join_leave` CLI. |
+| `crates/cityg-stress` | Load and chaos tool. |
+| `crates/cityg-config` | Configuration. |
+| `kat/` | Conformance vectors, independent verifier, requirement map. |
+| `docs/formal/` | Symbolic model of the protocol. |
+
+## Workflow
+
+1. Branch from `main` (`feature/...`, `fix/...`).
+2. Make the change with its tests.
+3. Run the local CI, which mirrors the GitHub workflow:
 
-Before making changes, familiarize yourself with:
-
-1. **[Protocol Overview](docs/protocol/01-overview.md)** - High-level architecture
-2. **[Specification](docs/specs.md)** - Normative protocol specification
-3. **[Security Model](docs/protocol/10-security-model.md)** - Threat model and guarantees
-4. **[Implementation Guide](docs/protocol/11-implementation-guide.md)** - Code structure walkthrough
-
----
-
-## Development Workflow
-
-### 1. Create a Feature Branch
-
-Always work on a dedicated branch:
-
-```bash
-# Create and switch to a new branch
-git checkout -b feature/improve-sphf
-
-# Or for bug fixes
-git checkout -b fix/merkle-witness-validation
-```
-
-**Branch naming convention:**
-- `feature/description` - New features
-- `fix/description` - Bug fixes
-- `docs/description` - Documentation updates
-- `refactor/description` - Code refactoring
-- `test/description` - Test improvements
-
-### 2. Make Your Changes
-
-```bash
-# Edit source files
-vim crates/msphf-core/src/rlwe/mod.rs
-
-# Add corresponding tests
-vim crates/msphf-core/tests/rlwe_kat.rs
-
-# Update documentation if needed
-vim docs/protocol/02-cryptographic-primitives.md
-```
-
-### 3. Verify Compliance
-
-Before committing, run all checks:
-
-```bash
-# One-time setup: block pushes unless local CI parity checks pass
-./scripts/setup-git-hooks.sh
-
-# Run the same strict checks used by GitHub workflows
-./scripts/ci/local-ci.sh
-
-# Optional overrides for constrained environments
-CITYG_SKIP_GUI=1 ./scripts/ci/local-ci.sh
-CITYG_SKIP_DOCKER=1 ./scripts/ci/local-ci.sh
-CITYG_SKIP_NEXTEST=1 ./scripts/ci/local-ci.sh
-CITYG_FAST=1 ./scripts/ci/local-ci.sh
-CITYG_DISABLE_PARITY_IMAGE_CACHE=1 ./scripts/ci/local-ci.sh
-```
-
-Notes:
-- The first macOS run now builds a cached Linux parity image (`cityg/local-ci:rust-1.91-bookworm-v1`).
-- Subsequent runs reuse that image plus Docker cargo cache volumes, which avoids repeated apt/tool bootstrap.
-- `CITYG_FAST=1` runs fmt + strict clippy + cargo check (+ nextest unless skipped), then exits before secret scan/release builds/package tests.
-
-### 4. Commit Your Changes
-
-Write clear, descriptive commit messages:
-
-```bash
-# Good commit message
-git commit -m "Optimize RLWE NTT implementation (§9, Annex C)
-
-- Use AVX2 intrinsics for polynomial multiplication
-- Add benchmark showing 2x speedup
-- Maintain constant-time guarantees (verified with dudect)
-
-Refs: docs/protocol/02-cryptographic-primitives.md"
-
-# Reference spec sections for protocol changes
-git commit -m "Fix witness validation for empty trees (§5.3)"
-```
-
-**Commit message guidelines:**
-- First line: <80 characters, imperative mood ("Add", not "Added")
-- Reference spec sections for protocol changes (§X.Y)
-- Explain **why**, not just **what**
-- Include performance impacts for optimizations
-- Note security implications if relevant
-
-### 5. Push and Create Pull Request
-
-```bash
-# Push your branch
-git push origin feature/improve-sphf
-
-# Create pull request on GitHub
-# Include:
-# - What changed and why
-# - Test results
-# - Performance impact (if applicable)
-# - Breaking changes (if any)
-```
-
----
-
-## Contribution Guidelines
-
-### General Principles
-
-1. **Preserve Security Guarantees**
-   - Never add secrets to `AcceptanceContext`
-   - Maintain server-blindness properties
-   - Run `./scripts/verify_no_secrets.sh` for server-side changes
-   - Document any new security assumptions
-
-2. **Maintain Determinism**
-   - Use canonical CBOR encoding
-   - Document any sources of non-determinism
-   - Add tests verifying deterministic behavior
-
-3. **Reference the Specification**
-   - Cite spec sections for protocol changes (§X.Y, Annex Z)
-   - Update specification if behavior changes
-   - Keep code aligned with spec definitions
-
-4. **Add Tests**
-   - Known-Answer Tests (KATs) for crypto changes
-   - Property-based tests for complex logic
-   - Integration tests for API changes
-   - Regression tests for bug fixes
-
-5. **Update Documentation**
-   - Protocol docs for protocol changes
-   - API docs for public APIs
-   - CHANGELOG.md for user-facing changes
-   - README.md if setup/usage changes
-
-### Specific Contribution Types
-
-#### Cryptographic Changes
-
-If modifying cryptographic code:
-
-- [ ] Add Known-Answer Tests (KATs) from reference implementations
-- [ ] Run constant-time verification (dudect/ctgrind)
-- [ ] Document security parameters and assumptions
-- [ ] Reference academic papers/standards (NIST FIPS, RFCs)
-- [ ] Update threat model if applicable
-
-**Example**: See `crates/msphf-lb-vrf/tests/` for KAT structure.
-
-#### Protocol Changes
-
-If modifying the protocol:
-
-- [ ] Update specification: `docs/specs.md`
-- [ ] Update protocol docs: `docs/protocol/*.md`
-- [ ] Add migration path for breaking changes
-- [ ] Consider backwards compatibility
-- [ ] Update test vectors
-
-#### Performance Optimizations
-
-If improving performance:
-
-- [ ] Add benchmarks showing improvement
-- [ ] Verify correctness (existing tests still pass)
-- [ ] Document trade-offs (memory vs. speed, etc.)
-- [ ] Ensure constant-time properties preserved (for crypto code)
-- [ ] Test on multiple platforms if using SIMD
-
-#### Bug Fixes
-
-If fixing a bug:
-
-- [ ] Add regression test reproducing the bug
-- [ ] Explain root cause in commit message
-- [ ] Check for similar bugs elsewhere
-- [ ] Update error messages if applicable
-- [ ] Consider adding validation to prevent recurrence
-
-#### Documentation
-
-If updating documentation:
-
-- [ ] Ensure accuracy (verify against code)
-- [ ] Check all links work
-- [ ] Use consistent terminology (see [Glossary](docs/GLOSSARY.md))
-- [ ] Add examples where helpful
-- [ ] Update "Last Updated" date
-
----
-
-## Testing Requirements
-
-All contributions must include appropriate tests.
-
-### Running Tests
-
-```bash
-# Run all tests
-cargo test --all
-
-# Run specific crate tests
-cargo test -p msphf-core
-
-# Run with verbose output
-cargo test --all -- --nocapture
-
-# Run specific test
-cargo test test_lbvrf_deterministic
-
-# Run benchmarks (requires nightly for some crates)
-cargo bench
-```
-
-### Test Types
-
-#### Unit Tests
-
-Test individual functions/modules:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_merkle_root_computation() {
-        let leaves = vec![/* ... */];
-        let root = compute_merkle_root(&leaves);
-        assert_eq!(root, expected_root);
-    }
-}
-```
-
-#### Integration Tests
-
-Test multi-component interactions:
-
-```rust
-// tests/integration/join_flow.rs
-#[tokio::test]
-async fn test_full_join_flow() {
-    let server = setup_test_server().await;
-    let client = create_test_client();
-
-    let result = client.join_room("test-room").await;
-    assert!(result.is_ok());
-}
-```
-
-#### Known-Answer Tests (KATs)
-
-For cryptographic code:
-
-```rust
-#[test]
-fn test_lbvrf_kat_vector_1() {
-    // Test vectors from reference implementation
-    let secret_key = hex!("abcd...");
-    let message = b"test message";
-    let expected_output = hex!("1234...");
-
-    let proof = LBVRF::prove(message, params, pk, sk, seed).unwrap();
-    assert_eq!(proof.output, expected_output);
-}
-```
-
-#### Property-Based Tests
-
-For complex logic:
-
-```rust
-use proptest::prelude::*;
-
-proptest! {
-    #[test]
-    fn test_merkle_consistency(leaves in prop::collection::vec(any::<[u8; 32]>(), 1..100)) {
-        let root1 = compute_merkle_root(&leaves);
-        let root2 = compute_merkle_root(&leaves);
-        prop_assert_eq!(root1, root2, "Merkle root must be deterministic");
-    }
-}
-```
-
-### Test Coverage
-
-We aim for:
-- **>80% line coverage** for core protocol code
-- **100% coverage** for security-critical paths
-- **Known-Answer Tests** for all crypto primitives
-- **Integration tests** for all API endpoints
-
----
-
-## Documentation Standards
-
-Good documentation is as important as good code.
-
-### Code Documentation
-
-Use Rust doc comments:
-
-```rust
-/// Computes the Merkle root from a list of leaf hashes.
-///
-/// # Arguments
-/// * `leaves` - Vector of 32-byte leaf hashes
-///
-/// # Security
-/// Uses BLAKE3 for hashing. O(n log n) time complexity.
-pub fn compute_merkle_root(leaves: &[[u8; 32]]) -> [u8; 32]
-```
-
-### Protocol Documentation
-
-When updating protocol docs:
-
-1. **Be precise** - Define terms clearly
-2. **Be complete** - Cover all cases and edge conditions
-3. **Be consistent** - Use terminology from [Glossary](docs/GLOSSARY.md)
-4. **Add examples** - Show concrete use cases
-5. **Cross-reference** - Link to related sections
-
-### Changelog
-
-For user-facing changes, update `CHANGELOG.md`:
-
-```markdown
-## [Unreleased]
-
-### Added
-- New `pivot_refresh` API endpoint for forward secrecy rotation
-
-### Changed
-- Improved RLWE NTT performance by 2x using AVX2 intrinsics
-
-### Fixed
-- Fixed witness validation for empty Merkle trees (#123)
-
-### Security
-- Addressed timing side-channel in polynomial multiplication (GHSA-xxxx)
-```
-
----
-
-## Security Considerations
-
-City-G is cryptographic software. Security is paramount.
-
-### Security-Critical Code
-
-Extra care is required when modifying:
-
-- `crates/msphf-core` - Cryptographic primitives
-- `crates/msphf-orchestrator/src/accept` - Server validation
-- `crates/capss` - CAPSS Smallwood proofs
-- `crates/msphf-lb-vrf` - VRF implementation
-
-### Server-Blindness Verification
-
-The `verify_no_secrets.sh` script ensures server code cannot decrypt:
-
-```bash
-./scripts/verify_no_secrets.sh
-
-# Must pass with:
-# ✓ No MlKemSecretKey in AcceptanceContext
-# ✓ No ml_kem_decapsulate() in accept path
-# ✓ All 10 checks passed
-```
-
-**If this fails after your changes, you've likely broken server-blindness!**
-
-### Side-Channel Resistance
-
-For constant-time requirements:
-
-1. Use `subtle` crate for timing-sensitive comparisons
-2. Avoid conditional branches on secrets
-3. Test with dudect/ctgrind:
    ```bash
-   # See docs/timing-verification.md
-   cargo build --release
-   # Run dudect tests
+   ./scripts/setup-git-hooks.sh          # once: blocks pushes that fail the checks
+   ./scripts/ci/local-ci.sh              # fmt, strict clippy, tests, guardrail, wasm, GUI, builds
+   CITYG_FAST=1 ./scripts/ci/local-ci.sh # fmt, clippy and tests only
    ```
 
-### Reporting Security Issues
+4. Write commit messages that say what changed and why; for protocol
+   changes, cite the sections of the specification.
+5. Open a pull request with the template's checklist.
 
-**Do not report security vulnerabilities publicly!**
+## Rules for changes
 
-See [SECURITY.md](SECURITY.md) for our coordinated disclosure process.
+### Everything
 
----
+- `cargo fmt --all` and the strict clippy set of the CI (no `unwrap`,
+  `expect`, `panic!`, `todo!` or `unimplemented!` outside tests).
+- Tests with the change; coverage must not drop.
+- No `unsafe` in protocol crates.
+- Update the documentation the change affects and `CHANGELOG.md`.
 
-## Research Contributions
+### Protocol changes
 
-We especially welcome research contributions in:
+The specification comes first; the code implements it.
 
-### Formal Verification
-- Coq/Lean proofs of protocol properties
-- Verification of cryptographic soundness
-- Model checking for concurrency bugs
+- Any change to an encoding, a label, a signature context, an algorithm or
+  a parameter is a **new profile version**: it changes `city-g/v0.2` and
+  every vector.
+- Register new labels and contexts (specs.md, section 16).
+- Regenerate the vectors, review the diff, and keep the independent verifier
+  in step:
 
-### Cryptographic Analysis
-- RLWE-HPS security analysis
-- Post-quantum security evaluation
-- Alternative SPHF instantiations
-- Zero-knowledge proof optimizations
+  ```bash
+  CITYG_WRITE_VECTORS=1 cargo test -p cityg-core --test vectors
+  python3 kat/v0.2/verify_vectors.py
+  ```
 
-### Performance Optimization
-- SIMD optimizations (AVX2/NEON)
-- Constant-time implementations
-- Memory efficiency improvements
-- Parallelization strategies
+- Map each new requirement in `kat/kat-v0.2-conformance-manifest.json` to
+  its section, its vectors and its tests. `cargo test -p cityg-core --test
+  conformance_manifest` fails if a section, a vector section or a test of
+  `cityg-core` is left out.
+- Update the formal model in `docs/formal/` if the change touches the key
+  schedule, the tree, removal or admission.
 
-### Side-Channel Analysis
-- Timing attack analysis (dudect/ctgrind)
-- Cache attack resistance
-- Power analysis (if hardware testing available)
+### Security-critical code
 
-### Scalability Research
-- Multi-million member simulations
-- Network latency analysis
-- Distributed deployment patterns
+- The server-side crates (`cityg-server`, `cityg-runtime`, `cityg-api`,
+  `cityg-worker`) must never use member-side, secret-holding types;
+  `scripts/verify_no_secrets.sh` checks it syntactically.
+- Secrets are zeroized on drop, never logged, and compared in constant time.
+- Every decoded object is re-encoded and compared byte for byte; relayed
+  objects are never re-encoded.
+- Randomness comes from a caller-provided CSPRNG (seeded in tests).
+- See [`docs/security-review-checklist.md`](docs/security-review-checklist.md).
 
----
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
-## Review Process
+## Research contributions
 
-### What to Expect
+We are especially interested in:
 
-1. **Automated Checks** (CI)
-   - Formatting (`cargo fmt`)
-   - Linting (`cargo clippy`)
-   - Tests (`cargo test --all`)
-   - Server-blindness verification
-   - Documentation builds
+- extending the symbolic model (`docs/formal/`) and computational proofs of
+  the key schedule and the tree;
+- cryptanalysis of the construction and of its parameter choices;
+- side-channel analysis of the ML-KEM and ML-DSA backends and of the
+  constant-time comparisons;
+- scaling beyond `MAX_N_MAX` (sub-groups, federation) and reducing commit
+  sizes.
 
-2. **Maintainer Review**
-   - Code quality and style
-   - Test coverage
-   - Documentation completeness
-   - Security implications
-   - Spec alignment
+## Review
 
-3. **Discussion**
-   - May request changes or clarifications
-   - Feedback is meant to improve quality
-   - Be patient and responsive
+Maintainers review for correctness, security, tests and documentation, and
+may ask for changes. Protocol changes need a specification update reviewed
+before the code. Large changes are best discussed in an issue first.
 
-### Timelines
+## Getting help
 
-- **Initial review**: Within 1 week
-- **Follow-up reviews**: 2-3 days
-- **Merge**: When all checks pass and reviewers approve
+- Questions and ideas: GitHub Discussions.
+- Bugs: GitHub Issues (not for vulnerabilities).
+- Documentation: [`docs/README.md`](docs/README.md).
 
-### Large Changes
-
-For substantial changes:
-
-1. **Open an issue first** to discuss approach
-2. **Share design doc** for architectural changes
-3. **Prototype** to validate feasibility
-4. **Incremental PRs** if possible (easier to review)
-
----
-
-## Getting Help
-
-### Resources
-
-- **[Documentation](docs/README.md)** - Start here
-- **[FAQ](docs/protocol/17-faq.md)** - Common questions
-- **[Glossary](docs/GLOSSARY.md)** - Terminology reference
-- **[GitHub Issues](https://github.com/pwnsdx/cityg/issues)** - Bug reports and feature requests
-
-### Communication
-
-- **GitHub Issues** - Bug reports, feature requests
-- **GitHub Discussions** - General questions, ideas
-- **Email** - Security issues only (see SECURITY.md)
-
-### Asking Questions
-
-When asking questions:
-
-1. **Search first** - Check docs, issues, and discussions
-2. **Be specific** - Include error messages, code snippets, logs
-3. **Show effort** - Explain what you've tried
-4. **Minimal example** - Reduce to simplest reproduction
-
----
-
-## Thank You!
-
-Your contributions help make City-G better for everyone. Whether you're:
-
-- Fixing a typo in documentation
-- Reporting a bug you found
-- Implementing a new feature
-- Conducting security research
-
-...every contribution is valuable. Thank you for being part of the City-G community!
-
----
-
-**See also:**
-- [Main README](README.md) - Project overview
-- [Security Policy](SECURITY.md) - Vulnerability reporting
-- [License](LICENSE) - MIT License
-
-**Last Updated**: 2025-11-12
+Thank you for contributing.

@@ -6,6 +6,20 @@ Preuves de concept reproductibles associées à
 Ce dossier est un crate autonome (`[workspace]` propre) : il ne fait pas partie
 du workspace principal et n'est pas compilé par la CI.
 
+> **Profil v0.1.4 uniquement.** Les PoC s'appuient sur les crates du profil
+> v0.1.4 (`anchor-seed`, `cityg-client`, `msphf-core`, `msphf-rlwe`), retirées
+> depuis le passage au profil v0.2. Pour les exécuter, utiliser une copie de
+> travail du commit audité :
+>
+> ```bash
+> git worktree add /tmp/cityg-71ee261 71ee261
+> cp -r docs/audits/poc-2026-09-25 /tmp/cityg-71ee261/docs/audits/
+> cd /tmp/cityg-71ee261/docs/audits/poc-2026-09-25
+> ```
+>
+> Le devenir de chaque constat dans le profil v0.2 est consigné à la fin du
+> rapport d'audit.
+
 ## Prérequis
 
 Le commit audité (`71ee261`) ne compile pas (constat H-09). Avant de lancer les

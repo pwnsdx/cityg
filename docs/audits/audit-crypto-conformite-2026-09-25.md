@@ -4,10 +4,11 @@
 | --- | --- |
 | Date | 2026-09-25 |
 | Commit audité | `71ee261` (identique à `origin/main`) ; les numéros de ligne cités renvoient à ce commit |
-| Spécification | [`docs/specs.md`](../specs.md) « v0.1.4 » (en-tête daté du 2026-03-23, texte modifié jusqu'au 2026-04-05) |
-| Périmètre | spec normative, chapitres compagnons de [`docs/protocol/`](../protocol/), crates `msphf-*`, `capss`, `anchor-seed`, `cityg-client`, `cityg-server`, `cityg-api`, `cityg-api-client`, `cityg-pqc`, flux GUI join / leave / expel / messages |
+| Spécification | `docs/specs.md` « v0.1.4 » (en-tête daté du 2026-03-23, texte modifié jusqu'au 2026-04-05), archivée depuis sous [`docs/legacy/v0.1.4/specs.md`](../legacy/v0.1.4/specs.md) |
+| Périmètre | spec normative, chapitres compagnons de `docs/protocol/` (archivés sous [`docs/legacy/v0.1.4/protocol/`](../legacy/v0.1.4/protocol/)), crates `msphf-*`, `capss`, `anchor-seed`, `cityg-client`, `cityg-server`, `cityg-api`, `cityg-api-client`, `cityg-pqc`, flux GUI join / leave / expel / messages |
 | Preuves de concept | [`poc-2026-09-25/`](poc-2026-09-25/) (Rust et Python, reproductibles) |
 | Auditeur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Les constats critiques sont étayés par du code exécuté ; une relecture cryptographique humaine indépendante reste recommandée avant toute décision de conception. |
+| Suivi | Section [6](#suivi) : traitement de chaque constat et de chaque proposition dans le profil v0.2. |
 
 ## 0. Résumé exécutif
 
@@ -555,6 +556,52 @@ Modéliser le calendrier de clés, la barrière, le retrait et l'admission dans 
 | P1 | Spec v0.2 : registre complet, transitions normatives, genèse, versionnement | H-07, M-04, L-01 | L |
 | P2 | Calendrier de clés chaîné (P-2), barrière v2 (P-3), admission (P-4), signature d'ancre (P-5), plan messages v3 (P-6) | C-01, C-02, H-01 à H-04, H-08, M-01 à M-03, M-05 | XL |
 | P2 | Analyse formelle (P-8) | tous | L |
+
+<a id="suivi"></a>
+## 6. Suivi des constats et des propositions
+
+Mis à jour le 2026-09-25 sur la branche `claude/nifty-lamport-s7sm1a`. Les correctifs P0 ont d'abord été appliqués au profil v0.1.4, puis ce profil a été remplacé par le profil `city-g/v0.2`, qui met en œuvre les propositions P-1 à P-8 : spécification normative [`docs/specs.md`](../specs.md), cœur protocolaire [`crates/cityg-core`](../../crates/cityg-core), service de distribution `/v2`, clients portés, retrait du code v0.1.4. Les deux profils n'interopèrent pas.
+
+La colonne « Exigences » renvoie aux identifiants du manifeste [`kat/kat-v0.2-conformance-manifest.json`](../../kat/kat-v0.2-conformance-manifest.json), qui relie chaque exigence à ses sections de spec, à ses vecteurs et à ses tests ; le test `conformance_manifest` de `cityg-core` en vérifie la cohérence en CI.
+
+### 6.1 Constats
+
+| ID | Statut | Traitement | Commits | Exigences |
+| --- | --- | --- | --- | --- |
+| C-01 | Résolu | P0 : le témoin CAPSS (`hp`) ne quitte plus l'appareil. v0.2 : `E_k` et ME-OR disparaissent ; toute clé dérive du calendrier chaîné (§8), dont chaque secret d'époque dépend du secret de chemin racine et de `init_secret` de l'époque précédente, que le serveur ne connaît pas. Le serveur ne vérifie que l'état public. | `4fd8d6e`, `4cd2dba`, `416e0a0` | KS.1, KS.2, SEC.2 |
+| C-02 | Résolu (retrait) | SPHF, CAPSS et SRX Smallwood, `hp_binding` et ZK-VRF sont retirés du profil et du code. Le serveur vérifie une signature ML-DSA-87 par commit et la transition publique (§9). | `4cd2dba`, `416e0a0` | COM.1, COM.2, COM.4 |
+| C-03 | Résolu | P0 : le départ passe par une proposition de retrait signée, committée par un autre membre. v0.2 : règle normative, l'auteur d'un commit ne peut pas en être la cible (§9.4, §10.1) ; la feuille et le chemin retirés sont effacés avant le chemin de mise à jour ; l'appareil retiré ne peut plus revenir avec une admission conservée (§7). Le modèle formel prouve la PRS et retrouve l'attaque sans la règle de l'auteur. | `0a0bb08`, `4cd2dba`, `5f33f26` | REM.1, REM.2, REM.3, ROS.4 |
+| H-01 | Résolu | Toute entrée porte une admission signée par un admin, ou par une clé d'invitation dont l'invitation est signée par un admin, vérifiée par le serveur et par chaque membre (§10.2). Le `roster_hash` engage le hachage de chaque admission et l'ensemble des admins (§7) ; le `gid` lie la clé du créateur (§5). Limite déclarée : un admin qui admet l'adversaire lui donne l'appartenance (§2.1). | `4cd2dba` | ADM.1 à ADM.3, ID.2 |
+| H-02 | Résolu | Calendrier chaîné : chaque commit renouvelle tous les secrets ; chaîne par émetteur avec effacement de chaque clé utilisée (§11.2) ; auto-mise à jour au plus tard toutes les 24 h (`FS_WINDOW`, §13.4) ; clés de l'époque précédente effacées après 10 minutes. La FS est définie par l'effacement (§2.2) ; aucune FS « à la minute » n'est revendiquée. | `4cd2dba`, `96151a9` | KS.2, KS.4, MSG.2, MSG.4, MEM.4 |
+| H-03 | Résolu | Chaque commit renouvelle la clé feuille de son auteur à partir d'un secret frais (§6.3) ; bouton « PCS refresh » et maintenance quotidienne dans la GUI. | `4cd2dba`, `96151a9` | TREE.3, MEM.4 |
+| H-04 | Résolu | Une seule signature ML-DSA-87 par commit, sur la map privée des clés 109 et 110, avec registre fermé (§9.1, §9.2) ; le tag de confirmation authentifie le transcript. | `4cd2dba` | COM.1, COM.2, KS.3 |
+| H-05 | Résolu | FIPS 204 ML-DSA-87 (crate `fips204`) sur toutes les cibles, y compris wasm32, avec une chaîne `ctx` par usage (§3, §16.3). | `5a47d30` | SUITE.1 à SUITE.3, LBL.2 |
+| H-06 | Résolu | `H_L` hache le tableau `CBOR_det(["city-g/v0.2", label, args])`, seul encodage (§4.2) ; vecteurs publiés et recalculés par un vérificateur indépendant en Python. | `4cd2dba`, `6d83768` | ENC.1, ENC.2, LBL.1 |
+| H-07 | Résolu | Spécification v0.2 complète (registre, transitions, genèse, règles du serveur) et manifeste de conformité vérifié en CI. Le rapprochement a révélé trois écarts, corrigés : règles de genèse non testées, absence de test de la borne des chemins, et une éviction du journal qui perdait le message ajouté (404 après acceptation). | `6d83768`, `132cbbe` | toutes |
+| H-08 | Résolu | Borne `max_update_path_bytes(n_max)`, `MAX_N_MAX` = 1024, taille de groupe configurable (§6.4, §15) ; un test vérifie qu'un chemin de pire cas tient dans la borne. Limite : environ 1,2 Mo par commit à 1024 membres ; au-delà, sous-groupes ou fédération. | `4cd2dba`, `6d83768` | TREE.6, PAR.1 |
+| H-09 | Résolu | Compilation de `main`, `Cargo.lock` et tests de la GUI réparés. | `85f6893`, `b3d97e3`, `776177d` | — |
+| H-10 | Résolu | P0 : contrôle d'appartenance à la réception et affichage de l'horodatage signé. v0.2 : plan messages v3 (§11) : contexte `city-g/msg/v3`, émetteur membre du roster de l'époque et du roster courant, signature vérifiée avant toute diffusion ; le serveur refuse les émetteurs retirés ou en instance de retrait. | `0a0bb08`, `4cd2dba` | MSG.1, MSG.3, DS.4 |
+| M-01 | Résolu | Un seul mécanisme anti-rejeu par couche : clé supprimée après usage côté membre, fenêtre de 64 générations par émetteur et par époque côté serveur (§11.3, §12.1). | `4cd2dba` | MSG.3, DS.4 |
+| M-02 | Résolu | Chaque membre chiffre sur sa propre chaîne, à générations strictement croissantes, et persiste son état avant l'envoi (§11.2, §13.3) : pas de réutilisation clé/nonce, même après un plantage. | `4cd2dba`, `96151a9` | MSG.2, MEM.3 |
+| M-03 | Résolu | Fenêtre de grâce de 10 minutes pour l'époque précédente, côté membre et côté serveur (§11.3, §12.1). | `4cd2dba` | MSG.4, DS.4 |
+| M-04 | Résolu | Un seul profil, `city-g/v0.2`, lié dans chaque `GroupContext` ; tout changement d'encodage, de label ou de contexte est un nouveau profil (§16) ; les éléments vestigiaux de v0.1.4 sont retirés. | `4cd2dba`, `416e0a0` | LBL.1 |
+| M-05 | Résolu (détection) | La validation publique des chemins exige que les cibles soient exactement les résolutions du co-chemin, ce qui interdit l'omission silencieuse ; un secret mal chiffré est détecté par son destinataire (clé publique dérivée différente), qui signe un rapport d'échec de couverture visible de tous et réintègre son slot par un commit Resync (§6.3, §10.4). Un membre malveillant peut toujours produire un chemin indéchiffrable : l'échec est détecté et attribué, pas empêché. | `4cd2dba` | TREE.4, TREE.5, CF.1, COM.7 |
+| M-06 | Résolu | P0 : configuration fail-closed. v0.2 : plus de jeton d'opérateur ; les requêtes de groupe s'authentifient par une `SessionAuth` signée par un membre (§14.1) ; les limites du serveur sont validées au démarrage. | `0a0bb08`, `ff32c81` | BIND.2, PAR.1 |
+| L-01 | Résolu | Spécification réécrite (RFC 2119, sections ancrées, registres des labels et contextes, paramètres). | `6d83768` | toutes |
+| L-02 | Résolu | README, SECURITY.md et guides réécrits ; le tableau §2.2 est la seule source des revendications. | `4fd8d6e` et la présente mise à jour de la documentation | SEC.1 |
+
+### 6.2 Propositions
+
+| ID | Statut | Mise en œuvre et écarts |
+| --- | --- | --- |
+| P-1 | Faite | §2 : adversaires A1 à A5, tableau des propriétés, définitions normatives de PRS, FS et PCS, hypothèses et limites. Le tableau v0.2 est plus fort que celui de P-1 pour A2, grâce à P-4. |
+| P-2 | Faite | §8 et §8.1, avec deux écarts : `DeriveSecret`/`ExpandLabel` sur BLAKE3 à clé plutôt que HKDF, et un `GroupContext` qui lie le transcript confirmé de l'époque `n` elle-même (comme MLS). Commit externe pour les entrées et les resyncs ; la `GroupInfo` est signée par l'auteur du commit, jamais par le serveur. |
+| P-3 | Faite | a : feuille renouvelée à chaque commit. b : l'auteur doit être membre et ne peut pas être la cible d'un retrait. c : propositions de retrait signées ; sans `not_after` ni `LEAVE_DEADLINE`, car chaque commit suivant doit inclure toutes les propositions enregistrées et le serveur refuse aussitôt les messages de la cible. d : un retrait efface la feuille et le chemin une seule fois, dans l'arbre de départ du commit. e : remplacée par les commits externes, où le nouvel entrant renouvelle lui-même son chemin, si bien qu'aucune feuille n'entre sans chemin frais. f : la génération entre dans le hachage de feuille et dans chaque proposition. g : §6.4. h : le membre non couvert signe un rapport puis se resynchronise lui-même, au lieu d'obliger un autre membre à re-couvrir. |
+| P-4 | Faite | Admissions de type 0 (admin) ou 1 (invitation signée par un admin), liées au `gid` et au `leaf_id` de l'entrant ; le slot est déterminé (plus petit slot libre) au lieu d'être signé. Transparence : code de sécurité (hachage du transcript) et hachage du roster comparables hors bande, épinglage des alias à la première utilisation ; pas de journal de transparence externe. |
+| P-5 | Faite | §9.2, contexte `city-g/anchor/v2` ; toutes les preuves sont retirées. |
+| P-6 | Faite | §11, avec engagement de clé dans l'en-tête (`H_L("msg/key-commitment", [key, nonce])`). |
+| P-7 | Faite | Registre fermé des commits, registres des labels et des contextes, suite FIPS 203/204 finale, profil versionné, liaison de déploiement séparée (§14), vecteurs recalculés par une implémentation indépendante (Python), manifeste de conformité. |
+| P-8 | Faite | Modèle symbolique ProVerif sous [`docs/formal/`](../formal/) : secret des époques face au serveur, accord sur les membres, contrôle d'admission, FS, PCS après auto-mise à jour, PRS, authentification de l'émetteur, prouvés dans des scénarios bornés avec primitives idéales ; deux scénarios de contrôle retrouvent les attaques que préviennent la règle de l'auteur (C-03) et les appareils retirés. L'écriture du modèle a révélé deux défauts, corrigés : une admission d'admin restait réutilisable par un membre retiré (appareils retirés, §7), et la PCS revendiquée face à la compromission complète d'un appareil ne tenait pas, sa clé de signature permettant un Resync à volonté (adversaires A5 et A6 séparés, §2). Voir [`docs/formal/README.md`](../formal/README.md) pour les abstractions et les limites. |
 
 <a id="annexe-a"></a>
 ## Annexe A — Reproduction des preuves de concept

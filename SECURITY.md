@@ -1,74 +1,81 @@
 # Security Policy
 
-## Reporting a Vulnerability
+City-G is a research prototype. Profile `city-g/v0.2` has not had an
+independent human cryptographic review; do not rely on it to protect
+people. Prefer MLS (RFC 9420) implementations for production.
+
+## Reporting a vulnerability
 
 **Do not report security vulnerabilities through public GitHub issues.**
 
-If you discover a security vulnerability in City-G, please report it privately:
+Report them privately:
 
 - **Email:** pwnsdx@protonmail.ch (PGP available with ProtonMail)
 - **Subject:** `[SECURITY] City-G Vulnerability Report`
-- **Response Time:** We aim to respond within 48 hours
+- **Response time:** we aim to respond within 48 hours
 
-### What to Include
+Please include a description, steps to reproduce, the impact you expect, and
+optionally a fix. We follow coordinated disclosure (90 days) and credit
+reporters in advisories.
 
-1. Description of the vulnerability
-2. Steps to reproduce (if applicable)
-3. Potential impact assessment
-4. Suggested remediation (optional)
+## What City-G claims
 
-### Disclosure Policy
+The security properties of profile v0.2, per adversary, are stated in
+[`docs/specs.md`](docs/specs.md), section 2.2. In short, against the
+delivery service (passive or active) and against removed members:
 
-- We follow **coordinated disclosure** (90-day timeline)
-- We will acknowledge your contribution in security advisories
-- We may offer recognition for significant findings
+- confidentiality of message content, sender authentication, membership
+  agreement, admission control (no member added without an admin's
+  signature), and post-removal secrecy;
+- forward secrecy within `FS_WINDOW` (24 hours) and post-compromise security
+  after the next self-update of a device whose state was compromised.
 
----
+Device keys (ML-DSA-87) are long-term credentials that the profile does not
+rotate: an adversary that steals one can act as that device, and as an admin
+if the device is one, until the device is removed and replaced by a new
+device.
 
-## Security Documentation
+A deployment must not advertise any other property. The following are
+**not** provided:
 
-For security properties, guarantees, and verification methods, see:
+- metadata privacy: the server sees the roster, who sends when, message
+  sizes and aliases;
+- availability: the server can drop or delay traffic and deny service;
+- protection of content from a member of the same epoch;
+- authenticated identities: aliases are self-asserted; compare security codes
+  and device keys out of band ([`docs/fingerprints.md`](docs/fingerprints.md));
+- confidentiality of invite links: an invite link is a bearer secret until
+  its invite expires.
 
-- **Security Model:** [`docs/protocol/10-security-model.md`](docs/protocol/10-security-model.md)
-- **Server Acceptance:** [`docs/protocol/07-server-acceptance.md`](docs/protocol/07-server-acceptance.md) (§3 - Publisher Blindness)
-- **Testing Guide:** [`docs/protocol/13-testing-guide.md`](docs/protocol/13-testing-guide.md)
-- **Security Review Checklist:** [`docs/security-review-checklist.md`](docs/security-review-checklist.md)
+## Out of scope
 
----
+- Metadata leakage and traffic analysis (use Tor or a VPN at the network
+  layer).
+- Denial of service by the delivery service or by members (a member can
+  author a commit that others cannot process; it is detected, reported and
+  recovered from, not prevented).
+- Compromise of an endpoint while it is compromised.
 
 ## Verification
 
-To verify security properties of the implementation:
-
 ```bash
-# Run automated security checks
-./scripts/verify_no_secrets.sh
-
-# Run release-grade security review baseline
-./scripts/security_review.sh
-
-# Run full test suite
-cargo test --all
-
-# Verify type safety
-cargo check --all-features
+./scripts/security_review.sh             # tests and the server-blindness guardrail
+./scripts/run_protocol_mutation_suite.sh # hostile inputs
+./scripts/verify_client_state_hardening.sh
+python3 kat/v0.2/verify_vectors.py       # independent conformance check (pip install blake3)
 ```
 
----
+The guardrail `scripts/verify_no_secrets.sh` is a syntactic check that the
+server-side crates use no secret-holding type; it is not a proof. The
+protocol argument is in the specification and in the symbolic model under
+[`docs/formal/`](docs/formal/). See also
+[`docs/security-review-checklist.md`](docs/security-review-checklist.md).
 
-## Security Audits
+## Audits
 
-- **October 2024:** Timing side-channel analysis (see [`docs/timing-verification.md`](docs/timing-verification.md))
-
----
-
-## Out of Scope
-
-The following are not considered security vulnerabilities:
-
-- Metadata leakage (group membership, join times, message counts)
-- Denial of service from malicious publishers (by design)
-- Traffic analysis attacks (use Tor/VPN at network layer)
-- Endpoint compromise revealing current epoch keys
-
-See [`docs/protocol/10-security-model.md`](docs/protocol/10-security-model.md) for complete threat model.
+- **2026-09-25:** cryptographic and conformance audit of profile v0.1.4
+  ([report, in French](docs/audits/audit-crypto-conformite-2026-09-25.md)).
+  It found critical flaws in v0.1.4 (C-01 to C-03) and proposed the v0.2
+  redesign; its section 6 records how each finding was addressed.
+- **2026-03:** text reviews of the v0.1.4 specification
+  ([`docs/audits/`](docs/audits/README.md)).

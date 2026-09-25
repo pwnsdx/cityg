@@ -30,7 +30,7 @@ Related to #(issue number)
 
 Describe how you tested your changes:
 
-- [ ] All existing tests pass (`cargo test --all`)
+- [ ] All existing tests pass (`cargo test --workspace`, `cargo test -p cityg-gui --features native-app`)
 - [ ] Added new tests for new functionality
 - [ ] Manual testing performed (describe scenarios)
 - [ ] Server-blindness verification passed (`./scripts/verify_no_secrets.sh`)
@@ -55,10 +55,11 @@ Describe how you tested your changes:
 ## Protocol Changes
 
 - [ ] No protocol changes
-- [ ] Protocol specification updated (`docs/specs-unified-fs.md`)
-- [ ] Protocol docs updated (`docs/protocol/*.md`)
-- [ ] Backwards compatible
-- [ ] Breaking protocol change (requires coordination)
+- [ ] Specification updated first (`docs/specs.md`); new labels and contexts registered (section 16)
+- [ ] Vectors regenerated and reviewed (`CITYG_WRITE_VECTORS=1 cargo test -p cityg-core --test vectors`), independent verifier updated (`kat/v0.2/verify_vectors.py`)
+- [ ] Requirements mapped in `kat/kat-v0.2-conformance-manifest.json`
+- [ ] Formal model updated if the key schedule, tree, removal or admission changed (`docs/formal/`)
+- [ ] New profile version (any change to an encoding, label, context, algorithm or parameter)
 
 ## Performance Impact
 

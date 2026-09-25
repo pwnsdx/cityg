@@ -1,143 +1,42 @@
-# City-G Release QA Checklist
+# Release QA checklist
 
-Use this checklist to verify server + GUI readiness before a release.
+## Build and tests
 
-For longer-running staging validation, see [`docs/preproduction-validation.md`](preproduction-validation.md).
+- [ ] `./scripts/ci/local-ci.sh` passes (format, strict clippy, workspace
+      tests, server-blindness guardrail, independent vectors when Python and
+      `blake3` are available, Worker `wasm32` check, GUI tests, release
+      builds, Docker image).
+- [ ] The CI workflow is green on the release commit, including the nightly
+      chaos campaign and the symbolic model of the last days.
+- [ ] Coverage did not drop (`cargo llvm-cov nextest --workspace --features
+      cityg-gui/native-app --profile ci --summary-only`).
+- [ ] [security-review-checklist.md](security-review-checklist.md) is done.
 
-## 1. Build and Unit/Integration Tests
+## End to end
 
-Run these from a shell that sourced `scripts/cargo_repo_env.sh`
-so the repo-local Cargo environment and native-app test stack floor are active.
+With a fresh `cityg-api` (and, for Worker releases, a staging Worker):
 
-- [ ] `cargo test -p cityg-server`
-- [ ] `cargo test -p cityg-api`
-- [ ] `cargo test -p cityg-gui --features native-app`
-- [ ] `cargo test -p msphf-orchestrator`
-- [ ] `./scripts/verify_client_state_hardening.sh`
-- [ ] `./scripts/verify_no_secrets.sh`
+- [ ] Two GUI instances (`CITYG_GUI_CONFIG_DIR` apart): create a room, copy
+      the invite link, join, exchange messages both ways, compare the
+      security codes.
+- [ ] A third member joins with the same link while the others are offline,
+      then everyone syncs and agrees.
+- [ ] An admin expels a member: the member is told, can no longer send,
+      and the others keep talking.
+- [ ] A member leaves: another member's maintenance commits the removal.
+- [ ] **PCS refresh** moves to a new epoch; messages of the previous epoch
+      still decrypt during the grace window.
+- [ ] Restart the server with a `state_path`: rooms, logs and sessions
+      recover (sessions may need to be reopened; the clients do it).
+- [ ] Restart a GUI: the session restores and does not resend with a spent
+      generation.
+- [ ] `cargo run -p cityg-stress -- --final-capacity-check` completes with no
+      failed round.
 
-## 2. API Runtime Checks
+## Release
 
-1. Start API server:
-
-```bash
-cargo run -p cityg-api
-```
-
-2. Verify health:
-
-```bash
-./scripts/healthcheck_api.sh http://127.0.0.1:8080/health/ready 30 1
-curl -fsS http://127.0.0.1:8080/health/detailed
-```
-
-3. Confirm telemetry/window endpoints respond:
-
-```bash
-curl -fsS -X POST -H 'content-type: application/x-protobuf' --data-binary '' \
-  http://127.0.0.1:8080/v1/window >/dev/null
-curl -fsS -X POST -H 'content-type: application/x-protobuf' --data-binary '' \
-  http://127.0.0.1:8080/v1/telemetry >/dev/null
-```
-
-## 3. Membership and Capacity Smoke
-
-Run one-command smoke (starts local API, runs watch mode, validates freeze-925 behavior):
-
-```bash
-cargo run -p cityg-stress -- \
-  --server-bind 127.0.0.1:18080 \
-  --server-url http://127.0.0.1:18080 \
-  --workers 1 \
-  --rounds-per-worker 2 \
-  --min-count 2 \
-  --max-count 2 \
-  --leaves-per-room 2 \
-  --watch-percent 100 \
-  --jitter-max-secs 0 \
-  --round-delay-secs 2 \
-  --message-burst-count 2 \
-  --message-burst-interval-ms 25 \
-  --restart-every-secs 45 \
-  --client-restart-every-secs 20 \
-  --capture-client-state-artifacts \
-  --require-metrics
-```
-
-Expected result:
-- Join + leave watch flow succeeds.
-- Restart-chaos run succeeds with per-round client-state artifacts.
-- Capacity run still fails with `freeze 925`/`mh_window_full` signal when explicitly requested.
-
-For longer churn validation, run:
-
-```bash
-cargo run -p cityg-stress -- \
-  --server-bind 127.0.0.1:18080 \
-  --server-url http://127.0.0.1:18080 \
-  --workers 1 \
-  --rounds-per-worker 10 \
-  --min-count 2 \
-  --max-count 2 \
-  --leaves-per-room 2 \
-  --watch-percent 100 \
-  --round-delay-secs 2 \
-  --restart-every-secs 120 \
-  --client-restart-every-secs 60 \
-  --capture-client-state-artifacts \
-  --require-metrics
-```
-
-## 4. GUI Smoke
-
-- [ ] Launch API with explicit local auth:
-
-```bash
-export CITYG_SERVER_ADDRESS=127.0.0.1:8080
-export CITYG_SERVER_MESSAGE_AUTH_TOKEN=dev-message-token
-cargo run -p cityg-api
-```
-
-- [ ] Launch first GUI instance:
-
-```bash
-export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
-export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-1
-cargo run -p cityg-gui --features native-app
-```
-
-- [ ] Launch second GUI instance with an isolated config dir:
-
-```bash
-export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
-export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-2
-cargo run -p cityg-gui --features native-app
-```
-
-- [ ] Normal room creation/join/leave/refresh works without
-  `CITYG_CLIENT_ADMIN_TOKEN` or `CITYG_SERVER_ROOMS_ADMIN_TOKEN`.
-- [ ] Second joiner can send immediately after joining the room.
-- [ ] Send/receive works in both directions.
-- [ ] Members panel reflects join/leave updates.
-- [ ] `PCS Refresh` succeeds without leaving either client stuck in pending barrier recovery.
-- [ ] Crash/restart recovery path remains message-blocked while `barrier_recovery_pending` is true and recovers after epoch sync.
-
-## 5. Container/Deployment Smoke
-
-From `docs/examples`:
-
-```bash
-cp cityg.env.example cityg.env
-docker compose up -d --build
-```
-
-- [ ] `cityg-api` becomes healthy.
-- [ ] Prometheus scrapes `/metrics`.
-- [ ] Grafana loads the `CityG Overview` dashboard.
-
-## 6. Sign-Off
-
-- [ ] Security checklist completed (`docs/security-review-checklist.md`).
-- [ ] Audit pack reviewed (`docs/client-state-hardening-audit-pack.md`).
-- [ ] Release notes updated.
-- [ ] Rollback plan validated.
+- [ ] Versions and `CHANGELOG.md` updated; the profile identifier matches
+      [`specs.md`](specs.md).
+- [ ] Docker image built from the release commit; health probes answer.
+- [ ] Release notes restate the security claims and limits of
+      [SECURITY.md](../SECURITY.md).
