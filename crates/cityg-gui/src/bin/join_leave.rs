@@ -2869,7 +2869,9 @@ mod tests {
         let Value::Array(cover_fields) = cover_value else {
             return Err(anyhow!("cover payload must decode as array"));
         };
-        let Some(Value::Array(new_public_keys_values)) = cover_fields.get(4) else {
+        // KemTreeCoverPayload: [slot_index, slot_generation, path_nodes,
+        // leaf_indices, node_ciphertexts, new_public_keys].
+        let Some(Value::Array(new_public_keys_values)) = cover_fields.get(5) else {
             return Err(anyhow!("cover payload missing new_public_keys"));
         };
 

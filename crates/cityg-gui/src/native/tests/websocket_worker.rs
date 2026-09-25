@@ -2,13 +2,16 @@ use super::*;
 
 #[test]
 fn websocket_control_messages_encode_expected_shapes() {
+    // Compare parsed JSON: key order depends on serde_json's `preserve_order`
+    // feature, which dependency feature unification may switch on.
+    let ack: serde_json::Value =
+        serde_json::from_str(&websocket_ack_message(12)).unwrap_or(serde_json::Value::Null);
+    assert_eq!(ack, serde_json::json!({"type": "ack", "last_sequence": 12}));
+    let resume: serde_json::Value =
+        serde_json::from_str(&websocket_resume_message(34)).unwrap_or(serde_json::Value::Null);
     assert_eq!(
-        websocket_ack_message(12),
-        r#"{"last_sequence":12,"type":"ack"}"#
-    );
-    assert_eq!(
-        websocket_resume_message(34),
-        r#"{"last_sequence":34,"type":"resume"}"#
+        resume,
+        serde_json::json!({"type": "resume", "last_sequence": 34})
     );
     assert_eq!(
         websocket_notification_sequence(&serde_json::json!({
