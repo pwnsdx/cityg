@@ -64,8 +64,8 @@ impl AppModel {
             session.barrier_state.last_pending_history_trace.as_ref(),
             |panel, trace| {
                 panel
-                    .child(self.session_row("Last pending check", trace.user_summary()))
-                    .child(self.session_row("Pending trace", trace.technical_summary()))
+                    .child(self.session_row("Last pending check", &trace.user_summary()))
+                    .child(self.session_row("Pending trace", &trace.technical_summary()))
             },
         )
         .child(self.render_epoch_age_row(session))

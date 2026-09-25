@@ -1268,7 +1268,7 @@ fn try_recover_barrier_from_header_returns_none_without_matches()
         test_new_public_key_wire(1)?,
         test_new_public_key_wire(4)?,
     ];
-    let cover = KemTreeCoverPayloadWire(3, vec![10, 4, 1, 0], None, Vec::new(), new_public_keys);
+    let cover = KemTreeCoverPayloadWire(3, 0, vec![10, 4, 1, 0], None, Vec::new(), new_public_keys);
     let cover_bytes = to_cbor_vec(&cover)?;
     let update = BarrierUpdateWire(
         "barrier-v1".to_string(),
@@ -1323,7 +1323,7 @@ fn try_recover_barrier_from_header_rejects_oversized_update()
         test_new_public_key_wire(1)?,
         test_new_public_key_wire(4)?,
     ];
-    let cover = KemTreeCoverPayloadWire(3, vec![10, 4, 1, 0], None, Vec::new(), new_public_keys);
+    let cover = KemTreeCoverPayloadWire(3, 0, vec![10, 4, 1, 0], None, Vec::new(), new_public_keys);
     let cover_bytes = to_cbor_vec(&cover)?;
     let update = BarrierUpdateWire(
         "barrier-v1".to_string(),
@@ -1414,6 +1414,7 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
         &session.barrier_state.kem_tree_hash_after,
         &[0xBB; 32],
         3,
+        0,
         source_node,
         target_node,
         &target_pkhash,
@@ -1461,6 +1462,7 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
     ];
     let cover = KemTreeCoverPayloadWire(
         3,
+        0,
         vec![10, 4, 1, 0],
         None,
         node_ciphertexts,
@@ -1574,6 +1576,7 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
         &session.barrier_state.kem_tree_hash_after,
         &[0xBB; 32],
         3,
+        0,
         source_node,
         target_node,
         &target_pkhash,
@@ -1622,6 +1625,7 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
     ];
     let cover = KemTreeCoverPayloadWire(
         3,
+        0,
         vec![10, 4, 1, 0],
         None,
         node_ciphertexts,
@@ -1716,6 +1720,7 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
         &session.barrier_state.kem_tree_hash_after,
         &[0xBB; 32],
         3,
+        0,
         source_node,
         target_node,
         &correct_pkhash,
@@ -1763,6 +1768,7 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
     ];
     let cover = KemTreeCoverPayloadWire(
         3,
+        0,
         vec![10, 4, 1, 0],
         None,
         node_ciphertexts,
@@ -1851,6 +1857,7 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
         &[0xBC; 32],
         &[0xBD; 32],
         3,
+        0,
         source_node,
         target_node,
         &target_pkhash,
@@ -1886,6 +1893,7 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
     ];
     let cover = KemTreeCoverPayloadWire(
         3,
+        0,
         vec![10, 4, 1, 0],
         None,
         node_ciphertexts,
@@ -1959,6 +1967,7 @@ fn try_recover_barrier_from_header_rejects_reason_mismatch_for_local_roots()
         [0xBB; 32].to_vec(),
         to_cbor_vec(&KemTreeCoverPayloadWire(
             3,
+            0,
             vec![10, 4, 1, 0],
             None,
             Vec::new(),
@@ -2021,6 +2030,7 @@ fn try_recover_barrier_from_header_rejects_local_barrier_version_mismatch()
         [0xBB; 32].to_vec(),
         to_cbor_vec(&KemTreeCoverPayloadWire(
             3,
+            0,
             vec![10, 4, 1, 0],
             None,
             Vec::new(),
@@ -2106,6 +2116,7 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
         &[0xBC; 32],
         &[0xBD; 32],
         3,
+        0,
         source_node,
         target_node,
         &target_pkhash,
@@ -2153,6 +2164,7 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     ];
     let cover = KemTreeCoverPayloadWire(
         3,
+        0,
         vec![10, 4, 1, 0],
         None,
         node_ciphertexts,
@@ -2270,6 +2282,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad(
         &[0xBC; 32],
         &[0xBD; 32],
         3,
+        0,
         source_node,
         target_node,
         &target_pkhash,
@@ -2317,6 +2330,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad(
     ];
     let cover = KemTreeCoverPayloadWire(
         3,
+        0,
         vec![10, 4, 1, 0],
         None,
         node_ciphertexts,
@@ -2412,6 +2426,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad()
         &[0xBC; 32],
         &[0xBD; 32],
         3,
+        0,
         source_node,
         target_node,
         &target_pkhash,
@@ -2459,6 +2474,7 @@ fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad()
     ];
     let cover = KemTreeCoverPayloadWire(
         3,
+        0,
         vec![10, 4, 1, 0],
         None,
         node_ciphertexts,
@@ -2592,6 +2608,7 @@ fn try_recover_barrier_from_header_rejects_stale_genesis_after_local_init()
         [0xBB; 32].to_vec(),
         to_cbor_vec(&KemTreeCoverPayloadWire(
             3,
+            0,
             vec![10, 4, 1, 0],
             None,
             Vec::new(),

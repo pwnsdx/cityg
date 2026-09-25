@@ -1,9 +1,9 @@
 use super::*;
+use cityg_client::barrier::BarrierSlotLease as CoreBarrierSlotLease;
 use cityg_client::barrier_recovery::{
     BarrierRecoverResult as CoreBarrierRecoverResult,
     BarrierRecoveryInput as CoreBarrierRecoveryInput,
     BarrierRecoveryNodeMaterialRef as CoreBarrierRecoveryNodeMaterialRef,
-    BarrierSlotLease as CoreBarrierSlotLease,
     recover_barrier_update as recover_barrier_update_core,
 };
 

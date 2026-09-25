@@ -1357,21 +1357,19 @@ fn load_session_overlays_replay_progress_sidecar() -> Result<(), Box<dyn std::er
     )?;
     session.last_fetch_timestamp_ms = Some(1_000);
 
-    let tuple_tag = MessageReplayTupleTag::new(
-        session.gid,
-        session.we_epoch_id,
-        session.fs_ec,
-        session.xk_hash,
-        session.epoch_key,
-        session.barrier_state.barrier_version,
-        session.leaf_id,
-    );
-    let replay_context = MessageReplayContext::new(
-        session.fs_ec,
-        session.xk_hash,
-        session.epoch_key,
-        session.leaf_id,
-    );
+    let crypto_context = cityg_client::message_crypto::MessageCryptoContext {
+        gid: &session.gid,
+        we_epoch_id: &session.we_epoch_id,
+        xk_hash: &session.xk_hash,
+        fs_ec: session.fs_ec,
+        barrier_version: session.barrier_state.barrier_version,
+        sender_leaf: &session.leaf_id,
+        epoch_key: &session.epoch_key,
+        k_barrier: &session.barrier_state.k_barrier,
+    };
+    let tuple_tag = cityg_client::message_crypto::derive_msg_replay_tuple_tag(&crypto_context)?;
+    let replay_context =
+        cityg_client::message_crypto::derive_msg_replay_context_id(&crypto_context)?;
     session
         .msg_replay_state
         .record(tuple_tag, replay_context, 1);
