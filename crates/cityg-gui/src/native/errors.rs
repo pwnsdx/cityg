@@ -87,12 +87,14 @@ fn categorize_api_error(
             "The server refused this device's session token. The client opens a new session; try again.",
             true,
         ),
+        // Only the removed v0.1.4 API answers 410; lost log entries are
+        // detected from the log itself and trigger a resync.
         ErrorCode::Gone => CategorizedError::new(
             ErrorCategory::Server,
-            "History no longer available",
+            "Outdated server",
             technical_details,
-            "The server no longer keeps the part of the room log this device needed. The client resyncs from the current state.",
-            true,
+            "The server answered with the removed City-G v0.1.4 API. Use a server that runs City-G v0.2.",
+            false,
         ),
         ErrorCode::PayloadTooLarge => CategorizedError::new(
             ErrorCategory::Validation,
@@ -283,12 +285,7 @@ mod tests {
                 false,
             ),
             (ErrorCode::Unauthorized, "expired", "Session refused", true),
-            (
-                ErrorCode::Gone,
-                "pruned",
-                "History no longer available",
-                true,
-            ),
+            (ErrorCode::Gone, "v0.1.4 API", "Outdated server", false),
             (ErrorCode::PayloadTooLarge, "big", "Too large", false),
             (
                 ErrorCode::Unprocessable,

@@ -2,7 +2,7 @@
 # Client-state hardening: encrypted session files, refusal of damaged or
 # foreign state, spent message generations made durable before a message
 # leaves the device (no nonce reuse after a crash), resync after a lost
-# state.
+# state or after commits that expired from the server log.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -16,5 +16,6 @@ cargo test --locked -p cityg-core -- \
 cargo test --locked -p cityg-api --test integration -- \
   the_state_sink_makes_spent_generations_durable \
   concurrent_commits_retry_and_lost_state_resyncs \
+  a_member_that_missed_pruned_commits_resyncs \
   members_wrap_only_their_own_sessions
 cargo test --locked -p cityg-gui --features native-app -- native::tests::persistence
