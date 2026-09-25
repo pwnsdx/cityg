@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Research note on groups of millions of members
+  (`docs/research/grands-groupes-2026-09-25.md`, in French) and its cost
+  model (`docs/research/rekey_sim.py`): the limits of profile v0.3, lower
+  bounds and related work, and a proposed architecture with parallel
+  re-keying by district, per-district delivery-service queues and taint
+  tracking. No protocol change.
+
 ## [0.3.0] - 2026-09-25
 
 Profile `city-g/v0.3` replaces profile v0.2 to serve groups of thousands of

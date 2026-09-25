@@ -233,7 +233,9 @@ Specification: sections 6.5, 8.
 * **Proposals by reference for admin changes and rotation.** Only removals
   and join requests wait in the delivery service; admin changes and rotations
   stay inside the commit of their author.
-* **Sub-groups and federation.** Not needed up to 8192 members.
+* **Sub-groups and federation.** Not needed up to 8192 members. Groups of
+  millions of members are the subject of a separate
+  [research note](research/grands-groupes-2026-09-25.md).
 
 ## Relation to the audit findings
 

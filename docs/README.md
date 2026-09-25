@@ -44,6 +44,13 @@ profile v0.1.4 in [`legacy/v0.1.4/`](legacy/v0.1.4/README.md).
 | [audits/audit-crypto-conformite-2026-09-25.md](audits/audit-crypto-conformite-2026-09-25.md) | Cryptographic and conformance audit of profile v0.1.4 (in French), its proposals P-1 to P-8, and the status of each finding after the move to v0.2; profile v0.3 keeps those fixes. |
 | [audits/](audits/README.md) | Earlier audits, kept as written. |
 
+## Research
+
+| Document | Content |
+| --- | --- |
+| [research/grands-groupes-2026-09-25.md](research/grands-groupes-2026-09-25.md) | Groups of millions of members (in French): why profile v0.3 stops at 8192, the lower bounds and related work, and a proposed architecture ("Cité": districts re-keyed in parallel by stateless committers, per-district delivery-service queues, taint tracking), with its costs, guarantees, risks and roadmap. Nothing in it is implemented. |
+| [research/rekey_sim.py](research/rekey_sim.py) | Cost model behind the note's figures. |
+
 ## Design notes
 
 | Document | Content |

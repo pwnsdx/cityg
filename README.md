@@ -173,7 +173,9 @@ python3 kat/v0.3/verify_vectors.py           # independent check (pip install bl
 * Groups have at most 8192 members (the reference delivery service accepts
   up to 1024 by default). The largest commit of an 8192-member group is
   under 10 MB and its tree about 35 MB, which is why such groups need light
-  members.
+  members. A [research note](docs/research/grands-groupes-2026-09-25.md)
+  (in French) studies how to reach groups of millions of members; nothing
+  in it is implemented yet.
 * A joiner cannot check the history before the epoch it enters: a malicious
   delivery service can show it a fabricated view of the group until it
   compares its security code with a member it knows.
