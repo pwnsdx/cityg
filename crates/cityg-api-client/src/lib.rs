@@ -141,6 +141,7 @@ mod join_ticket;
 mod member_queries;
 mod merge_tickets;
 mod observability;
+mod remove_proposals;
 mod room_admin;
 mod verification;
 
@@ -494,6 +495,8 @@ impl CitygApiClient {
                 | "/v1/members"
                 | "/v1/members/search"
                 | "/v1/rooms/merge_ticket"
+                | "/v1/rooms/remove_proposal"
+                | "/v1/rooms/pending_remove_proposals"
                 | "/v2/barrier/resolve_revoked_occupancies"
                 | "/v2/barrier/resolve_join_occupancies_since"
                 | "/v1/barrier/fetch_public_tree"
@@ -660,6 +663,8 @@ pub struct BarrierSnapshotPreparationRequest<'a> {
     pub deployment_profile_manifest_bytes: &'a [u8],
     pub pop_secret_key: &'a [u8],
     pub full_verification_target_leaf_id: Option<[u8; 32]>,
+    /// Slot occupancies revoked by this update (the ticket's targets).
+    pub revocation_target_records: &'a [BarrierRevokedOccupancyRecord],
     pub barrier_update_reason: u64,
     pub operation_label: &'a str,
 }
@@ -971,6 +976,8 @@ pub struct MergeTicket {
     pub deployment_profile_manifest_bytes: Vec<u8>,
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
+    /// Slot occupancies the ticket revokes (authority-signed in the artifact).
+    pub revoked_slot_leases: Vec<BarrierRevokedOccupancyRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -1178,6 +1185,7 @@ pub struct PreparedRevocationMergeTicket {
     pub parities: Vec<PivotParity>,
     pub witness_bytes: Option<Vec<u8>>,
     pub srx_inputs: cityg_client::witness::SrxInputsOwned,
+    pub revoked_slot_leases: Vec<BarrierRevokedOccupancyRecord>,
     pub ticket_history_commitment: HistoryCommitment,
     pub ticket_history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
@@ -1267,6 +1275,7 @@ impl PreparedOriginMergeTicket {
             deployment_profile_manifest_bytes: self.deployment_profile_manifest_bytes.as_slice(),
             pop_secret_key,
             full_verification_target_leaf_id: None,
+            revocation_target_records: &[],
             barrier_update_reason,
             operation_label,
         }
@@ -1356,6 +1365,7 @@ impl PreparedRevocationMergeTicket {
             deployment_profile_manifest_bytes: self.deployment_profile_manifest_bytes.as_slice(),
             pop_secret_key,
             full_verification_target_leaf_id,
+            revocation_target_records: self.revoked_slot_leases.as_slice(),
             barrier_update_reason,
             operation_label,
         }
@@ -1627,6 +1637,7 @@ impl MergeTicket {
             parities: prepared_runtime.parities,
             witness_bytes: prepared_runtime.witness_bytes,
             srx_inputs,
+            revoked_slot_leases: self.revoked_slot_leases.clone(),
             ticket_history_commitment: self.current_history_commitment,
             ticket_history_authority_extension: self.history_authority_extension,
             history_authority: self.history_authority.clone(),
@@ -2166,8 +2177,13 @@ mod tests {
         let pox_r_commit = array32(&response.pox_r_commit).expect("pox_r_commit");
         let kem_tree_hash_after =
             array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after");
+        let revoked_slot_leases: Vec<(u32, u64)> = response
+            .revoked_slot_leases
+            .iter()
+            .map(|record| (record.slot_index, record.slot_generation))
+            .collect();
         let payload = encode_cbor_det(&MergeTicketArtifactSignedPayload {
-            label: "cityg/merge-ticket-artifact-v2",
+            label: "cityg/merge-ticket-artifact-v3",
             scope_id: &authority.descriptor.scope_id,
             history_authority_extension: response.history_authority_extension.as_str(),
             profile_version: response.profile_version.as_str(),
@@ -2213,6 +2229,7 @@ mod tests {
             fs_policy_version: response.fs_policy_version.as_str(),
             fs_epoch_base_ts: response.fs_epoch_base_ts,
             kbroad_generation: response.kbroad_generation,
+            revoked_slot_leases: revoked_slot_leases.as_slice(),
         });
         let signature = cityg_pqc::test_utils::sign_deterministic(
             &authority.secret_key,
@@ -2265,6 +2282,7 @@ mod tests {
             fs_policy_version: response.fs_policy_version.clone(),
             fs_epoch_base_ts: response.fs_epoch_base_ts,
             kbroad_generation: response.kbroad_generation,
+            revoked_slot_leases,
             signature,
         })
     }
@@ -3302,6 +3320,7 @@ mod tests {
             deployment_profile_manifest_bytes: Vec::new(),
             n_max: 8,
             max_barrier_update_bytes: 0,
+            revoked_slot_leases: Vec::new(),
         }
     }
 

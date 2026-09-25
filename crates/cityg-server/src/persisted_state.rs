@@ -225,6 +225,11 @@ pub(crate) fn persisted_kbroad_room_state(
         room.current_accepted_barrier_predecessor_hash =
             state.current_accepted_barrier_predecessor_hash;
         room.pending_join_finalize_auth = persisted_join_finalize_auth(state);
+        room.pending_removals = state
+            .pending_removals
+            .values()
+            .map(|pending| pending.encoded.clone())
+            .collect();
         room.active_slot_leases = persisted_leaf_slot_leases(&state.leaf_slot_leases);
         room.revoked_slot_leases = persisted_leaf_slot_leases(&state.revoked_slot_leases);
     }
@@ -238,4 +243,29 @@ pub(crate) fn merge_optional_u64_max(current: Option<u64>, persisted: Option<u64
         (None, Some(rhs)) => Some(rhs),
         (None, None) => None,
     }
+}
+
+/// Restore pending removal proposals, keeping only well-formed, correctly
+/// signed proposals for this group (targets are re-checked by
+/// `prune_pending_removals`).
+pub(crate) fn decode_persisted_pending_removals(
+    gid: &[u8],
+    records: &[Vec<u8>],
+) -> BTreeMap<[u8; 32], PendingRemoval> {
+    records
+        .iter()
+        .filter_map(|encoded| {
+            let signed = SignedRemoveProposal::from_cbor(encoded).ok()?;
+            if signed.proposal.gid.as_slice() != gid || signed.verify_signature().is_err() {
+                return None;
+            }
+            Some((
+                signed.proposal.target_leaf_id,
+                PendingRemoval {
+                    signed,
+                    encoded: encoded.clone(),
+                },
+            ))
+        })
+        .collect()
 }

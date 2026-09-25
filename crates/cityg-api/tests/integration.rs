@@ -646,6 +646,36 @@ async fn build_join_finalize_bundle(
     })
 }
 
+/// Sign and submit `member`'s own leave request (audit C-03): another member
+/// commits it with a LEAVE merge ticket.
+async fn submit_leave_proposal(
+    client: &CitygApiClient,
+    room_id: &str,
+    member: &JoinedMember,
+) -> Result<String> {
+    let gid = array32("gid", &hex::decode(room_id)?)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    let proposal = cityg_client::remove_proposal::SignedRemoveProposal::sign(
+        cityg_client::remove_proposal::RemoveProposal {
+            gid,
+            target_leaf_id: member.leaf_id,
+            target_slot_index: u32::try_from(member.slot_lease.slot_index)?,
+            target_slot_generation: member.slot_lease.slot_generation,
+            not_after_ms: now_ms + 60_000,
+        },
+        &member.pop_public_key,
+        member.pop_secret_key.as_bytes(),
+    )?;
+    Ok(client
+        .submit_remove_proposal(room_id, &proposal)
+        .await?
+        .status)
+}
+
+/// LEAVE-ticket revocation merge authored by `member`: the pending removals
+/// it commits, or its own removal when it is the last member.
 async fn build_leave_bundle(
     client: &CitygApiClient,
     room_id: &str,
@@ -911,11 +941,16 @@ async fn public_stale_join_finalize_auth_rejected_after_slot_reuse() -> Result<(
     bob.bundle = bob_finalize.bundle.clone();
     bob.forward_state = bob_finalize.forward_state_after;
 
-    let bob_leave = build_leave_bundle(&client, &room_id, &bob).await?;
+    // Bob asks to leave; Alice commits his removal.
+    assert_eq!(
+        submit_leave_proposal(&client, &room_id, &bob).await?,
+        "pending"
+    );
+    let bob_removal = build_leave_bundle(&client, &room_id, &alice).await?;
     client
-        .accept_epoch_bundle(&bob_leave)
+        .accept_epoch_bundle(&bob_removal)
         .await
-        .expect("accept bob leave");
+        .expect("accept bob removal committed by alice");
 
     let charlie = join_room_member(&client, &room_id, "charlie", 0xB3).await?;
     assert_eq!(

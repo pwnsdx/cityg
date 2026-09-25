@@ -100,23 +100,26 @@ pub fn derive_barrier_snapshot_ticket_fields(
     })
 }
 
+/// Revoked occupancies the updater blanks before re-keying its own path.
+///
+/// For reason 0, `revocation_target_records` (the merge ticket's targets) join
+/// the committed revoked set; the updater slot is revoked only if it is itself
+/// a target (the last member leaving, audit C-03). When
+/// `apply_revocation_targets` is false the updater reclaims a committed
+/// revoked slot, which then leaves the revoked set.
 pub fn derive_barrier_snapshot_witness_selection(
     barrier_update_reason: u64,
     updater_slot_lease: BarrierSlotLease,
     resolved_revoked_records: &[BarrierRevokedSnapshotRecord],
+    revocation_target_records: &[BarrierRevokedSnapshotRecord],
     revocation_roots_hash: [u8; 32],
     committed_revocation_roots_hash: [u8; 32],
-    include_updater_in_revoked_set: bool,
+    apply_revocation_targets: bool,
 ) -> Result<BarrierSnapshotWitnessSelection> {
     let mut witness_revoked_records = resolved_revoked_records.to_vec();
     let witness_revocation_roots_hash = if barrier_update_reason == 0 {
-        if include_updater_in_revoked_set {
-            let updater_slot_index = u32::try_from(updater_slot_lease.slot_index)
-                .map_err(|_| anyhow!("slot_index out of range"))?;
-            witness_revoked_records.push(BarrierRevokedSnapshotRecord {
-                slot_index: updater_slot_index,
-                slot_generation: updater_slot_lease.slot_generation,
-            });
+        if apply_revocation_targets {
+            witness_revoked_records.extend_from_slice(revocation_target_records);
         } else {
             let updater_slot_index = u32::try_from(updater_slot_lease.slot_index)
                 .map_err(|_| anyhow!("slot_index out of range"))?;
@@ -332,11 +335,13 @@ mod tests {
             &[0xF0; 32],
         )?;
         assert_eq!(fields.cat, [0xAA; 32]);
+        // The updater (slot 2) re-keys its own path; only the ticket's
+        // target (slot 4) joins the committed revoked set (audit C-03).
         let selection = derive_barrier_snapshot_witness_selection(
             0,
             BarrierSlotLease {
-                slot_index: 4,
-                slot_generation: 9,
+                slot_index: 2,
+                slot_generation: 5,
             },
             &[
                 BarrierRevokedSnapshotRecord {
@@ -348,6 +353,10 @@ mod tests {
                     slot_generation: 2,
                 },
             ],
+            &[BarrierRevokedSnapshotRecord {
+                slot_index: 4,
+                slot_generation: 9,
+            }],
             fields.revocation_roots_hash,
             fields.committed_revocation_roots_hash,
             true,
@@ -448,6 +457,7 @@ mod tests {
                     slot_generation: 2,
                 },
             ],
+            &[],
             [0x44; 32],
             [0x55; 32],
             false,

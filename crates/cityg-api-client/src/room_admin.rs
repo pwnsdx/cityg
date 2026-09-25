@@ -539,6 +539,14 @@ impl CitygApiClient {
             current_global_history_attestation,
             merge_ticket_artifact_bytes: response.merge_ticket_artifact,
             deployment_profile_manifest_bytes: response.deployment_profile_manifest,
+            revoked_slot_leases: response
+                .revoked_slot_leases
+                .iter()
+                .map(|record| crate::BarrierRevokedOccupancyRecord {
+                    slot_index: record.slot_index,
+                    slot_generation: record.slot_generation,
+                })
+                .collect(),
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })

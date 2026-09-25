@@ -148,13 +148,14 @@ mod tests {
 
     #[test]
     fn runtime_room_wraps_server_and_volatile_state() {
-        let room = RuntimeRoom::new(CityGServer::new(ServerConfig::new()));
+        let room = RuntimeRoom::new(CityGServer::new(ServerConfig::without_history_authority()));
         assert!(room.volatile().member_metadata().is_empty());
     }
 
     #[test]
     fn runtime_room_exposes_room_level_volatile_helpers() {
-        let mut room = RuntimeRoom::new(CityGServer::new(ServerConfig::new()));
+        let mut room =
+            RuntimeRoom::new(CityGServer::new(ServerConfig::without_history_authority()));
         let weid = [0x11; 32];
         let leaf = [0x22; 32];
         let scope = EpochScope {

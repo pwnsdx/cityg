@@ -111,6 +111,17 @@ fn join_slot_index_guard_rejects_colliding_slot_index() -> Result<(), CityGError
     let mut state = GroupState::default();
     state.snapshots.insert(root, membership);
     state.latest_root = Some(root);
+    // Both leaves map to the same fixture slot: the active member holds it and
+    // a (corrupted) pending lease claims it again for the joiner.
+    let active_lease = install_active_fixture_lease(&mut state, active_leaf)?;
+    state.pending_join_finalize_auth.insert(
+        colliding_leaf,
+        JoinFinalizeAuthRecord {
+            leaf_id: colliding_leaf,
+            lease: active_lease,
+            token: [0x5C; 32],
+        },
+    );
     let err = ensure_join_slot_indices_available(&state, &[colliding_leaf])
         .expect_err("colliding join must be rejected");
     assert!(

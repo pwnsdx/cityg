@@ -3,7 +3,7 @@
   "kind": "v0.2-conformance-manifest",
   "notes": [
     "This manifest links the requirements introduced by the v0.2 profile (audit docs/audits/audit-crypto-conformite-2026-09-25.md) to deterministic implementation tests.",
-    "Requirement IDs are grouped by area: SIG (signature suite, audit H-05)."
+    "Requirement IDs are grouped by area: SIG (signature suite, audit H-05), REM (member removal, audit C-03), MSG (message receipt, audit H-10), CFG (server configuration, audit M-06), SLOT (slot leases)."
   ],
   "requirements": [
     {
@@ -56,6 +56,170 @@
           "crate": "cityg-pqc",
           "test": "tests::secret_key_round_trips_through_bytes",
           "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "REM.1",
+      "title": "A member never authors the barrier update that revokes it while other members remain; it leaves by signing a removal proposal that another member commits",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "tests::removal_proposals::pending_removal_blocks_refresh_and_self_revocation_until_committed",
+          "expectation": "reject_self_revocation"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::barrier_update_validation::validate_barrier_update_rejects_updater_revoked_by_its_own_anchor",
+          "expectation": "reject"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::sequential_member_leaves_succeed",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "tests::join_leave_roundtrip_and_message_send",
+          "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "REM.2",
+      "title": "Removal proposals are signed (context city-g/remove/v1) by their target or a room admin, bound to the target's slot occupancy, and short-lived",
+      "coverage": [
+        {
+          "crate": "cityg-client",
+          "test": "remove_proposal::tests::self_signed_proposal_round_trips_and_verifies",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-client",
+          "test": "remove_proposal::tests::tampered_or_foreign_proposals_are_rejected",
+          "expectation": "reject"
+        },
+        {
+          "crate": "cityg-client",
+          "test": "remove_proposal::tests::malformed_encodings_are_rejected",
+          "expectation": "reject_malformed"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::removal_proposals::submit_remove_proposal_validates_signer_target_and_lifetime",
+          "expectation": "reject"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::removal_proposals::room_admin_may_propose_another_members_removal",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-api-schema",
+          "test": "tests::remove_proposal_requests_validate_room_and_size",
+          "expectation": "reject_malformed"
+        }
+      ]
+    },
+    {
+      "id": "REM.3",
+      "title": "Every revocation is authorized by a pending removal proposal or a room-admin author, and a member-authored update commits every pending removal",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "tests::barrier_update_validation::validate_barrier_update_rejects_unauthorized_revocation",
+          "expectation": "reject"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::barrier_update_validation::validate_barrier_update_accepts_revocation_backed_by_pending_removal",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::barrier_update_validation::validate_barrier_update_accepts_revocation_authored_by_room_admin",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::barrier_update_validation::validate_barrier_update_rejects_updates_leaving_pending_removals_uncommitted",
+          "expectation": "reject"
+        }
+      ]
+    },
+    {
+      "id": "REM.4",
+      "title": "Only the last member of a room commits its own removal",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "tests::ticket_generation::merge_ticket_lets_only_the_last_member_revoke_itself",
+          "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "REM.5",
+      "title": "Pending removal proposals survive a server restart",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "tests::removal_proposals::pending_removals_survive_restart",
+          "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "REM.6",
+      "title": "The updater blanks the authority-signed revoked occupancies of its ticket and re-keys only its own path",
+      "coverage": [
+        {
+          "crate": "cityg-client",
+          "test": "barrier_snapshot_prepare::tests::derive_ticket_fields_and_witness_selection_cover_revocation_reason",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::admin_expel::admin_expel_removes_member_and_preserves_survivor_messaging",
+          "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "MSG.1",
+      "title": "Receivers drop messages whose sender is not a current member and display the signed timestamp",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::perform_fetch_shows_signed_timestamps_and_drops_removed_senders",
+          "expectation": "reject"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::perform_fetch_rejects_sender_leaf_spoofing_with_mismatched_public_key",
+          "expectation": "reject"
+        }
+      ]
+    },
+    {
+      "id": "CFG.1",
+      "title": "The default server configuration fails closed with the global history authority",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "tests::history_authority::default_server_config_fails_closed_with_global_history_authority",
+          "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "SLOT.1",
+      "title": "A failed join ticket leaves the slot allocator untouched",
+      "coverage": [
+        {
+          "crate": "cityg-server",
+          "test": "tests::ticket_generation::failed_join_ticket_does_not_leak_a_slot_lease",
+          "expectation": "reject"
         }
       ]
     }

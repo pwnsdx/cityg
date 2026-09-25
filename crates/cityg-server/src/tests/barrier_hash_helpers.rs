@@ -97,6 +97,7 @@ fn barrier_tree_fallback_helpers_cover_empty_and_owned_paths() -> Result<(), Cit
     state.snapshots.insert(root, membership);
     state.latest_root = Some(root);
     state.leaf_barrier_public.insert(leaf, vec![0x77; 1184]);
+    install_active_fixture_lease(&mut state, leaf)?;
 
     let view = build_pk_entries_view(&state)?;
     let owned = match view {

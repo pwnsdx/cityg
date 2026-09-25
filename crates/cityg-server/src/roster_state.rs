@@ -181,6 +181,17 @@ pub(crate) struct GroupState {
     pub(crate) pending_join_finalize_auth: BTreeMap<[u8; 32], JoinFinalizeAuthRecord>,
     pub(crate) room_admin_pop_keys: BTreeSet<Vec<u8>>,
     pub(crate) room_admin_proof_replay_keys: BTreeSet<[u8; 32]>,
+    /// Signed removal proposals awaiting a committing barrier update, keyed
+    /// by target leaf (audit C-03).
+    pub(crate) pending_removals: BTreeMap<[u8; 32], PendingRemoval>,
+}
+
+/// A verified removal proposal waiting to be committed by another member.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingRemoval {
+    pub(crate) signed: SignedRemoveProposal,
+    /// Canonical encoding served to clients and persisted.
+    pub(crate) encoded: Vec<u8>,
 }
 
 impl Default for GroupState {
@@ -225,6 +236,7 @@ impl Default for GroupState {
             pending_join_finalize_auth: BTreeMap::new(),
             room_admin_pop_keys: BTreeSet::new(),
             room_admin_proof_replay_keys: BTreeSet::new(),
+            pending_removals: BTreeMap::new(),
         }
     }
 }
@@ -276,7 +288,7 @@ impl GroupState {
         self.n_max.max(1).min(u32::MAX as u64) as u32
     }
 
-    fn ensure_slot_allocator_initialized(&mut self) {
+    pub(crate) fn ensure_slot_allocator_initialized(&mut self) {
         let slot_capacity = self.slot_capacity();
         if self.slot_generations.is_empty() {
             for slot_index in 0..slot_capacity {
@@ -505,6 +517,9 @@ pub(crate) struct PersistedKbroadRoomState {
     pub(crate) revoked_slot_leases: Vec<PersistedLeafSlotLeaseRecord>,
     #[serde(default)]
     pub(crate) device_chain_states: Vec<PersistedDeviceChainState>,
+    /// Canonical encodings of pending signed removal proposals.
+    #[serde(default)]
+    pub(crate) pending_removals: Vec<Vec<u8>>,
 }
 
 impl Default for PersistedKbroadRoomState {
@@ -540,6 +555,7 @@ impl Default for PersistedKbroadRoomState {
             active_slot_leases: Vec::new(),
             revoked_slot_leases: Vec::new(),
             device_chain_states: Vec::new(),
+            pending_removals: Vec::new(),
         }
     }
 }

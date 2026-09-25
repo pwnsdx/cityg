@@ -82,6 +82,7 @@ impl CitygApiClient {
             deployment_profile_manifest_bytes,
             pop_secret_key,
             full_verification_target_leaf_id,
+            revocation_target_records,
             barrier_update_reason,
             operation_label,
         } = request;
@@ -147,10 +148,13 @@ impl CitygApiClient {
         };
         let revoked_records_core =
             to_core_revoked_snapshot_records(revoked_resolution.records.as_slice());
+        let revocation_target_records_core =
+            to_core_revoked_snapshot_records(revocation_target_records);
         let witness_selection = derive_barrier_snapshot_witness_selection(
             barrier_update_reason,
             updater_slot_lease,
             revoked_records_core.as_slice(),
+            revocation_target_records_core.as_slice(),
             ticket_fields.revocation_roots_hash,
             ticket_fields.committed_revocation_roots_hash,
             !reclaims_slot_index,
@@ -273,7 +277,7 @@ impl CitygApiClient {
         join_records: &[BarrierJoinOccupancyRecord],
         revocation_roots_hash: &[u8; 32],
         revoked_records: &[BarrierRevokedOccupancyRecord],
-        include_updater_in_revoked_set: bool,
+        apply_revocation_targets: bool,
         deployment_profile_manifest: &[u8],
     ) -> Result<Vec<u8>, Error> {
         if barrier_update_reason != 0 && barrier_update_reason != 1 {
@@ -307,7 +311,7 @@ impl CitygApiClient {
                     slot_generation: record.slot_generation,
                 })
                 .collect(),
-            include_updater_in_revoked_set,
+            apply_revocation_targets,
             deployment_profile_manifest: deployment_profile_manifest.to_vec(),
             revocation_target_leaf_id: revocation_target_leaf_id
                 .map(|leaf_id| leaf_id.to_vec())

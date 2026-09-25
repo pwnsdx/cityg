@@ -419,3 +419,33 @@ fn accept_epoch_rejects_barrier_update_witness_slot_generation_mismatch_under_gl
     ));
     Ok(())
 }
+
+#[test]
+fn default_server_config_fails_closed_with_global_history_authority() {
+    let config = ServerConfig::new();
+    assert_eq!(
+        config.history_authority,
+        Some(crate::HistoryAuthorityConfig {
+            mode: crate::HistoryAuthorityMode::Global,
+            require_full_verification_receipt: true,
+        }),
+        "the base profile requires the global history authority by default (audit M-06)"
+    );
+    assert_eq!(
+        ServerConfig::default().history_authority,
+        config.history_authority
+    );
+    let server = CityGServer::new(config);
+    assert_eq!(
+        server.history_authority_extension_id(),
+        GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+    );
+
+    let mut opted_out = ServerConfig::new();
+    opted_out.disable_history_authority();
+    assert_eq!(opted_out.history_authority, None);
+    assert_eq!(
+        ServerConfig::without_history_authority().history_authority,
+        None
+    );
+}

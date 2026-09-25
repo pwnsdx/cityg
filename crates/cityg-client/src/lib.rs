@@ -94,6 +94,7 @@ pub mod join_runtime;
 pub mod message_auth;
 pub mod message_crypto;
 pub mod pivot;
+pub mod remove_proposal;
 pub mod vrf;
 pub mod witness;
 

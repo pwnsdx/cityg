@@ -39,13 +39,13 @@ pub use service::{
     fetch_room_members, fetch_room_messages, filter_room_members_by_query, grant_room_admin,
     list_room_admins, materialize_replayed_bundle, materialize_stored_bundle,
     paginate_barrier_helper_slice, paginate_room_members, parse_room_window_limit_update,
-    prepare_accepted_bundle, prepare_barrier_envelope, prepare_barrier_public_tree,
-    prepare_current_barrier_envelope, prepare_expel_member_ticket,
+    pending_remove_proposals, prepare_accepted_bundle, prepare_barrier_envelope,
+    prepare_barrier_public_tree, prepare_current_barrier_envelope, prepare_expel_member_ticket,
     prepare_full_verification_witness, prepare_join_ticket, prepare_merge_acceptance_lookup,
     prepare_merge_ticket, prepare_merge_ticket_from_bundle, prepare_resolved_join_occupancies,
     prepare_resolved_revoked_occupancies, refresh_room_pivot, revoke_room_admin,
     rotate_room_kbroad, seed_room_window_head, snapshot_room_telemetry, snapshot_room_window,
-    store_room_message,
+    store_room_message, submit_remove_proposal,
 };
 pub use storage::{
     AcceptedBundleRecord, EpochLeafBindingRecord, EpochScopeRecord, MemberMetadataRecord,

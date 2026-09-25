@@ -8,6 +8,10 @@ use cityg_client::message_crypto::{
 
 use super::*;
 
+/// Skew between a signed message timestamp and the server's receive time
+/// above which the client logs a warning.
+const SIGNED_TIMESTAMP_SKEW_WARN_MS: u64 = 5 * 60 * 1000;
+
 pub(super) fn perform_send(
     params: SendParams,
 ) -> Pin<Box<dyn Future<Output = Result<ChatMessageEntry>> + Send>> {
@@ -123,6 +127,16 @@ async fn perform_fetch_inner(params: FetchParams) -> Result<FetchOutcome> {
         usize::try_from(n_max).unwrap_or(usize::MAX),
     );
 
+    // S8.1 / audit H-10: only current members may author messages. The
+    // roster is fetched after the messages, so it is at least as recent.
+    let current_members = if response.messages.is_empty() {
+        BTreeSet::new()
+    } else {
+        fetch_current_member_set(&client, &gid)
+            .await
+            .context("failed to verify the room roster for message senders")?
+    };
+
     let mut messages = Vec::new();
     let mut max_timestamp = since.unwrap_or(0);
     for message in response.messages {
@@ -140,6 +154,13 @@ async fn perform_fetch_inner(params: FetchParams) -> Result<FetchOutcome> {
             continue;
         }
         let leaf_id: [u8; 32] = message.sender[..32].try_into()?;
+        if !current_members.contains(&leaf_id) {
+            tracing::warn!(
+                "dropping message from {}: sender is not a current member",
+                hex_encode(&leaf_id[..4])
+            );
+            continue;
+        }
         let replay_context = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
@@ -182,6 +203,15 @@ async fn perform_fetch_inner(params: FetchParams) -> Result<FetchOutcome> {
 
         let sender_display = format!("{}✓", hex_encode(&leaf_id[..4]));
         let plaintext = String::from_utf8_lossy(envelope.plaintext).into_owned();
+        // Display the timestamp the sender signed, not the server's (H-10).
+        let signed_timestamp_ms = envelope.timestamp_ms;
+        if signed_timestamp_ms.abs_diff(message.timestamp_ms) > SIGNED_TIMESTAMP_SKEW_WARN_MS {
+            tracing::warn!(
+                "signed timestamp of message from {} differs from server time by {} ms",
+                hex_encode(&leaf_id[..4]),
+                signed_timestamp_ms.abs_diff(message.timestamp_ms)
+            );
+        }
 
         if message.timestamp_ms > max_timestamp {
             max_timestamp = message.timestamp_ms;
@@ -195,7 +225,7 @@ async fn perform_fetch_inner(params: FetchParams) -> Result<FetchOutcome> {
             fallback_label: sender_display,
             plaintext,
             ciphertext_hex: hex_encode(&message.ciphertext),
-            timestamp_ms: message.timestamp_ms,
+            timestamp_ms: signed_timestamp_ms,
             delivery: MessageDelivery::Sent,
             pending_id: None,
         });

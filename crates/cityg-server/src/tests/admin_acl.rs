@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn room_admin_rotation_requires_authorized_identity() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0xB3; 32];
     let initial_kbroad = vec![0x41; 16];
     let rotated_kbroad = vec![0x42; 16];
@@ -42,7 +42,7 @@ fn room_admin_rotation_requires_authorized_identity() -> Result<(), CityGError> 
 
 #[test]
 fn room_admin_rotation_requires_explicit_admin_acl() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0xB4; 32];
     server.register_group(&gid, vec![0x41; 16])?;
 
@@ -63,7 +63,7 @@ fn room_admin_rotation_requires_explicit_admin_acl() -> Result<(), CityGError> {
 
 #[test]
 fn grant_revoke_and_list_room_admins_enforce_authorization() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0xB5; 32];
     let kbroad_public = vec![0x51; 16];
     let creator_pop_key = vec![0xA1; 48];
@@ -173,7 +173,7 @@ fn revoke_room_admin_rejects_last_admin_and_persists_grants() -> Result<(), City
     let delegate_pop_key = vec![0xE1; 48];
 
     {
-        let mut config = ServerConfig::new();
+        let mut config = ServerConfig::without_history_authority();
         config.state_path = Some(journal_path.clone());
         let mut server = CityGServer::new(config);
         server.register_group_with_admin(&gid, kbroad_public, creator_pop_key.clone())?;
@@ -201,7 +201,7 @@ fn revoke_room_admin_rejects_last_admin_and_persists_grants() -> Result<(), City
         assert_eq!(admin_count, 2);
     }
 
-    let mut config = ServerConfig::new();
+    let mut config = ServerConfig::without_history_authority();
     config.state_path = Some(journal_path);
     let restarted = CityGServer::new(config);
     assert_eq!(
@@ -324,13 +324,13 @@ fn explicit_room_admins_persist_across_restart() -> Result<(), CityGError> {
     let admin_pop_key = vec![0xCC; 48];
 
     {
-        let mut config = ServerConfig::new();
+        let mut config = ServerConfig::without_history_authority();
         config.state_path = Some(journal_path.clone());
         let mut server = CityGServer::new(config);
         server.register_group_with_admin(&gid, kbroad_public.clone(), admin_pop_key.clone())?;
     }
 
-    let mut config = ServerConfig::new();
+    let mut config = ServerConfig::without_history_authority();
     config.state_path = Some(journal_path);
     let mut restarted = CityGServer::new(config);
     let rotated_kbroad = vec![0x55; 16];
@@ -358,7 +358,7 @@ fn room_admin_proof_replay_keys_persist_across_restart() -> Result<(), CityGErro
     let replay_key = test_room_admin_replay_key(17);
 
     {
-        let mut config = ServerConfig::new();
+        let mut config = ServerConfig::without_history_authority();
         config.state_path = Some(journal_path.clone());
         let mut server = CityGServer::new(config);
         server.register_group_with_admin(&gid, kbroad_public, creator_pop_key.clone())?;
@@ -372,7 +372,7 @@ fn room_admin_proof_replay_keys_persist_across_restart() -> Result<(), CityGErro
         assert_eq!(admin_count, 2);
     }
 
-    let mut config = ServerConfig::new();
+    let mut config = ServerConfig::without_history_authority();
     config.state_path = Some(journal_path);
     let mut restarted = CityGServer::new(config);
     let err = restarted

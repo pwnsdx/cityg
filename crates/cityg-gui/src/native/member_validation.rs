@@ -37,6 +37,37 @@ pub(super) async fn verify_members_root_consistency(
     gid: &[u8; 32],
     root: &[u8; 32],
 ) -> Result<()> {
+    fetch_verified_member_leaves(client, gid, root)
+        .await
+        .map(|_| ())
+}
+
+/// Current roster of the room, with its root recomputed from every returned
+/// leaf. Used to check that a message sender is a current member (audit H-10).
+pub(super) async fn fetch_current_member_set(
+    client: &CitygApiClient,
+    gid: &[u8; 32],
+) -> Result<BTreeSet<[u8; 32]>> {
+    let first_page = client
+        .members_with_range(gid, None, Some(0), Some(1))
+        .await?;
+    let root: [u8; 32] = first_page
+        .root
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("members root must be 32 bytes"))?;
+    Ok(fetch_verified_member_leaves(client, gid, &root)
+        .await?
+        .into_iter()
+        .collect())
+}
+
+/// Every leaf of the roster at `root`, checked against `root`.
+pub(super) async fn fetch_verified_member_leaves(
+    client: &CitygApiClient,
+    gid: &[u8; 32],
+    root: &[u8; 32],
+) -> Result<Vec<[u8; 32]>> {
     let mut offset = 0u64;
     let mut expected_total: Option<u64> = None;
     let mut leaves: Vec<[u8; 32]> = Vec::new();
@@ -92,5 +123,6 @@ pub(super) async fn verify_members_root_consistency(
         offset = response.next_offset;
     }
 
-    validate_members_root_from_leaves(*root, leaves, expected_total.unwrap_or(0))
+    validate_members_root_from_leaves(*root, leaves.clone(), expected_total.unwrap_or(0))?;
+    Ok(leaves)
 }

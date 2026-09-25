@@ -214,12 +214,19 @@ impl AppModel {
 
     pub(super) fn on_leave_finished(
         &mut self,
-        result: anyhow::Result<()>,
+        result: anyhow::Result<LeaveOutcome>,
         cx: &mut ViewContext<Self>,
     ) {
         self.leave_status = LeaveStatus::Idle;
         match result {
-            Ok(()) => {
+            Ok(outcome) => {
+                let (info, toast) = match outcome {
+                    LeaveOutcome::Left => ("Device left the room.", "Successfully left the room"),
+                    LeaveOutcome::RemovalRequested => (
+                        "Leave requested. The remaining members commit your removal.",
+                        "Leave request submitted",
+                    ),
+                };
                 self.reset_fetch_state();
                 self.stop_epoch_sync_task();
                 self.stop_websocket();
@@ -230,9 +237,9 @@ impl AppModel {
                     }
                     match remove_persisted_session(&session.server_url, &session.room_id) {
                         Ok(()) => {
-                            self.info_message = Some("Device left the room.".to_string());
+                            self.info_message = Some(info.to_string());
                             self.clear_error();
-                            self.show_success("Successfully left the room", cx);
+                            self.show_success(toast, cx);
                         }
                         Err(err) => {
                             let message =
@@ -244,9 +251,9 @@ impl AppModel {
                         }
                     }
                 } else {
-                    self.info_message = Some("Device left the room.".to_string());
+                    self.info_message = Some(info.to_string());
                     self.clear_error();
-                    self.show_success("Successfully left the room", cx);
+                    self.show_success(toast, cx);
                 }
                 self.messages.clear();
                 self.message_keys.clear();

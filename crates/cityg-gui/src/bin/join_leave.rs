@@ -53,6 +53,7 @@ use cityg_client::message_crypto::{
     MsgReplayState, decrypt_message_v2_with_index, derive_msg_replay_context_id,
     derive_msg_replay_tuple_tag,
 };
+use cityg_client::remove_proposal::{RemoveProposal, SignedRemoveProposal};
 use cityg_client::{
     ClientEpochBundle,
     barrier_merge_bundle::{
@@ -427,6 +428,7 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
 
         let default_order: Vec<usize> = (1..=count).collect();
         let order = leave_order.as_ref().unwrap_or(&default_order);
+        let mut departed = vec![false; sessions.len()];
         for idx in order {
             if *idx == 0 || *idx > sessions.len() {
                 return Err(anyhow!("leave order index {idx} invalid"));
@@ -443,7 +445,7 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
                 alias_for(&alias_base, count, *idx - 1),
                 hex::encode(session.we_epoch_id)
             );
-            perform_leave(session, verbose).await?;
+            leave_and_commit(&mut sessions, &mut departed, *idx - 1, verbose).await?;
             println!("leave ok");
         }
     } else if count > 1 {
@@ -467,7 +469,9 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             sessions.push(session);
         }
 
-        for (idx, session) in sessions.iter().enumerate() {
+        let mut departed = vec![false; sessions.len()];
+        for idx in 0..sessions.len() {
+            let session = &sessions[idx];
             maybe_write_session_artifact(
                 session_artifact_dir.as_deref(),
                 "pre-leave",
@@ -479,12 +483,12 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
                 alias_for(&alias_base, count, idx),
                 hex::encode(session.we_epoch_id)
             );
-            perform_leave(session, verbose).await?;
+            leave_and_commit(&mut sessions, &mut departed, idx, verbose).await?;
             println!("leave ok");
         }
     } else {
         println!("server={server_url} room={room_id} alias={alias_base}");
-        let session = perform_join(&server_url, &room_id, &alias_base).await?;
+        let mut session = perform_join(&server_url, &room_id, &alias_base).await?;
         println!("join ok: weid={}", hex::encode(session.we_epoch_id));
         log_fingerprints(&session);
         maybe_write_session_artifact(
@@ -499,10 +503,39 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             &alias_base,
             &session,
         )?;
-        perform_leave(&session, verbose).await?;
+        leave_and_commit(std::slice::from_mut(&mut session), &mut [false], 0, verbose).await?;
         println!("leave ok");
     }
 
+    Ok(())
+}
+
+/// Leave as `sessions[leaver]`; when other members remain, the first of them
+/// commits the removal (a member never revokes itself, audit C-03).
+async fn leave_and_commit(
+    sessions: &mut [Session],
+    departed: &mut [bool],
+    leaver: usize,
+    verbose: bool,
+) -> Result<()> {
+    let session = sessions
+        .get(leaver)
+        .ok_or_else(|| anyhow!("leave index {leaver} out of range"))?;
+    if perform_leave(session, verbose).await? == LeaveOutcome::RemovalRequested {
+        let committer = sessions
+            .iter_mut()
+            .enumerate()
+            .find(|(idx, _)| *idx != leaver && !departed.get(*idx).copied().unwrap_or(true))
+            .map(|(_, session)| session)
+            .ok_or_else(|| anyhow!("no remaining member can commit the leave request"))?;
+        let committed = commit_pending_removals(committer, verbose).await?;
+        if verbose {
+            println!("committed {committed} pending removal(s)");
+        }
+    }
+    if let Some(flag) = departed.get_mut(leaver) {
+        *flag = true;
+    }
     Ok(())
 }
 
@@ -1053,7 +1086,155 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     Ok(session)
 }
 
-async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
+/// A revocation merge the server accepted, with the author's state after it.
+struct AcceptedRevocation {
+    bundle: ClientEpochBundle,
+    forward_state: ForwardSecrecyState,
+    fs_policy_version: String,
+    fs_epoch_base_ts: u64,
+    barrier_version: u64,
+    k_barrier: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+}
+
+impl std::fmt::Debug for AcceptedRevocation {
+    // Key material stays out of debug output.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcceptedRevocation")
+            .field("we_epoch_id", &hex::encode(self.bundle.we_epoch_id))
+            .field("barrier_version", &self.barrier_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Advance the author's session past its accepted revocation merge, so the
+/// same member can author again (its FS device chain continues from it).
+fn apply_accepted_revocation(session: &mut Session, accepted: AcceptedRevocation) -> Result<()> {
+    let AcceptedRevocation {
+        bundle,
+        mut forward_state,
+        fs_policy_version,
+        fs_epoch_base_ts,
+        barrier_version,
+        k_barrier,
+        kem_tree_hash_after,
+    } = accepted;
+    let state =
+        parse_accepted_bundle_runtime_state(&bundle, fs_policy_version.as_str(), fs_epoch_base_ts)?;
+    let fs_dev_prev_commit = state
+        .fs_dev_prev_commit
+        .ok_or_else(|| anyhow!("accepted revocation bundle missing fs_dev commit"))?;
+    forward_state.set_last_we_epoch_id(bundle.we_epoch_id);
+    forward_state.set_epoch_base_ts(state.fs_epoch_base_ts);
+    session.forward_state = forward_state;
+    session.fs_ec = state.fs_ec;
+    session.fs_epoch_commit = state.fs_epoch_commit;
+    session.fs_dev_prev_commit = fs_dev_prev_commit;
+    session.we_epoch_id = bundle.we_epoch_id;
+    session.xk_hash = bundle.hp_binding.xk_hash;
+    session.epoch_key = bundle.epoch_key;
+    session.barrier_version = barrier_version;
+    session.k_barrier = k_barrier;
+    session.kem_tree_hash_after = kem_tree_hash_after;
+    session.anchor_hdr_ctx = state.anchor_hdr_ctx;
+    session.seed_ctx_hash = state.seed_ctx_hash;
+    session.seed_commit = state.seed_commit;
+    session.seed_bundle_commit = state.seed_bundle_commit;
+    session.fs_fingerprint = state.fs_fingerprint;
+    session.stored_header_map = bundle.header_map.clone();
+    Ok(())
+}
+
+/// Lifetime of a leave proposal: the remaining members have a day to commit it.
+const LEAVE_PROPOSAL_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Result of a leave request (audit C-03).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaveOutcome {
+    /// A signed removal proposal is pending; a remaining member commits it.
+    RemovalRequested,
+    /// This member was the last one and committed its own removal.
+    Left,
+}
+
+/// Leave the room: sign a removal proposal for this member's own slot. Only
+/// the last member of the room publishes its own revocation.
+async fn perform_leave(session: &Session, verbose: bool) -> Result<LeaveOutcome> {
+    let client = new_api_client(&session.server_url);
+    let lease = client
+        .merge_ticket_refresh_with_retry(&session.room_id, &session.leaf_id)
+        .await
+        .context("fetch current slot lease")?
+        .slot_lease;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let proposal = SignedRemoveProposal::sign(
+        RemoveProposal {
+            gid: session.gid,
+            target_leaf_id: session.leaf_id,
+            target_slot_index: u32::try_from(lease.slot_index)
+                .context("slot index exceeds the barrier slot range")?,
+            target_slot_generation: lease.slot_generation,
+            not_after_ms: now_ms.saturating_add(LEAVE_PROPOSAL_LIFETIME_MS),
+        },
+        &session.pop_public_key,
+        &session.pop_secret,
+    )?;
+    let submission = client
+        .submit_remove_proposal(&session.room_id, &proposal)
+        .await
+        .context("submit leave request")?;
+    if submission.status != "self_commit" {
+        if verbose {
+            println!("leave request pending; a remaining member commits it");
+        }
+        return Ok(LeaveOutcome::RemovalRequested);
+    }
+    let _ = publish_revocation_commit(session, verbose, "leave", session.leaf_id).await?;
+    Ok(LeaveOutcome::Left)
+}
+
+/// Commit the pending removal proposals as `committer`; returns how many
+/// members were removed.
+async fn commit_pending_removals(committer: &mut Session, verbose: bool) -> Result<usize> {
+    let client = new_api_client(&committer.server_url);
+    let proposals = client
+        .pending_remove_proposals(&committer.room_id, &committer.gid)
+        .await
+        .context("fetch pending removal proposals")?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let targets: std::collections::BTreeSet<[u8; 32]> = proposals
+        .iter()
+        .filter(|signed| signed.proposal.is_live_at(now_ms))
+        .map(|signed| signed.proposal.target_leaf_id)
+        .collect();
+    let Some(first_target) = targets.first().copied() else {
+        return Ok(0);
+    };
+    if targets.contains(&committer.leaf_id) {
+        return Err(anyhow!(
+            "a member with a pending leave request cannot commit removals"
+        ));
+    }
+    let accepted = publish_revocation_commit(committer, verbose, "remove", first_target).await?;
+    apply_accepted_revocation(committer, accepted)?;
+    Ok(targets.len())
+}
+
+/// Publish the revocation merge built from a LEAVE ticket: the pending
+/// removals, or the last member's own removal. The updater is always the
+/// author's own slot.
+async fn publish_revocation_commit(
+    session: &Session,
+    verbose: bool,
+    operation_label: &'static str,
+    target_leaf_id: [u8; 32],
+) -> Result<AcceptedRevocation> {
     let client = new_api_client(&session.server_url);
     let mut accept_retry_attempt = 0u32;
     loop {
@@ -1078,7 +1259,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
 
         let prepared_runtime = ticket
             .prepare_revocation_runtime(PrepareRevocationMergeTicketInput {
-                operation_label: "leave",
+                operation_label,
                 local_barrier_version: session.barrier_version,
                 local_kem_tree_hash_after: session.kem_tree_hash_after,
                 local_current_history_commitment: session.current_history_commitment.as_ref(),
@@ -1090,14 +1271,19 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
                 stored_max_barrier_update_bytes: 0,
             })
             .map_err(anyhow::Error::from)?;
+        // S6.6: after a PCS refresh at epoch t every later anchor uses
+        // fs_ec > t; t never exceeds the group's last accepted epoch.
+        if forward_state.current_ec() <= prepared_runtime.last_accepted_ec {
+            forward_state.advance_past(prepared_runtime.last_accepted_ec);
+        }
         let snapshot_request = prepared_runtime.snapshot_preparation_request(
             &session.room_id,
             &session.gid,
             &session.leaf_id,
             session.pop_secret.as_slice(),
-            Some(session.leaf_id),
+            Some(target_leaf_id),
             0,
-            "leave",
+            operation_label,
         );
 
         if verbose {
@@ -1346,8 +1532,18 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             Err(err) => return Err(err).context("refresh pivot parity"),
         }
 
+        let accepted =
+            |bundle: ClientEpochBundle, forward_state: ForwardSecrecyState| AcceptedRevocation {
+                bundle,
+                forward_state,
+                fs_policy_version: prepared_runtime.fs_policy_version.clone(),
+                fs_epoch_base_ts: prepared_runtime.fs_epoch_base_ts,
+                barrier_version: next_barrier_version,
+                k_barrier: *barrier_update.k_barrier_new,
+                kem_tree_hash_after: barrier_update.kem_tree_hash_after,
+            };
         match client.accept_epoch_bundle(&bundle).await {
-            Ok(_) => return Ok(()),
+            Ok(_) => return Ok(accepted(bundle, forward_state)),
             Err(ApiClientError::HttpStatus {
                 message,
                 freeze_reason,
@@ -1363,7 +1559,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
                     .accept_epoch_bundle(&pristine_bundle)
                     .await
                     .context("server rejected pristine merge bundle")?;
-                return Ok(());
+                return Ok(accepted(pristine_bundle, forward_state));
             }
             Err(ApiClientError::HttpStatus {
                 status,
@@ -1756,6 +1952,7 @@ mod tests {
             deployment_profile_manifest_bytes: Vec::new(),
             n_max: 8,
             max_barrier_update_bytes: 64 * 1024,
+            revoked_slot_leases: Vec::new(),
         }
     }
 
@@ -1833,6 +2030,8 @@ mod tests {
         deployment_profile_manifest: Vec<u8>,
         #[prost(uint64, tag = "37")]
         slot_generation: u64,
+        #[prost(message, repeated, tag = "38")]
+        revoked_slot_leases: Vec<BarrierRevokedOccupancyRecordPb>,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -2393,10 +2592,16 @@ mod tests {
         let room_id = random_hex_32();
         bootstrap_test_room(&server_url, &room_id).await?;
         let session = perform_join(&server_url, &room_id, "leave-mock-alice").await?;
-        let _peer = perform_join(&server_url, &room_id, "leave-mock-bob").await?;
+        let peer = perform_join(&server_url, &room_id, "leave-mock-bob").await?;
+        // Bob asks to leave; the fixture captures Alice's commit ticket.
+        assert_eq!(
+            perform_leave(&peer, false).await?,
+            LeaveOutcome::RemovalRequested
+        );
 
         let client = new_api_client(&server_url);
         let ticket = client.merge_ticket(&room_id, &session.leaf_id).await?;
+        assert_eq!(ticket.revoked_slot_leases.len(), 1, "commit revokes Bob");
         let pivot = select_ticket_pivot(&ticket.parities)
             .ok_or_else(|| anyhow!("merge ticket missing pivot parity entries"))?;
         let committed_revocation_roots_hash =
@@ -2593,6 +2798,14 @@ mod tests {
             merge_ticket_artifact: ticket.merge_ticket_artifact_bytes.clone(),
             deployment_profile_manifest: ticket.deployment_profile_manifest_bytes.clone(),
             slot_generation: ticket.slot_lease.slot_generation,
+            revoked_slot_leases: ticket
+                .revoked_slot_leases
+                .iter()
+                .map(|record| BarrierRevokedOccupancyRecordPb {
+                    slot_index: record.slot_index,
+                    slot_generation: record.slot_generation,
+                })
+                .collect(),
         }
         .encode_to_vec())
     }
@@ -3984,7 +4197,16 @@ mod tests {
         );
 
         send_dummy_message(&mut bob).await?;
-        perform_leave(&alice, true).await?;
+        assert_eq!(
+            perform_leave(&alice, true).await?,
+            LeaveOutcome::RemovalRequested
+        );
+        let pending_leave = client.members(&alice.gid, None).await?;
+        assert_eq!(
+            pending_leave.total_count, 2,
+            "a leave request alone must not revoke the leaving member"
+        );
+        assert_eq!(commit_pending_removals(&mut bob, true).await?, 1);
         let after_alice_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_alice_leave.total_count, 1);
         assert!(
@@ -3999,7 +4221,7 @@ mod tests {
                 .iter()
                 .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice())
         );
-        perform_leave(&bob, true).await?;
+        assert_eq!(perform_leave(&bob, true).await?, LeaveOutcome::Left);
         let after_bob_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_bob_leave.total_count, 0);
         assert!(after_bob_leave.members.is_empty());
@@ -4029,7 +4251,7 @@ mod tests {
             .bootstrap_room_as_admin(&room_id, demo::kbroad_public(), admin_proof)
             .await?;
 
-        let alice = perform_join_with_identity(
+        let mut alice = perform_join_with_identity(
             &server_url,
             &room_id,
             "alice",
@@ -4040,8 +4262,12 @@ mod tests {
         let bob = perform_join(&server_url, &room_id, "bob").await?;
         let client = new_api_client(&server_url);
 
-        perform_leave(&bob, true).await?;
-        perform_leave(&alice, true).await?;
+        assert_eq!(
+            perform_leave(&bob, true).await?,
+            LeaveOutcome::RemovalRequested
+        );
+        assert_eq!(commit_pending_removals(&mut alice, true).await?, 1);
+        assert_eq!(perform_leave(&alice, true).await?, LeaveOutcome::Left);
 
         let empty_members = client.members(&alice.gid, None).await?;
         assert_eq!(empty_members.total_count, 0);
@@ -4767,7 +4993,7 @@ mod tests {
     #[tokio::test]
     async fn perform_leave_reports_transport_error() -> Result<()> {
         let session = sample_session("http://127.0.0.1:9");
-        let result = perform_leave(&session, false).await;
+        let result = publish_revocation_commit(&session, false, "leave", session.leaf_id).await;
         assert!(result.is_err());
         let err = match result {
             Ok(_) => return Err(anyhow!("expected transport failure")),
@@ -4797,7 +5023,7 @@ mod tests {
 
         let mut session = fixture.session;
         session.server_url = server_url;
-        let err = perform_leave(&session, false)
+        let err = publish_revocation_commit(&session, false, "leave", session.leaf_id)
             .await
             .expect_err("tampered out-of-range cover leaf must fail closed");
         let detail = format!("{err:#}");
@@ -4839,7 +5065,7 @@ mod tests {
 
         let mut session = fixture.session;
         session.server_url = server_url;
-        let err = perform_leave(&session, false)
+        let err = publish_revocation_commit(&session, false, "leave", session.leaf_id)
             .await
             .expect_err("n_max mismatch must fail");
         let detail = format!("{err:#}");
@@ -4909,7 +5135,7 @@ mod tests {
 
         let mut session = fixture.session;
         session.server_url = server_url;
-        perform_leave(&session, true).await?;
+        publish_revocation_commit(&session, true, "leave", session.leaf_id).await?;
         assert_eq!(state.call_count("/v1/pivot/refresh"), 2);
         assert_eq!(state.call_count("/v1/accept_epoch"), 2);
 
@@ -4973,7 +5199,7 @@ mod tests {
 
         let mut session = fixture.session;
         session.server_url = server_url;
-        perform_leave(&session, true).await?;
+        publish_revocation_commit(&session, true, "leave", session.leaf_id).await?;
         assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 2);
         assert_eq!(state.call_count("/v1/accept_epoch"), 2);
 
@@ -5051,7 +5277,7 @@ mod tests {
 
         let mut session = fixture.session;
         session.server_url = server_url;
-        let err = perform_leave(&session, true)
+        let err = publish_revocation_commit(&session, true, "leave", session.leaf_id)
             .await
             .expect_err("non-retryable accept_epoch failure must surface");
         let detail = err.to_string();

@@ -20,7 +20,7 @@ fn kbroad_state_persists_across_restart() -> Result<(), CityGError> {
     let persisted_hash = crate::compute_barrier_tree_hash(4, persisted_entries.as_slice())?;
 
     {
-        let mut cfg = ServerConfig::new();
+        let mut cfg = ServerConfig::without_history_authority();
         cfg.state_path = Some(journal_path.clone());
         let mut server = CityGServer::new(cfg);
         server.register_group(&gid, initial_key.clone())?;
@@ -59,7 +59,7 @@ fn kbroad_state_persists_across_restart() -> Result<(), CityGError> {
         server.persist_kbroad_state()?;
     }
 
-    let mut cfg = ServerConfig::new();
+    let mut cfg = ServerConfig::without_history_authority();
     cfg.state_path = Some(journal_path.clone());
     let mut server = CityGServer::new(cfg);
     assert_eq!(server.kbroad_generation(&gid), 1);
@@ -237,7 +237,7 @@ fn invalid_persisted_kbroad_state_is_ignored_on_boot() -> Result<(), CityGError>
     let kbroad_path = crate::kbroad_state_path_for_journal(&journal_path);
     std::fs::write(&kbroad_path, [0xA1, 0x01, 0x02])?;
 
-    let mut cfg = ServerConfig::new();
+    let mut cfg = ServerConfig::without_history_authority();
     cfg.state_path = Some(journal_path);
     let mut server = CityGServer::new(cfg);
     let gid = [0x91; 32];
@@ -253,7 +253,7 @@ fn invalid_persisted_kbroad_state_is_ignored_on_boot() -> Result<(), CityGError>
 
 #[test]
 fn initialize_group_barrier_bootstrap_state_preserves_existing_state() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x92; 32];
     let existing_hash = [0xA5; 32];
     let existing_roots_hash = [0xB6; 32];
@@ -294,7 +294,7 @@ fn initialize_group_barrier_bootstrap_state_preserves_existing_state() -> Result
 
 #[test]
 fn initialize_group_barrier_bootstrap_state_skips_history_only_group() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x93; 32];
     let state = server.roster.groups.entry(gid.to_vec()).or_default();
     state.revoked.insert([0x44; 32]);
@@ -325,7 +325,7 @@ fn initialize_group_barrier_bootstrap_state_skips_history_only_group() -> Result
 #[test]
 fn initialize_registered_groups_barrier_state_bootstraps_registry_groups() -> Result<(), CityGError>
 {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid1 = [0x31; 32];
     let gid2 = [0x32; 32];
     let registry = BTreeMap::from([
@@ -372,7 +372,7 @@ fn initialize_registered_groups_barrier_state_bootstraps_registry_groups() -> Re
 #[test]
 fn initialize_registered_groups_barrier_state_ignores_non_32_byte_registry_keys()
 -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x33; 32];
     let registry = BTreeMap::from([
         (gid.to_vec(), vec![0x11; 16]),
@@ -393,7 +393,7 @@ fn initialize_registered_groups_barrier_state_ignores_non_32_byte_registry_keys(
 #[test]
 fn register_group_reuses_existing_historyless_state_and_clears_stale_metadata()
 -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x34; 32];
     let state = server.roster.groups.entry(gid.to_vec()).or_default();
     state.rotation_required = true;
@@ -422,7 +422,7 @@ fn register_group_reuses_existing_historyless_state_and_clears_stale_metadata()
 #[test]
 fn apply_persisted_kbroad_state_rebuilds_current_snapshot_when_history_is_invalid()
 -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x93; 32];
     let pk_entries = vec![vec![0x11; 4], vec![0x22; 4], vec![0x33; 4]];
     let current_hash = compute_barrier_tree_hash(2, pk_entries.as_slice())?;
@@ -466,6 +466,7 @@ fn apply_persisted_kbroad_state_rebuilds_current_snapshot_when_history_is_invali
             active_slot_leases: Vec::new(),
             revoked_slot_leases: Vec::new(),
             device_chain_states: Vec::new(),
+            pending_removals: Vec::new(),
         },
     )]);
 
@@ -500,7 +501,7 @@ fn apply_persisted_kbroad_state_rebuilds_current_snapshot_when_history_is_invali
 #[test]
 fn apply_persisted_kbroad_state_keeps_history_and_adds_missing_current_snapshot()
 -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x94; 32];
     let historical_entries = vec![vec![0x01; 4], vec![0x02; 4], vec![0x03; 4]];
     let current_entries = vec![vec![0x04; 4], vec![0x05; 4], vec![0x06; 4]];
@@ -546,6 +547,7 @@ fn apply_persisted_kbroad_state_keeps_history_and_adds_missing_current_snapshot(
             active_slot_leases: Vec::new(),
             revoked_slot_leases: Vec::new(),
             device_chain_states: Vec::new(),
+            pending_removals: Vec::new(),
         },
     )]);
 
@@ -576,7 +578,7 @@ fn apply_persisted_kbroad_state_keeps_history_and_adds_missing_current_snapshot(
 
 #[test]
 fn apply_persisted_kbroad_state_restores_revoked_leaf_set() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x9Au8; 32];
     let revoked_leaf = [0xBC; 32];
     let state = BTreeMap::from([(
@@ -602,7 +604,7 @@ fn apply_persisted_kbroad_state_restores_revoked_leaf_set() -> Result<(), CityGE
 
 #[test]
 fn apply_persisted_kbroad_state_restores_accepted_barrier_merges() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x95; 32];
     let state = BTreeMap::from([(
         gid.to_vec(),
@@ -635,7 +637,7 @@ fn apply_persisted_kbroad_state_restores_accepted_barrier_merges() -> Result<(),
 
 #[test]
 fn apply_persisted_kbroad_state_rejects_oversized_n_max() {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x95; 32];
     let state = BTreeMap::from([(
         gid.to_vec(),
@@ -669,7 +671,7 @@ fn validate_barrier_n_max_rejects_invalid_shapes_and_oversized_values() {
 
 #[test]
 fn snapshot_kbroad_state_captures_group_state_and_registry_defaults() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid_with_group = [0x95; 32];
     let gid_without_group = [0x96; 32];
     let tree_entries = vec![vec![0x10; 4], vec![0x20; 4], vec![0x30; 4]];

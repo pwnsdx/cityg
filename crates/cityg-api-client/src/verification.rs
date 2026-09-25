@@ -181,6 +181,7 @@ pub(crate) struct MergeTicketArtifactWire {
     pub(crate) fs_policy_version: String,
     pub(crate) fs_epoch_base_ts: u64,
     pub(crate) kbroad_generation: u64,
+    pub(crate) revoked_slot_leases: Vec<(u32, u64)>,
     #[serde(with = "serde_bytes")]
     pub(crate) signature: Vec<u8>,
 }
@@ -345,6 +346,7 @@ pub(crate) struct MergeTicketArtifactSignedPayload<'a> {
     pub(crate) fs_policy_version: &'a str,
     pub(crate) fs_epoch_base_ts: u64,
     pub(crate) kbroad_generation: u64,
+    pub(crate) revoked_slot_leases: &'a [(u32, u64)],
 }
 
 #[derive(Serialize)]
@@ -1007,6 +1009,16 @@ pub(crate) fn verify_merge_ticket_artifact(
             "merge ticket artifact response field mismatch".to_string(),
         ));
     }
+    let revoked_slot_leases: Vec<(u32, u64)> = response
+        .revoked_slot_leases
+        .iter()
+        .map(|record| (record.slot_index, record.slot_generation))
+        .collect();
+    if artifact.revoked_slot_leases != revoked_slot_leases {
+        return Err(Error::Parse(
+            "merge ticket artifact revoked_slot_leases mismatch".to_string(),
+        ));
+    }
     let gid = current_global_history_attestation.gid;
     let leaf_id = array32(&artifact.leaf_id)?;
     let we_epoch_id = array32(&response.we_epoch_id)?;
@@ -1019,7 +1031,7 @@ pub(crate) fn verify_merge_ticket_artifact(
     let tswe_salt_hash = array32(&response.tswe_salt_hash)?;
     let pox_r_commit = array32(&response.pox_r_commit)?;
     let payload = encode_cbor_det(&MergeTicketArtifactSignedPayload {
-        label: "cityg/merge-ticket-artifact-v2",
+        label: "cityg/merge-ticket-artifact-v3",
         scope_id: &authority.scope_id,
         history_authority_extension: history_authority_extension.as_str(),
         profile_version: response.profile_version.as_str(),
@@ -1063,6 +1075,7 @@ pub(crate) fn verify_merge_ticket_artifact(
         fs_policy_version: response.fs_policy_version.as_str(),
         fs_epoch_base_ts: response.fs_epoch_base_ts,
         kbroad_generation: response.kbroad_generation,
+        revoked_slot_leases: revoked_slot_leases.as_slice(),
     })?;
     verify_history_authority_signature(
         payload.as_slice(),

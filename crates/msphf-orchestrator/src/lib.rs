@@ -59,7 +59,8 @@ pub use accept::{
     AnnexMTelemetryReport, AnnexMTelemetryRow, BarrierGroupState, BootstrapPolicy,
     DeviceChainState, FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE, FREEZE_BARRIER_GENESIS_REQUIRED,
     FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIONS,
-    FREEZE_BARRIER_PROACTIVE_FORBIDDEN, FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+    FREEZE_BARRIER_PENDING_REMOVALS_UNCOMMITTED, FREEZE_BARRIER_PROACTIVE_FORBIDDEN,
+    FREEZE_BARRIER_REVOCATION_UNAUTHORIZED, FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
     FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE, FREEZE_BARRIER_UPDATE_MALFORMED,
     FREEZE_BARRIER_UPDATER_INVALID, FsPolicyConfig, TelemetryCounters, TelemetryKey,
     build_bootstrap_digest,
@@ -1107,6 +1108,21 @@ impl ForwardSecrecyState {
         self.fs_ec
     }
 
+    /// Ratchet forward until the current FS epoch is strictly after `ec`.
+    ///
+    /// After an accepted PCS refresh at epoch `t`, every later anchor of the
+    /// group MUST use `fs_ec > t` (S6.6); a device that has not authored since
+    /// steps past the group's last accepted epoch before authoring.
+    pub fn advance_past(&mut self, ec: u64) {
+        let target = ec.saturating_add(1);
+        let budget = self.policy.ratchet_budget_per_tick.max(1);
+        while self.fs_ec < target {
+            if self.advance_to_with_budget(target, budget) == 0 && self.fs_ec < target {
+                break;
+            }
+        }
+    }
+
     pub fn cached_tau(&mut self, weid: &[u8; 32], fs_ec: u64) -> Option<[u8; 32]> {
         self.tau_cache.get(weid, fs_ec)
     }
@@ -1487,6 +1503,29 @@ mod fs_state_tests {
             10,
             "subsequent ticks should continue bounded catch-up"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn advance_past_steps_strictly_after_the_given_epoch() -> Result<(), MsphfError> {
+        let weid = [0x30; 32];
+        let mut state = ForwardSecrecyState::with_state([0x10; 32], 7, [0x20; 32], weid);
+        state.advance_past(5);
+        assert_eq!(state.current_ec(), 7, "already past epoch 5");
+        state.advance_past(7);
+        assert_eq!(state.current_ec(), 8);
+        let expected = evolve_k_fs(&[0x10; 32], &weid, 8)?;
+        assert_eq!(
+            state.snapshot().k_fs,
+            expected,
+            "one ratchet step per epoch"
+        );
+
+        // A state without a last epoch id only moves its counter.
+        let mut fresh = ForwardSecrecyState::with_state([0x11; 32], 2, [0u8; 32], [0u8; 32]);
+        fresh.advance_past(4);
+        assert_eq!(fresh.current_ec(), 5);
+        assert_eq!(fresh.snapshot().k_fs, [0x11; 32]);
         Ok(())
     }
 

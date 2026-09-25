@@ -216,3 +216,16 @@ pub const FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIO
         code: 96013,
         reason: "barrier_non_revocation_reason_forbidden_while_pending_revocations",
     };
+
+/// A revocation neither authored by a room admin nor backed by a signed
+/// removal proposal for its target (audit C-03).
+pub const FREEZE_BARRIER_REVOCATION_UNAUTHORIZED: FreezeError = FreezeError {
+    code: 96014,
+    reason: "barrier_revocation_unauthorized",
+};
+
+/// A barrier update that leaves a pending removal proposal uncommitted.
+pub const FREEZE_BARRIER_PENDING_REMOVALS_UNCOMMITTED: FreezeError = FreezeError {
+    code: 96015,
+    reason: "barrier_pending_removals_uncommitted",
+};

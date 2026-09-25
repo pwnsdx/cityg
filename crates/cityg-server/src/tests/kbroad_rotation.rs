@@ -3,7 +3,7 @@ use crate::{KBROAD_HISTORY_EXISTS_ERR, demo};
 
 #[test]
 fn register_group_rejects_duplicate_gid() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0xA1; 32];
     let key = vec![0x33; 16];
 
@@ -25,7 +25,7 @@ fn register_group_rejects_gid_with_existing_history_even_if_registry_is_missing(
 -> Result<(), CityGError> {
     let gid = [0xCA; 32];
     let leaf = cityg_client::demo::demo_member_leaf("history-owner");
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let mut membership = cityg_client::GroupMembership::default();
     membership.apply_delta(&cityg_client::MembershipDelta {
         joined: vec![leaf],
@@ -49,7 +49,7 @@ fn register_group_rejects_gid_with_existing_history_even_if_registry_is_missing(
 
 #[test]
 fn rotate_group_kbroad_rejects_missing_and_unchanged_keys() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0xB1; 32];
     let key = vec![0x44; 16];
 
@@ -74,7 +74,7 @@ fn rotate_group_kbroad_rejects_missing_and_unchanged_keys() -> Result<(), CityGE
 
 #[test]
 fn rotate_group_kbroad_allows_successive_unflagged_rotations() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0xB2; 32];
     let key_a = vec![0x41; 16];
     let key_b = vec![0x42; 16];
@@ -142,7 +142,7 @@ fn build_merge_ticket_auto_rotates_kbroad_when_pending() -> Result<(), CityGErro
 
     server.roster.mark_kbroad_rotation_required(gid.as_slice());
 
-    let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+    let ticket = server.build_merge_ticket_for_refresh(&gid, &leaf_id)?;
     assert_eq!(server.kbroad_generation(&gid), 1);
     assert!(!server.kbroad_rotation_required(&gid));
     assert_ne!(ticket.kbroad_public, previous_key);

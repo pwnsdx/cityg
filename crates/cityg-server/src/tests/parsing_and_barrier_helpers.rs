@@ -9,7 +9,7 @@ use super::*;
 
 #[test]
 fn group_state_defaults_include_barrier_policy_bounds() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0xD1; 32];
     server.register_group(&gid, vec![0x11; 16])?;
     let state = server

@@ -8,8 +8,8 @@ use cityg_client::{CityGError, ClientEpochBundle};
 use cityg_server::{
     BarrierJoinOccupancyRecord, BarrierPublicTreeSnapshot, BarrierRevokedOccupancyRecord,
     CityGServer, JoinProvisioningAuthorityArtifacts, JoinTicketBundle, MergeAcceptanceRecord,
-    MergeTicketBundle, MergeTicketIntent, ResolvedJoinOccupancies, ResolvedRevokedOccupancies,
-    ServerOutcome,
+    MergeTicketBundle, MergeTicketIntent, RemoveProposalSubmission, ResolvedJoinOccupancies,
+    ResolvedRevokedOccupancies, ServerOutcome,
 };
 use msphf_core::hash::h_l;
 use msphf_orchestrator::{PivotParity, hdr};
@@ -424,7 +424,9 @@ pub struct FullVerificationWitnessRequest {
     pub merge_ticket_artifact: Vec<u8>,
     pub barrier_update_reason: u64,
     pub updater_slot_generation: u64,
-    pub include_updater_in_revoked_set: bool,
+    /// Reason 0: add the ticket's revoked slot leases to the committed
+    /// revoked set (`false`: the updater reclaims a committed revoked slot).
+    pub apply_revocation_targets: bool,
     pub revocation_roots_hash: [u8; 32],
     pub revocation_target_leaf_id: Option<[u8; 32]>,
     pub join_records: Vec<BarrierJoinOccupancyRecord>,
@@ -879,6 +881,21 @@ pub fn list_room_admins(
     server.list_room_admins(gid, actor_pop_key)
 }
 
+/// Record a signed removal proposal (voluntary leave or admin removal).
+pub fn submit_remove_proposal(
+    server: &mut CityGServer,
+    gid: &[u8; 32],
+    signed_proposal: &[u8],
+) -> Result<RemoveProposalSubmission, CityGError> {
+    server.submit_remove_proposal(gid, signed_proposal)
+}
+
+/// Encoded pending removal proposals, for members to verify and commit.
+#[must_use]
+pub fn pending_remove_proposals(server: &mut CityGServer, gid: &[u8; 32]) -> Vec<Vec<u8>> {
+    server.pending_removal_proposals(gid)
+}
+
 /// Build and serialize an expel-member ticket through the shared merge-ticket path.
 pub fn prepare_expel_member_ticket(
     server: &mut CityGServer,
@@ -961,38 +978,49 @@ pub fn prepare_full_verification_witness(
         deployment_profile_manifest: expected_manifest,
         ..
     } = if request.barrier_update_reason == 0 {
-        match request.revocation_target_leaf_id {
-            Some(target_leaf_id) if target_leaf_id != request.author_leaf_id => {
-                let bundle = server.build_merge_ticket_for_targeted_revocation(
-                    gid,
-                    &request.author_leaf_id,
-                    &target_leaf_id,
-                )?;
-                prepare_merge_ticket_from_bundle(server, gid, bundle, profile_version)?
-            }
-            _ => {
-                let leave_bundle = server.build_merge_ticket(gid, &request.author_leaf_id)?;
-                let leave_ticket =
-                    prepare_merge_ticket_from_bundle(server, gid, leave_bundle, profile_version)?;
-                if request.merge_ticket_artifact == leave_ticket.merge_ticket_artifact {
-                    leave_ticket
-                } else {
-                    let refresh_bundle =
-                        server.build_merge_ticket_for_refresh(gid, &request.author_leaf_id)?;
-                    let refresh_ticket = prepare_merge_ticket_from_bundle(
-                        server,
-                        gid,
-                        refresh_bundle,
-                        profile_version,
-                    )?;
-                    if request.merge_ticket_artifact == refresh_ticket.merge_ticket_artifact {
-                        refresh_ticket
-                    } else {
-                        return Err(
-                            RoomFullVerificationWitnessPreparationError::MergeTicketArtifactMismatch,
-                        );
+        // Re-derive the ticket the author used: a targeted revocation (admin
+        // expel), a commit of the pending removals (or the last member
+        // leaving), or a refresh. The first artifact that matches wins.
+        let mut candidates = Vec::with_capacity(3);
+        if let Some(target_leaf_id) = request.revocation_target_leaf_id
+            && target_leaf_id != request.author_leaf_id
+        {
+            candidates.push(server.build_merge_ticket_for_targeted_revocation(
+                gid,
+                &request.author_leaf_id,
+                &target_leaf_id,
+            ));
+        }
+        candidates.push(server.build_merge_ticket(gid, &request.author_leaf_id));
+        candidates.push(server.build_merge_ticket_for_refresh(gid, &request.author_leaf_id));
+        let mut matched = None;
+        let mut any_built = false;
+        let mut first_error = None;
+        for candidate in candidates {
+            match candidate {
+                Ok(bundle) => {
+                    any_built = true;
+                    let ticket =
+                        prepare_merge_ticket_from_bundle(server, gid, bundle, profile_version)?;
+                    if request.merge_ticket_artifact == ticket.merge_ticket_artifact {
+                        matched = Some(ticket);
+                        break;
                     }
                 }
+                Err(err) => {
+                    first_error.get_or_insert(err);
+                }
+            }
+        }
+        match (matched, first_error) {
+            (Some(ticket), _) => ticket,
+            (None, Some(err)) if !any_built => {
+                return Err(RoomTicketPreparationError::from(err).into());
+            }
+            _ => {
+                return Err(
+                    RoomFullVerificationWitnessPreparationError::MergeTicketArtifactMismatch,
+                );
             }
         }
     } else {
@@ -1044,16 +1072,17 @@ pub fn prepare_full_verification_witness(
             .records;
         let slot_index = u32::try_from(bundle.slot_index)
             .map_err(|_| RoomFullVerificationWitnessPreparationError::SlotIndexOutOfRange)?;
-        if request.include_updater_in_revoked_set {
-            let updater_record = BarrierRevokedOccupancyRecord {
-                slot_index,
-                slot_generation: bundle.slot_generation,
-            };
-            if let Err(insert_at) = records.binary_search_by_key(
-                &(updater_record.slot_index, updater_record.slot_generation),
-                |record| (record.slot_index, record.slot_generation),
-            ) {
-                records.insert(insert_at, updater_record);
+        if request.apply_revocation_targets {
+            // The ticket's targets are blanked; the updater (the author's own
+            // slot) is revoked only when the last member leaves.
+            for target in &bundle.revoked_slot_leases {
+                if let Err(insert_at) = records
+                    .binary_search_by_key(&(target.slot_index, target.slot_generation), |record| {
+                        (record.slot_index, record.slot_generation)
+                    })
+                {
+                    records.insert(insert_at, target.clone());
+                }
             }
         } else {
             records.retain(|record| record.slot_index != slot_index);
@@ -1643,6 +1672,10 @@ pub fn store_room_message(
             RoomAuthorizationError::Unauthorized => RoomMessageStoreError::RoomUnauthorized,
         }
     })?;
+    // A member that asked to leave no longer sends (audit C-03 / P-3.c).
+    if server.has_pending_removal(&scope.gid, &message.sender_leaf) {
+        return Err(RoomMessageStoreError::RoomUnauthorized);
+    }
 
     room_state.store_message(
         message.we_epoch_id,
@@ -1854,7 +1887,7 @@ mod tests {
         let mut kbroad_registry = BTreeMap::new();
         kbroad_registry.insert(DEMO_GID.to_vec(), kbroad_public().to_vec());
 
-        let mut config = ServerConfig::new();
+        let mut config = ServerConfig::without_history_authority();
         config.acceptance_options = Some(AcceptanceOptions {
             bootstrap_policy: BootstrapPolicy::CaMlDsa {
                 public_key: bootstrap_public().to_vec(),
@@ -2146,7 +2179,7 @@ mod tests {
 
     #[test]
     fn snapshot_room_telemetry_includes_capacity_for_registered_room_without_accepts() {
-        let mut server = CityGServer::new(ServerConfig::new());
+        let mut server = CityGServer::new(ServerConfig::without_history_authority());
         let gid = [0x61; 32];
         server
             .register_group(&gid, vec![0x55; 16])

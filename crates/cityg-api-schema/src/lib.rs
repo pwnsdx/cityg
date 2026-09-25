@@ -230,6 +230,14 @@ pub fn encode_prepared_merge_ticket_response(prepared: PreparedMergeTicket) -> V
         history_authority_extension,
         merge_ticket_artifact,
         deployment_profile_manifest,
+        revoked_slot_leases: bundle
+            .revoked_slot_leases
+            .iter()
+            .map(|record| pb::BarrierRevokedOccupancyRecord {
+                slot_index: record.slot_index,
+                slot_generation: record.slot_generation,
+            })
+            .collect(),
     };
 
     response.encode_to_vec()
@@ -982,7 +990,7 @@ pub fn decode_full_verification_witness_request(
         merge_ticket_artifact: request.merge_ticket_artifact,
         barrier_update_reason: request.barrier_update_reason,
         updater_slot_generation: request.updater_slot_generation,
-        include_updater_in_revoked_set: request.include_updater_in_revoked_set,
+        apply_revocation_targets: request.apply_revocation_targets,
         revocation_roots_hash,
         revocation_target_leaf_id,
         join_records,
@@ -1388,6 +1396,75 @@ pub enum MergeTicketRequestValidationError {
     InvalidIntent,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedSubmitRemoveProposalRequest {
+    pub room_id: String,
+    pub gid: [u8; 32],
+    pub signed_proposal: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedPendingRemoveProposalsRequest {
+    pub room_id: String,
+    pub gid: [u8; 32],
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RemoveProposalRequestValidationError {
+    #[error("room_id must be provided")]
+    MissingRoomId,
+    #[error("room_id must be 64 hex characters")]
+    InvalidRoomIdEncoding,
+    #[error("room_id must be 32 bytes")]
+    InvalidRoomIdLength,
+    #[error("signed_proposal must be provided")]
+    MissingProposal,
+    #[error("signed_proposal exceeds {max} bytes")]
+    ProposalTooLarge { max: usize },
+}
+
+fn parse_room_id_for_remove_proposal(
+    room_id: &str,
+) -> Result<[u8; 32], RemoveProposalRequestValidationError> {
+    parse_room_id(room_id).map_err(|err| match err {
+        RoomScopedRouteParseError::InvalidRoomIdEncoding => {
+            RemoveProposalRequestValidationError::InvalidRoomIdEncoding
+        }
+        RoomScopedRouteParseError::InvalidRoomIdLength => {
+            RemoveProposalRequestValidationError::InvalidRoomIdLength
+        }
+        _ => RemoveProposalRequestValidationError::MissingRoomId,
+    })
+}
+
+pub fn validate_submit_remove_proposal_request(
+    request: pb::SubmitRemoveProposalRequest,
+) -> Result<ValidatedSubmitRemoveProposalRequest, RemoveProposalRequestValidationError> {
+    let gid = parse_room_id_for_remove_proposal(request.room_id.as_str())?;
+    if request.signed_proposal.is_empty() {
+        return Err(RemoveProposalRequestValidationError::MissingProposal);
+    }
+    let max = cityg_client::remove_proposal::MAX_SIGNED_REMOVE_PROPOSAL_BYTES;
+    if request.signed_proposal.len() > max {
+        return Err(RemoveProposalRequestValidationError::ProposalTooLarge { max });
+    }
+    Ok(ValidatedSubmitRemoveProposalRequest {
+        room_id: request.room_id,
+        gid,
+        signed_proposal: request.signed_proposal,
+    })
+}
+
+pub fn validate_pending_remove_proposals_request(
+    request: pb::PendingRemoveProposalsRequest,
+) -> Result<ValidatedPendingRemoveProposalsRequest, RemoveProposalRequestValidationError> {
+    let gid = parse_room_id_for_remove_proposal(request.room_id.as_str())?;
+    Ok(ValidatedPendingRemoveProposalsRequest {
+        room_id: request.room_id,
+        gid,
+    })
+}
+
 pub fn validate_merge_ticket_request(
     request: pb::MergeTicketRequest,
 ) -> Result<ValidatedMergeTicketRequest, MergeTicketRequestValidationError> {
@@ -1789,6 +1866,8 @@ pub enum RoomScopedApiRoute {
     BarrierIssueFullVerificationWitness,
     BarrierLookupMergeAcceptance,
     RefreshPivot,
+    SubmitRemoveProposal,
+    PendingRemoveProposals,
 }
 
 impl RoomScopedApiRoute {
@@ -1819,6 +1898,8 @@ impl RoomScopedApiRoute {
             }
             Self::BarrierLookupMergeAcceptance => "/v1/barrier/lookup_merge_acceptance",
             Self::RefreshPivot => "/v1/pivot/refresh",
+            Self::SubmitRemoveProposal => "/v1/rooms/remove_proposal",
+            Self::PendingRemoveProposals => "/v1/rooms/pending_remove_proposals",
         }
     }
 }
@@ -1954,6 +2035,14 @@ pub fn extract_room_scoped_request_target(
             let request = decode::<pb::RefreshPivotRequest>(route, body)?;
             RoomScopedRoutingKey::Gid(bundle_gid(route, &request.bundle_cbor)?)
         }
+        RoomScopedApiRoute::SubmitRemoveProposal => {
+            let request = decode::<pb::SubmitRemoveProposalRequest>(route, body)?;
+            RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
+        }
+        RoomScopedApiRoute::PendingRemoveProposals => {
+            let request = decode::<pb::PendingRemoveProposalsRequest>(route, body)?;
+            RoomScopedRoutingKey::Gid(parse_room_id(request.room_id.as_str())?)
+        }
     };
 
     Ok(Some(RoomScopedRequestTarget { route, key }))
@@ -1986,6 +2075,8 @@ fn match_room_scoped_route(path: &str) -> Option<RoomScopedApiRoute> {
         "/v1/rooms/expel_member_ticket" => Some(RoomScopedApiRoute::ExpelMemberTicket),
         "/v1/rooms/join_ticket" => Some(RoomScopedApiRoute::JoinTicket),
         "/v1/rooms/merge_ticket" => Some(RoomScopedApiRoute::MergeTicket),
+        "/v1/rooms/remove_proposal" => Some(RoomScopedApiRoute::SubmitRemoveProposal),
+        "/v1/rooms/pending_remove_proposals" => Some(RoomScopedApiRoute::PendingRemoveProposals),
         "/v2/barrier/resolve_revoked_occupancies" => {
             Some(RoomScopedApiRoute::BarrierResolveRevokedOccupancies)
         }
@@ -2292,7 +2383,7 @@ mod tests {
                     slot_index: 61,
                     slot_generation: 64,
                 }],
-                include_updater_in_revoked_set: true,
+                apply_revocation_targets: true,
                 barrier_update: vec![0x62],
             },
         )
@@ -2315,7 +2406,7 @@ mod tests {
         assert_eq!(decoded.updater_slot_generation, 63);
         assert_eq!(decoded.revoked_records.len(), 1);
         assert_eq!(decoded.revoked_records[0].slot_generation, 64);
-        assert!(decoded.include_updater_in_revoked_set);
+        assert!(decoded.apply_revocation_targets);
         assert_eq!(decoded.barrier_update, vec![0x62]);
     }
 
@@ -2341,7 +2432,7 @@ mod tests {
                 join_records: Vec::new(),
                 updater_slot_generation: 0,
                 revoked_records: Vec::new(),
-                include_updater_in_revoked_set: false,
+                apply_revocation_targets: false,
                 barrier_update: Vec::new(),
             },
         )
@@ -2549,6 +2640,78 @@ mod tests {
         assert_eq!(
             validated.intent_value,
             pb::MergeTicketIntent::Refresh as i32
+        );
+    }
+
+    #[test]
+    fn remove_proposal_requests_validate_room_and_size() {
+        let validated = validate_submit_remove_proposal_request(pb::SubmitRemoveProposalRequest {
+            room_id: hex::encode(DEMO_GID),
+            signed_proposal: vec![0x82, 0x01],
+        })
+        .expect("valid request");
+        assert_eq!(validated.gid, DEMO_GID);
+        assert_eq!(validated.signed_proposal, vec![0x82, 0x01]);
+        assert_eq!(
+            validate_submit_remove_proposal_request(pb::SubmitRemoveProposalRequest {
+                room_id: hex::encode(DEMO_GID),
+                signed_proposal: Vec::new(),
+            }),
+            Err(RemoveProposalRequestValidationError::MissingProposal)
+        );
+        let max = cityg_client::remove_proposal::MAX_SIGNED_REMOVE_PROPOSAL_BYTES;
+        assert_eq!(
+            validate_submit_remove_proposal_request(pb::SubmitRemoveProposalRequest {
+                room_id: hex::encode(DEMO_GID),
+                signed_proposal: vec![0u8; max + 1],
+            }),
+            Err(RemoveProposalRequestValidationError::ProposalTooLarge { max })
+        );
+        assert_eq!(
+            validate_submit_remove_proposal_request(pb::SubmitRemoveProposalRequest::default()),
+            Err(RemoveProposalRequestValidationError::MissingRoomId)
+        );
+        assert_eq!(
+            validate_pending_remove_proposals_request(pb::PendingRemoveProposalsRequest {
+                room_id: "zz".repeat(32),
+            }),
+            Err(RemoveProposalRequestValidationError::InvalidRoomIdEncoding)
+        );
+        assert_eq!(
+            validate_pending_remove_proposals_request(pb::PendingRemoveProposalsRequest {
+                room_id: "ab".repeat(31),
+            }),
+            Err(RemoveProposalRequestValidationError::InvalidRoomIdLength)
+        );
+        let pending =
+            validate_pending_remove_proposals_request(pb::PendingRemoveProposalsRequest {
+                room_id: hex::encode(DEMO_GID),
+            })
+            .expect("valid pending request");
+        assert_eq!(pending.gid, DEMO_GID);
+
+        let body = pb::SubmitRemoveProposalRequest {
+            room_id: hex::encode(DEMO_GID),
+            signed_proposal: vec![1],
+        }
+        .encode_to_vec();
+        let target = extract_room_scoped_request_target("/v1/rooms/remove_proposal", &body)
+            .expect("parse")
+            .expect("room scoped");
+        assert_eq!(target.route, RoomScopedApiRoute::SubmitRemoveProposal);
+        assert_eq!(target.key, RoomScopedRoutingKey::Gid(DEMO_GID));
+        let body = pb::PendingRemoveProposalsRequest {
+            room_id: hex::encode(DEMO_GID),
+        }
+        .encode_to_vec();
+        let target =
+            extract_room_scoped_request_target("/v1/rooms/pending_remove_proposals", &body)
+                .expect("parse")
+                .expect("room scoped");
+        assert_eq!(target.route, RoomScopedApiRoute::PendingRemoveProposals);
+        assert_eq!(
+            RoomScopedApiRoute::PendingRemoveProposals.path(),
+            "/v1/rooms/pending_remove_proposals"
         );
     }
 

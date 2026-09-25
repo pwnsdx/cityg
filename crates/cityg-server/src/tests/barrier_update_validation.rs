@@ -228,6 +228,7 @@ fn validate_barrier_update_rejects_join_finalize_reason_for_non_joiner() -> Resu
     let pop_pk = vec![0xAE; 32];
     let leaf_ek = vec![0xA5; 1184];
     state.leaf_device_pk.insert(leaf, pop_pk.clone());
+    install_active_fixture_lease(&mut state, leaf)?;
 
     let slot_index = super::slot_index_for_leaf(&leaf, state.n_max);
     let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
@@ -553,6 +554,7 @@ fn validate_barrier_update_rejects_updater_identity_mismatch() -> Result<(), Cit
     let mapped_pop_pk = vec![0xA1; 32];
     let header_pop_pk = vec![0xA2; 32];
     state.leaf_device_pk.insert(leaf, mapped_pop_pk);
+    let _join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf)?;
     let join_ek = vec![0xA5; 1184];
     let delta = cityg_client::MembershipDelta {
         joined: vec![leaf],
@@ -661,6 +663,7 @@ fn validate_barrier_update_rejects_missing_author_pop_pk() -> Result<(), CityGEr
     let leaf = cityg_client::demo::demo_member_leaf("barrier-missing-pop");
     let mapped_pop_pk = vec![0xA1; 32];
     state.leaf_device_pk.insert(leaf, mapped_pop_pk);
+    let _join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf)?;
     let join_ek = vec![0xA5; 1184];
     let delta = cityg_client::MembershipDelta {
         joined: vec![leaf],
@@ -798,6 +801,7 @@ fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), Cit
     state.snapshots.insert(root, membership);
     state.latest_root = Some(root);
     state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
+    install_active_fixture_lease(&mut state, leaf)?;
 
     let updater_slot_index = u64::from(super::slot_index_for_leaf(&leaf, state.n_max));
     let leaf_node = state.n_max.saturating_sub(1) + updater_slot_index;
@@ -1029,6 +1033,7 @@ fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), Cit
     singleton_state
         .leaf_barrier_public
         .insert(singleton_leaf, singleton_leaf_ek.clone());
+    install_active_fixture_lease(&mut singleton_state, singleton_leaf)?;
 
     let singleton_snapshot = vec![singleton_leaf_ek];
     let singleton_hash =
@@ -1075,5 +1080,304 @@ fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), Cit
         singleton_validation.hash_cache_post.is_none(),
         "empty update should reuse the prior cache instead of building a new one"
     );
+    Ok(())
+}
+
+/// Two active members (A at slot 0, B at slot 1) in a 4-slot tree, and a
+/// reason-0 barrier update authored by `author` that revokes `revoked`.
+/// Only A's path is regenerated, so the update is valid whenever the policy
+/// checks let it through.
+struct RevocationFixture {
+    state: super::GroupState,
+    header: BTreeMap<u64, Value>,
+    delta: cityg_client::MembershipDelta,
+    alice: [u8; 32],
+    bob: [u8; 32],
+    alice_pop_pk: Vec<u8>,
+    bob_pop_pk: Vec<u8>,
+}
+
+fn revocation_fixture(
+    author_is_bob: bool,
+    revoke_alice: bool,
+) -> Result<RevocationFixture, CityGError> {
+    let mut state = super::GroupState {
+        n_max: 4,
+        ..super::GroupState::default()
+    };
+    state.barrier_initialized = true;
+    state.barrier_version = 3;
+    let alice = [0xA1; 32];
+    let bob = [0xB2; 32];
+    let alice_pop_pk = vec![0xAA; 32];
+    let bob_pop_pk = vec![0xBB; 32];
+    let alice_lease = SlotLease {
+        slot_index: 0,
+        slot_generation: 0,
+    };
+    let bob_lease = SlotLease {
+        slot_index: 1,
+        slot_generation: 0,
+    };
+    state.ensure_slot_allocator_initialized();
+    state.free_slots.remove(&0);
+    state.free_slots.remove(&1);
+    state.activate_slot_lease(alice, alice_lease)?;
+    state.activate_slot_lease(bob, bob_lease)?;
+    state.leaf_device_pk.insert(alice, alice_pop_pk.clone());
+    state.leaf_device_pk.insert(bob, bob_pop_pk.clone());
+    let mut membership = cityg_client::GroupMembership::default();
+    membership.apply_delta(&cityg_client::MembershipDelta {
+        joined: vec![alice, bob],
+        revoked: Vec::new(),
+    });
+    let root = msphf_core::merkle::canonical_set_root(&[alice, bob])?;
+    state.snapshots.insert(root, membership);
+    state.latest_root = Some(root);
+
+    // Committed tree before the update: both leaves and their common path.
+    let alice_ek = vec![0x31; 1184];
+    let bob_ek = vec![0x32; 1184];
+    let mut entries = super::build_all_blank_pk_entries(state.n_max)?;
+    entries[3] = alice_ek.clone();
+    entries[4] = bob_ek.clone();
+    entries[1] = vec![0x41; 1184];
+    entries[0] = vec![0x40; 1184];
+    state.barrier_pk_entries = entries.clone();
+    state.leaf_barrier_public.insert(alice, alice_ek);
+    state.leaf_barrier_public.insert(bob, bob_ek);
+    state.kem_tree_hash_after =
+        super::compute_barrier_tree_hash(state.n_max, state.barrier_pk_entries.as_slice())?;
+    state.barrier_roots_hash = super::compute_revocation_roots_hash(&[0u8; 32], &[0u8; 32])?;
+
+    let (author_leaf_node, revoked_leaf_node, author_pop_pk, revoked) = if author_is_bob {
+        (
+            4u64,
+            3usize,
+            bob_pop_pk.clone(),
+            if revoke_alice { alice } else { bob },
+        )
+    } else {
+        (
+            3u64,
+            4usize,
+            alice_pop_pk.clone(),
+            if revoke_alice { alice } else { bob },
+        )
+    };
+    let revoked_node = if revoked == alice { 3usize } else { 4usize };
+    let _ = revoked_leaf_node;
+
+    // Snapshot the update is built against: revoked leaf and its path blanked.
+    let mut snapshot_pre = entries;
+    super::blank_internal_path_from_leaf(snapshot_pre.as_mut_slice(), revoked_node);
+    snapshot_pre[revoked_node] = Vec::new();
+    let kem_before = super::compute_barrier_tree_hash(state.n_max, snapshot_pre.as_slice())?;
+    let mut snapshot_post = snapshot_pre;
+    snapshot_post[1] = vec![0x51; 1184];
+    snapshot_post[0] = vec![0x50; 1184];
+    let kem_after = super::compute_barrier_tree_hash(state.n_max, snapshot_post.as_slice())?;
+
+    let revoked_since = [0x5E; 32];
+    let revoked_root = [0x5F; 32];
+    let rrh = super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
+    let updater_slot_index = author_leaf_node - 3;
+    let cover_payload = super::KemTreeCoverPayloadWire(
+        updater_slot_index,
+        0,
+        vec![author_leaf_node, 1, 0],
+        None,
+        Vec::new(),
+        vec![
+            super::NewPublicKeyWire(0, vec![0x50; 1184]),
+            super::NewPublicKeyWire(1, vec![0x51; 1184]),
+        ],
+    );
+    let barrier_update = super::BarrierUpdateWire(
+        "barrier-v1".to_string(),
+        4,
+        3,
+        state.n_max,
+        rrh.to_vec(),
+        kem_before.to_vec(),
+        kem_after.to_vec(),
+        super::to_cbor_vec(&cover_payload)?,
+    );
+    let mut header = BTreeMap::new();
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE,
+        Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+    );
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(0u64)),
+    );
+    header.insert(112, Value::Bytes(revoked_since.to_vec()));
+    header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+    header.insert(hdr::HDR_POP_PK, Value::Bytes(author_pop_pk));
+    Ok(RevocationFixture {
+        state,
+        header,
+        delta: cityg_client::MembershipDelta {
+            joined: Vec::new(),
+            revoked: vec![revoked],
+        },
+        alice,
+        bob,
+        alice_pop_pk,
+        bob_pop_pk,
+    })
+}
+
+fn pending_removal_for(target: [u8; 32], lease: SlotLease) -> crate::PendingRemoval {
+    let proposal = cityg_client::remove_proposal::RemoveProposal {
+        gid: [0x47; 32],
+        target_leaf_id: target,
+        target_slot_index: lease.slot_index,
+        target_slot_generation: lease.slot_generation,
+        not_after_ms: u64::MAX,
+    };
+    // Validation only checks presence; the signature is verified on submission.
+    let signed = cityg_client::remove_proposal::SignedRemoveProposal {
+        proposal,
+        signer_public_key: vec![0u8; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES],
+        signature: vec![0u8; cityg_pqc::ML_DSA_87_SIGNATURE_BYTES],
+    };
+    let encoded = signed.to_cbor().unwrap_or_default();
+    crate::PendingRemoval { signed, encoded }
+}
+
+fn expect_freeze(err: CityGError, expected: msphf_orchestrator::mhw::FreezeError) {
+    assert!(
+        matches!(
+            &err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == expected.code && freeze.reason == expected.reason
+        ),
+        "expected {expected:?}, got {err:?}"
+    );
+}
+
+#[test]
+fn validate_barrier_update_rejects_updater_revoked_by_its_own_anchor() -> Result<(), CityGError> {
+    // Audit C-03: a departing member must never pick the post-revocation key.
+    let mut fixture = revocation_fixture(false, true)?;
+    let alice_lease = fixture.state.leaf_slot_leases[&fixture.alice];
+    fixture.state.pending_removals.insert(
+        fixture.alice,
+        pending_removal_for(fixture.alice, alice_lease),
+    );
+    let err = super::validate_barrier_update_against_roster(
+        &fixture.state,
+        &fixture.header,
+        &fixture.delta,
+    )
+    .err()
+    .ok_or(CityGError::InvalidInput("self-revocation must be rejected"))?;
+    expect_freeze(err, msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID);
+    Ok(())
+}
+
+#[test]
+fn validate_barrier_update_rejects_unauthorized_revocation() -> Result<(), CityGError> {
+    // Alice (not an admin) revokes Bob, who never asked to leave.
+    let fixture = revocation_fixture(false, false)?;
+    let err = super::validate_barrier_update_against_roster(
+        &fixture.state,
+        &fixture.header,
+        &fixture.delta,
+    )
+    .err()
+    .ok_or(CityGError::InvalidInput(
+        "revocation without admin or proposal must be rejected",
+    ))?;
+    expect_freeze(
+        err,
+        msphf_orchestrator::FREEZE_BARRIER_REVOCATION_UNAUTHORIZED,
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_barrier_update_accepts_revocation_backed_by_pending_removal() -> Result<(), CityGError>
+{
+    let mut fixture = revocation_fixture(false, false)?;
+    let bob_lease = fixture.state.leaf_slot_leases[&fixture.bob];
+    fixture
+        .state
+        .pending_removals
+        .insert(fixture.bob, pending_removal_for(fixture.bob, bob_lease));
+    let validation = super::validate_barrier_update_against_roster(
+        &fixture.state,
+        &fixture.header,
+        &fixture.delta,
+    )?
+    .ok_or(CityGError::InvalidInput("expected a validated update"))?;
+    assert_eq!(validation.parsed.updater_slot_index, 0);
+    assert!(
+        validation.snapshot_post[4].is_empty(),
+        "the revoked leaf stays blank after the update"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_barrier_update_accepts_revocation_authored_by_room_admin() -> Result<(), CityGError> {
+    let mut fixture = revocation_fixture(false, false)?;
+    fixture
+        .state
+        .room_admin_pop_keys
+        .insert(fixture.alice_pop_pk.clone());
+    let _ = &fixture.bob_pop_pk;
+    super::validate_barrier_update_against_roster(&fixture.state, &fixture.header, &fixture.delta)?
+        .ok_or(CityGError::InvalidInput("expected a validated update"))?;
+    Ok(())
+}
+
+#[test]
+fn validate_barrier_update_rejects_updates_leaving_pending_removals_uncommitted()
+-> Result<(), CityGError> {
+    // Admin Alice expels Bob while a third member's removal is pending: the
+    // update must also commit that removal.
+    let mut fixture = revocation_fixture(false, false)?;
+    fixture
+        .state
+        .room_admin_pop_keys
+        .insert(fixture.alice_pop_pk.clone());
+    let carol = [0xC3; 32];
+    fixture.state.pending_removals.insert(
+        carol,
+        pending_removal_for(
+            carol,
+            SlotLease {
+                slot_index: 2,
+                slot_generation: 0,
+            },
+        ),
+    );
+    let err = super::validate_barrier_update_against_roster(
+        &fixture.state,
+        &fixture.header,
+        &fixture.delta,
+    )
+    .err()
+    .ok_or(CityGError::InvalidInput(
+        "update must commit every pending removal",
+    ))?;
+    expect_freeze(
+        err,
+        msphf_orchestrator::FREEZE_BARRIER_PENDING_REMOVALS_UNCOMMITTED,
+    );
+
+    // Replay of historical bundles skips the removal policy.
+    crate::validate_barrier_update_against_roster_with_policy(
+        &fixture.state,
+        &fixture.header,
+        &fixture.delta,
+        crate::RemovalPolicy::SkipForReplay,
+    )?
+    .ok_or(CityGError::InvalidInput(
+        "replay should validate the update",
+    ))?;
     Ok(())
 }

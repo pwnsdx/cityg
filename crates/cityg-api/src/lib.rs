@@ -14,6 +14,7 @@ mod middleware;
 mod observability_routes;
 mod pivot_routes;
 mod proof_validation;
+mod removal_routes;
 mod ticket_routes;
 mod websocket_routes;
 
@@ -55,8 +56,10 @@ use pb::{
     BarrierResolveRevokedOccupanciesRequest, BootstrapRoomRequest, ChatMessage,
     ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest,
     GetBundleResponse, JoinTicketRequest, ListRoomAdminsRequest, MembersRequest, MergeTicketIntent,
-    MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
-    RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
+    MergeTicketRequest, PendingRemoveProposalsRequest, PendingRemoveProposalsResponse,
+    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RotateRoomKbroadRequest,
+    SendMessageRequest, SendMessageResponse, SubmitRemoveProposalRequest,
+    SubmitRemoveProposalResponse,
 };
 #[cfg(test)]
 use pb::{
@@ -772,6 +775,14 @@ pub async fn run_with_config(
         .route("/v1/rooms/expel_member_ticket", post(expel_member_ticket))
         .route("/v1/rooms/join_ticket", post(join_ticket))
         .route("/v1/rooms/merge_ticket", post(merge_ticket))
+        .route(
+            "/v1/rooms/remove_proposal",
+            post(removal_routes::submit_remove_proposal),
+        )
+        .route(
+            "/v1/rooms/pending_remove_proposals",
+            post(removal_routes::pending_remove_proposals),
+        )
         .route(
             "/v2/barrier/resolve_revoked_occupancies",
             post(barrier_resolve_revoked_occupancies),

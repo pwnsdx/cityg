@@ -24,7 +24,7 @@ fn resolve_join_occupancies_since_reports_join_metadata() -> Result<(), CityGErr
 #[test]
 fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<(), CityGError> {
     let gid = [0x82; 32];
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let state = server.roster.groups.entry(gid.to_vec()).or_default();
     state.barrier_version = 3;
     let leaf_v2 = colliding_cover_leaf(8);
@@ -108,7 +108,7 @@ fn resolve_join_occupancies_since_filters_post_genesis_join_history() -> Result<
 fn resolve_join_occupancies_since_prunes_resolved_and_revoked_join_history()
 -> Result<(), CityGError> {
     let gid = [0x85; 32];
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let leaf_active = colliding_cover_leaf(11);
     let leaf_revoked = colliding_cover_leaf(12);
     let latest_root = [0xB1; 32];
@@ -178,7 +178,7 @@ fn resolve_join_occupancies_since_prunes_resolved_and_revoked_join_history()
 fn resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot() -> Result<(), CityGError>
 {
     let gid = [0x86; 32];
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let old_leaf = colliding_cover_leaf(13);
     let new_leaf = colliding_cover_leaf(17);
     let latest_root = [0xB6; 32];
@@ -244,7 +244,7 @@ fn resolve_join_occupancies_since_keeps_latest_generation_for_reused_slot() -> R
 fn resolve_join_occupancies_since_rejects_duplicate_active_cover_allocations()
 -> Result<(), CityGError> {
     let gid = [0x84; 32];
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let leaf_a = colliding_cover_leaf(5);
     let leaf_b = colliding_cover_leaf(1029);
     let mut membership = cityg_client::GroupMembership::default();
@@ -285,7 +285,7 @@ fn resolve_join_occupancies_since_rejects_duplicate_active_cover_allocations()
 fn resolve_join_occupancies_since_genesis_without_snapshot_rejects_missing_artifact()
 -> Result<(), CityGError> {
     let gid = [0x81; 32];
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     server
         .roster
         .groups
@@ -389,7 +389,7 @@ fn fetch_barrier_public_tree_rejects_corrupted_history_snapshot() -> Result<(), 
 fn fetch_barrier_public_tree_rejects_duplicate_active_cover_allocations() -> Result<(), CityGError>
 {
     let gid = [0x85; 32];
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let leaf_a = colliding_cover_leaf(5);
     let leaf_b = colliding_cover_leaf(1029);
     let mut membership = cityg_client::GroupMembership::default();
@@ -570,7 +570,7 @@ fn barrier_public_tree_history_prunes_retired_snapshots() -> Result<(), CityGErr
         "current committed snapshot must remain retained"
     );
 
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     server.roster.groups.insert(gid.to_vec(), state);
 
     let err = server
@@ -592,7 +592,7 @@ fn merge_ticket_hash_matches_fetchable_tree_snapshot() -> Result<(), CityGError>
     let alice = cityg_client::demo::demo_bundle("alice")?;
     server.accept_epoch(&alice)?;
 
-    let ticket = server.build_merge_ticket(
+    let ticket = server.build_merge_ticket_for_refresh(
         &cityg_client::demo::DEMO_GID,
         &cityg_client::demo::demo_member_leaf("alice"),
     )?;
@@ -611,7 +611,8 @@ fn fetch_barrier_public_tree_prefers_current_commitment_for_current_hash() -> Re
     server.accept_epoch(&alice)?;
 
     let gid = cityg_client::demo::DEMO_GID;
-    let ticket = server.build_merge_ticket(&gid, &cityg_client::demo::demo_member_leaf("alice"))?;
+    let ticket = server
+        .build_merge_ticket_for_refresh(&gid, &cityg_client::demo::demo_member_leaf("alice"))?;
     let current = server.current_history_commitment(&gid)?;
     {
         let group = server

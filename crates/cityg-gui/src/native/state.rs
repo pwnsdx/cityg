@@ -31,6 +31,8 @@ pub(super) struct AppModel {
     pub(super) members_mode: MembersMode,
     pub(super) members_search: MembersSearchState,
     pub(super) members_refresh_task: Option<Task<()>>,
+    /// A background commit of other members' leave requests is running.
+    pub(super) removal_commit_in_flight: bool,
     pub(super) alias_bindings: AHashMap<String, AliasBindingRecord>,
     pub(super) leaf_alias_index: AHashMap<[u8; 32], String>,
     pub(super) room_admins: Vec<Vec<u8>>,

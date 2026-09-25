@@ -71,6 +71,7 @@ pub(super) async fn run_watch_mode(params: WatchModeParams<'_>) -> Result<()> {
 
     let default_order: Vec<usize> = (1..=sessions.len()).collect();
     let order = leave_order.as_ref().unwrap_or(&default_order);
+    let mut departed = vec![false; sessions.len()];
     for idx in order {
         if *idx == 0 || *idx > sessions.len() {
             return Err(anyhow!("leave order index {idx} invalid"));
@@ -87,11 +88,13 @@ pub(super) async fn run_watch_mode(params: WatchModeParams<'_>) -> Result<()> {
             alias_for(alias_base, sessions.len(), *idx - 1),
             hex::encode(session.we_epoch_id)
         );
-        perform_leave(session, verbose).await?;
+        let gid = session.gid;
+        let leaf_id = session.leaf_id;
+        leave_and_commit(&mut sessions, &mut departed, *idx - 1, verbose).await?;
         expect_membership_event(
             &mut event_rx,
-            &session.gid,
-            &session.leaf_id,
+            &gid,
+            &leaf_id,
             "revoke",
             format!(
                 "alias {} leave",

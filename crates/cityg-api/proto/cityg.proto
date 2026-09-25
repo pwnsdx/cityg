@@ -287,8 +287,38 @@ message MergeTicketRequest {
 }
 
 enum MergeTicketIntent {
+  // Commit every pending removal proposal (a member never authors its own
+  // revocation; only the last member of a room may leave this way directly).
   MERGE_TICKET_INTENT_LEAVE = 0;
   MERGE_TICKET_INTENT_REFRESH = 1;
+}
+
+// Signed removal proposal (voluntary leave or room-admin removal); another
+// member commits it with a LEAVE merge ticket.
+message SubmitRemoveProposalRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  // CBOR_det ["city-g/remove/v1", gid, target_leaf_id, target_slot_index,
+  // target_slot_generation, not_after_ms, signer_public_key, signature].
+  bytes signed_proposal = 2;
+}
+
+message SubmitRemoveProposalResponse {
+  reserved 1000 to 1999;
+  // "pending": another member commits the removal.
+  // "self_commit": the target is the last active member and commits its own
+  // removal with a LEAVE merge ticket.
+  string status = 1;
+}
+
+message PendingRemoveProposalsRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+}
+
+message PendingRemoveProposalsResponse {
+  reserved 1000 to 1999;
+  repeated bytes signed_proposals = 1;
 }
 
 message MergeTicketResponse {
@@ -330,6 +360,9 @@ message MergeTicketResponse {
   string history_authority_extension = 34;
   bytes merge_ticket_artifact = 35;
   bytes deployment_profile_manifest = 36;
+  // Slot occupancies the ticket revokes (sorted). The updater is always the
+  // author's own slot: the author blanks these leaves, then re-keys its path.
+  repeated BarrierRevokedOccupancyRecord revoked_slot_leases = 38;
 }
 
 message BarrierResolveRevokedOccupanciesRequest {
@@ -479,7 +512,9 @@ message BarrierIssueFullVerificationWitnessRequest {
   bytes merge_ticket_artifact = 13;
   uint64 updater_slot_generation = 14;
   repeated BarrierRevokedOccupancyRecord revoked_records = 15;
-  bool include_updater_in_revoked_set = 16;
+  // true: the ticket's revoked_slot_leases join the revoked set (reason 0);
+  // false: the updater reclaims a committed revoked slot (reclaim join).
+  bool apply_revocation_targets = 16;
 }
 
 message BarrierIssueFullVerificationWitnessResponse {

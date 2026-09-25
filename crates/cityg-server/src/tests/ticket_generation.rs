@@ -7,7 +7,7 @@ use crate::{
 #[test]
 fn build_join_ticket_requires_kbroad_and_allocates_distinct_slot_leases() -> Result<(), CityGError>
 {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x42; 32];
 
     let err = server
@@ -105,7 +105,7 @@ fn build_join_ticket_with_leaf_assigns_first_free_slot_even_when_leaf_ids_collid
 
 #[test]
 fn build_join_ticket_rejects_when_barrier_leaf_capacity_is_exhausted() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x24; 32];
     server.register_group(&gid, vec![0x55; 16])?;
 
@@ -161,7 +161,7 @@ fn build_join_ticket_rejects_when_barrier_leaf_capacity_is_exhausted() -> Result
 
 #[test]
 fn build_join_ticket_reuses_revoked_slot_capacity() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x6Cu8; 32];
     server.register_group(&gid, vec![0x44; 16])?;
 
@@ -197,7 +197,7 @@ fn build_join_ticket_reuses_revoked_slot_capacity() -> Result<(), CityGError> {
 
 #[test]
 fn pending_join_tickets_consume_cover_slots_until_exhaustion() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x39; 32];
     server.register_group(&gid, vec![0x77; 16])?;
 
@@ -235,7 +235,7 @@ fn pending_join_tickets_consume_cover_slots_until_exhaustion() -> Result<(), Cit
 
 #[test]
 fn build_join_ticket_rejects_new_reservations_at_refusal_threshold() -> Result<(), CityGError> {
-    let mut config = ServerConfig::new();
+    let mut config = ServerConfig::without_history_authority();
     config.barrier_leaf_capacity_refusal_percent = Some(75);
     let mut server = CityGServer::new(config);
     let gid = [0x5A; 32];
@@ -267,7 +267,7 @@ fn build_join_ticket_rejects_new_reservations_at_refusal_threshold() -> Result<(
 #[test]
 fn build_join_ticket_with_existing_pending_leaf_remains_idempotent_at_refusal_threshold()
 -> Result<(), CityGError> {
-    let mut config = ServerConfig::new();
+    let mut config = ServerConfig::without_history_authority();
     config.barrier_leaf_capacity_refusal_percent = Some(50);
     let mut server = CityGServer::new(config);
     let gid = [0x5B; 32];
@@ -356,9 +356,9 @@ fn build_merge_ticket_reports_missing_anchor_leaf_and_parity() -> Result<(), Cit
     let gid = [0x24; 32];
     let leaf = cityg_client::demo::demo_member_leaf("merge");
 
-    let mut empty = CityGServer::new(ServerConfig::new());
+    let mut empty = CityGServer::new(ServerConfig::without_history_authority());
     let err = empty
-        .build_merge_ticket(&gid, &leaf)
+        .build_merge_ticket_for_refresh(&gid, &leaf)
         .err()
         .expect("empty server should reject merge ticket");
     assert!(matches!(
@@ -366,7 +366,7 @@ fn build_merge_ticket_reports_missing_anchor_leaf_and_parity() -> Result<(), Cit
         CityGError::InvalidInput("no anchors accepted for group")
     ));
 
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let mut membership = cityg_client::GroupMembership::default();
     membership.apply_delta(&cityg_client::MembershipDelta {
         joined: vec![leaf],
@@ -382,7 +382,7 @@ fn build_merge_ticket_reports_missing_anchor_leaf_and_parity() -> Result<(), Cit
     server.context_mut().set_kbroad_registry(Some(registry));
 
     let missing_leaf_err = server
-        .build_merge_ticket(&gid, &[0xFF; 32])
+        .build_merge_ticket_for_refresh(&gid, &[0xFF; 32])
         .err()
         .expect("unknown leaf should fail before parity lookup");
     assert!(matches!(
@@ -391,7 +391,7 @@ fn build_merge_ticket_reports_missing_anchor_leaf_and_parity() -> Result<(), Cit
     ));
 
     let no_parity_err = server
-        .build_merge_ticket(&gid, &leaf)
+        .build_merge_ticket_for_refresh(&gid, &leaf)
         .err()
         .expect("missing parity should fail");
     assert!(matches!(
@@ -403,7 +403,7 @@ fn build_merge_ticket_reports_missing_anchor_leaf_and_parity() -> Result<(), Cit
 
 #[test]
 fn build_merge_ticket_rejects_unknown_membership_root() -> Result<(), CityGError> {
-    let mut server = CityGServer::new(ServerConfig::new());
+    let mut server = CityGServer::new(ServerConfig::without_history_authority());
     let gid = [0x25; 32];
     let leaf = cityg_client::demo::demo_member_leaf("merge-root");
     let state = GroupState {
@@ -412,7 +412,7 @@ fn build_merge_ticket_rejects_unknown_membership_root() -> Result<(), CityGError
     };
     server.roster.groups.insert(gid.to_vec(), state);
 
-    let err = match server.build_merge_ticket(&gid, &leaf) {
+    let err = match server.build_merge_ticket_for_refresh(&gid, &leaf) {
         Ok(_) => return Err(CityGError::InvalidInput("missing snapshot for latest root")),
         Err(err) => err,
     };
@@ -438,7 +438,7 @@ fn build_merge_ticket_preserves_existing_revoked_membership() -> Result<(), City
         .ok_or(CityGError::InvalidInput("missing group state"))?;
     group.revoked.insert(leaf_id);
 
-    let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+    let ticket = server.build_merge_ticket_for_refresh(&gid, &leaf_id)?;
     let expected_root = msphf_core::merkle::canonical_set_root(&[leaf_id])?;
     assert_eq!(ticket.revoked_since_root, expected_root);
     assert_eq!(ticket.revoked_root, expected_root);
@@ -452,7 +452,7 @@ fn build_merge_ticket_requires_kbroad_even_with_live_roster_and_parity() -> Resu
     server.accept_epoch(&bundle)?;
     server.context_mut().set_kbroad_registry(None);
 
-    let err = match server.build_merge_ticket(
+    let err = match server.build_merge_ticket_for_refresh(
         &cityg_client::demo::DEMO_GID,
         &cityg_client::demo::demo_member_leaf("alice"),
     ) {
@@ -489,7 +489,7 @@ fn build_merge_ticket_falls_back_on_invalid_utf8_ids() -> Result<(), CityGError>
     let now = server.context().current_time();
     server.context_mut().insert_pivot_parity(parity, now);
 
-    let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+    let ticket = server.build_merge_ticket_for_refresh(&gid, &leaf_id)?;
     assert_eq!(ticket.msphf_crs_id, msphf_core::params::RLWE_CRS_ID_DEFAULT);
     assert_eq!(
         ticket.msphf_params_id,
@@ -581,7 +581,7 @@ fn build_merge_ticket_prefers_highest_accept_seq_and_tie_breaks_on_weid() -> Res
         .map_err(|err| CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(err)))?;
     server.context_mut().insert_pivot_parity(tie_winner, now);
 
-    let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+    let ticket = server.build_merge_ticket_for_refresh(&gid, &leaf_id)?;
     assert_eq!(ticket.pivot_we_epoch_id, [0x11; 32]);
     assert_eq!(ticket.proof_mode, "tie-winner");
     assert_eq!(ticket.vrf_id, "tie-winner");
@@ -616,7 +616,7 @@ fn build_merge_ticket_ignores_stale_parity_without_live_head() -> Result<(), Cit
     stale.policy_version = "99".to_string();
     server.context_mut().insert_pivot_parity(stale, now);
 
-    let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+    let ticket = server.build_merge_ticket_for_refresh(&gid, &leaf_id)?;
     assert_eq!(
         ticket.pivot_we_epoch_id, base_parity.we_epoch_id,
         "merge ticket must ignore parity entries whose heads are no longer live in mh_window"
@@ -653,7 +653,7 @@ fn join_root_carries_forward_live_checkpoint_parity() -> Result<(), CityGError> 
         .latest_parent_root(gid.as_slice())
         .ok_or(CityGError::InvalidInput("latest root missing after bob"))?;
     let bob_leaf = cityg_client::demo::demo_member_leaf("bob");
-    let ticket = server.build_merge_ticket(&gid, &bob_leaf)?;
+    let ticket = server.build_merge_ticket_for_refresh(&gid, &bob_leaf)?;
     let max_ticket_fs = ticket
         .parities
         .iter()
@@ -678,7 +678,7 @@ fn build_merge_ticket_defaults_fs_policy_and_base_ts_when_context_unset() -> Res
     server.context_mut().set_fs_policy_version(None);
     server.context_mut().set_fs_base_ts(None);
 
-    let ticket = server.build_merge_ticket(
+    let ticket = server.build_merge_ticket_for_refresh(
         &cityg_client::demo::DEMO_GID,
         &cityg_client::demo::demo_member_leaf("alice"),
     )?;
@@ -722,7 +722,6 @@ fn build_merge_ticket_for_refresh_keeps_revocation_roots_stable() -> Result<(), 
 
     let gid = cityg_client::demo::DEMO_GID;
     let leaf_id = cityg_client::demo::demo_member_leaf("alice");
-    let leave_ticket = server.build_merge_ticket(&gid, &leaf_id)?;
     let refresh_ticket = server.build_merge_ticket_for_refresh(&gid, &leaf_id)?;
 
     assert_eq!(
@@ -734,11 +733,6 @@ fn build_merge_ticket_for_refresh_keeps_revocation_roots_stable() -> Result<(), 
         refresh_ticket.revoked_root
     );
     assert_eq!(refresh_ticket.srx_cbor, Vec::<u8>::new());
-
-    assert_ne!(
-        leave_ticket.revoked_root, refresh_ticket.revoked_root,
-        "leave ticket should stage self-revocation while refresh ticket must not"
-    );
     Ok(())
 }
 
@@ -749,7 +743,7 @@ fn merge_ticket_after_single_join_has_parity() -> Result<(), CityGError> {
     server.accept_epoch(&bundle)?;
 
     let leaf_id = cityg_client::demo::demo_member_leaf("alice");
-    let ticket = server.build_merge_ticket(&cityg_client::demo::DEMO_GID, &leaf_id)?;
+    let ticket = server.build_merge_ticket_for_refresh(&cityg_client::demo::DEMO_GID, &leaf_id)?;
 
     assert!(
         !ticket.parities.is_empty(),
@@ -760,16 +754,19 @@ fn merge_ticket_after_single_join_has_parity() -> Result<(), CityGError> {
 }
 
 #[test]
-fn merge_ticket_encodes_requester_self_revocation_delta() -> Result<(), CityGError> {
+fn merge_ticket_lets_only_the_last_member_revoke_itself() -> Result<(), CityGError> {
+    // Audit C-03: a member leaves by signing a remove proposal that another
+    // member commits. The last member has nobody to commit it, and revoking
+    // itself exposes no other member, so it may leave directly.
     let mut server = demo::demo_server();
     let bundle = cityg_client::demo::demo_bundle("alice")?;
     server.accept_epoch(&bundle)?;
 
+    let gid = cityg_client::demo::DEMO_GID;
     let leaf_id = cityg_client::demo::demo_member_leaf("alice");
-    let ticket = server.build_merge_ticket(&cityg_client::demo::DEMO_GID, &leaf_id)?;
+    let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
     let srx = cityg_client::witness::SrxInputsOwned::from_cbor(ticket.srx_cbor.as_slice())
         .map_err(|_| CityGError::InvalidInput("merge srx decode failed"))?;
-
     assert!(
         srx.join_leaf_ids.is_empty(),
         "merge must not add join leaves"
@@ -777,17 +774,66 @@ fn merge_ticket_encodes_requester_self_revocation_delta() -> Result<(), CityGErr
     assert_eq!(
         srx.since_leaf_ids,
         vec![leaf_id],
-        "merge ticket should include requester in revoked_since delta"
+        "the last member's leave ticket revokes the requester"
     );
     let expected_since_root = msphf_core::merkle::canonical_set_root(&[leaf_id])?;
     assert_eq!(ticket.revoked_since_root, expected_since_root);
     assert_eq!(ticket.revoked_root, expected_since_root);
+
+    let self_target = server
+        .build_merge_ticket_for_targeted_revocation(&gid, &leaf_id, &leaf_id)
+        .err()
+        .ok_or(CityGError::InvalidInput("expected self-revocation refusal"))?;
+    assert!(matches!(
+        self_target,
+        CityGError::InvalidInput(message) if message.starts_with("a member cannot author its own revocation")
+    ));
+    Ok(())
+}
+
+#[test]
+fn failed_join_ticket_does_not_leak_a_slot_lease() -> Result<(), CityGError> {
+    // A join ticket reserves its slot only once every other step succeeded:
+    // a failed provisioning must leave the slot allocator untouched.
+    let mut server = demo::demo_server();
+    let bundle = cityg_client::demo::demo_bundle("alice")?;
+    server.accept_epoch(&bundle)?;
+    let gid = cityg_client::demo::DEMO_GID;
+    let (free_before, pending_before) = {
+        let state = server
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("missing group"))?;
+        state.current_accepted_barrier_update.clear();
+        state.ensure_slot_allocator_initialized();
+        (
+            state.free_slots.clone(),
+            state.pending_join_finalize_auth.len(),
+        )
+    };
+
+    let err = server
+        .build_join_ticket(&gid)
+        .err()
+        .ok_or(CityGError::InvalidInput("provisioning must fail"))?;
+    assert!(matches!(
+        err,
+        CityGError::InvalidInput("current barrier_update missing for join provisioning")
+    ));
+    let state = server
+        .roster
+        .groups
+        .get(gid.as_slice())
+        .ok_or(CityGError::InvalidInput("missing group"))?;
+    assert_eq!(state.free_slots, free_before, "no slot was reserved");
+    assert_eq!(state.pending_join_finalize_auth.len(), pending_before);
     Ok(())
 }
 
 #[test]
 fn bootstrapped_room_keeps_kbroad_registry_after_first_join() -> Result<(), CityGError> {
-    let mut config = ServerConfig::new();
+    let mut config = ServerConfig::without_history_authority();
     config.enable_global_history_authority();
     let mut server = CityGServer::new(config);
     let gid = [0x91u8; 32];

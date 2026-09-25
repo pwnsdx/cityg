@@ -91,6 +91,30 @@ fn next_test_port() -> u16 {
         .port()
 }
 
+/// Ask to leave as `leaver` (a signed removal proposal, audit C-03).
+async fn request_leave(
+    leaver: &AppSession,
+    leaver_base: &std::path::Path,
+) -> Result<LeaveOutcome, Box<dyn std::error::Error>> {
+    let _override_guard = set_config_dir_override_for_tests(Some(leaver_base.to_path_buf()));
+    persist_session(leaver)?;
+    Ok(perform_leave(LeaveRequest::from_session(leaver)).await?)
+}
+
+/// Commit the pending leave requests as `committer` and persist the result.
+async fn commit_pending_removals_as(
+    committer: AppSession,
+    committer_base: &std::path::Path,
+) -> Result<AppSession, Box<dyn std::error::Error>> {
+    let _override_guard = set_config_dir_override_for_tests(Some(committer_base.to_path_buf()));
+    persist_session(&committer)?;
+    let committed = perform_pending_removal_commit(committer)
+        .await?
+        .ok_or_else(|| anyhow!("expected a pending removal proposal to commit"))?;
+    persist_session(&committed)?;
+    Ok(committed)
+}
+
 #[derive(Clone, PartialEq, prost::Message)]
 struct MockPbFsForwardLeapPolicy {
     #[prost(uint64, tag = "1")]
@@ -6099,11 +6123,16 @@ async fn sequential_member_leaves_succeed() -> Result<(), Box<dyn std::error::Er
             .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice())
     );
 
-    {
-        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
-        persist_session(&alice)?;
-        perform_leave(LeaveRequest::from_session(&alice)).await?;
-    }
+    assert_eq!(
+        request_leave(&alice, &alice_base).await?,
+        LeaveOutcome::RemovalRequested
+    );
+    let pending_leave = client.members(&alice.gid, None).await?;
+    assert_eq!(
+        pending_leave.total_count, 2,
+        "a leave request alone must not revoke the leaving member"
+    );
+    let bob = commit_pending_removals_as(bob, &bob_base).await?;
     let after_alice_leave = client.members(&alice.gid, None).await?;
     assert_eq!(after_alice_leave.total_count, 1);
     assert!(
@@ -6132,11 +6161,11 @@ async fn sequential_member_leaves_succeed() -> Result<(), Box<dyn std::error::Er
         .rotate_room_kbroad_as_admin(&room_id, &rotated_kbroad_public, admin_proof)
         .await?;
 
-    {
-        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
-        persist_session(&bob)?;
-        perform_leave(LeaveRequest::from_session(&bob)).await?;
-    }
+    assert_eq!(
+        request_leave(&bob, &bob_base).await?,
+        LeaveOutcome::Left,
+        "the last member commits its own removal"
+    );
     let after_bob_leave = client.members(&alice.gid, None).await?;
     assert_eq!(after_bob_leave.total_count, 0);
     assert!(after_bob_leave.members.is_empty());
@@ -6188,11 +6217,11 @@ async fn rejoin_with_same_persisted_identity_succeeds_after_room_becomes_empty()
     };
     bob.barrier_state.barrier_recovery_pending = false;
 
-    {
-        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
-        persist_session(&alice)?;
-        perform_leave(LeaveRequest::from_session(&alice)).await?;
-    }
+    assert_eq!(
+        request_leave(&alice, &alice_base).await?,
+        LeaveOutcome::RemovalRequested
+    );
+    let bob = commit_pending_removals_as(bob, &bob_base).await?;
 
     let (rotated_kbroad_public, _) = generate_kbroad_keypair();
     let admin_identity =
@@ -6206,11 +6235,7 @@ async fn rejoin_with_same_persisted_identity_succeeds_after_room_becomes_empty()
         .rotate_room_kbroad_as_admin(&room_id, &rotated_kbroad_public, admin_proof)
         .await?;
 
-    {
-        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
-        persist_session(&bob)?;
-        perform_leave(LeaveRequest::from_session(&bob)).await?;
-    }
+    assert_eq!(request_leave(&bob, &bob_base).await?, LeaveOutcome::Left);
 
     let client = new_api_client(&server_url);
     let empty_members = client.members(&alice.gid, None).await?;
@@ -7908,21 +7933,14 @@ async fn restart_after_leave_preserves_survivor_refresh_and_new_join()
         synced
     };
 
-    {
-        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
-        persist_session(&bob)?;
-        perform_leave(LeaveRequest::from_session(&bob)).await?;
-    }
+    assert_eq!(
+        request_leave(&bob, &bob_base).await?,
+        LeaveOutcome::RemovalRequested
+    );
+    let synced_alice = commit_pending_removals_as(alice, &alice_base).await?;
     let _after_leave_ticket = new_api_client(&server_url)
-        .merge_ticket_refresh(&room_id, &alice.leaf_id)
+        .merge_ticket_refresh(&room_id, &synced_alice.leaf_id)
         .await?;
-
-    let synced_alice = {
-        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
-        let synced = perform_epoch_sync(alice).await?.session;
-        persist_session(&synced)?;
-        synced
-    };
     let client = new_api_client(&server_url);
     let after_leave = client.members(&synced_alice.gid, None).await?;
     assert_eq!(after_leave.total_count, 1);
@@ -8304,17 +8322,18 @@ async fn epoch_sync_survives_multi_version_barrier_gap_after_refresh_and_leave()
         .rotate_room_kbroad_as_admin(&room_id, &rotated_kbroad_public, admin_proof)
         .await?;
 
-    {
-        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
-        perform_leave(LeaveRequest::from_session(&refreshed_alice)).await?;
-    }
+    assert_eq!(
+        request_leave(&refreshed_alice, &alice_base).await?,
+        LeaveOutcome::RemovalRequested
+    );
 
     let bob_previous_we_epoch_id = bob.we_epoch_id;
     let bob_previous_barrier_version = bob.barrier_state.barrier_version;
-    let synced_bob = {
-        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+    let mut synced_bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
         perform_epoch_sync(bob).await?
     };
+    synced_bob.session = commit_pending_removals_as(synced_bob.session, &bob_base).await?;
     assert!(
         synced_bob.changed,
         "stale client should adopt the latest head instead of failing on a version gap"
@@ -8575,6 +8594,87 @@ async fn perform_fetch_skips_malformed_ciphertexts_and_invalid_auth_envelopes()
             .iter()
             .all(|message| message.ciphertext_hex != hex_encode(&invalid_signature_ct)),
         "messages with invalid signatures should be skipped"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn perform_fetch_shows_signed_timestamps_and_drops_removed_senders()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Audit H-10: the receiver checks that the sender is a current member and
+    // shows the timestamp the sender signed, not the server's.
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+    let port = next_test_port();
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let mut room_id_bytes = [0x8Eu8; 32];
+    room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+    let room_id = hex_encode(room_id_bytes);
+    bootstrap_test_room(&server_url, &room_id).await?;
+
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    let bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?
+    };
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let synced = perform_epoch_sync(alice).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+
+    let marker = "bob-signed-timestamp-marker".to_string();
+    let sent = perform_send(SendParams::from_session(&bob, marker.clone(), 0)?).await?;
+    let fetched = perform_fetch(FetchParams::from_session(&alice, None)?).await?;
+    let received = fetched
+        .messages
+        .iter()
+        .find(|message| message.plaintext == marker)
+        .ok_or_else(|| anyhow!("member message must be delivered"))?;
+    assert_eq!(
+        received.timestamp_ms, sent.timestamp_ms,
+        "the displayed timestamp is the one the sender signed"
+    );
+
+    // Bob leaves; once the removal is committed he is no longer a member and
+    // his messages are dropped on receipt.
+    assert_eq!(
+        request_leave(&bob, &bob_base).await?,
+        LeaveOutcome::RemovalRequested
+    );
+    let _committed = commit_pending_removals_as(alice.clone(), &alice_base).await?;
+    let refetched = perform_fetch(FetchParams::from_session(&alice, None)?).await?;
+    assert!(
+        refetched
+            .messages
+            .iter()
+            .all(|message| message.plaintext != marker),
+        "messages from a sender that is no longer a member must be dropped"
     );
 
     handle.abort();

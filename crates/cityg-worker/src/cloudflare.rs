@@ -11,10 +11,11 @@ use cityg_api_schema::{
     GetBundleRequestValidationError, JoinTicketRequestPreparationError,
     LookupMergeAcceptanceRequestDecodeError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
     MembersRequestValidationError, MergeTicketRequestValidationError,
-    ResolveRevokedOccupanciesRequestDecodeError, RoomAdminProofValidationError,
-    RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
-    RoomScopedRoutingKey, SearchMembersRequestValidationError, SendMessageRequestValidationError,
-    decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
+    RemoveProposalRequestValidationError, ResolveRevokedOccupanciesRequestDecodeError,
+    RoomAdminProofValidationError, RoomAdminRequestValidationError, RoomScopedApiRoute,
+    RoomScopedRequestTarget, RoomScopedRoutingKey, SearchMembersRequestValidationError,
+    SendMessageRequestValidationError, decode_barrier_fetch_public_tree_request,
+    decode_barrier_lookup_merge_acceptance_request,
     decode_barrier_resolve_revoked_occupancies_request,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
     decode_full_verification_witness_request, encode_bootstrap_room_response,
@@ -29,9 +30,10 @@ use cityg_api_schema::{
     room_admin_proof_replay_key, validate_bootstrap_room_request,
     validate_expel_member_ticket_request, validate_fetch_messages_request,
     validate_list_room_admins_request, validate_members_request, validate_merge_ticket_request,
-    validate_room_admin_mutation_request, validate_rotate_room_kbroad_request,
-    validate_search_members_request, validate_send_message_request, verify_room_admin_proof,
-    verify_room_admin_proof_payload,
+    validate_pending_remove_proposals_request, validate_room_admin_mutation_request,
+    validate_rotate_room_kbroad_request, validate_search_members_request,
+    validate_send_message_request, validate_submit_remove_proposal_request,
+    verify_room_admin_proof, verify_room_admin_proof_payload,
 };
 use cityg_client::CityGError as ClientError;
 use cityg_runtime::{
@@ -45,12 +47,14 @@ use cityg_runtime::{
     classify_refresh_pivot_conflict, derive_room_routing_entries, fetch_room_bundle,
     fetch_room_members, fetch_room_messages, filter_room_members_by_query,
     grant_room_admin as runtime_grant_room_admin, list_room_admins as runtime_list_room_admins,
-    paginate_room_members, prepare_barrier_public_tree,
+    paginate_room_members, pending_remove_proposals as runtime_pending_remove_proposals,
+    prepare_barrier_public_tree,
     prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
     prepare_full_verification_witness, prepare_merge_acceptance_lookup,
     prepare_resolved_join_occupancies, prepare_resolved_revoked_occupancies, refresh_room_pivot,
     revoke_room_admin as runtime_revoke_room_admin,
     rotate_room_kbroad as runtime_rotate_room_kbroad, store_room_message,
+    submit_remove_proposal as runtime_submit_remove_proposal,
 };
 use cityg_server::MergeTicketIntent as ServerMergeTicketIntent;
 use msphf_core::MsphfError;
@@ -355,6 +359,13 @@ impl CloudflareRoomDurableObject {
             RoomScopedApiRoute::JoinTicket => self.handle_join_ticket(req, target, body).await,
             RoomScopedApiRoute::MergeTicket => self.handle_merge_ticket(req, target, body).await,
             RoomScopedApiRoute::RefreshPivot => self.handle_refresh_pivot(req, target, body).await,
+            RoomScopedApiRoute::SubmitRemoveProposal => {
+                self.handle_submit_remove_proposal(req, target, body).await
+            }
+            RoomScopedApiRoute::PendingRemoveProposals => {
+                self.handle_pending_remove_proposals(req, target, body)
+                    .await
+            }
         }
     }
 
@@ -856,6 +867,119 @@ impl CloudflareRoomDurableObject {
             };
 
         protobuf_response_bytes(encode_list_room_admins_response(admin_pop_public_keys))
+    }
+
+    async fn handle_submit_remove_proposal(
+        &self,
+        req: &Request,
+        target: RoomScopedRequestTarget,
+        body: Vec<u8>,
+    ) -> Result<Response> {
+        if req.method() != Method::Post {
+            return Response::error("method not allowed", 405);
+        }
+        if let Err(message) =
+            enforce_message_auth_header(req, configured_message_auth_token(&self.env).as_deref())
+        {
+            return Response::error(message, 401);
+        }
+
+        let request = match pb::SubmitRemoveProposalRequest::decode(body.as_slice()) {
+            Ok(request) => request,
+            Err(error) => {
+                return Response::error(
+                    format!("failed to decode {} request: {error}", target.route.path()),
+                    400,
+                );
+            }
+        };
+        let request = match validate_submit_remove_proposal_request(request) {
+            Ok(request) => request,
+            Err(error) => return remove_proposal_request_validation_error_response(error),
+        };
+
+        let Some(checkpoint) = self.load_checkpoint_for_gid(request.gid)? else {
+            return Response::error("room checkpoint not found", 404);
+        };
+        let bootstrap = configured_room_bootstrap(&self.env)?;
+        let room = match rehydrate_runtime_room_from_checkpoint(&checkpoint, &bootstrap) {
+            Ok(room) => room,
+            Err(error) => {
+                return Response::error(
+                    format!("failed to rehydrate room checkpoint: {error}"),
+                    500,
+                );
+            }
+        };
+        let (mut server, room_state) = room.into_parts();
+        let submission = match runtime_submit_remove_proposal(
+            &mut server,
+            &request.gid,
+            &request.signed_proposal,
+        ) {
+            Ok(submission) => submission,
+            Err(error) => return client_error_response(error),
+        };
+
+        self.persist_room_runtime_state(
+            request.gid,
+            Some(&checkpoint),
+            &server,
+            room_state.snapshot(),
+            current_timestamp_ms(),
+        )?;
+
+        protobuf_response(&pb::SubmitRemoveProposalResponse {
+            status: submission.status().to_owned(),
+        })
+    }
+
+    async fn handle_pending_remove_proposals(
+        &self,
+        req: &Request,
+        target: RoomScopedRequestTarget,
+        body: Vec<u8>,
+    ) -> Result<Response> {
+        if req.method() != Method::Post {
+            return Response::error("method not allowed", 405);
+        }
+        if let Err(message) =
+            enforce_message_auth_header(req, configured_message_auth_token(&self.env).as_deref())
+        {
+            return Response::error(message, 401);
+        }
+
+        let request = match pb::PendingRemoveProposalsRequest::decode(body.as_slice()) {
+            Ok(request) => request,
+            Err(error) => {
+                return Response::error(
+                    format!("failed to decode {} request: {error}", target.route.path()),
+                    400,
+                );
+            }
+        };
+        let request = match validate_pending_remove_proposals_request(request) {
+            Ok(request) => request,
+            Err(error) => return remove_proposal_request_validation_error_response(error),
+        };
+
+        let Some(checkpoint) = self.load_checkpoint_for_gid(request.gid)? else {
+            return protobuf_response(&pb::PendingRemoveProposalsResponse::default());
+        };
+        let bootstrap = configured_room_bootstrap(&self.env)?;
+        let room = match rehydrate_runtime_room_from_checkpoint(&checkpoint, &bootstrap) {
+            Ok(room) => room,
+            Err(error) => {
+                return Response::error(
+                    format!("failed to rehydrate room checkpoint: {error}"),
+                    500,
+                );
+            }
+        };
+        let (mut server, _) = room.into_parts();
+        protobuf_response(&pb::PendingRemoveProposalsResponse {
+            signed_proposals: runtime_pending_remove_proposals(&mut server, &request.gid),
+        })
     }
 
     async fn handle_members(
@@ -3033,6 +3157,12 @@ fn client_error_response(err: ClientError) -> Result<Response> {
     }
 }
 
+fn remove_proposal_request_validation_error_response(
+    err: RemoveProposalRequestValidationError,
+) -> Result<Response> {
+    Response::error(err.to_string(), 400)
+}
+
 fn refresh_pivot_error_response(err: ClientError) -> Result<Response> {
     match err {
         ClientError::InvalidInput(message)
@@ -3819,7 +3949,7 @@ struct RoomCheckpointSummary {
     stored_bundle_count: usize,
 }
 
-const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 20] = [
+const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 22] = [
     RoomScopedApiRoute::AcceptEpoch,
     RoomScopedApiRoute::Members,
     RoomScopedApiRoute::SearchMembers,
@@ -3840,6 +3970,8 @@ const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 20] = [
     RoomScopedApiRoute::BarrierIssueFullVerificationWitness,
     RoomScopedApiRoute::BarrierLookupMergeAcceptance,
     RoomScopedApiRoute::RefreshPivot,
+    RoomScopedApiRoute::SubmitRemoveProposal,
+    RoomScopedApiRoute::PendingRemoveProposals,
 ];
 
 fn worker_route_policy_manifest() -> WorkerRoutePolicyManifest {

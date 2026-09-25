@@ -72,10 +72,10 @@ async fn client_restart_during_multi_version_catchup_after_refresh_and_leave_rec
         .await?;
     }
 
-    {
-        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
-        perform_leave(LeaveRequest::from_session(&refreshed_alice)).await?;
-    }
+    assert_eq!(
+        request_leave(&refreshed_alice, &alice_base).await?,
+        LeaveOutcome::RemovalRequested
+    );
     {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
         persist_session(&bob)?;
@@ -93,6 +93,7 @@ async fn client_restart_during_multi_version_catchup_after_refresh_and_leave_rec
         persist_session(&outcome.session)?;
         outcome.session
     };
+    let bob_after_sync = commit_pending_removals_as(bob_after_sync, &bob_base).await?;
     assert!(
         !bob_after_sync.barrier_state.barrier_recovery_pending,
         "stale restarted member should recover to a message-ready state"

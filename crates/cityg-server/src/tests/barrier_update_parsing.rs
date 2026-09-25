@@ -17,6 +17,7 @@ fn barrier_snapshot_helpers_cover_fallback_and_parser_paths() -> Result<(), City
     state.latest_root = Some(root);
     let leaf_ek = vec![0x5A; 1184];
     state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
+    install_active_fixture_lease(&mut state, leaf)?;
 
     let pk_entries = super::build_pk_entries(&state)?;
     assert_eq!(pk_entries.len(), 7);
@@ -137,6 +138,7 @@ fn validate_barrier_update_uses_genesis_snapshot_joinset() -> Result<(), CityGEr
     state.snapshots.insert(root, membership);
     state.latest_root = Some(root);
     state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
+    install_active_fixture_lease(&mut state, leaf)?;
 
     let updater_slot_index = u64::from(super::slot_index_for_leaf(&leaf, state.n_max));
     let leaf_node = state.n_max.saturating_sub(1) + updater_slot_index;

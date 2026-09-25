@@ -77,6 +77,7 @@ use std::{
 };
 
 use ciborium::value::{Integer, Value};
+use cityg_client::remove_proposal::{MAX_REMOVE_PROPOSAL_LIFETIME_MS, SignedRemoveProposal};
 use cityg_client::witness;
 use cityg_client::{CityGError, ClientEpochBundle, GroupMembership, MembershipDelta};
 use cityg_pqc::SignatureContext;
@@ -152,7 +153,10 @@ pub struct ServerConfig {
     pub barrier_leaf_capacity_warning_percent: Option<u8>,
     /// Refusal threshold for new barrier leaf reservations, as a percent in `[1, 100]`.
     pub barrier_leaf_capacity_refusal_percent: Option<u8>,
-    /// Optional local history authority extension.
+    /// History authority extension. `ServerConfig::new()` enables the
+    /// deployment-global authority required by the base profile; `None` is an
+    /// explicit, non-conformant opt-out (see
+    /// [`ServerConfig::without_history_authority`]).
     pub history_authority: Option<HistoryAuthorityConfig>,
 }
 
@@ -239,7 +243,21 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    /// Base-profile configuration: fail closed with the deployment-global
+    /// history authority, so barrier updates always need an author receipt,
+    /// a global attestation and a full-verification witness (audit M-06).
     pub fn new() -> Self {
+        let mut config = Self::without_history_authority();
+        config.enable_global_history_authority();
+        config
+    }
+
+    /// Configuration without any history authority.
+    ///
+    /// Not conformant to the base profile: barrier updates are accepted without
+    /// author receipts, so MERGE authorship is unauthenticated. Only for tests
+    /// and local experiments that exercise other layers in isolation.
+    pub fn without_history_authority() -> Self {
         Self {
             h_max: None,
             window_ttl: None,
@@ -249,6 +267,10 @@ impl ServerConfig {
             barrier_leaf_capacity_refusal_percent: None,
             history_authority: None,
         }
+    }
+
+    pub fn disable_history_authority(&mut self) {
+        self.history_authority = None;
     }
 
     pub fn enable_local_history_authority(&mut self) {
@@ -564,6 +586,30 @@ pub struct MergeTicketBundle {
     pub last_accepted_ec: u64,
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
+    /// Slot occupancies this ticket revokes, sorted. The updater is always the
+    /// author's own slot, so the author blanks these leaves before re-keying
+    /// its own path (audit C-03).
+    pub revoked_slot_leases: Vec<BarrierRevokedOccupancyRecord>,
+}
+
+/// Outcome of [`CityGServer::submit_remove_proposal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoveProposalSubmission {
+    /// Another member commits the removal with a LEAVE merge ticket.
+    Pending,
+    /// The target is the last active member and commits its own removal.
+    SelfCommitRequired,
+}
+
+impl RemoveProposalSubmission {
+    /// Wire status reported to the proposer.
+    #[must_use]
+    pub fn status(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::SelfCommitRequired => "self_commit",
+        }
+    }
 }
 
 /// Intent used when preparing a merge ticket for an existing member.
@@ -1207,7 +1253,7 @@ impl CityGServer {
         let pox_r_commit = witness::demo_pox_commit();
         let barrier_leaf_capacity_refusal_percent = self.barrier_leaf_capacity_refusal_percent;
 
-        let (parent_root, leaf_id, lease, parent_leaves) = {
+        let (parent_root, leaf_id, parent_leaves) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
             let mut parent_leaves: Vec<[u8; 32]> = state
                 .latest_snapshot()
@@ -1235,14 +1281,13 @@ impl CityGServer {
                     barrier_leaf_capacity_refusal_percent,
                 )?;
             }
-            let lease = state.allocate_slot_lease(leaf_id)?;
 
             let parent_root = if parent_leaves.is_empty() {
                 [0u8; 32]
             } else {
                 canonical_set_root(&parent_leaves)?
             };
-            (parent_root, leaf_id, lease, parent_leaves)
+            (parent_root, leaf_id, parent_leaves)
         };
         let mut revoked_all = self.roster.revoked(gid);
         revoked_all.sort();
@@ -1296,7 +1341,6 @@ impl CityGServer {
         let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
         let current_history_view_id = current_history_commitment.history_view_id;
         let barrier_version = barrier_state.barrier_version;
-        let slot_index = u64::from(lease.slot_index);
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
         let requires_current_barrier_update = parent_root != [0u8; 32] || barrier_version > 0;
@@ -1345,8 +1389,11 @@ impl CityGServer {
             slack_first_device: self.acceptance_options.fs_policy_config.slack_first_device,
             slack_device: self.acceptance_options.fs_policy_config.slack_device,
         };
-        {
+        // Reserve the slot last: any failure above leaves the allocator
+        // untouched (a failed ticket used to leak its reservation).
+        let lease = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            let lease = state.allocate_slot_lease(leaf_id)?;
             state.pending_join_finalize_auth.insert(
                 leaf_id,
                 JoinFinalizeAuthRecord {
@@ -1355,7 +1402,9 @@ impl CityGServer {
                     token: join_finalize_auth_token,
                 },
             );
-        }
+            lease
+        };
+        let slot_index = u64::from(lease.slot_index);
 
         Ok(JoinTicketBundle {
             gid: *gid,
@@ -1392,29 +1441,180 @@ impl CityGServer {
         })
     }
 
+    /// Ticket for committing every pending removal proposal.
+    ///
+    /// The author must be a member that is not itself a target: a member
+    /// never authors the update that revokes it (audit C-03).
     pub fn build_merge_ticket(
         &mut self,
         gid: &[u8; 32],
-        leaf_id: &[u8; 32],
+        author_leaf_id: &[u8; 32],
     ) -> Result<MergeTicketBundle, CityGError> {
-        self.build_merge_ticket_core(gid, leaf_id, Some(*leaf_id))
+        let mut targets = self.live_pending_removal_targets(gid);
+        if self.is_sole_active_member(gid, author_leaf_id) {
+            // The last member leaves directly: nobody else could commit it.
+            // Its own pending proposal, if any, is the only live target.
+            if !targets.contains(author_leaf_id) {
+                targets.push(*author_leaf_id);
+                targets.sort();
+            }
+        } else if targets.is_empty() {
+            return Err(CityGError::InvalidInput(
+                "no pending removal proposals to commit; members leave by submitting a remove proposal",
+            ));
+        } else {
+            ensure_author_is_not_revoked(author_leaf_id, &targets)?;
+        }
+        self.build_merge_ticket_core(gid, author_leaf_id, targets)
     }
 
+    /// Ticket for a proactive refresh (no membership change). Clients also
+    /// read it to sync the current state, so it is issued even while removal
+    /// proposals are pending; a refresh *update* is then rejected until they
+    /// are committed (freeze 96015).
     pub fn build_merge_ticket_for_refresh(
         &mut self,
         gid: &[u8; 32],
         leaf_id: &[u8; 32],
     ) -> Result<MergeTicketBundle, CityGError> {
-        self.build_merge_ticket_core(gid, leaf_id, None)
+        self.build_merge_ticket_core(gid, leaf_id, Vec::new())
     }
 
+    /// Ticket revoking `target_leaf_id`, together with every pending removal.
     pub fn build_merge_ticket_for_targeted_revocation(
         &mut self,
         gid: &[u8; 32],
         author_leaf_id: &[u8; 32],
         target_leaf_id: &[u8; 32],
     ) -> Result<MergeTicketBundle, CityGError> {
-        self.build_merge_ticket_core(gid, author_leaf_id, Some(*target_leaf_id))
+        let mut targets = self.live_pending_removal_targets(gid);
+        if !targets.contains(target_leaf_id) {
+            targets.push(*target_leaf_id);
+        }
+        targets.sort();
+        ensure_author_is_not_revoked(author_leaf_id, &targets)?;
+        self.build_merge_ticket_core(gid, author_leaf_id, targets)
+    }
+
+    /// Verify and record a signed removal proposal (voluntary leave, or a
+    /// removal requested by a room admin). Another member commits it, unless
+    /// the target is the last active member.
+    pub fn submit_remove_proposal(
+        &mut self,
+        gid: &[u8; 32],
+        encoded: &[u8],
+    ) -> Result<RemoveProposalSubmission, CityGError> {
+        let signed = SignedRemoveProposal::from_cbor(encoded)
+            .map_err(|_| CityGError::InvalidInput("malformed remove proposal"))?;
+        if &signed.proposal.gid != gid {
+            return Err(CityGError::InvalidInput("remove proposal gid mismatch"));
+        }
+        signed
+            .verify_signature()
+            .map_err(|_| CityGError::InvalidInput("remove proposal signature rejected"))?;
+        let now_ms = current_timestamp_ms();
+        if !signed.proposal.is_live_at(now_ms) {
+            return Err(CityGError::InvalidInput("remove proposal expired"));
+        }
+        if signed.proposal.not_after_ms > now_ms.saturating_add(MAX_REMOVE_PROPOSAL_LIFETIME_MS) {
+            return Err(CityGError::InvalidInput(
+                "remove proposal lifetime too long",
+            ));
+        }
+        let signer_is_target = signed
+            .is_signed_by_target()
+            .map_err(|_| CityGError::InvalidInput("malformed remove proposal"))?;
+        let state = self
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        let target = signed.proposal.target_leaf_id;
+        let lease =
+            state
+                .leaf_slot_leases
+                .get(&target)
+                .copied()
+                .ok_or(CityGError::InvalidInput(
+                    "remove proposal target is not an active member",
+                ))?;
+        if lease.slot_index != signed.proposal.target_slot_index
+            || lease.slot_generation != signed.proposal.target_slot_generation
+        {
+            return Err(CityGError::InvalidInput(
+                "remove proposal target slot lease mismatch",
+            ));
+        }
+        let signed_by_target = signer_is_target
+            && state
+                .leaf_device_pk
+                .get(&target)
+                .is_some_and(|device_pk| device_pk == &signed.signer_public_key);
+        let signed_by_admin = state
+            .room_admin_pop_keys
+            .contains(&signed.signer_public_key);
+        if !signed_by_target && !signed_by_admin {
+            return Err(CityGError::InvalidInput(
+                "remove proposal must be signed by its target or by a room admin",
+            ));
+        }
+        prune_pending_removals(state, now_ms);
+        let keep_existing = state.pending_removals.get(&target).is_some_and(|existing| {
+            existing.signed.proposal.not_after_ms >= signed.proposal.not_after_ms
+        });
+        if !keep_existing {
+            state.pending_removals.insert(
+                target,
+                PendingRemoval {
+                    signed,
+                    encoded: encoded.to_vec(),
+                },
+            );
+            self.persist_kbroad_state()?;
+        }
+        if self.is_sole_active_member(gid, &target) {
+            Ok(RemoveProposalSubmission::SelfCommitRequired)
+        } else {
+            Ok(RemoveProposalSubmission::Pending)
+        }
+    }
+
+    /// Canonical encodings of the live pending removal proposals.
+    pub fn pending_removal_proposals(&mut self, gid: &[u8; 32]) -> Vec<Vec<u8>> {
+        let Some(state) = self.roster.groups.get_mut(gid.as_slice()) else {
+            return Vec::new();
+        };
+        prune_pending_removals(state, current_timestamp_ms());
+        state
+            .pending_removals
+            .values()
+            .map(|pending| pending.encoded.clone())
+            .collect()
+    }
+
+    /// Whether `leaf_id` is the target of a pending removal proposal.
+    #[must_use]
+    pub fn has_pending_removal(&self, gid: &[u8; 32], leaf_id: &[u8; 32]) -> bool {
+        let now_ms = current_timestamp_ms();
+        self.roster.groups.get(gid.as_slice()).is_some_and(|state| {
+            state
+                .pending_removals
+                .get(leaf_id)
+                .is_some_and(|pending| pending.signed.proposal.is_live_at(now_ms))
+        })
+    }
+
+    fn is_sole_active_member(&self, gid: &[u8; 32], leaf_id: &[u8; 32]) -> bool {
+        let members = self.roster.members(gid.as_slice());
+        members.len() == 1 && members[0] == *leaf_id
+    }
+
+    fn live_pending_removal_targets(&mut self, gid: &[u8; 32]) -> Vec<[u8; 32]> {
+        let Some(state) = self.roster.groups.get_mut(gid.as_slice()) else {
+            return Vec::new();
+        };
+        prune_pending_removals(state, current_timestamp_ms());
+        state.pending_removals.keys().copied().collect()
     }
 
     pub fn build_admin_expel_ticket(
@@ -1462,7 +1662,8 @@ impl CityGServer {
             ));
         }
 
-        let bundle = self.build_merge_ticket_core(gid, author_leaf_id, Some(*target_leaf_id))?;
+        let bundle =
+            self.build_merge_ticket_for_targeted_revocation(gid, author_leaf_id, target_leaf_id)?;
         self.roster
             .groups
             .get_mut(gid.as_slice())
@@ -1477,7 +1678,7 @@ impl CityGServer {
         &mut self,
         gid: &[u8; 32],
         author_leaf_id: &[u8; 32],
-        revoked_leaf_id: Option<[u8; 32]>,
+        revoked_leaf_ids: Vec<[u8; 32]>,
     ) -> Result<MergeTicketBundle, CityGError> {
         self.ensure_kbroad_ready(gid)?;
         let default_state = GroupState::default();
@@ -1502,46 +1703,53 @@ impl CityGServer {
         if !members.iter().any(|member| member == author_leaf_id) {
             return Err(CityGError::InvalidInput("leaf not present in roster"));
         }
-        if let Some(target_leaf_id) = revoked_leaf_id
-            && !members.iter().any(|member| member == &target_leaf_id)
+        if revoked_leaf_ids
+            .iter()
+            .any(|target| !members.iter().any(|member| member == target))
         {
-            let message = if target_leaf_id == *author_leaf_id {
-                "leaf not present in roster"
-            } else {
-                "target leaf not present in roster"
-            };
-            return Err(CityGError::InvalidInput(message));
+            return Err(CityGError::InvalidInput(
+                "target leaf not present in roster",
+            ));
         }
 
         let mut revoked_all = self.roster.revoked(gid);
+        // The updater is always the author's own slot (S11.12.1.F).
         let (
-            author_slot_index,
+            author_lease,
             pending_join_finalize_reclaim,
             current_history_commitment,
-            target_lease,
+            mut revoked_slot_leases,
         ) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
-            let author_slot_index =
-                require_pending_or_active_slot_lease(state, author_leaf_id)?.slot_index;
-            let pending_join_finalize_reclaim = revoked_leaf_id.is_none()
+            let author_lease = require_pending_or_active_slot_lease(state, author_leaf_id)?;
+            let pending_join_finalize_reclaim = revoked_leaf_ids.is_empty()
                 && state
                     .pending_join_finalize_auth
                     .contains_key(author_leaf_id)
-                && has_committed_revoked_slot_index(state, author_slot_index);
+                && has_committed_revoked_slot_index(state, author_lease.slot_index);
+            let mut revoked_slot_leases = Vec::with_capacity(revoked_leaf_ids.len());
+            for target in &revoked_leaf_ids {
+                let lease = require_active_slot_lease(state, target)?;
+                revoked_slot_leases.push(BarrierRevokedOccupancyRecord {
+                    slot_index: lease.slot_index,
+                    slot_generation: lease.slot_generation,
+                });
+            }
             let current_history_commitment = ensure_current_history_commitment(gid, state)?;
-            let target_leaf = revoked_leaf_id.as_ref().unwrap_or(author_leaf_id);
-            let target_lease = require_pending_or_active_slot_lease(state, target_leaf)?;
             (
-                author_slot_index,
+                author_lease,
                 pending_join_finalize_reclaim,
                 current_history_commitment,
-                target_lease,
+                revoked_slot_leases,
             )
         };
-        if let Some(target_leaf_id) = revoked_leaf_id
-            && !revoked_all.iter().any(|leaf| leaf == &target_leaf_id)
-        {
-            revoked_all.push(target_leaf_id);
+        revoked_slot_leases.sort_by_key(|record| (record.slot_index, record.slot_generation));
+        revoked_slot_leases.dedup();
+        let author_slot_index = author_lease.slot_index;
+        for target_leaf_id in &revoked_leaf_ids {
+            if !revoked_all.iter().any(|leaf| leaf == target_leaf_id) {
+                revoked_all.push(*target_leaf_id);
+            }
         }
         if pending_join_finalize_reclaim {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
@@ -1556,10 +1764,13 @@ impl CityGServer {
         revoked_all.sort();
         revoked_all.dedup();
 
-        let (revoked_since, srx_cbor): (Vec<[u8; 32]>, Vec<u8>) = match revoked_leaf_id {
-            Some(target_leaf_id) => {
-                let mut revoked_since = vec![target_leaf_id];
+        let (revoked_since, srx_cbor): (Vec<[u8; 32]>, Vec<u8>) = if revoked_leaf_ids.is_empty() {
+            (revoked_all.clone(), Vec::new())
+        } else {
+            {
+                let mut revoked_since = revoked_leaf_ids.clone();
                 revoked_since.sort();
+                revoked_since.dedup();
                 let revoked_root = canonical_set_root(&revoked_all)?;
                 let join_leaves: Vec<[u8; 32]> = Vec::new();
                 let srx_owned = witness::build_merge_srx_inputs(
@@ -1572,7 +1783,6 @@ impl CityGServer {
                 )?;
                 (revoked_since, srx_owned.to_cbor()?)
             }
-            None => (revoked_all.clone(), Vec::new()),
         };
 
         let join_leaves: Vec<[u8; 32]> = Vec::new();
@@ -1729,8 +1939,8 @@ impl CityGServer {
             kbroad_public,
             kbroad_generation,
             barrier_version,
-            slot_index: u64::from(target_lease.slot_index),
-            slot_generation: target_lease.slot_generation,
+            slot_index: u64::from(author_lease.slot_index),
+            slot_generation: author_lease.slot_generation,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             current_history_view_id: current_history_commitment.history_view_id,
             current_history_commitment,
@@ -1738,6 +1948,7 @@ impl CityGServer {
             last_accepted_ec: barrier_state.last_accepted_ec,
             n_max: barrier_n_max,
             max_barrier_update_bytes,
+            revoked_slot_leases,
         })
     }
 
@@ -1806,10 +2017,23 @@ impl CityGServer {
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
             derive_implicit_genesis_slot_leases(state, &bundle.header_map, &delta)?
         };
+        if !delta.revoked.is_empty() && !bundle.header_map.contains_key(&hdr::HDR_BARRIER_UPDATE) {
+            return Err(CityGError::InvalidInput(
+                "revocations must be committed by a barrier update",
+            ));
+        }
+        let removal_policy = if replaying {
+            RemovalPolicy::SkipForReplay
+        } else {
+            RemovalPolicy::Enforce
+        };
         let mut state_before = {
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
             if bundle.header_map.contains_key(&hdr::HDR_BARRIER_UPDATE) {
                 let _ = ensure_current_history_commitment(bundle.gid(), state)?;
+            }
+            if removal_policy == RemovalPolicy::Enforce {
+                prune_pending_removals(state, current_timestamp_ms());
             }
             state.clone()
         };
@@ -1821,8 +2045,12 @@ impl CityGServer {
         }
         ensure_distinct_active_slot_indices(&state_before)?;
         ensure_join_slot_indices_available(&state_before, delta.joined.as_slice())?;
-        let barrier_validation =
-            validate_barrier_update_against_roster(&state_before, &bundle.header_map, &delta)?;
+        let barrier_validation = validate_barrier_update_against_roster_with_policy(
+            &state_before,
+            &bundle.header_map,
+            &delta,
+            removal_policy,
+        )?;
         let gid: [u8; 32] = bundle
             .gid()
             .try_into()
@@ -1964,6 +2192,7 @@ impl CityGServer {
                 state.leaf_device_pk.remove(leaf);
                 state.leaf_barrier_public.remove(leaf);
                 state.pending_join_finalize_auth.remove(leaf);
+                state.pending_removals.remove(leaf);
                 state.revoked_slot_leases.insert(*leaf, released_lease);
             }
             prune_join_history(state)?;
@@ -2090,6 +2319,8 @@ impl CityGServer {
                 .iter()
                 .copied()
                 .collect();
+            group.pending_removals =
+                decode_persisted_pending_removals(gid.as_slice(), &room_state.pending_removals);
             group.revoked = room_state
                 .revoked_leaf_ids_hex
                 .iter()
@@ -2281,6 +2512,8 @@ impl CityGServer {
                 .iter()
                 .copied()
                 .collect();
+            group.pending_removals =
+                decode_persisted_pending_removals(gid.as_slice(), &room_state.pending_removals);
             let persisted_revoked: BTreeSet<[u8; 32]> = room_state
                 .revoked_leaf_ids_hex
                 .iter()
@@ -2638,6 +2871,8 @@ impl CityGServer {
                 .iter()
                 .copied()
                 .collect();
+            group.pending_removals =
+                decode_persisted_pending_removals(gid.as_slice(), &room_state.pending_removals);
             group.n_max = room_state.n_max.max(1);
             group.max_barrier_update_bytes = usize::try_from(room_state.max_barrier_update_bytes)
                 .unwrap_or(
@@ -3810,6 +4045,7 @@ struct MergeTicketArtifactWire {
     fs_policy_version: String,
     fs_epoch_base_ts: u64,
     kbroad_generation: u64,
+    revoked_slot_leases: Vec<(u32, u64)>,
     #[serde(with = "serde_bytes")]
     signature: Vec<u8>,
 }
@@ -3967,6 +4203,7 @@ struct MergeTicketArtifactSignedPayload<'a> {
     fs_policy_version: &'a str,
     fs_epoch_base_ts: u64,
     kbroad_generation: u64,
+    revoked_slot_leases: &'a [(u32, u64)],
 }
 
 #[derive(Serialize)]
@@ -4556,8 +4793,13 @@ fn encode_merge_ticket_artifact(
     current_global_history_attestation: &[u8],
     pivot_parity_cbor: &[Vec<u8>],
 ) -> Result<Vec<u8>, CityGError> {
+    let revoked_slot_leases: Vec<(u32, u64)> = bundle
+        .revoked_slot_leases
+        .iter()
+        .map(|record| (record.slot_index, record.slot_generation))
+        .collect();
     let payload = to_cbor_vec(&MergeTicketArtifactSignedPayload {
-        label: "cityg/merge-ticket-artifact-v2",
+        label: "cityg/merge-ticket-artifact-v3",
         scope_id: &state.descriptor.scope_id,
         history_authority_extension,
         profile_version,
@@ -4601,6 +4843,7 @@ fn encode_merge_ticket_artifact(
         fs_policy_version: bundle.fs_policy_version.as_str(),
         fs_epoch_base_ts: bundle.fs_epoch_base_ts,
         kbroad_generation: bundle.kbroad_generation,
+        revoked_slot_leases: revoked_slot_leases.as_slice(),
     })?;
     let signature = sign_history_authority_message(state, payload.as_slice())?;
     Ok(to_cbor_vec(&MergeTicketArtifactWire {
@@ -4653,6 +4896,7 @@ fn encode_merge_ticket_artifact(
         fs_policy_version: bundle.fs_policy_version.clone(),
         fs_epoch_base_ts: bundle.fs_epoch_base_ts,
         kbroad_generation: bundle.kbroad_generation,
+        revoked_slot_leases,
         signature,
     })?)
 }
@@ -5699,6 +5943,34 @@ fn fresh_kbroad_public() -> Vec<u8> {
     public.as_bytes().to_vec()
 }
 
+/// A member never authors the update that revokes it (audit C-03): its
+/// removal is committed by another member.
+fn ensure_author_is_not_revoked(
+    author_leaf_id: &[u8; 32],
+    targets: &[[u8; 32]],
+) -> Result<(), CityGError> {
+    if targets.contains(author_leaf_id) {
+        return Err(CityGError::InvalidInput(
+            "a member cannot author its own revocation; another member must commit it",
+        ));
+    }
+    Ok(())
+}
+
+/// Drop removal proposals that expired or whose target no longer holds the
+/// proposed slot lease (already revoked, or lease reused).
+fn prune_pending_removals(state: &mut GroupState, now_ms: u64) {
+    let active_leases = &state.leaf_slot_leases;
+    state.pending_removals.retain(|target, pending| {
+        let proposal = &pending.signed.proposal;
+        proposal.is_live_at(now_ms)
+            && active_leases.get(target).is_some_and(|lease| {
+                lease.slot_index == proposal.target_slot_index
+                    && lease.slot_generation == proposal.target_slot_generation
+            })
+    });
+}
+
 fn current_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -6110,10 +6382,50 @@ fn validate_history_authority_headers(
     Ok(())
 }
 
+/// Whether acceptance enforces the removal policy (audit C-03).
+///
+/// Journal replay re-applies bundles that were accepted before the current
+/// pending removals existed, so it skips the policy checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemovalPolicy {
+    Enforce,
+    SkipForReplay,
+}
+
+#[cfg(test)]
 fn validate_barrier_update_against_roster(
     state_before: &GroupState,
     header: &BTreeMap<u64, Value>,
     delta: &MembershipDelta,
+) -> Result<Option<BarrierUpdateValidationOutcome>, CityGError> {
+    validate_barrier_update_against_roster_with_policy(
+        state_before,
+        header,
+        delta,
+        RemovalPolicy::Enforce,
+    )
+}
+
+/// Revocation neither authored by a room admin nor backed by a pending
+/// removal proposal for its target.
+fn revocation_not_authorized_error() -> CityGError {
+    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
+        msphf_orchestrator::FREEZE_BARRIER_REVOCATION_UNAUTHORIZED,
+    ))
+}
+
+/// Barrier update leaving a pending removal proposal uncommitted.
+fn pending_removals_not_committed_error() -> CityGError {
+    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
+        msphf_orchestrator::FREEZE_BARRIER_PENDING_REMOVALS_UNCOMMITTED,
+    ))
+}
+
+fn validate_barrier_update_against_roster_with_policy(
+    state_before: &GroupState,
+    header: &BTreeMap<u64, Value>,
+    delta: &MembershipDelta,
+    removal_policy: RemovalPolicy,
 ) -> Result<Option<BarrierUpdateValidationOutcome>, CityGError> {
     let validation = (|| -> Result<Option<BarrierUpdateValidationOutcome>, CityGError> {
         if let Some(Value::Bytes(raw_update)) = header.get(&hdr::HDR_BARRIER_UPDATE)
@@ -6214,9 +6526,12 @@ fn validate_barrier_update_against_roster(
             .into_iter()
             .map(|slot_index| slot_index as usize)
             .collect();
+        // Slots revoked by this anchor itself.
+        let mut delta_revoked_indices: BTreeSet<usize> = BTreeSet::new();
         for leaf in &delta.revoked {
-            revoked_indices
-                .insert(require_active_slot_lease(state_before, leaf)?.slot_index as usize);
+            let slot_index = require_active_slot_lease(state_before, leaf)?.slot_index as usize;
+            revoked_indices.insert(slot_index);
+            delta_revoked_indices.insert(slot_index);
         }
 
         let expected_len = usize::try_from(tree_n_max)
@@ -6253,7 +6568,8 @@ fn validate_barrier_update_against_roster(
             Some(snapshot_base)
         };
 
-        // Updater cannot be a previously revoked member; allow self-revocation merges.
+        // The updater must be the author's own active slot, not revoked before
+        // this anchor nor by it (S11.12.1.F; audit C-03).
         let committed_revoked_indices: BTreeSet<usize> =
             committed_revoked_slot_indices(state_before)
                 .into_iter()
@@ -6270,38 +6586,48 @@ fn validate_barrier_update_against_roster(
             })?;
         let mut author_cover_indices = BTreeSet::new();
         let mut author_leaf_ids = Vec::new();
+        let mut author_is_active = false;
         for (leaf, device_pk) in &state_before.leaf_device_pk {
             if device_pk.as_slice() == author_pop_pk {
-                author_cover_indices.insert(u64::from(
-                    require_active_slot_lease(state_before, leaf)?.slot_index,
-                ));
+                // A pending joiner may author its own join finalization; its
+                // lease is still pending at this point.
+                let lease = require_pending_or_active_slot_lease(state_before, leaf)
+                    .map_err(|_| freeze_barrier_updater_invalid_error())?;
+                author_is_active |= state_before.leaf_slot_leases.contains_key(leaf);
+                author_cover_indices.insert(u64::from(lease.slot_index));
                 author_leaf_ids.push(*leaf);
             }
         }
         let parsed_updater_slot_index_usize = usize::try_from(parsed.updater_slot_index)
             .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
-        let has_full_verification_witness =
-            header.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS);
         let author_is_room_admin = state_before
             .room_admin_pop_keys
             .iter()
             .any(|pop_key| pop_key.as_slice() == author_pop_pk);
-        let targeted_admin_revocation = matches!(barrier_update_reason, Some(0))
-            && delta.revoked.iter().any(|leaf| {
-                *leaf != author_leaf_ids.first().copied().unwrap_or([0u8; 32])
-                    && require_active_slot_lease(state_before, leaf)
-                        .map(|lease| u64::from(lease.slot_index) == parsed.updater_slot_index)
-                        .unwrap_or(false)
-            })
-            && has_full_verification_witness
-            && author_is_room_admin;
         let join_finalize_auth_token = parse_join_finalize_auth_token(header)?;
         let candidate_reclaim_join =
             matches!(barrier_update_reason, Some(0)) && join_finalize_auth_token.is_some();
+        // Pending joiners reach the reason-specific checks (2: join finalize,
+        // 1: rejected as proactive, S10.4) or reclaim a slot (reason 0 + 179).
+        let author_may_be_pending =
+            matches!(barrier_update_reason, Some(1 | 2)) || candidate_reclaim_join;
+        // The last active member may revoke itself: nobody else is covered
+        // by that update, so it learns no other member's key (audit C-03).
+        let sole_member_leaving = author_leaf_ids.len() == 1
+            && delta.revoked.as_slice() == author_leaf_ids.as_slice()
+            && active_leaves.len() == 1
+            && active_leaves.contains(&author_leaf_ids[0]);
+        let updater_revoked_by_anchor = delta_revoked_indices
+            .contains(&parsed_updater_slot_index_usize)
+            || delta
+                .revoked
+                .iter()
+                .any(|leaf| author_leaf_ids.contains(leaf));
         if author_cover_indices.len() != 1
-            || (!author_cover_indices.contains(&parsed.updater_slot_index)
-                && !targeted_admin_revocation)
+            || (!author_is_active && !author_may_be_pending)
+            || !author_cover_indices.contains(&parsed.updater_slot_index)
             || author_leaf_ids.len() != 1
+            || (updater_revoked_by_anchor && !sole_member_leaving)
             || (committed_revoked_indices.contains(&parsed_updater_slot_index_usize)
                 && !candidate_reclaim_join)
         {
@@ -6312,6 +6638,32 @@ fn validate_barrier_update_against_roster(
             ));
         }
         let author_leaf_id = author_leaf_ids[0];
+        if removal_policy == RemovalPolicy::Enforce {
+            // A revocation is authorized either by a room admin authoring the
+            // update or by a signed removal proposal for the target.
+            for leaf in &delta.revoked {
+                if !state_before.pending_removals.contains_key(leaf)
+                    && !author_is_room_admin
+                    && !sole_member_leaving
+                {
+                    return Err(revocation_not_authorized_error());
+                }
+            }
+            // A member-authored update (revocation or PCS refresh) must commit
+            // every pending removal, as an MLS commit covers all pending
+            // proposals. A join_finalize (reason 2) is authored by the joiner,
+            // which commits nothing: pending removals do not block joins, and
+            // their targets stay members until a later commit.
+            let revoked_by_delta: BTreeSet<&[u8; 32]> = delta.revoked.iter().collect();
+            if !matches!(barrier_update_reason, Some(2))
+                && state_before
+                    .pending_removals
+                    .keys()
+                    .any(|target| !revoked_by_delta.contains(target))
+            {
+                return Err(pending_removals_not_committed_error());
+            }
+        }
         let author_reclaims_committed_revoked_slot =
             committed_revoked_indices.contains(&parsed_updater_slot_index_usize);
         if candidate_reclaim_join && author_reclaims_committed_revoked_slot {
@@ -6925,6 +7277,9 @@ mod tests {
     #[path = "parsing_and_barrier_helpers.rs"]
     mod parsing_and_barrier_helpers;
 
+    #[path = "removal_proposals.rs"]
+    mod removal_proposals;
+
     fn test_room_admin_replay_key(tag: u8) -> [u8; 32] {
         [tag; 32]
     }
@@ -6957,7 +7312,7 @@ mod tests {
     }
 
     fn demo_acceptance_config() -> ServerConfig {
-        let mut config = ServerConfig::new();
+        let mut config = ServerConfig::without_history_authority();
         config.window_ttl = Some(Duration::from_secs(120));
 
         let mut registry = BTreeMap::new();
@@ -7013,12 +7368,38 @@ mod tests {
         }
     }
 
+    /// Reserve the slot that `slot_index_for_leaf` assigns to `leaf_id`, so
+    /// fixtures that place the leaf at that position agree with the lease.
+    fn reserve_fixture_slot(state: &mut super::GroupState, leaf_id: &[u8; 32]) -> SlotLease {
+        let slot_index = super::slot_index_for_leaf(leaf_id, state.n_max);
+        state.ensure_slot_allocator_initialized();
+        state.free_slots.remove(&slot_index);
+        SlotLease {
+            slot_index,
+            slot_generation: state
+                .slot_generations
+                .get(&slot_index)
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+
+    /// Record `leaf_id` as an active member holding its fixture slot.
+    fn install_active_fixture_lease(
+        state: &mut super::GroupState,
+        leaf_id: [u8; 32],
+    ) -> Result<SlotLease, CityGError> {
+        let lease = reserve_fixture_slot(state, &leaf_id);
+        state.activate_slot_lease(leaf_id, lease)?;
+        Ok(lease)
+    }
+
     fn install_pending_join_finalize_auth(
         state: &mut super::GroupState,
         leaf_id: [u8; 32],
     ) -> Result<[u8; 32], CityGError> {
         let token = [0xE7; 32];
-        let lease = state.allocate_slot_lease(leaf_id)?;
+        let lease = reserve_fixture_slot(state, &leaf_id);
         state.pending_join_finalize_auth.insert(
             leaf_id,
             super::JoinFinalizeAuthRecord {
@@ -7876,10 +8257,81 @@ mod tests {
         Ok((refresh_bundle, pristine_bundle))
     }
 
+    /// Self-revocation bundle. The public ticket entry points only allow it
+    /// for the last member (audit C-03), so build the ticket from the core to
+    /// also exercise the acceptance checks with a hostile member.
     fn build_leave_bundle_for_member(
         server: &mut CityGServer,
         generated: &GeneratedMemberBundle,
         source_bundle: &ClientEpochBundle,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let ticket =
+            server.build_merge_ticket_core(&gid, &generated.leaf_id, vec![generated.leaf_id])?;
+        let revoked = BarrierRevokedOccupancyRecord {
+            slot_index: u32::try_from(ticket.slot_index)
+                .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?,
+            slot_generation: ticket.slot_generation,
+        };
+        build_revocation_bundle_for_member(server, generated, source_bundle, ticket, &[revoked])
+    }
+
+    /// Sign `target`'s removal proposal with its own key and submit it.
+    fn submit_leave_proposal(
+        server: &mut CityGServer,
+        target: &GeneratedMemberBundle,
+    ) -> Result<SlotLease, CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let lease = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .and_then(|state| state.leaf_slot_leases.get(&target.leaf_id).copied())
+            .ok_or(CityGError::InvalidInput(
+                "leaving member has no active lease",
+            ))?;
+        let proposal = cityg_client::remove_proposal::RemoveProposal {
+            gid,
+            target_leaf_id: target.leaf_id,
+            target_slot_index: lease.slot_index,
+            target_slot_generation: lease.slot_generation,
+            not_after_ms: super::current_timestamp_ms().saturating_add(60_000),
+        };
+        let signed = cityg_client::remove_proposal::SignedRemoveProposal::sign(
+            proposal,
+            &target.pop_public_key,
+            target.pop_secret_key.as_bytes(),
+        )
+        .map_err(|_| CityGError::InvalidInput("sign remove proposal"))?;
+        let encoded = signed
+            .to_cbor()
+            .map_err(|_| CityGError::InvalidInput("encode remove proposal"))?;
+        server.submit_remove_proposal(&gid, &encoded)?;
+        Ok(lease)
+    }
+
+    /// Bundle in which `author` commits the pending removal of `target`.
+    fn build_removal_commit_bundle_for_member(
+        server: &mut CityGServer,
+        author: &GeneratedMemberBundle,
+        author_source_bundle: &ClientEpochBundle,
+        target_lease: SlotLease,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let ticket = server.build_merge_ticket(&gid, &author.leaf_id)?;
+        let revoked = BarrierRevokedOccupancyRecord {
+            slot_index: target_lease.slot_index,
+            slot_generation: target_lease.slot_generation,
+        };
+        build_revocation_bundle_for_member(server, author, author_source_bundle, ticket, &[revoked])
+    }
+
+    fn build_revocation_bundle_for_member(
+        server: &mut CityGServer,
+        generated: &GeneratedMemberBundle,
+        source_bundle: &ClientEpochBundle,
+        ticket: super::MergeTicketBundle,
+        revoked_by_update: &[BarrierRevokedOccupancyRecord],
     ) -> Result<ClientEpochBundle, CityGError> {
         let gid = cityg_client::demo::DEMO_GID;
         let fs_ec = u64_from_header(&source_bundle.header_map, hdr::HDR_FS_EC)?;
@@ -7888,7 +8340,6 @@ mod tests {
         let fs_dev_prev_commit =
             bytes32_from_header(&source_bundle.header_map, hdr::HDR_FS_DEV_COMMIT)?;
 
-        let ticket = server.build_merge_ticket(&gid, &generated.leaf_id)?;
         let parities = hydrate_parities(
             ticket.parities.as_slice(),
             fs_ec,
@@ -7907,14 +8358,8 @@ mod tests {
             .pk_entries;
         let join_records = server.resolve_join_occupancies_since(&gid, ticket.barrier_version)?;
         let committed_revoked = server.resolve_revoked_occupancies(&gid, &committed_roots_hash)?;
-        let revoked_slot_index = u32::try_from(ticket.slot_index)
-            .map_err(|_| CityGError::InvalidInput("slot_index out of range"))?;
         let mut post_revoked_records = committed_revoked.records.clone();
-        {
-            let revoked_record = BarrierRevokedOccupancyRecord {
-                slot_index: revoked_slot_index,
-                slot_generation: ticket.slot_generation,
-            };
+        for revoked_record in revoked_by_update.iter().cloned() {
             if let Err(record_insert_at) = post_revoked_records.binary_search_by_key(
                 &(revoked_record.slot_index, revoked_record.slot_generation),
                 |record| (record.slot_index, record.slot_generation),
@@ -8444,7 +8889,7 @@ mod tests {
 
     #[test]
     fn server_config_defaults() -> Result<(), Box<dyn std::error::Error>> {
-        let cfg = ServerConfig::new();
+        let cfg = ServerConfig::without_history_authority();
         assert!(cfg.h_max.is_none());
         assert!(cfg.window_ttl.is_none());
         Ok(())
@@ -8781,8 +9226,16 @@ mod tests {
         let (bob_finalize, _) = build_refresh_bundle_for_member(&mut server, &bob, &bob.bundle)?;
         server.accept_epoch(&bob_finalize)?;
 
-        let bob_leave = build_leave_bundle_for_member(&mut server, &bob, &bob_finalize)?;
-        server.accept_epoch(&bob_leave)?;
+        // Bob leaves: he signs a removal proposal and Alice commits it; a
+        // departing member never authors its own revocation (audit C-03).
+        let bob_lease = submit_leave_proposal(&mut server, &bob)?;
+        let bob_removal =
+            build_removal_commit_bundle_for_member(&mut server, &alice, &alice.bundle, bob_lease)?;
+        server.accept_epoch(&bob_removal)?;
+        assert!(
+            server.pending_removal_proposals(&gid).is_empty(),
+            "the committed removal leaves no pending proposal"
+        );
 
         let charlie = build_join_member_from_server_ticket(&mut server, &gid, 0x7C, false)?;
         assert_ne!(
@@ -9008,7 +9461,7 @@ mod tests {
     #[test]
     fn lookup_merge_acceptance_returns_superseded_for_mismatched_locator() -> Result<(), CityGError>
     {
-        let mut server = CityGServer::new(ServerConfig::new());
+        let mut server = CityGServer::new(ServerConfig::without_history_authority());
         let gid = [0x96; 32];
         let group = server.roster.groups.entry(gid.to_vec()).or_default();
         group.barrier_initialized = true;
@@ -9035,7 +9488,7 @@ mod tests {
     #[test]
     fn lookup_merge_acceptance_returns_final_rejected_after_version_advances_without_record()
     -> Result<(), CityGError> {
-        let mut server = CityGServer::new(ServerConfig::new());
+        let mut server = CityGServer::new(ServerConfig::without_history_authority());
         let gid = [0x97; 32];
         let group = server.roster.groups.entry(gid.to_vec()).or_default();
         group.barrier_initialized = true;
@@ -9580,7 +10033,7 @@ mod tests {
             Vec::new(),
         ))?;
 
-        let mut server = CityGServer::new(ServerConfig::new());
+        let mut server = CityGServer::new(ServerConfig::without_history_authority());
         server.ctx.set_kbroad_registry(Some(BTreeMap::from([(
             gid.to_vec(),
             kbroad_public.clone(),
@@ -10211,8 +10664,11 @@ pub mod demo {
     use msphf_orchestrator::BootstrapPolicy;
 
     /// Build a server configured with the demo KBROAD keypair.
+    ///
+    /// Demo bundles carry no author receipts, so the demo server runs without
+    /// a history authority; it is not a base-profile server.
     pub fn demo_server() -> CityGServer {
-        let mut config = ServerConfig::new();
+        let mut config = ServerConfig::without_history_authority();
         let mut registry = BTreeMap::new();
         registry.insert(
             cityg_client::demo::DEMO_GID.to_vec(),

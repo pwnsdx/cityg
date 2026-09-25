@@ -170,10 +170,12 @@ fn v02_manifest_is_well_formed_and_complete() -> Result<(), Box<dyn std::error::
     let manifest: S14Manifest = serde_json::from_slice(&bytes)?;
     assert_eq!(manifest.profile_version, "v0.2");
 
-    let expected = BTreeSet::from([
-        "SIG.1".to_string(),
-        "SIG.2".to_string(),
-        "SIG.3".to_string(),
-    ]);
+    let expected = BTreeSet::from(
+        [
+            "SIG.1", "SIG.2", "SIG.3", "REM.1", "REM.2", "REM.3", "REM.4", "REM.5", "REM.6",
+            "MSG.1", "CFG.1", "SLOT.1",
+        ]
+        .map(str::to_string),
+    );
     validate_manifest_entries(manifest, expected)
 }

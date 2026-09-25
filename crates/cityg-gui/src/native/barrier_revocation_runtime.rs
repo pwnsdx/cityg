@@ -6,11 +6,13 @@ use super::barrier_merge_publish_runtime::{
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
 use cityg_api_client::{PrepareRevocationMergeTicketInput, PreparedBarrierSnapshot};
+use cityg_client::remove_proposal::{RemoveProposal, SignedRemoveProposal};
 
 fn revocation_build_bundle_context(operation_label: &'static str) -> &'static str {
     match operation_label {
         "leave" => "failed to build leave merge bundle",
         "expel" => "failed to build expel merge bundle",
+        "remove" => "failed to build removal commit bundle",
         _ => "failed to build revocation merge bundle",
     }
 }
@@ -19,6 +21,7 @@ fn revocation_accept_bundle_context(operation_label: &'static str) -> &'static s
     match operation_label {
         "leave" => "server rejected leave merge bundle",
         "expel" => "server rejected expel merge bundle",
+        "remove" => "server rejected removal commit bundle",
         _ => "server rejected revocation merge bundle",
     }
 }
@@ -84,6 +87,13 @@ async fn publish_revocation_merge_from_ticket_inner(
             stored_max_barrier_update_bytes,
         })
         .map_err(anyhow::Error::from)?;
+    // S6.6: after a PCS refresh at epoch t every later anchor uses fs_ec > t.
+    // t never exceeds the group's last accepted epoch, so a committer that is
+    // not ahead of it steps past it.
+    let mut forward_state = forward_state;
+    if forward_state.current_ec() <= prepared_runtime.last_accepted_ec {
+        forward_state.advance_past(prepared_runtime.last_accepted_ec);
+    }
     let client = new_api_client(&server_url);
     let pop_secret = Box::new(
         cityg_api_client::parse_room_admin_secret_key(&pop_secret_key)
@@ -178,13 +188,54 @@ async fn publish_revocation_merge_from_ticket_inner(
     .await
 }
 
+/// Lifetime of a leave proposal: the remaining members have a day to commit it.
+pub(super) const LEAVE_PROPOSAL_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Server status telling the proposer it is the last member and must commit
+/// its own removal.
+const REMOVE_PROPOSAL_STATUS_SELF_COMMIT: &str = "self_commit";
+
+/// Result of a leave request (audit C-03: a device never authors the barrier
+/// update that revokes it while other members remain).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LeaveOutcome {
+    /// A signed removal proposal is pending; the remaining members commit it.
+    RemovalRequested,
+    /// This device was the last member and committed its own removal.
+    Left,
+}
+
+/// Sign a proposal removing this device from the room.
+pub(super) fn build_leave_proposal(
+    request: &LeaveRequest,
+    now_ms: u64,
+) -> Result<SignedRemoveProposal> {
+    let target_slot_index = u32::try_from(request.slot_lease.slot_index).map_err(|_| {
+        anyhow!(
+            "slot index {} exceeds the barrier slot range",
+            request.slot_lease.slot_index
+        )
+    })?;
+    SignedRemoveProposal::sign(
+        RemoveProposal {
+            gid: request.gid,
+            target_leaf_id: request.leaf_id,
+            target_slot_index,
+            target_slot_generation: request.slot_lease.slot_generation,
+            not_after_ms: now_ms.saturating_add(LEAVE_PROPOSAL_LIFETIME_MS),
+        },
+        &request.pop_public_key,
+        &request.pop_secret_key,
+    )
+}
+
 pub(super) fn perform_leave(
     request: LeaveRequest,
-) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+) -> Pin<Box<dyn Future<Output = Result<LeaveOutcome>> + Send>> {
     Box::pin(perform_leave_inner(request))
 }
 
-async fn perform_leave_inner(request: LeaveRequest) -> Result<()> {
+async fn perform_leave_inner(request: LeaveRequest) -> Result<LeaveOutcome> {
     ensure_full_barrier_verification_for_origin(
         request.barrier_recovery_pending,
         request.current_barrier_full_verified,
@@ -193,14 +244,104 @@ async fn perform_leave_inner(request: LeaveRequest) -> Result<()> {
     let client = new_api_client(&request.server_url);
     let room_id = request.room_id.clone();
     let leaf_id = request.leaf_id;
+    let proposal = build_leave_proposal(&request, current_unix_timestamp_ms())?;
+    let submission = client
+        .submit_remove_proposal(&room_id, &proposal)
+        .await
+        .context("failed to submit leave request")?;
+    if submission.status != REMOVE_PROPOSAL_STATUS_SELF_COMMIT {
+        return Ok(LeaveOutcome::RemovalRequested);
+    }
+
     let ticket = client
         .merge_ticket_with_retry(&room_id, &leaf_id)
         .await
         .context("failed to obtain leave merge ticket")?;
+    publish_revocation_merge_from_ticket(request, ticket, "leave", Some(leaf_id)).await?;
+    Ok(LeaveOutcome::Left)
+}
 
-    let leave_leaf_id = request.leaf_id;
-    publish_revocation_merge_from_ticket(request, ticket, "leave", Some(leave_leaf_id)).await?;
-    Ok(())
+/// Commit the pending removal proposals of other members, if any.
+///
+/// Returns the updated session when this device published the commit, and
+/// `None` when there was nothing to commit (or this device is itself leaving).
+pub(super) fn perform_pending_removal_commit(
+    session: AppSession,
+) -> Pin<Box<dyn Future<Output = Result<Option<AppSession>>> + Send>> {
+    Box::pin(perform_pending_removal_commit_inner(session))
+}
+
+async fn perform_pending_removal_commit_inner(session: AppSession) -> Result<Option<AppSession>> {
+    let request = LeaveRequest::from_session(&session);
+    if request.barrier_recovery_pending || !request.current_barrier_full_verified {
+        return Ok(None);
+    }
+    let client = new_api_client(&request.server_url);
+    let proposals = client
+        .pending_remove_proposals(&request.room_id, &request.gid)
+        .await
+        .context("failed to fetch pending removal proposals")?;
+    let now_ms = current_unix_timestamp_ms();
+    let targets: BTreeSet<[u8; 32]> = proposals
+        .iter()
+        .filter(|signed| signed.proposal.is_live_at(now_ms))
+        .map(|signed| signed.proposal.target_leaf_id)
+        .collect();
+    let Some(first_target) = targets.first().copied() else {
+        return Ok(None);
+    };
+    if targets.contains(&request.leaf_id) {
+        // This device asked to leave: another member commits its removal.
+        return Ok(None);
+    }
+
+    let ticket = client
+        .merge_ticket_with_retry(&request.room_id, &request.leaf_id)
+        .await
+        .context("failed to obtain removal commit ticket")?;
+    let published =
+        publish_revocation_merge_from_ticket(request, ticket, "remove", Some(first_target)).await?;
+    activate_published_revocation(session, published, "removal commit")
+        .await
+        .map(Some)
+}
+
+/// Activate a revocation merge this device just published, falling back to
+/// an epoch sync when local activation fails.
+async fn activate_published_revocation(
+    session: AppSession,
+    published: PublishedBarrierMerge,
+    operation: &'static str,
+) -> Result<AppSession> {
+    let mut updated = session.clone();
+    match apply_local_published_barrier_merge(&mut updated, published) {
+        Ok(()) => {
+            persist_activated_joined_session(&updated)
+                .with_context(|| format!("persist room session after {operation}"))?;
+            Ok(updated)
+        }
+        Err(local_err) => {
+            warn!(
+                "local activation of {operation} merge failed; falling back to epoch sync: {local_err:#}"
+            );
+            let persisted =
+                load_session_at(&session.server_url, &session.room_id)?.ok_or_else(|| {
+                    anyhow!("persisted session missing after {operation} merge publish")
+                })?;
+            let mut sync = perform_epoch_sync(persisted)
+                .await
+                .with_context(|| format!("sync room after {operation} merge"))?;
+            if sync.session.barrier_state.barrier_recovery_pending {
+                return Err(anyhow!(
+                    "barrier recovery still pending after {operation} merge"
+                ));
+            }
+            discard_pending_barrier_state(&mut sync.session);
+            persist_activated_joined_session(&sync.session)
+                .with_context(|| format!("persist room session after {operation} merge sync"))?;
+            Ok(sync.session)
+        }
+    }
 }
 
 pub(super) fn perform_room_admin_expel(
@@ -254,29 +395,5 @@ async fn perform_room_admin_expel_inner(
     let published =
         publish_revocation_merge_from_ticket(request, ticket, "expel", Some(target_leaf_id))
             .await?;
-    let mut updated = session.clone();
-    match apply_local_published_barrier_merge(&mut updated, published) {
-        Ok(()) => {
-            persist_activated_joined_session(&updated)
-                .context("persist room session after expel")?;
-            Ok(updated)
-        }
-        Err(local_err) => {
-            warn!(
-                "local activation of expel merge failed; falling back to epoch sync: {local_err:#}"
-            );
-            let persisted = load_session_at(&session.server_url, &session.room_id)?
-                .ok_or_else(|| anyhow!("persisted session missing after expel merge publish"))?;
-            let mut sync = perform_epoch_sync(persisted)
-                .await
-                .context("sync room after expel merge")?;
-            if sync.session.barrier_state.barrier_recovery_pending {
-                return Err(anyhow!("barrier recovery still pending after expel merge"));
-            }
-            discard_pending_barrier_state(&mut sync.session);
-            persist_activated_joined_session(&sync.session)
-                .context("persist room session after expel merge sync")?;
-            Ok(sync.session)
-        }
-    }
+    activate_published_revocation(session, published, "expel").await
 }

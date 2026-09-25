@@ -158,6 +158,7 @@ impl AppModel {
             members_mode: MembersMode::default(),
             members_search: MembersSearchState::default(),
             members_refresh_task: None,
+            removal_commit_in_flight: false,
             alias_bindings: AHashMap::new(),
             leaf_alias_index: AHashMap::new(),
             room_admins: Vec::new(),

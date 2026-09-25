@@ -21,7 +21,7 @@ fn gpui_on_leave_finished_surfaces_session_cleanup_error(cx: &mut TestAppContext
 
     view.update(cx, |model, view_cx| {
         model.session = Some(session.clone());
-        model.on_leave_finished(Ok(()), view_cx);
+        model.on_leave_finished(Ok(LeaveOutcome::Left), view_cx);
         assert!(
             model
                 .last_error
@@ -445,7 +445,12 @@ fn gpui_async_handler_paths_cover_state_machine(cx: &mut TestAppContext) {
             model.on_leave_clicked(&event, window, view_cx);
             assert!(matches!(model.leave_status, LeaveStatus::Leaving));
             model.on_leave_finished(Err(anyhow::anyhow!("leave failed")), view_cx);
-            model.on_leave_finished(Ok(()), view_cx);
+            model.on_leave_finished(Ok(LeaveOutcome::RemovalRequested), view_cx);
+            assert!(model.session.is_none());
+            assert_eq!(
+                model.info_message.as_deref(),
+                Some("Leave requested. The remaining members commit your removal.")
+            );
         });
     });
 
