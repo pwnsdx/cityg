@@ -4,7 +4,7 @@ use gpui::{EmptyView, Modifiers, TestAppContext};
 use msphf_rlwe::CapssBranchWitness;
 use prost::Message;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
-use std::sync::{Arc, Once, atomic::AtomicU16};
+use std::sync::{Arc, Once};
 use tempfile::TempDir;
 use tokio::{task::JoinHandle, time::sleep};
 
@@ -41,7 +41,6 @@ mod watch_backlog;
 #[path = "websocket_worker.rs"]
 mod websocket_worker;
 
-static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18400);
 struct TestEnvLock(std::sync::Mutex<()>);
 
 impl TestEnvLock {
@@ -79,15 +78,12 @@ fn init_test_auth_env() {
     });
 }
 
+/// Free local port for a test server.
+///
+/// nextest runs every test in its own process, so a per-process counter hands
+/// the same ports to concurrent tests (and one test then talks to another
+/// test's server). Let the OS pick an ephemeral port instead.
 fn next_test_port() -> u16 {
-    for _ in 0..256 {
-        let candidate = NEXT_TEST_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", candidate)) {
-            drop(listener);
-            return candidate;
-        }
-    }
-
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .expect("bind ephemeral test port")
         .local_addr()
@@ -264,17 +260,18 @@ fn test_new_public_key_wire(node: u64) -> Result<NewPublicKeyWire, Box<dyn std::
 fn install_valid_message_identities(
     session: &mut AppSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let identity = cityg_api_client::generate_room_admin_identity();
+    let identity = cityg_api_client::generate_room_admin_identity().expect("room identity");
     session.leaf_id = compute_leaf_id(
         LeafIdMode::PerGroup,
         &session.gid,
-        "ML-DSA-65",
+        "ML-DSA-87",
         identity.pop_public_key.as_slice(),
     )?;
     session.pop_public_key = identity.pop_public_key;
     session.pop_secret_key = identity.pop_secret_key;
 
-    let (msg_sign_pk, msg_sign_sk) = cityg_client::message_auth::generate_message_signing_keypair();
+    let (msg_sign_pk, msg_sign_sk) = cityg_client::message_auth::generate_message_signing_keypair()
+        .expect("message signing keypair");
     session.msg_sign_public_key = msg_sign_pk;
     session.msg_sign_secret_key = msg_sign_sk;
     Ok(())
@@ -306,7 +303,8 @@ fn build_test_history_authority(
     kem_tree_hash_after: [u8; 32],
 ) -> Result<TestHistoryAuthority, Box<dyn std::error::Error>> {
     let (public_key_bytes, secret_key_bytes) =
-        cityg_client::message_auth::generate_message_signing_keypair();
+        cityg_client::message_auth::generate_message_signing_keypair()
+            .expect("message signing keypair");
     let descriptor = HistoryAuthorityDescriptor {
         scope_id: [0xA1; 32],
         public_key: public_key_bytes,
@@ -329,10 +327,11 @@ fn build_test_history_authority(
         &parent_attestation_id,
         TEST_GLOBAL_HISTORY_FINALITY_KIND,
     ))?;
-    let signature = cityg_client::message_auth::detached_sign_payload(
-        payload.as_slice(),
+    let signature = cityg_pqc::test_utils::sign_deterministic_with_secret_key_bytes(
         secret_key_bytes.as_slice(),
-    )?;
+        cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+        payload.as_slice(),
+    );
     let attestation_bytes = encode_test_cbor_det(&TestGlobalHistoryAttestationWire(
         descriptor.scope_id.to_vec(),
         gid.to_vec(),
@@ -375,10 +374,11 @@ fn build_test_deployment_profile_manifest(
         fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
         fs_forward_leap_slack_device: fs_policy.slack_device,
     })?;
-    let signature = cityg_client::message_auth::detached_sign_payload(
-        payload.as_slice(),
+    let signature = cityg_pqc::test_utils::sign_deterministic_with_secret_key_bytes(
         authority.secret_key.as_slice(),
-    )?;
+        cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+        payload.as_slice(),
+    );
     encode_test_cbor_det(&TestDeploymentProfileManifestWire {
         scope_id: authority.descriptor.scope_id.to_vec(),
         history_authority_extension: TEST_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
@@ -587,11 +587,11 @@ fn apply_fetch_outcome_to_session(session: &mut AppSession, outcome: &FetchOutco
 fn install_valid_pop_identity(
     session: &mut AppSession,
 ) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    let identity = cityg_api_client::generate_room_admin_identity();
+    let identity = cityg_api_client::generate_room_admin_identity().expect("room identity");
     let leaf_id = compute_leaf_id(
         LeafIdMode::PerGroup,
         &session.gid,
-        "ML-DSA-65",
+        "ML-DSA-87",
         identity.pop_public_key.as_slice(),
     )?;
     session.pop_public_key = identity.pop_public_key;
@@ -2758,7 +2758,7 @@ async fn bootstrap_test_room_with_admin_identity(
     server_url: &str,
     room_id: &str,
 ) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
-    let identity = cityg_api_client::generate_room_admin_identity();
+    let identity = cityg_api_client::generate_room_admin_identity().expect("room identity");
     let admin_proof = identity.build_kbroad_proof(
         RoomAdminOperation::Bootstrap,
         room_id,
@@ -4207,7 +4207,8 @@ fn signing_helpers_reject_invalid_key_material() -> Result<(), Box<dyn std::erro
         "invalid secret key bytes should fail"
     );
 
-    let (pk, sk) = cityg_client::message_auth::generate_message_signing_keypair();
+    let (pk, sk) = cityg_client::message_auth::generate_message_signing_keypair()
+        .expect("message signing keypair");
     let signature = sign_message(&leaf, ts, payload, &sk)?;
 
     assert!(
@@ -9381,7 +9382,8 @@ fn categorize_error_case_insensitive() -> Result<(), Box<dyn std::error::Error>>
 #[test]
 fn encode_decode_authenticated_message_empty_plaintext() -> Result<(), Box<dyn std::error::Error>> {
     let (msg_sign_public_key, msg_sign_secret_key) =
-        cityg_client::message_auth::generate_message_signing_keypair();
+        cityg_client::message_auth::generate_message_signing_keypair()
+            .expect("message signing keypair");
 
     let leaf_id = [0x42u8; 32];
     let plaintext = b"";
@@ -9402,7 +9404,8 @@ fn encode_decode_authenticated_message_empty_plaintext() -> Result<(), Box<dyn s
 #[test]
 fn encode_decode_authenticated_message_large_plaintext() -> Result<(), Box<dyn std::error::Error>> {
     let (msg_sign_public_key, msg_sign_secret_key) =
-        cityg_client::message_auth::generate_message_signing_keypair();
+        cityg_client::message_auth::generate_message_signing_keypair()
+            .expect("message signing keypair");
 
     let leaf_id = [0x42u8; 32];
     let plaintext = vec![b'A'; 5000]; // 5KB message
@@ -9437,7 +9440,8 @@ fn decode_authenticated_message_too_short() -> Result<(), Box<dyn std::error::Er
 #[test]
 fn decode_authenticated_message_wrong_prefix() -> Result<(), Box<dyn std::error::Error>> {
     let (msg_sign_public_key, msg_sign_secret_key) =
-        cityg_client::message_auth::generate_message_signing_keypair();
+        cityg_client::message_auth::generate_message_signing_keypair()
+            .expect("message signing keypair");
 
     let leaf_id = [0x42u8; 32];
     let plaintext = b"test";

@@ -617,14 +617,18 @@ fn sample_polyvec(seed: &[u8; 32], label: &str) -> Result<PolyVec, MsphfError> {
 mod tests {
     use super::*;
     use ciborium::ser;
+    use cityg_pqc::test_utils::{AsBytes as _, keypair};
     use msphf_core::hash::hash_bytes_with_label;
     use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
     use msphf_core::{
         merkle::{hash_leaf, hash_node},
         witness::{CanonicalWitness, RawMembershipWitness, RawPathEntry, WitnessVariants},
     };
-    use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
-    use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+
+    fn detached_sign(message: &[u8], secret_key: &cityg_pqc::SecretKey) -> Vec<u8> {
+        cityg_pqc::sign_deterministic(secret_key, cityg_pqc::SignatureContext::ANCHOR_POP, message)
+            .unwrap_or_default()
+    }
 
     #[test]
     fn xof_helpers_align_with_core_hash_domain() {
@@ -761,7 +765,7 @@ mod tests {
         let leaf_id = leak_bytes(vec![0x33; 32]);
         let (pk, sk) = keypair();
         let pop_pk = leak_bytes(pk.as_bytes().to_vec());
-        let pop_alg = "ML-DSA-65";
+        let pop_alg = "ML-DSA-87";
 
         #[derive(Serialize)]
         struct PopMsg<'a> {

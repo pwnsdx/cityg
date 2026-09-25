@@ -41,12 +41,8 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
-#[cfg(target_arch = "wasm32")]
-use cityg_pqc::{MlDsa65SecretKey as MlDsaSecretKey, sign_ml_dsa_65_detached_signature};
-#[cfg(not(target_arch = "wasm32"))]
-use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign};
-#[cfg(not(target_arch = "wasm32"))]
-use pqcrypto_traits::sign::DetachedSignature;
+pub use cityg_pqc::SecretKey as MlDsaSecretKey;
+use cityg_pqc::SignatureContext;
 
 mod accept;
 mod time;
@@ -124,21 +120,16 @@ pub(crate) const BARRIER_HP_CONTEXT_BARRIER_RECOVERY: &str = "barrier-recovery";
 const KBROAD_ML_KEM_ALG: &str = "ml-kem-768";
 const HP_AEAD_SUITE: &str = "chacha20-poly1305";
 
-#[cfg(not(target_arch = "wasm32"))]
+/// JOIN proof of possession (header key 109).
+///
+/// Uses the FIPS 204 deterministic variant: the legacy seed derivation feeds
+/// the PoP signature into `rho_raw`, so the signature must be reproducible.
 fn sign_cityg_pop_bytes(
     secret_key: &MlDsaSecretKey,
     message: &[u8],
 ) -> Result<Vec<u8>, MsphfError> {
-    Ok(detached_sign(message, secret_key).as_bytes().to_vec())
-}
-
-#[cfg(target_arch = "wasm32")]
-fn sign_cityg_pop_bytes(
-    secret_key: &MlDsaSecretKey,
-    message: &[u8],
-) -> Result<Vec<u8>, MsphfError> {
-    sign_ml_dsa_65_detached_signature(secret_key, message)
-        .map_err(|_| MsphfError::invalid_input("invalid ML-DSA secret key"))
+    cityg_pqc::sign_deterministic(secret_key, SignatureContext::ANCHOR_POP, message)
+        .map_err(|_| MsphfError::invalid_input("ML-DSA-87 signing failed"))
 }
 const BARRIER_HP_INFO_PREFIX: &[u8] = b"city-g|hp/barrier/v1";
 const FS_STEP_INFO: &[u8] = b"city-g|fs/step|v1";
@@ -3717,6 +3708,7 @@ mod tests {
     };
     use blake3::Hasher;
     use ciborium::{de, ser};
+    use cityg_pqc::test_utils::{AsBytes as _, keypair};
     use msphf_core::WitnessValidationError;
     use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
     use msphf_core::{
@@ -3727,9 +3719,19 @@ mod tests {
             WitnessVariants,
         },
     };
-    use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign, keypair};
-    use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
     use std::borrow::Cow;
+
+    /// Proof-of-possession signature (header key 109), deterministic like
+    /// the production signer.
+    fn detached_sign(message: &[u8], secret_key: &MlDsaSecretKey) -> Vec<u8> {
+        cityg_pqc::sign_deterministic(secret_key, SignatureContext::ANCHOR_POP, message)
+            .unwrap_or_default()
+    }
+
+    /// Bootstrap CA signature (header key 171).
+    fn bootstrap_sign(message: &[u8], secret_key: &MlDsaSecretKey) -> Vec<u8> {
+        cityg_pqc::test_utils::sign(secret_key, SignatureContext::ANCHOR_BOOTSTRAP, message)
+    }
     fn leak(bytes: [u8; 32]) -> &'static [u8] {
         Box::leak(Box::new(bytes)).as_slice()
     }
@@ -4825,7 +4827,7 @@ mod tests {
                 srx: Some(self.srx_inputs.clone()),
                 srx_mode: SrxMode::Complete,
                 pop_keys: Some(PopKeypair {
-                    algorithm: "ML-DSA-65",
+                    algorithm: "ML-DSA-87",
                     public_key: self.pop_pk,
                     secret_key: self.pop_sk,
                 }),
@@ -4885,7 +4887,7 @@ mod tests {
         let gid = leak([0x10; 32]);
         let cat = leak([0x11; 32]);
         let join_leaf_arr = {
-            let leaf = match compute_leaf_id(LeafIdMode::PerGroup, gid, "ML-DSA-65", pop_pk) {
+            let leaf = match compute_leaf_id(LeafIdMode::PerGroup, gid, "ML-DSA-87", pop_pk) {
                 Ok(value) => value,
                 Err(_) => unreachable!("compute_leaf_id with valid test inputs cannot fail"),
             };
@@ -5210,7 +5212,7 @@ mod tests {
             epoch: &'a [u8],
         }
 
-        let leaf_id = match compute_leaf_id(LeafIdMode::PerGroup, anchor.gid, "ML-DSA-65", pop_pk) {
+        let leaf_id = match compute_leaf_id(LeafIdMode::PerGroup, anchor.gid, "ML-DSA-87", pop_pk) {
             Ok(id) => id,
             Err(_) => unreachable!("compute_leaf_id with valid test inputs cannot fail"),
         };
@@ -5231,7 +5233,7 @@ mod tests {
         };
         let signature = detached_sign(&msg, pop_sk);
 
-        header.insert(107, Value::Text("ML-DSA-65".to_string()));
+        header.insert(107, Value::Text("ML-DSA-87".to_string()));
         header.insert(108, Value::Bytes(pop_pk.to_vec()));
         header.insert(109, Value::Bytes(signature.as_bytes().to_vec()));
     }
@@ -5254,7 +5256,7 @@ mod tests {
             Ok(d) => d,
             Err(_) => unreachable!("build_bootstrap_digest with valid test inputs cannot fail"),
         };
-        let sig = detached_sign(&digest, fixture.bootstrap_sk);
+        let sig = bootstrap_sign(&digest, fixture.bootstrap_sk);
         header.insert(HDR_BOOTSTRAP_SIG, Value::Bytes(sig.as_bytes().to_vec()));
         refresh_seed_ctx_hash(header);
     }

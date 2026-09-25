@@ -11,8 +11,7 @@ use cityg_api_client::{
     verify_join_occupancies_since_completeness_attestation,
     verify_revoked_occupancies_completeness_attestation,
 };
-use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
+use cityg_pqc::test_utils::AsBytes as _;
 use serde::{Deserialize, Serialize};
 
 const HELPER_KIND_REVOKED_OCCUPANCIES: &str = "resolve_revoked_occupancies";
@@ -103,8 +102,8 @@ fn encode_cbor_det<T: Serialize>(value: &T) -> Result<Vec<u8>, Box<dyn StdError>
     Ok(bytes)
 }
 
-fn history_authority(seed: u8) -> (HistoryAuthorityDescriptor, dilithium5::SecretKey) {
-    let (public_key, secret_key) = dilithium5::keypair();
+fn history_authority(seed: u8) -> (HistoryAuthorityDescriptor, cityg_pqc::SecretKey) {
+    let (public_key, secret_key) = cityg_pqc::test_utils::keypair();
     (
         HistoryAuthorityDescriptor {
             scope_id: [seed; 32],
@@ -125,7 +124,7 @@ fn parent_attestation_id(prev_history_commitment_id: &[u8; 32]) -> [u8; 32] {
 
 fn sign_global_history_attestation(
     authority: &HistoryAuthorityDescriptor,
-    secret_key: &dilithium5::SecretKey,
+    secret_key: &cityg_pqc::SecretKey,
     gid: &[u8; 32],
     history_commitment: &HistoryCommitment,
     barrier_version: u64,
@@ -147,9 +146,11 @@ fn sign_global_history_attestation(
         &parent_attestation_id,
         finality_kind.as_str(),
     ))?;
-    let signature = dilithium5::detached_sign(payload.as_slice(), secret_key)
-        .as_bytes()
-        .to_vec();
+    let signature = cityg_pqc::test_utils::sign_deterministic(
+        secret_key,
+        cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+        payload.as_slice(),
+    );
     let wire = encode_cbor_det(&GlobalHistoryAttestationWire(
         authority.scope_id.to_vec(),
         gid.to_vec(),
@@ -180,7 +181,7 @@ fn sign_global_history_attestation(
 
 fn sign_helper_completeness_attestation<T: Serialize>(
     authority: &HistoryAuthorityDescriptor,
-    secret_key: &dilithium5::SecretKey,
+    secret_key: &cityg_pqc::SecretKey,
     helper_kind: &'static str,
     history_commitment: &HistoryCommitment,
     page_offset: u32,
@@ -197,9 +198,11 @@ fn sign_helper_completeness_attestation<T: Serialize>(
         total_entries,
         selector,
     })?;
-    let signature = dilithium5::detached_sign(payload.as_slice(), secret_key)
-        .as_bytes()
-        .to_vec();
+    let signature = cityg_pqc::test_utils::sign_deterministic(
+        secret_key,
+        cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+        payload.as_slice(),
+    );
     encode_cbor_det(&HelperCompletenessAttestationWire(
         authority.scope_id.to_vec(),
         helper_kind.to_string(),

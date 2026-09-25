@@ -48,7 +48,7 @@ This is achieved by:
 3. **ZK-VRF** proves Y\* correctness without revealing it
 4. **Client-side** epoch key derivation only
 
-**Important**: "Publisher-blind" refers to **encryption key confidentiality**, not device anonymity. The server **CAN identify devices** via public keys (ML-DSA-65, ~2KB) transmitted in field #108 (HDR_POP_PK) during join/merge operations. The server uses these for signature verification and leaf_id computation, but cannot decrypt messages or derive encryption keys.
+**Important**: "Publisher-blind" refers to **encryption key confidentiality**, not device anonymity. The server **CAN identify devices** via public keys (ML-DSA-87, ~2KB) transmitted in field #108 (HDR_POP_PK) during join/merge operations. The server uses these for signature verification and leaf_id computation, but cannot decrypt messages or derive encryption keys.
 
 ---
 
@@ -94,7 +94,7 @@ Goals: confidentiality of hp; correctness of set relations; uniqueness of Y*;
 service blindness (no hp, no Y*, no E_k); offline readiness; DoS hygiene;
 policy transparency.
 Assumptions: ML-KEM-768; rpo-256; BLAKE3/HMAC-BLAKE3; chacha20-poly1305;
-ML-DSA-65; CAPSS Smallwood FS proof (ROM soundness); ZK-VRF in QROM.
+ML-DSA-87; CAPSS Smallwood FS proof (ROM soundness); ZK-VRF in QROM.
 ```
 
 ---
@@ -145,7 +145,7 @@ ML-DSA-65; CAPSS Smallwood FS proof (ROM soundness); ZK-VRF in QROM.
 | Primitive | Standard | Security Level | Assumption |
 |-----------|----------|----------------|------------|
 | **ML-KEM-768** | FIPS 203 | NIST Level 3 (~192-bit) | Module-LWE hardness |
-| **ML-DSA-65** | FIPS 204 | NIST Level 3 (~192-bit) | Module-LWE + QROM Fiat-Shamir |
+| **ML-DSA-87** | FIPS 204 | NIST Level 5 (~256-bit) | Module-LWE + QROM Fiat-Shamir |
 | **RLWE-HPS A1** | Custom | ≥ NIST Level 3 (matching ML-KEM-768) | Ring-LWE decisional assumption |
 
 **Note**: RLWE-HPS uses the same (N=256, Q=3329, K=3, η₂=2) Module-LWE parameters as ML-KEM-768. Internal analysis tracks the evolving Kyber/ML-KEM cryptanalysis; raise parameters if the recommended security level drops below Category 3.
@@ -292,7 +292,7 @@ hp := KGen(seed_DRBG)
 4. **Rho parity cache**: Server detects replay (RhoReplayGuard)
 
 **Attack Scenarios**:
-- ❌ **Grind pop_sig**: ML-DSA-65 is deterministic (RFC 8032 mode), pop_sig fixed
+- ❌ **Grind pop_sig**: ML-DSA-87 is deterministic (RFC 8032 mode), pop_sig fixed
 - ❌ **Grind seed_commit**: Bound to ANCHOR_SEED_CTX via seed_bundle_commit
 - ❌ **Replay old pop_sig**: Detected by RhoReplayGuard (64-entry cache)
 
@@ -531,7 +531,7 @@ fn defense_in_depth_checks(
 | Attack Vector | Mitigation | Status |
 |---------------|-----------|--------|
 | **Eavesdropping** | TLS 1.3 transport (assumed) | ✅ Out-of-band |
-| **MitM** | PoP signature validation | ✅ ML-DSA-65 |
+| **MitM** | PoP signature validation | ✅ ML-DSA-87 |
 | **Replay** | Rho parity guard, VCK cache | ✅ Tested |
 | **Reordering** | Deterministic validation | ✅ Stateless |
 | **DoS (flood)** | Rate limits, quotas (policy) | ⚠️ Out-of-band |
@@ -548,7 +548,7 @@ fn defense_in_depth_checks(
 |-----------|---------|----------------|
 | **CAPSS Smallwood** | Anti-grinding (seed→hp determinism) | Fiat-Shamir ROM proof (straightline-extractable) |
 | **ZK-VRF** | Y\* uniqueness + output-hiding | lb-vrf/v1 |
-| **PoP** | Device authentication | ML-DSA-65 signature |
+| **PoP** | Device authentication | ML-DSA-87 signature |
 | **SRX** | Completeness (no omitted members) | Frontier + anchor pool |
 | **Canonical Witnesses** | Prevent malleability | Strict format (depth≤64, sorted) |
 | **KBROAD Encryption** | hp confidentiality | ML-KEM-768 + ChaCha20-Poly1305 |
@@ -595,7 +595,7 @@ fn defense_in_depth_checks(
 **Impact on City-G**:
 - ❌ **Not affected**: No RSA or ECDH primitives
 - ✅ **Protected**: ML-KEM-768 (NIST Level 3) resists quantum attacks
-- ✅ **Protected**: ML-DSA-65 (NIST Level 3) resists quantum forgery
+- ✅ **Protected**: ML-DSA-87 (NIST Level 3) resists quantum forgery
 - ⚠️ **Mitigated**: BLAKE3/ChaCha20 (256-bit keys) → 128-bit quantum security (sufficient)
 
 ---
@@ -605,7 +605,7 @@ fn defense_in_depth_checks(
 | Primitive | Classical Security | Quantum Security | NIST Status |
 |-----------|-------------------|------------------|-------------|
 | **ML-KEM-768** | ≥192 bits (Category 3) | ≥96 bits (Category 3 quantum target) | FIPS 203 (final) |
-| **ML-DSA-65** | ≥192 bits (Category 3) | ≥96 bits (Category 3 quantum target) | FIPS 204 (final) |
+| **ML-DSA-87** | ≥192 bits (Category 3) | ≥96 bits (Category 3 quantum target) | FIPS 204 (final) |
 | **RLWE-HPS A1** | ≥192 bits (matches ML-KEM-768) | ≈96 bits (best-known quantum sieving ≈2^95 ops) | Custom (ongoing analysis) |
 | **BLAKE3** | 256-bit preimage | 128-bit preimage | Non-standardized |
 | **ChaCha20** | 256-bit key | 128-bit key | RFC 8439 |
@@ -707,7 +707,7 @@ let challenge = H_L("msphf/fs-lin/challenge", [commitments, bind]);
 The City-G `tswe/msphf-we/fs-hybrid` protocol provides:
 
 1. **Publisher-Blindness** — Server cannot learn hp, Y\*, E_k, or eid (type-safe, functionally verified)
-2. **Post-Quantum Security** — ML-KEM-768, ML-DSA-65, lattice-based SPHF (NIST Level 3)
+2. **Post-Quantum Security** — ML-KEM-768, ML-DSA-87, lattice-based SPHF (NIST Level 3)
 3. **Anti-Grinding** — CAPSS Smallwood enforces seed→hp determinism (ROM secure)
 4. **Uniqueness** — ZK-VRF proves Y\* correctness without revealing it (output-hiding)
 5. **Completeness** — SRX prevents member omissions (frontier + anchor pool)
@@ -715,7 +715,7 @@ The City-G `tswe/msphf-we/fs-hybrid` protocol provides:
 7. **Parallel Joins** — Multi-Head Window supports 16 concurrent heads (unprecedented scale)
 8. **DoS Hygiene** — Pre-filters, size limits, SRX bounds, TTL-based expiration
 
-**Important Note on Publisher-Blindness**: The term "publisher-blind" means the server is **cryptographically blind to encryption keys** (hp, Y\*, E_k) and message content. However, the server **CAN identify devices** via public keys (ML-DSA-65) transmitted in field #108 during join/merge operations. This is NOT sender anonymity — see §1.1 and §5.4 for details.
+**Important Note on Publisher-Blindness**: The term "publisher-blind" means the server is **cryptographically blind to encryption keys** (hp, Y\*, E_k) and message content. However, the server **CAN identify devices** via public keys (ML-DSA-87) transmitted in field #108 during join/merge operations. This is NOT sender anonymity — see §1.1 and §5.4 for details.
 
 **Security Guarantees**: Proven via type-level (Rust), functional (code review), API-level (return types), and information-theoretic (ML-KEM hardness) arguments.
 

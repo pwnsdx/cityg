@@ -269,7 +269,7 @@ pub(super) fn load_or_create_room_identity(
         return Ok(identity);
     }
 
-    let identity = cityg_api_client::generate_room_admin_identity();
+    let identity = cityg_api_client::generate_room_admin_identity()?;
     persist_room_identity(server_url, room_id, &identity)?;
     Ok(identity)
 }

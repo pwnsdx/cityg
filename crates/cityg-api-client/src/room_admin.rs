@@ -5,8 +5,7 @@ use cityg_api_schema::pb::{
     RoomAdminMutationResponse, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
 };
 use cityg_client::{barrier_crypto::generate_kbroad_keypair, pivot::pivot_parity_from_cbor};
-use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
+use cityg_pqc::SignatureContext;
 use serde_bytes::ByteBuf;
 
 use crate::{
@@ -64,7 +63,7 @@ impl RoomAdminIdentity {
         crate::build_identity_binding(alias, &self.pop_public_key, &self.pop_secret_key)
     }
 
-    pub fn parse_secret_key(&self) -> Result<dilithium5::SecretKey, Error> {
+    pub fn parse_secret_key(&self) -> Result<cityg_pqc::SecretKey, Error> {
         parse_room_admin_secret_key(&self.pop_secret_key)
     }
 
@@ -127,38 +126,37 @@ fn build_room_admin_proof_payload(
     pop_public_key: &[u8],
     pop_secret_key: &[u8],
 ) -> Result<RoomAdminProof, Error> {
-    let secret_key = dilithium5::SecretKey::from_bytes(pop_secret_key)
-        .map_err(|_| Error::Parse("invalid room admin secret key".to_string()))?;
+    let secret_key = parse_room_admin_secret_key(pop_secret_key)?;
     let message = (operation.as_str(), room_id, ByteBuf::from(payload.to_vec()));
     let mut payload_bytes = Vec::new();
     into_writer(&message, &mut payload_bytes)
         .map_err(|err| Error::Parse(format!("encode room admin proof payload: {err}")))?;
-    let signature = dilithium5::detached_sign(&payload_bytes, &secret_key);
+    let signature = cityg_pqc::sign(&secret_key, SignatureContext::ROOM_ADMIN, &payload_bytes)
+        .map_err(|err| Error::Parse(format!("sign room admin proof: {err}")))?;
     Ok(RoomAdminProof {
         pop_public_key: pop_public_key.to_vec(),
-        signature: signature.as_bytes().to_vec(),
+        signature,
     })
 }
 
-pub fn generate_room_admin_keypair() -> (Vec<u8>, Vec<u8>) {
-    let (public_key, secret_key) = dilithium5::keypair();
-    (
-        public_key.as_bytes().to_vec(),
-        secret_key.as_bytes().to_vec(),
-    )
+/// Fresh ML-DSA-87 room identity key pair (public key, secret key bytes).
+pub fn generate_room_admin_keypair() -> Result<(Vec<u8>, Vec<u8>), Error> {
+    let (public_key, secret_key) = cityg_pqc::keypair()
+        .map_err(|err| Error::Parse(format!("generate room identity key pair: {err}")))?;
+    Ok((public_key, secret_key.to_bytes()))
 }
 
 pub fn room_admin_public_key_bytes() -> usize {
-    dilithium5::public_key_bytes()
+    cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES
 }
 
-pub fn generate_room_admin_identity() -> RoomAdminIdentity {
-    let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
-    RoomAdminIdentity::new(pop_public_key, pop_secret_key)
+pub fn generate_room_admin_identity() -> Result<RoomAdminIdentity, Error> {
+    let (pop_public_key, pop_secret_key) = generate_room_admin_keypair()?;
+    Ok(RoomAdminIdentity::new(pop_public_key, pop_secret_key))
 }
 
-pub fn parse_room_admin_secret_key(bytes: &[u8]) -> Result<dilithium5::SecretKey, Error> {
-    dilithium5::SecretKey::from_bytes(bytes)
+pub fn parse_room_admin_secret_key(bytes: &[u8]) -> Result<cityg_pqc::SecretKey, Error> {
+    cityg_pqc::SecretKey::from_bytes(bytes)
         .map_err(|_| Error::Parse("invalid room admin secret key".to_string()))
 }
 

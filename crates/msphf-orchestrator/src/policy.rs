@@ -6,9 +6,7 @@ use std::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ciborium::ser::into_writer;
-use cityg_pqc::{
-    ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES, verify_ml_dsa_65_detached_signature,
-};
+use cityg_pqc::{ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, SignatureContext};
 use hex::FromHexError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -296,7 +294,7 @@ fn verify_signatures(
 impl PolicySignatureSer {
     fn verify(&self, message: &[u8], anchors: &PolicyTrustAnchors) -> Result<bool, PolicyError> {
         match self.algorithm.as_str() {
-            "ml-dsa-65" | "ML-DSA-65" => self.verify_ml_dsa(message, anchors),
+            "ml-dsa-87" | "ML-DSA-87" => self.verify_ml_dsa(message, anchors),
             other => Err(PolicyError::UnsupportedSignatureAlgorithm(
                 other.to_string(),
             )),
@@ -311,15 +309,15 @@ impl PolicySignatureSer {
         let public_key = BASE64.decode(self.public_key.as_bytes())?;
         let signature = BASE64.decode(self.signature.as_bytes())?;
 
-        if public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES
-            || signature.len() != ML_DSA_65_SIGNATURE_BYTES
+        if public_key.len() != ML_DSA_87_PUBLIC_KEY_BYTES
+            || signature.len() != ML_DSA_87_SIGNATURE_BYTES
         {
             return Err(PolicyError::InvalidSignature);
         }
         if !anchors.contains_ml_dsa(&public_key) {
             return Ok(false);
         }
-        verify_ml_dsa_65_detached_signature(&public_key, message, &signature)
+        cityg_pqc::verify(&public_key, SignatureContext::POLICY, message, &signature)
             .map_err(|_| PolicyError::InvalidSignature)?;
         Ok(true)
     }
@@ -487,11 +485,11 @@ mod tests {
 
     use super::*;
     use anyhow::{Context, Result, bail, ensure};
-    use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, keypair};
-    use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
+    use cityg_pqc::SecretKey as MlDsaSecretKey;
+    use cityg_pqc::test_utils::{AsBytes as _, keypair};
     use time::Month;
 
-    type MlDsaPublicKey = pqcrypto_dilithium::dilithium5::PublicKey;
+    type MlDsaPublicKey = Vec<u8>;
 
     fn make_payload(version: &str, params_hex: &str) -> PolicyPayloadSer {
         PolicyPayloadSer {
@@ -551,9 +549,9 @@ mod tests {
         sk: &MlDsaSecretKey,
     ) -> Result<PolicySignatureSer> {
         let message = serialize_payload(payload)?;
-        let signature = pqcrypto_dilithium::dilithium5::detached_sign(&message, sk);
+        let signature = cityg_pqc::test_utils::sign(sk, SignatureContext::POLICY, &message);
         Ok(PolicySignatureSer {
-            algorithm: "ml-dsa-65".to_string(),
+            algorithm: "ml-dsa-87".to_string(),
             public_key: BASE64.encode(pk.as_bytes()),
             signature: BASE64.encode(signature.as_bytes()),
         })

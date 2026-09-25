@@ -6,9 +6,7 @@ use crate::{
     proofs::srx_smallwood::{self, SRX_SMALLWOOD_MAX_BYTES},
 };
 use ciborium::de;
-use cityg_pqc::{
-    ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES, verify_ml_dsa_65_detached_signature,
-};
+use cityg_pqc::{ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, SignatureContext};
 use msphf_core::ds::MSPHF_POP_MSG;
 use serde::Serialize;
 use tracing::debug;
@@ -107,9 +105,9 @@ pub(super) fn ensure_join_pop(
         .ok_or(AcceptanceError::Freeze(FREEZE_POP_INVALID))?;
     // Avoid allocating string - just compare directly
     let algorithm_matches = match alg_value {
-        Value::Text(text) => text.as_str() == "ML-DSA-65",
+        Value::Text(text) => text.as_str() == "ML-DSA-87",
         Value::Bytes(bytes) => std::str::from_utf8(bytes)
-            .map(|s| s == "ML-DSA-65")
+            .map(|s| s == "ML-DSA-87")
             .unwrap_or(false),
         _ => false,
     };
@@ -118,15 +116,15 @@ pub(super) fn ensure_join_pop(
     }
 
     let pk_bytes = match header.get(&KEY_PK) {
-        Some(Value::Bytes(bytes)) if bytes.len() == ML_DSA_65_PUBLIC_KEY_BYTES => bytes,
+        Some(Value::Bytes(bytes)) if bytes.len() == ML_DSA_87_PUBLIC_KEY_BYTES => bytes,
         _ => return Err(AcceptanceError::Freeze(FREEZE_POP_INVALID)),
     };
     let sig_bytes = match header.get(&KEY_SIG) {
-        Some(Value::Bytes(bytes)) if bytes.len() == ML_DSA_65_SIGNATURE_BYTES => bytes,
+        Some(Value::Bytes(bytes)) if bytes.len() == ML_DSA_87_SIGNATURE_BYTES => bytes,
         _ => return Err(AcceptanceError::Freeze(FREEZE_POP_INVALID)),
     };
 
-    let leaf_id = crate::compute_leaf_id(leaf_id_mode, anchor.gid, "ML-DSA-65", pk_bytes)
+    let leaf_id = crate::compute_leaf_id(leaf_id_mode, anchor.gid, "ML-DSA-87", pk_bytes)
         .map_err(AcceptanceError::from)?;
 
     #[derive(Serialize)]
@@ -149,8 +147,13 @@ pub(super) fn ensure_join_pop(
     )
     .map_err(AcceptanceError::from)?;
 
-    verify_ml_dsa_65_detached_signature(pk_bytes.as_slice(), &msg, sig_bytes.as_slice())
-        .map_err(|_| AcceptanceError::Freeze(FREEZE_POP_INVALID))?;
+    cityg_pqc::verify(
+        pk_bytes.as_slice(),
+        SignatureContext::ANCHOR_POP,
+        &msg,
+        sig_bytes.as_slice(),
+    )
+    .map_err(|_| AcceptanceError::Freeze(FREEZE_POP_INVALID))?;
 
     Ok(())
 }
@@ -928,7 +931,7 @@ mod tests {
             .expect_err("invalid pop alg encoding should freeze");
         expect_freeze(err, FREEZE_POP_INVALID);
 
-        header.insert(super::HDR_POP_ALG, Value::Text("ML-DSA-65".to_string()));
+        header.insert(super::HDR_POP_ALG, Value::Text("ML-DSA-87".to_string()));
         header.insert(super::HDR_POP_PK, Value::Bytes(vec![0u8; 4]));
         let err = ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup)
             .expect_err("invalid pop public key length should freeze");

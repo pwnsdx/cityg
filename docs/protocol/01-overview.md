@@ -41,7 +41,7 @@
 | **Server Blindness** | ✅ Cryptographic | Server cannot learn hp, Y*, E_k, or eid |
 | **Offline Join** | ✅ Native | No online handshake required |
 | **Parallel Joins** | ✅ Up to h_max=16 | Multi-Head Window (MHW) |
-| **Post-Quantum** | ✅ NIST Standards | ML-KEM-768, ML-DSA-65 |
+| **Post-Quantum** | ✅ NIST Standards | ML-KEM-768, ML-DSA-87 |
 | **Scalability** | ✅ O(log N) | Merkle witnesses, millions of members |
 | **Forward Secrecy** | ✅ Per-epoch | Deterministic epoch rotation |
 
@@ -99,7 +99,7 @@
    - No tree synchronization bottleneck
 
 5. **✅ Post-Quantum Security**
-   - NIST-approved algorithms (ML-KEM-768, ML-DSA-65)
+   - NIST-approved algorithms (ML-KEM-768, ML-DSA-87)
    - Quantum-resistant by design, not retrofitted
 
 6. **✅ Battery-Friendly**
@@ -218,7 +218,7 @@ Window Properties:
 
 **Chain:**
 ```
-PoP Signature (ML-DSA-65)
+PoP Signature (ML-DSA-87)
     ↓
 ρ := H_L("msphf/rho/der", [pop_sig, xk_hash])  — deterministic from PoP
     ↓
@@ -273,7 +273,7 @@ hp_commit := H_L("msphf/hp/commit", [hp])  — field #99
 **Role:** Device joining the group or contributing to an epoch.
 
 **Responsibilities:**
-1. Generate PoP (Proof-of-Possession) signature with ML-DSA-65
+1. Generate PoP (Proof-of-Possession) signature with ML-DSA-87
 2. Derive deterministic seed ρ from PoP
 3. Build RLWE-HPS hash projection (hp) via KGen
 4. Encrypt hp in KBROAD envelope
@@ -385,7 +385,7 @@ Both produce cryptographically identical anchors - the difference is **policy** 
 │  ┌──────────────┬─────────────┬──────────────────────────┐  │
 │  │ pqcrypto_    │ pqcrypto_   │  blake3, chacha20poly1305│  │
 │  │ dilithium    │ kyber       │  (Rust crypto ecosystem) │  │
-│  │ (ML-DSA-65)  │ (ML-KEM-768)│                          │  │
+│  │ (ML-DSA-87)  │ (ML-KEM-768)│                          │  │
 │  └──────────────┴─────────────┴──────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -396,7 +396,7 @@ Both produce cryptographically identical anchors - the difference is **policy** 
 JOINER                        SERVER                      RECEIVERS
   │                              │                            │
   │ 1. Generate PoP signature    │                            │
-  │    (ML-DSA-65)               │                            │
+  │    (ML-DSA-87)               │                            │
   │                              │                            │
   │ 2. Derive ρ from PoP         │                            │
   │    ρ := H_L("msphf/rho/der", │                            │
@@ -424,7 +424,7 @@ JOINER                        SERVER                      RECEIVERS
   │                              │ 8. Validate structure      │
   │                              │    (CBOR, headers, sizes)  │
   │                              │                            │
-  │                              │ 9. Verify PoP (ML-DSA-65)  │
+  │                              │ 9. Verify PoP (ML-DSA-87)  │
   │                              │                            │
   │                              │ 10. Check ρ determinism    │
   │                              │     H_L("msphf/kgen/rho",  │
@@ -486,7 +486,7 @@ JOINER                        SERVER                      RECEIVERS
 - E_k (derived from Y*, which server doesn't know)
 - eid (derived from E_k)
 
-**Important Clarification:** "Server blindness" refers to **encryption key confidentiality**, not device anonymity. The server **CAN identify devices** via public keys (ML-DSA-65, ~2KB) transmitted in field #108 (HDR_POP_PK) during join/merge operations. These public keys are used for signature verification and leaf_id computation. However, the server cannot decrypt messages or derive encryption keys.
+**Important Clarification:** "Server blindness" refers to **encryption key confidentiality**, not device anonymity. The server **CAN identify devices** via public keys (ML-DSA-87, ~2KB) transmitted in field #108 (HDR_POP_PK) during join/merge operations. These public keys are used for signature verification and leaf_id computation. However, the server cannot decrypt messages or derive encryption keys.
 
 **Enforcement Mechanism:**
 1. **Type System:** No `MlKemSecretKey` in `AcceptanceContext` ([`accept/` module](../../crates/msphf-orchestrator/src/accept/mod.rs))
@@ -543,7 +543,7 @@ JOINER                        SERVER                      RECEIVERS
    - join_delta_root = canonical_set_root([...existing, Bob])
    - Builds membership witness for Bob
    - Builds non-membership witnesses (proving no conflicts)
-   - Generates PoP signature (ML-DSA-65)
+   - Generates PoP signature (ML-DSA-87)
    - Creates CAPSS Smallwood + ZK-VRF proofs
    - Encrypts hp in KBROAD envelope
 

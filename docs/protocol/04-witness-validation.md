@@ -108,7 +108,7 @@ pub enum WitnessMode {
 
 | Field     | Type          | Size  | Description |
 |-----------|---------------|-------|-------------|
-| `leaf_id` | `bstr`        | 32 B  | `H_L("msphf/leaf/id", [pk_bytes])` where `pk_bytes` is ML-DSA-65 public key |
+| `leaf_id` | `bstr`        | 32 B  | `H_L("msphf/leaf/id", [pk_bytes])` where `pk_bytes` is ML-DSA-87 public key |
 | `root`    | `bstr`        | 32 B  | Merkle root to validate against (MUST match expected root from `X_k`) |
 | `path`    | `[PathEntry]` | ≤64   | Path from leaf to root (depth ≤ 64) |
 
@@ -131,7 +131,7 @@ pub struct RawPathEntry {
 #[derive(Serialize)]
 struct LeafBinding {
     #[serde(with = "serde_bytes")]
-    public_key: &[u8],  // ML-DSA-65 public key (1952 bytes)
+    public_key: &[u8],  // ML-DSA-87 public key (2592 bytes)
 }
 
 leaf_id := H_L("msphf/leaf/id", &LeafBinding { public_key: pk_bytes })
@@ -270,14 +270,14 @@ Non-membership witnesses prove that a query value falls within an interval `(lef
 
 ## 5. Proof-of-Possession (PoP)
 
-PoP witnesses bind the device's ML-DSA-65 keypair to the anchor instance **X_k** and prove possession of the private key.
+PoP witnesses bind the device's ML-DSA-87 keypair to the anchor instance **X_k** and prove possession of the private key.
 
 ### Wire Format
 
 ```cbor
 {
-  "public_key": h'<1952 bytes>',  # ML-DSA-65 public key
-  "signature": h'<4595 bytes>'    # ML-DSA-65 detached signature
+  "public_key": h'<2592 bytes>',  # ML-DSA-87 public key
+  "signature": h'<4627 bytes>'    # ML-DSA-87 detached signature
 }
 ```
 
@@ -302,8 +302,8 @@ pop_msg := H_L("msphf/pop/msg", &PopMsg { xk, leaf_id, epoch })
 ### Validation Steps
 
 1. **Size check**:
-   - `public_key.len() == 1952` (ML-DSA-65 public key size)
-   - `signature.len() == 4595` (ML-DSA-65 signature size)
+   - `public_key.len() == 2592` (ML-DSA-87 public key size)
+   - `signature.len() == 4627` (ML-DSA-87 signature size)
 
 2. **Leaf binding check**:
    ```rust
@@ -520,7 +520,7 @@ The acceptance pipeline validates witnesses in the following order (specificatio
    - Compute `leaf_id := H_L("msphf/leaf/id", [pk_bytes])`
    - Require `leaf_id ∈ join_leaf_ids` (syntactic check)
 3. Compute `pop_msg := H_L("msphf/pop/msg", [xk, leaf_id, we_epoch_id])`
-4. Verify ML-DSA-65 signature deterministically
+4. Verify ML-DSA-87 signature deterministically
 5. On failure → `Freeze(921, "pop_invalid")`
 
 ### Step 6: SRX Validation (Join Only)
@@ -561,7 +561,7 @@ Witness validation errors map to **Freeze** codes (deterministic, cacheable):
 | 907.4   | `proj_eval_fail`            | Merkle path evaluation does not match expected root |
 | 907.5   | `path_oversize`             | Merkle path depth > 64 |
 | 907.6   | `set_conflict`              | Leaf set not strictly increasing |
-| 921     | `pop_invalid`               | ML-DSA-65 signature verification failed |
+| 921     | `pop_invalid`               | ML-DSA-87 signature verification failed |
 | 929     | `srx_required`              | SRX payload missing when required |
 | 930     | `srx_invalid`               | SRX validation failed (see sub-reasons below) |
 
@@ -721,6 +721,6 @@ impl ValidatedWitness {
 
 ## Summary
 
-City-G's canonical witness validation enforces strict **depth limits** (≤64), **sorted order**, and **anchored adjacency** to ensure deterministic verification and prevent proof malleability. The **SRX/v1-complete** mode bundles all join witnesses into a single payload with shared anchor pools, enabling efficient batch validation. **PoP** witnesses bind ML-DSA-65 keypairs to the epoch context, and **NMINT** bindings prevent interval witness replay. All errors map to deterministic **Freeze** codes for caching and DoS mitigation.
+City-G's canonical witness validation enforces strict **depth limits** (≤64), **sorted order**, and **anchored adjacency** to ensure deterministic verification and prevent proof malleability. The **SRX/v1-complete** mode bundles all join witnesses into a single payload with shared anchor pools, enabling efficient batch validation. **PoP** witnesses bind ML-DSA-87 keypairs to the epoch context, and **NMINT** bindings prevent interval witness replay. All errors map to deterministic **Freeze** codes for caching and DoS mitigation.
 
 **Next**: [05 — SPHF & ME-OR](./05-sphf-meor.md)

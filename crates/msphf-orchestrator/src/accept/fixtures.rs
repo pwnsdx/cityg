@@ -11,6 +11,8 @@ use ciborium::{
     de, ser,
     value::{Integer, Value},
 };
+use cityg_pqc::SecretKey as MlDsaSecretKey;
+use cityg_pqc::test_utils::{AsBytes as _, keypair};
 use msphf_core::{
     ds,
     hash::{self, hash_bytes_with_label},
@@ -18,8 +20,15 @@ use msphf_core::{
     params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK},
     witness::{RawMembershipWitness, RawNonMembershipWitness},
 };
-use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign, keypair};
-use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+
+/// Bootstrap CA signature over an anchor digest (header key 171).
+fn detached_sign(message: &[u8], secret_key: &MlDsaSecretKey) -> Vec<u8> {
+    cityg_pqc::test_utils::sign(
+        secret_key,
+        cityg_pqc::SignatureContext::ANCHOR_BOOTSTRAP,
+        message,
+    )
+}
 use serde::Serialize;
 use std::{borrow::Cow, collections::BTreeMap, sync::OnceLock};
 pub(crate) fn leak(bytes: [u8; 32]) -> &'static [u8] {
@@ -31,7 +40,7 @@ pub(crate) fn unique_pop_keypair() -> crate::PopKeypair<'static> {
     let pk_static: &'static [u8] = Box::leak(pk.as_bytes().to_vec().into_boxed_slice());
     let sk_static: &'static MlDsaSecretKey = Box::leak(Box::new(sk));
     crate::PopKeypair {
-        algorithm: "ML-DSA-65",
+        algorithm: "ML-DSA-87",
         public_key: pk_static,
         secret_key: sk_static,
     }
@@ -79,7 +88,7 @@ pub(crate) fn sample_anchor_fixture() -> (AnchorInstanceParts<'static>, SrxInput
     if let Ok(pop_leaf) = crate::compute_leaf_id(
         crate::LeafIdMode::PerGroup,
         gid,
-        "ML-DSA-65",
+        "ML-DSA-87",
         pop_keys_static().0,
     ) && pop_leaf.len() == 32
     {
@@ -170,7 +179,7 @@ pub(crate) fn params() -> OrchestrationParams<'static> {
         srx: Some(srx),
         srx_mode: crate::SrxMode::Complete,
         pop_keys: Some(crate::PopKeypair {
-            algorithm: "ML-DSA-65",
+            algorithm: "ML-DSA-87",
             public_key: pop_keys_static().0,
             secret_key: pop_keys_static().1,
         }),
@@ -264,7 +273,7 @@ pub(crate) fn fresh_pop_keypair() -> crate::PopKeypair<'static> {
     let pk_static: &'static [u8] = Box::leak(pk.as_bytes().to_vec().into_boxed_slice());
     let sk_static: &'static MlDsaSecretKey = Box::leak(Box::new(sk));
     crate::PopKeypair {
-        algorithm: "ML-DSA-65",
+        algorithm: "ML-DSA-87",
         public_key: pk_static,
         secret_key: sk_static,
     }
@@ -272,7 +281,7 @@ pub(crate) fn fresh_pop_keypair() -> crate::PopKeypair<'static> {
 
 pub fn sample_pop_keys() -> (Vec<u8>, MlDsaSecretKey) {
     let (pk, sk) = pop_keys_static();
-    (pk.to_vec(), *sk)
+    (pk.to_vec(), sk.clone())
 }
 
 pub(crate) fn configure_bootstrap(ctx: &mut AcceptanceContext) {
@@ -868,7 +877,7 @@ pub(crate) fn mutate_srx_payload_preserving_leaf_auto(
     pop_pk: &[u8],
     mutator: impl FnOnce(&mut Value),
 ) {
-    if let Ok(leaf_arr) = crate::compute_leaf_id(mode, gid, "ML-DSA-65", pop_pk) {
+    if let Ok(leaf_arr) = crate::compute_leaf_id(mode, gid, "ML-DSA-87", pop_pk) {
         mutate_srx_payload_preserving_leaf(header, &leaf_arr, mutator);
         return;
     }
@@ -896,11 +905,11 @@ mod tests {
     #[test]
     fn helper_keypair_and_hp_inputs_are_constructible() {
         let unique = unique_pop_keypair();
-        assert_eq!(unique.algorithm, "ML-DSA-65");
+        assert_eq!(unique.algorithm, "ML-DSA-87");
         assert!(!unique.public_key.is_empty());
 
         let fresh = fresh_pop_keypair();
-        assert_eq!(fresh.algorithm, "ML-DSA-65");
+        assert_eq!(fresh.algorithm, "ML-DSA-87");
         assert!(!fresh.public_key.is_empty());
 
         let (inputs, proof) = sample_hp_inputs();
@@ -996,7 +1005,7 @@ mod tests {
         );
 
         let expected_leaf =
-            crate::compute_leaf_id(crate::LeafIdMode::PerGroup, &gid, "ML-DSA-65", &pop_pk)?;
+            crate::compute_leaf_id(crate::LeafIdMode::PerGroup, &gid, "ML-DSA-87", &pop_pk)?;
         let payload_bytes = match header.get(&HDR_SRX_PAYLOAD) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => panic!("payload bytes missing"),

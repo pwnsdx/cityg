@@ -2,7 +2,6 @@ use msphf_orchestrator::{
     AnchorInstanceParts, FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair,
     SrxInputs, SrxMode,
 };
-use pqcrypto_dilithium::dilithium5;
 
 pub struct BarrierOrchestrationInputs<'a> {
     pub gid: &'a [u8; 32],
@@ -17,7 +16,7 @@ pub struct BarrierOrchestrationInputs<'a> {
     pub msphf_params_id: &'a str,
     pub srx: Option<SrxInputs<'a>>,
     pub pop_public_key: &'a [u8],
-    pub pop_secret_key: &'a dilithium5::SecretKey,
+    pub pop_secret_key: &'a cityg_pqc::SecretKey,
     pub proof_mode: &'a str,
     pub vrf_id: &'a str,
     pub policy_version: &'a str,
@@ -68,7 +67,7 @@ pub fn prepare_barrier_orchestration(
         srx,
         srx_mode: SrxMode::Complete,
         pop_keys: Some(PopKeypair {
-            algorithm: "ML-DSA-65",
+            algorithm: "ML-DSA-87",
             public_key: pop_public_key,
             secret_key: pop_secret_key,
         }),

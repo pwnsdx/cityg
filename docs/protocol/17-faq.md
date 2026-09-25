@@ -31,7 +31,7 @@
 - **Server blindness**: Cryptographic guarantee (server cannot learn epoch keys)
 - **Offline-ready**: Devices derive keys without server interaction
 - **Extreme scale**: Millions of members with O(log N) overhead
-- **Post-quantum**: ML-KEM-768, ML-DSA-65 (NIST-standardized)
+- **Post-quantum**: ML-KEM-768, ML-DSA-87 (NIST-standardized)
 
 ---
 
@@ -279,7 +279,7 @@ full guidance.
 | Primitive | Quantum Security | Standard |
 |-----------|------------------|----------|
 | **ML-KEM-768** | 192 bits | FIPS 203 |
-| **ML-DSA-65** | 192 bits | FIPS 204 |
+| **ML-DSA-87** | 256 bits | FIPS 204 |
 | **BLAKE3** | 128 bits | Non-standardized |
 | **ChaCha20** | 128 bits | RFC 8439 |
 | **RLWE-HPS A1** | ≈96 bits (Module-LWE, best-known quantum ≈2^95 ops) | Custom (ongoing analysis) |
@@ -581,7 +581,7 @@ City-G `tswe/msphf-we/fs-hybrid` is a **post-quantum, publisher-blind E2EE proto
 - ✅ **Server blindness** (cryptographic, type-safe)
 - ✅ **Offline-ready** (non-interactive epoch derivation)
 - ✅ **Extreme scale** (millions of members)
-- ✅ **Post-quantum** (ML-KEM-768, ML-DSA-65)
+- ✅ **Post-quantum** (ML-KEM-768, ML-DSA-87)
 - ✅ **Parallel joins** (Multi-Head Window)
 
 **Use Cases**: Public broadcasts, whistleblower platforms, mass events, IoT deployments

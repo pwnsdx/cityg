@@ -45,7 +45,7 @@
 //! # use cityg_api_client::{
 //! #   build_room_admin_proof, generate_room_admin_keypair, RoomAdminOperation,
 //! # };
-//! let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+//! let (pop_public_key, pop_secret_key) = generate_room_admin_keypair()?;
 //! let admin_proof = build_room_admin_proof(
 //!     RoomAdminOperation::Bootstrap,
 //!     "room-123",
@@ -168,7 +168,6 @@ use pb::MergeTicketIntent as PbMergeTicketIntent;
 pub use pb::RoomAdminProof;
 #[cfg(test)]
 use pb::{ListRoomAdminsResponse, MembersRequest, RoomAdminMutationResponse};
-use pqcrypto_dilithium::dilithium5;
 use prost::Message;
 use reqwest::{Client, StatusCode};
 pub use room_admin::*;
@@ -1029,7 +1028,7 @@ impl PreparedRuntimeJoinTicket {
     pub fn prepare_barrier_orchestration<'a>(
         &'a self,
         pop_public_key: &'a [u8],
-        pop_secret_key: &'a dilithium5::SecretKey,
+        pop_secret_key: &'a cityg_pqc::SecretKey,
         vrf_secret_key: &'a [u8],
         vrf_public_key: &'a [u8],
     ) -> PreparedBarrierOrchestration<'a> {
@@ -1188,11 +1187,12 @@ pub struct PreparedRevocationMergeTicket {
 }
 
 impl PreparedOriginMergeTicket {
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_barrier_orchestration<'a>(
         &'a self,
         gid: &'a [u8; 32],
         pop_public_key: &'a [u8],
-        pop_secret_key: &'a dilithium5::SecretKey,
+        pop_secret_key: &'a cityg_pqc::SecretKey,
         vrf_secret_key: &'a [u8],
         vrf_public_key: &'a [u8],
         fs_ec: u64,
@@ -1274,11 +1274,12 @@ impl PreparedOriginMergeTicket {
 }
 
 impl PreparedRevocationMergeTicket {
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_barrier_orchestration<'a>(
         &'a self,
         gid: &'a [u8; 32],
         pop_public_key: &'a [u8],
-        pop_secret_key: &'a dilithium5::SecretKey,
+        pop_secret_key: &'a cityg_pqc::SecretKey,
         vrf_secret_key: &'a [u8],
         vrf_public_key: &'a [u8],
         fs_ec: u64,
@@ -1316,6 +1317,7 @@ impl PreparedRevocationMergeTicket {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn snapshot_preparation_request<'a>(
         &'a self,
         room_id: &'a str,
@@ -1734,6 +1736,7 @@ mod tests {
         routing::{get, post},
     };
     use cityg_client::demo::demo_bundle_alice;
+    use cityg_pqc::test_utils::AsBytes as _;
     use pb::{
         AcceptEpochResponse, BarrierFetchPublicTreeRequest, BarrierFetchPublicTreeResponse,
         BarrierJoinOccupancyRecord as PbBarrierJoinOccupancyRecord,
@@ -1748,8 +1751,6 @@ mod tests {
         RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse, SeedHeadResponse,
         SendMessageResponse,
     };
-    use pqcrypto_dilithium::dilithium5;
-    use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
     use prost::Message;
     use std::{
         error::Error as StdError,
@@ -1774,18 +1775,15 @@ mod tests {
     struct TestHistoryAuthority {
         descriptor: HistoryAuthorityDescriptor,
         descriptor_bytes: Vec<u8>,
-        secret_key: dilithium5::SecretKey,
+        secret_key: cityg_pqc::SecretKey,
         attestation_bytes: Vec<u8>,
     }
 
     fn test_history_authority_keypair() -> (&'static [u8], &'static [u8]) {
         static KEYPAIR: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
         let (public_key, secret_key) = KEYPAIR.get_or_init(|| {
-            let (public_key, secret_key) = dilithium5::keypair();
-            (
-                public_key.as_bytes().to_vec(),
-                secret_key.as_bytes().to_vec(),
-            )
+            let (public_key, secret_key) = cityg_pqc::test_utils::keypair();
+            (public_key, secret_key.to_bytes())
         });
         (public_key.as_slice(), secret_key.as_slice())
     }
@@ -1797,9 +1795,8 @@ mod tests {
         kem_tree_hash_after: [u8; 32],
     ) -> TestHistoryAuthority {
         let (public_key_bytes, secret_key_bytes) = test_history_authority_keypair();
-        let public_key = dilithium5::PublicKey::from_bytes(public_key_bytes)
-            .expect("test history authority public key");
-        let secret_key = dilithium5::SecretKey::from_bytes(secret_key_bytes)
+        let public_key = public_key_bytes.to_vec();
+        let secret_key = cityg_pqc::SecretKey::from_bytes(secret_key_bytes)
             .expect("test history authority secret key");
         let descriptor = HistoryAuthorityDescriptor {
             scope_id: [0xA1; 32],
@@ -1823,9 +1820,11 @@ mod tests {
             &parent_attestation_id,
             GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
         ));
-        let signature = dilithium5::detached_sign(payload.as_slice(), &secret_key)
-            .as_bytes()
-            .to_vec();
+        let signature = cityg_pqc::test_utils::sign_deterministic(
+            &secret_key,
+            cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+            payload.as_slice(),
+        );
         let attestation_bytes = encode_cbor_det(&GlobalHistoryAttestationWire(
             descriptor.scope_id.to_vec(),
             gid.to_vec(),
@@ -1870,9 +1869,11 @@ mod tests {
             fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
             fs_forward_leap_slack_device: fs_policy.slack_device,
         });
-        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
-            .as_bytes()
-            .to_vec();
+        let signature = cityg_pqc::test_utils::sign_deterministic(
+            &authority.secret_key,
+            cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+            payload.as_slice(),
+        );
         encode_cbor_det(&DeploymentProfileManifestWire {
             scope_id: authority.descriptor.scope_id.to_vec(),
             history_authority_extension: history_authority_extension.to_string(),
@@ -1907,9 +1908,11 @@ mod tests {
             total_entries,
             selector,
         });
-        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
-            .as_bytes()
-            .to_vec();
+        let signature = cityg_pqc::test_utils::sign_deterministic(
+            &authority.secret_key,
+            cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+            payload.as_slice(),
+        );
         encode_cbor_det(&HelperCompletenessAttestationWire(
             authority.descriptor.scope_id.to_vec(),
             helper_kind.to_string(),
@@ -2016,9 +2019,11 @@ mod tests {
             current_join_occupancies: join_records.as_slice(),
             current_revoked_occupancies: revoked_records.as_slice(),
         });
-        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
-            .as_bytes()
-            .to_vec();
+        let signature = cityg_pqc::test_utils::sign_deterministic(
+            &authority.secret_key,
+            cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+            payload.as_slice(),
+        );
         encode_cbor_det(&JoinProvisioningArtifactWire {
             scope_id: authority.descriptor.scope_id.to_vec(),
             history_authority_extension: response.history_authority_extension.clone(),
@@ -2092,9 +2097,11 @@ mod tests {
             fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
             fs_forward_leap_slack_device: fs_policy.slack_device,
         });
-        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
-            .as_bytes()
-            .to_vec();
+        let signature = cityg_pqc::test_utils::sign_deterministic(
+            &authority.secret_key,
+            cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+            payload.as_slice(),
+        );
         encode_cbor_det(&DeploymentProfileManifestWire {
             scope_id: authority.descriptor.scope_id.to_vec(),
             history_authority_extension: response.history_authority_extension.clone(),
@@ -2207,9 +2214,11 @@ mod tests {
             fs_epoch_base_ts: response.fs_epoch_base_ts,
             kbroad_generation: response.kbroad_generation,
         });
-        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
-            .as_bytes()
-            .to_vec();
+        let signature = cityg_pqc::test_utils::sign_deterministic(
+            &authority.secret_key,
+            cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+            payload.as_slice(),
+        );
         encode_cbor_det(&MergeTicketArtifactWire {
             scope_id: authority.descriptor.scope_id.to_vec(),
             history_authority_extension: response.history_authority_extension.clone(),
@@ -2299,9 +2308,11 @@ mod tests {
             fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
             fs_forward_leap_slack_device: fs_policy.slack_device,
         });
-        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
-            .as_bytes()
-            .to_vec();
+        let signature = cityg_pqc::test_utils::sign_deterministic(
+            &authority.secret_key,
+            cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+            payload.as_slice(),
+        );
         encode_cbor_det(&DeploymentProfileManifestWire {
             scope_id: authority.descriptor.scope_id.to_vec(),
             history_authority_extension: response.history_authority_extension.clone(),
@@ -3786,7 +3797,7 @@ mod tests {
         let (base_url, handle) = start_mock_server().await?;
         let client = CitygApiClient::with_http_client(base_url, Client::new());
         let demo_bundle = demo_bundle_alice()?;
-        let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+        let (pop_public_key, pop_secret_key) = generate_room_admin_keypair().expect("keypair");
         let target_pop_public_key = vec![0xA1; 32];
 
         client.health().await?;
@@ -4024,7 +4035,7 @@ mod tests {
     async fn expel_member_ticket_roundtrip_against_mock_server() -> Result<(), Box<dyn StdError>> {
         let (base_url, handle) = start_mock_server().await?;
         let client = CitygApiClient::with_http_client(base_url, Client::new());
-        let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+        let (pop_public_key, pop_secret_key) = generate_room_admin_keypair().expect("keypair");
 
         let expelled = client
             .expel_member_ticket(

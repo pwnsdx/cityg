@@ -102,7 +102,7 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 | Primitive | City-G | MLS |
 |-----------|--------|-----|
 | **KEM** | ML-KEM-768 (NIST Level 3) | ECDH P-256/X25519 (MLS 1.0), Hybrid (draft) |
-| **Signature** | ML-DSA-65 (NIST Level 3) | Ed25519, ECDSA P-256, Ed448 |
+| **Signature** | ML-DSA-87 (NIST Level 3) | Ed25519, ECDSA P-256, Ed448 |
 | **Hash** | BLAKE3 (256-bit) | SHA-256, SHA-512 |
 | **AEAD** | ChaCha20-Poly1305 | AES-GCM, ChaCha20-Poly1305 |
 | **HKDF** | HKDF-BLAKE3 | HKDF-SHA256/SHA512 |
@@ -154,7 +154,7 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 | **Message Content** | ✅ AEAD-encrypted | ✅ AEAD-encrypted |
 | **Metadata** | ⚠️ gid, parent_root visible | ⚠️ Group ID, sender visible |
 
-**Important Clarification on "Server Blindness"**: In City-G, "server-blind" means the server **cannot decrypt messages or derive encryption keys** (hp, Y*, E_k, eid). However, the server **CAN identify devices** via public keys (ML-DSA-65, ~2KB) transmitted in field #108 during join/merge operations. This is NOT sender anonymity — it's encryption key confidentiality.
+**Important Clarification on "Server Blindness"**: In City-G, "server-blind" means the server **cannot decrypt messages or derive encryption keys** (hp, Y*, E_k, eid). However, the server **CAN identify devices** via public keys (ML-DSA-87, ~2KB) transmitted in field #108 during join/merge operations. This is NOT sender anonymity — it's encryption key confidentiality.
 
 **Server Compromise**:
 - **City-G**: Server compromise does not leak epoch keys (type-safe)
@@ -166,7 +166,7 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 
 | Property | City-G | MLS |
 |----------|--------|-----|
-| **Member Auth** | ✅ PoP (ML-DSA-65) | ✅ TreeKEM signature |
+| **Member Auth** | ✅ PoP (ML-DSA-87) | ✅ TreeKEM signature |
 | **Publisher Auth** | ✅ Anchor signature | ✅ Commit signature |
 | **Replay Protection** | ✅ ρ determinism, VCK cache | ✅ Epoch counter |
 

@@ -1,13 +1,9 @@
 use anyhow::{Context as AnyhowContext, Result, anyhow};
+use cityg_pqc::SignatureContext;
 use msphf_orchestrator::{CapssWitnessBundle, LeafIdMode, compute_leaf_id};
-use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::{
-    DetachedSignature as DilithiumDetachedSignatureTrait, PublicKey as DilithiumPublicKeyTrait,
-    SecretKey as DilithiumSecretKeyTrait,
-};
 
 pub const MESSAGE_PREFIX: &[u8; 4] = b"CGM1";
-pub const MESSAGE_SENDER_DEVICE_PK_ALG: &str = "ML-DSA-65";
+pub const MESSAGE_SENDER_DEVICE_PK_ALG: &str = "ML-DSA-87";
 
 #[derive(Debug)]
 pub struct AuthenticatedMessage<'a> {
@@ -105,20 +101,18 @@ pub fn decode_authenticated_message(data: &[u8]) -> Result<AuthenticatedMessage<
     })
 }
 
-pub fn generate_message_signing_keypair() -> (Vec<u8>, Vec<u8>) {
-    let (public_key, secret_key) = dilithium5::keypair();
-    (
-        public_key.as_bytes().to_vec(),
-        secret_key.as_bytes().to_vec(),
-    )
+pub fn generate_message_signing_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
+    let (public_key, secret_key) =
+        cityg_pqc::keypair().map_err(|err| anyhow!("ML-DSA-87 key generation failed: {err}"))?;
+    Ok((public_key, secret_key.to_bytes()))
 }
 
 pub fn message_signing_public_key_bytes() -> usize {
-    dilithium5::public_key_bytes()
+    cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES
 }
 
 pub fn message_signature_bytes() -> usize {
-    dilithium5::signature_bytes()
+    cityg_pqc::ML_DSA_87_SIGNATURE_BYTES
 }
 
 pub fn authenticated_message_min_bytes() -> usize {
@@ -147,10 +141,15 @@ pub fn build_authenticated_message(
     ))
 }
 
-pub fn detached_sign_payload(payload: &[u8], secret_key: &[u8]) -> Result<Vec<u8>> {
-    let sk = dilithium5::SecretKey::from_bytes(secret_key)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
-    Ok(dilithium5::detached_sign(payload, &sk).as_bytes().to_vec())
+/// Sign `payload` for the given usage context with a serialized ML-DSA-87 key.
+pub fn detached_sign_payload(
+    context: SignatureContext,
+    payload: &[u8],
+    secret_key: &[u8],
+) -> Result<Vec<u8>> {
+    let sk = cityg_pqc::SecretKey::from_bytes(secret_key)
+        .map_err(|_| anyhow!("invalid ML-DSA-87 secret key"))?;
+    cityg_pqc::sign(&sk, context, payload).map_err(|err| anyhow!("ML-DSA-87 signing failed: {err}"))
 }
 
 pub fn sign_message(
@@ -159,14 +158,14 @@ pub fn sign_message(
     plaintext: &[u8],
     secret_key: &[u8],
 ) -> Result<Vec<u8>> {
-    let sk = dilithium5::SecretKey::from_bytes(secret_key)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
+    let sk = cityg_pqc::SecretKey::from_bytes(secret_key)
+        .map_err(|_| anyhow!("invalid ML-DSA-87 secret key"))?;
     let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
     payload.extend_from_slice(leaf_id);
     payload.extend_from_slice(&timestamp_ms.to_le_bytes());
     payload.extend_from_slice(plaintext);
-    let signature = dilithium5::detached_sign(&payload, &sk);
-    Ok(signature.as_bytes().to_vec())
+    cityg_pqc::sign(&sk, SignatureContext::MESSAGE, &payload)
+        .map_err(|err| anyhow!("ML-DSA-87 signing failed: {err}"))
 }
 
 pub fn verify_message_signature(
@@ -176,18 +175,23 @@ pub fn verify_message_signature(
     signature_bytes: &[u8],
     public_key_bytes: &[u8],
 ) -> Result<()> {
-    let pk = dilithium5::PublicKey::from_bytes(public_key_bytes)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 public key"))?;
-    let signature = dilithium5::DetachedSignature::from_bytes(signature_bytes)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 signature"))?;
-
     let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
     payload.extend_from_slice(leaf_id);
     payload.extend_from_slice(&timestamp_ms.to_le_bytes());
     payload.extend_from_slice(plaintext);
 
-    dilithium5::verify_detached_signature(&signature, &payload, &pk)
-        .map_err(|_| anyhow!("signature verification failed"))?;
+    cityg_pqc::verify(
+        public_key_bytes,
+        SignatureContext::MESSAGE,
+        &payload,
+        signature_bytes,
+    )
+    .map_err(|err| match err {
+        cityg_pqc::VerifyError::InvalidPublicKeyLength
+        | cityg_pqc::VerifyError::InvalidPublicKey => anyhow!("invalid ML-DSA-87 public key"),
+        cityg_pqc::VerifyError::InvalidSignatureLength => anyhow!("invalid ML-DSA-87 signature"),
+        cityg_pqc::VerifyError::VerificationFailed => anyhow!("signature verification failed"),
+    })?;
 
     Ok(())
 }
@@ -258,10 +262,9 @@ pub fn sign_identity_binding(
     pop_secret_key: &[u8],
 ) -> Result<Vec<u8>> {
     use ciborium::ser::into_writer;
-    use pqcrypto_traits::sign::DetachedSignature as _;
     use serde_bytes::ByteBuf;
 
-    let pop_secret = dilithium5::SecretKey::from_bytes(pop_secret_key)
+    let pop_secret = cityg_pqc::SecretKey::from_bytes(pop_secret_key)
         .context("invalid persisted room identity secret key")?;
     let message_data = (
         ByteBuf::from(alias.as_bytes().to_vec()),
@@ -270,8 +273,8 @@ pub fn sign_identity_binding(
     let mut message = Vec::new();
     into_writer(&message_data, &mut message)
         .context("failed to encode identity binding message")?;
-    let signature = dilithium5::detached_sign(&message, &pop_secret);
-    Ok(signature.as_bytes().to_vec())
+    cityg_pqc::sign(&pop_secret, SignatureContext::IDENTITY_BINDING, &message)
+        .map_err(|err| anyhow!("ML-DSA-87 signing failed: {err}"))
 }
 
 pub fn build_signed_identity_binding(
@@ -339,10 +342,17 @@ pub fn decode_capss_witness(data: &[u8]) -> Result<CapssWitnessBundle> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use cityg_pqc::test_utils::AsBytes as _;
+
+    /// Serialized (public key, secret key) pair.
+    fn keypair_bytes() -> (Vec<u8>, Vec<u8>) {
+        let (public_key, secret_key) = cityg_pqc::test_utils::keypair();
+        (public_key, secret_key.to_bytes())
+    }
 
     #[test]
     fn authenticated_message_roundtrips() -> Result<()> {
-        let (pk, sk) = dilithium5::keypair();
+        let (pk, sk) = keypair_bytes();
         let leaf = [0x42; 32];
         let ts = 7u64;
         let payload = b"hello";
@@ -358,7 +368,7 @@ mod tests {
     #[test]
     fn verified_authenticated_message_roundtrips() -> Result<()> {
         let gid = [0x11; 32];
-        let (pk, sk) = dilithium5::keypair();
+        let (pk, sk) = keypair_bytes();
         let leaf = compute_leaf_id(
             LeafIdMode::PerGroup,
             &gid,
@@ -376,8 +386,8 @@ mod tests {
     #[test]
     fn sender_leaf_binding_rejects_spoofed_key() {
         let gid = [0x11; 32];
-        let (pk1, _) = dilithium5::keypair();
-        let (pk2, _) = dilithium5::keypair();
+        let (pk1, _) = keypair_bytes();
+        let (pk2, _) = keypair_bytes();
         let leaf = compute_leaf_id(
             LeafIdMode::PerGroup,
             &gid,
@@ -391,7 +401,7 @@ mod tests {
 
     #[test]
     fn build_signed_identity_binding_roundtrips_fields() -> Result<()> {
-        let (pk, sk) = dilithium5::keypair();
+        let (pk, sk) = keypair_bytes();
         let binding = build_signed_identity_binding("alice", pk.as_bytes(), sk.as_bytes())?;
         assert_eq!(binding.alias, "alice");
         assert_eq!(binding.pop_public_key, pk.as_bytes());
@@ -400,9 +410,30 @@ mod tests {
     }
 
     #[test]
-    fn generate_message_signing_keypair_uses_ml_dsa_lengths() {
-        let (public_key, secret_key) = generate_message_signing_keypair();
-        assert_eq!(public_key.len(), dilithium5::public_key_bytes());
-        assert_eq!(secret_key.len(), dilithium5::secret_key_bytes());
+    fn generate_message_signing_keypair_uses_ml_dsa_lengths() -> Result<()> {
+        let (public_key, secret_key) = generate_message_signing_keypair()?;
+        assert_eq!(public_key.len(), cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES);
+        assert_eq!(secret_key.len(), cityg_pqc::ML_DSA_87_SECRET_KEY_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn message_signatures_are_bound_to_the_message_context() -> Result<()> {
+        let (pk, sk) = keypair_bytes();
+        let leaf = [0x42; 32];
+        let identity_signature =
+            detached_sign_payload(SignatureContext::IDENTITY_BINDING, b"payload", &sk)?;
+        assert!(
+            verify_message_signature(&leaf, 1, b"payload", &identity_signature, &pk).is_err(),
+            "a signature made for another usage must not verify as a message"
+        );
+        let err =
+            verify_message_signature(&leaf, 1, b"x", &[0u8; 3], &pk).expect_err("short signature");
+        assert!(err.to_string().contains("invalid ML-DSA-87 signature"));
+        let err = verify_message_signature(&leaf, 1, b"x", &identity_signature, &pk[1..])
+            .expect_err("short public key");
+        assert!(err.to_string().contains("invalid ML-DSA-87 public key"));
+        assert!(detached_sign_payload(SignatureContext::MESSAGE, b"x", &[0u8; 5]).is_err());
+        Ok(())
     }
 }

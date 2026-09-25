@@ -941,7 +941,7 @@ impl ServerContext {
 ### 7.1 Seed Derivation Hierarchy
 
 ```
-pop_sig (ML-DSA-65 signature)
+pop_sig (ML-DSA-87 signature)
     ↓ H_L("msphf/rho/der", [pop_sig, xk_hash])
 ρ_raw [32 bytes]
     ↓ H_L("msphf/kgen/rho", [ρ_raw])
@@ -1012,7 +1012,7 @@ WID [32 bytes]
 
 ```
 1. Device generates PoP signature
-   └─► pop_sig = ML-DSA-65.Sign(device_sk, PoP_MSG)
+   └─► pop_sig = ML-DSA-87.Sign(device_sk, PoP_MSG)
 
 2. Derive ρ and seed_DRBG
    └─► rho_raw = H_L("msphf/rho/der", [pop_sig, xk_hash])
@@ -1057,7 +1057,7 @@ WID [32 bytes]
 
 4. PoP validation (join only)
    └─► leaf_id = H_L("leaf_id", [device_pk])
-   └─► ML-DSA-65.Verify(device_pk, PoP_MSG, pop_sig)
+   └─► ML-DSA-87.Verify(device_pk, PoP_MSG, pop_sig)
 
 5. ρ determinism
    └─► Recompute rho_raw = H_L("msphf/rho/der", [pop_sig, xk_hash])

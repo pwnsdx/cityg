@@ -4,8 +4,6 @@ use anyhow::{Result, anyhow};
 use ciborium::Value;
 use msphf_core::{hash::h_l, serde_utils::to_cbor_vec};
 use msphf_orchestrator::hdr;
-use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use rand::{Rng, rng};
 use serde::{Deserialize, Serialize};
 
@@ -256,11 +254,14 @@ pub fn encode_full_verification_receipt(
         barrier_update,
     })
     .map_err(|err| anyhow!("encode full verification receipt payload: {err}"))?;
-    let secret_key = dilithium5::SecretKey::from_bytes(author_pop_secret_key)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 POP secret key"))?;
-    let signature = dilithium5::detached_sign(payload.as_slice(), &secret_key)
-        .as_bytes()
-        .to_vec();
+    let secret_key = cityg_pqc::SecretKey::from_bytes(author_pop_secret_key)
+        .map_err(|_| anyhow!("invalid ML-DSA-87 POP secret key"))?;
+    let signature = cityg_pqc::sign(
+        &secret_key,
+        cityg_pqc::SignatureContext::BARRIER_RECEIPT,
+        payload.as_slice(),
+    )
+    .map_err(|err| anyhow!("full verification receipt signing failed: {err}"))?;
     to_cbor_vec(&FullVerificationReceiptWire {
         author_leaf_id: author_leaf_id.to_vec(),
         barrier_update_reason,
@@ -316,12 +317,22 @@ pub fn verify_full_verification_receipt(
         barrier_update,
     })
     .map_err(|err| anyhow!("encode full verification receipt payload: {err}"))?;
-    let public_key = dilithium5::PublicKey::from_bytes(author_pop_public_key)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 POP public key"))?;
-    let signature = dilithium5::DetachedSignature::from_bytes(decoded.signature.as_slice())
-        .map_err(|_| anyhow!("invalid ML-DSA-65 receipt signature"))?;
-    dilithium5::verify_detached_signature(&signature, payload.as_slice(), &public_key)
-        .map_err(|_| anyhow!("full verification receipt signature verification failed"))
+    cityg_pqc::verify(
+        author_pop_public_key,
+        cityg_pqc::SignatureContext::BARRIER_RECEIPT,
+        payload.as_slice(),
+        decoded.signature.as_slice(),
+    )
+    .map_err(|err| match err {
+        cityg_pqc::VerifyError::InvalidPublicKeyLength
+        | cityg_pqc::VerifyError::InvalidPublicKey => anyhow!("invalid ML-DSA-87 POP public key"),
+        cityg_pqc::VerifyError::InvalidSignatureLength => {
+            anyhow!("invalid ML-DSA-87 receipt signature")
+        }
+        cityg_pqc::VerifyError::VerificationFailed => {
+            anyhow!("full verification receipt signature verification failed")
+        }
+    })
 }
 
 pub fn validate_barrier_n_max(n_max: u64) -> Result<u64> {
@@ -573,6 +584,7 @@ pub fn collect_resolution_targets(
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use cityg_pqc::test_utils::AsBytes as _;
 
     #[test]
     fn validate_barrier_n_max_rejects_invalid_shapes_and_oversized_values() {
@@ -805,7 +817,8 @@ mod tests {
 
     #[test]
     fn full_verification_receipt_roundtrips() -> Result<()> {
-        let (public_key, secret_key) = dilithium5::keypair();
+        let (public_key, secret_key) = cityg_pqc::test_utils::keypair();
+        let secret_key = secret_key.to_bytes();
         let gid = [0x11; 32];
         let author_leaf_id = [0x22; 32];
         let barrier_history_commitment = [0x33; 12];
@@ -838,7 +851,8 @@ mod tests {
 
     #[test]
     fn full_verification_receipt_rejects_updater_slot_generation_mismatch() -> Result<()> {
-        let (public_key, secret_key) = dilithium5::keypair();
+        let (public_key, secret_key) = cityg_pqc::test_utils::keypair();
+        let secret_key = secret_key.to_bytes();
         let gid = [0x12; 32];
         let author_leaf_id = [0x23; 32];
         let barrier_history_commitment = [0x34; 12];

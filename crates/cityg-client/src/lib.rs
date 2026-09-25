@@ -1059,14 +1059,13 @@ mod tests {
         build_branch_b_artifacts, demo_pox_commit, join_delta_root, sequential_leaf,
         witness_to_cbor,
     };
+    use cityg_pqc::test_utils::{AsBytes as _, keypair};
     use msphf_core::{instance::tswe_salt_hash, merkle::canonical_set_root, params::*};
     use msphf_orchestrator::{DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID};
     use msphf_orchestrator::{
         FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PivotParity, PopKeypair,
         SrxMode,
     };
-    use pqcrypto_dilithium::dilithium5::keypair;
-    use pqcrypto_traits::sign::PublicKey as _;
     use std::sync::OnceLock;
 
     fn test_vrf_keys() -> (&'static [u8], &'static [u8]) {
@@ -1605,7 +1604,7 @@ mod tests {
             srx: Some(srx_inputs),
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: pop_pk.as_bytes(),
                 secret_key: &pop_sk,
             }),
@@ -1714,7 +1713,7 @@ mod tests {
             srx: None,
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: pop_pk.as_bytes(),
                 secret_key: &pop_sk,
             }),
@@ -1824,7 +1823,7 @@ mod tests {
             srx: None,
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: pop_pk.as_bytes(),
                 secret_key: &pop_sk,
             }),
@@ -1935,7 +1934,7 @@ mod tests {
             srx: None,
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: pop_pk.as_bytes(),
                 secret_key: &pop_sk,
             }),

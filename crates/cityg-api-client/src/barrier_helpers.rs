@@ -17,6 +17,7 @@ use cityg_client::barrier_snapshot_prepare::{
 use cityg_client::barrier_state_auth::validate_barrier_tree_snapshot_auth;
 
 impl CitygApiClient {
+    #[allow(clippy::too_many_arguments)]
     pub async fn barrier_fetch_snapshot_dependencies(
         &self,
         room_id: &str,

@@ -55,8 +55,7 @@ mod tests {
     #[test]
     fn compute_barrier_snapshot_transition_applies_join_and_public_key_updates() -> Result<()> {
         let n_max = 4;
-        let blank_len =
-            usize::try_from(expected_barrier_tree_nodes(n_max)?).expect("tree size fits usize");
+        let blank_len = expected_barrier_tree_nodes(n_max)?;
         let snapshot_base_entries = vec![Vec::new(); blank_len];
         let join_records = vec![BarrierJoinSnapshotRecord {
             slot_index: 1,
@@ -108,8 +107,7 @@ mod tests {
     #[test]
     fn compute_barrier_snapshot_transition_applies_versioned_revocations() -> Result<()> {
         let n_max = 4;
-        let blank_len =
-            usize::try_from(expected_barrier_tree_nodes(n_max)?).expect("tree size fits usize");
+        let blank_len = expected_barrier_tree_nodes(n_max)?;
         let snapshot_base_entries = vec![Vec::new(); blank_len];
         let revoked_records = vec![
             BarrierRevokedSnapshotRecord {

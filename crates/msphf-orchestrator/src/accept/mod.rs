@@ -17,9 +17,7 @@ use ciborium::{
     de, ser,
     value::{Integer, Value},
 };
-use cityg_pqc::{
-    ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES, verify_ml_dsa_65_detached_signature,
-};
+use cityg_pqc::{ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, SignatureContext};
 use msphf_core::serde_utils::to_cbor_vec;
 use msphf_core::{
     MsphfError, WitnessValidationError, ds,
@@ -2380,8 +2378,8 @@ fn validate_bootstrap(
                 Some(Value::Bytes(bytes)) => bytes.clone(),
                 _ => return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID)),
             };
-            if public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES
-                || sig_bytes.len() != ML_DSA_65_SIGNATURE_BYTES
+            if public_key.len() != ML_DSA_87_PUBLIC_KEY_BYTES
+                || sig_bytes.len() != ML_DSA_87_SIGNATURE_BYTES
             {
                 return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID));
             }
@@ -2395,8 +2393,9 @@ fn validate_bootstrap(
                 seed_bundle_commit,
             )?;
 
-            verify_ml_dsa_65_detached_signature(
+            cityg_pqc::verify(
                 public_key.as_slice(),
+                SignatureContext::ANCHOR_BOOTSTRAP,
                 &digest,
                 sig_bytes.as_slice(),
             )
@@ -3044,14 +3043,18 @@ mod tests {
     };
     use anchor_seed::{build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_ctx_hash};
     use ciborium::value::Integer;
+    use cityg_pqc::test_utils::{AsBytes as _, keypair};
     use msphf_core::params::RLWE_PARAMS_ID_A1;
     use msphf_core::witness::{
         RawMembershipWitness, RawNonMembershipWitness, RawPathEntry, ValidatedMembership,
         ValidatedNonMembership,
     };
-    use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
     use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
-    use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+
+    /// Bootstrap CA signature over an anchor digest (header key 171).
+    fn detached_sign(message: &[u8], secret_key: &cityg_pqc::SecretKey) -> Vec<u8> {
+        cityg_pqc::test_utils::sign(secret_key, SignatureContext::ANCHOR_BOOTSTRAP, message)
+    }
     use serde::Serialize;
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -6740,7 +6743,7 @@ mod tests {
         if header.contains_key(&HDR_SRX_PAYLOAD) {
             return;
         }
-        let leaf = crate::compute_leaf_id(crate::LeafIdMode::PerGroup, gid, "ML-DSA-65", pop_pk)
+        let leaf = crate::compute_leaf_id(crate::LeafIdMode::PerGroup, gid, "ML-DSA-87", pop_pk)
             .unwrap_or([0u8; 32]);
         let payload = Value::Array(vec![
             Value::Array(Vec::new()),
@@ -6849,7 +6852,7 @@ mod tests {
         let leaf_id = crate::compute_leaf_id(
             crate::LeafIdMode::PerGroup,
             parts.gid,
-            "ML-DSA-65",
+            "ML-DSA-87",
             pop_pk.as_slice(),
         )?;
         mutate_srx_payload(&mut header, |payload| {

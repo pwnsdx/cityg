@@ -515,7 +515,7 @@ use cityg_api_client::IdentityBinding;
 // Without identity binding
 let ticket = client.join_ticket("my-room", "alice", None).await?;
 
-// With ML-DSA-65 identity binding (recommended)
+// With ML-DSA-87 identity binding (recommended)
 let identity = IdentityBinding {
     alias: "alice".to_string(),
     pop_public_key: dilithium_pubkey.to_vec(),
@@ -529,10 +529,10 @@ let ticket = client.join_ticket("my-room", "alice", Some(identity)).await?;
 
 **Identity Binding (TOFU):**
 
-- The server recomputes `leaf_id` in "PerGroup" mode from `(gid, "ML-DSA-65", pop_public_key)`.
+- The server recomputes `leaf_id` in "PerGroup" mode from `(gid, "ML-DSA-87", pop_public_key)`.
   The alias is authenticated separately by the TOFU identity binding, but does not participate in
   leaf derivation.
-- Signatures are Dilithium (ML-DSA-65) over the CBOR tuple `[alias, pop_public_key]`. Any change in
+- Signatures are FIPS 204 ML-DSA-87 (context `city-g/identity-binding/v1`) over the CBOR tuple `[alias, pop_public_key]`. Any change in
   alias or key invalidates the signature.
 - On first use the alias is registered; later requests must reuse the same keypair or they are
   rejected as TOFU violations.
@@ -861,10 +861,10 @@ println!("Message status: {}", response.status);
   - `0..4`: ASCII `"CGM1"` prefix (protocol tag)
   - `4..12`: Little-endian `timestamp_ms` supplied by the sender (milliseconds since UNIX epoch)
   - `12..16`: Little-endian plaintext length, followed by the plaintext bytes
-  - Next `4` bytes: length of the ML-DSA-65 message-signing public key (always 1,952)
-  - Next `pub_key_len` bytes: ML-DSA-65 message-signing public key
-  - Next `4` bytes: length of the ML-DSA-65 signature (always 3,293)
-  - Remaining bytes: ML-DSA-65 signature over `leaf_id || timestamp_ms || plaintext`
+  - Next `4` bytes: length of the ML-DSA-87 message-signing public key (always 2,592)
+  - Next `pub_key_len` bytes: ML-DSA-87 message-signing public key
+  - Next `4` bytes: length of the ML-DSA-87 signature (always 4,627)
+  - Remaining bytes: FIPS 204 ML-DSA-87 signature (context `city-g/msg/v2`) over `leaf_id || timestamp_ms || plaintext`
 - Recipients verify the envelope by recomputing the signature from the decrypted fields; modifying
   the timestamp or plaintext invalidates the proof independent of the server-side timestamp.
 

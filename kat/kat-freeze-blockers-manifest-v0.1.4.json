@@ -11,12 +11,12 @@
       "title": "sender-scoped payload tuple and receiver duplicate rejection",
       "coverage": [
         {
-          "crate": "cityg-gui",
+          "crate": "cityg-client",
           "test": "message_crypto::tests::derive_msg_replay_tuple_tag_changes_with_sender_scope",
           "expectation": "distinct_tuple_tag"
         },
         {
-          "crate": "cityg-gui",
+          "crate": "cityg-client",
           "test": "message_crypto::tests::same_msg_index_from_different_senders_is_not_replayed",
           "expectation": "accept_distinct_senders"
         }

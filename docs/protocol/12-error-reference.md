@@ -592,7 +592,7 @@ These errors are defined in the implementation but not explicitly listed in Alph
 
 #### FREEZE_POP_INVALID (348)
 
-**Description**: PoP signature verification failed (ML-DSA-65).
+**Description**: PoP signature verification failed (ML-DSA-87).
 
 **Implementation**: [crates/msphf-orchestrator/src/accept/mod.rs](../../crates/msphf-orchestrator/src/accept/mod.rs)
 

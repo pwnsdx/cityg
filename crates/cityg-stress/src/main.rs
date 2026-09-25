@@ -1279,7 +1279,7 @@ async fn run_worker_round_attempt(
     if attempt.bootstrap_room {
         api_client
             .bootstrap_room_as_admin(attempt.room_id, demo::kbroad_public(), {
-                let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+                let (pop_public_key, pop_secret_key) = generate_room_admin_keypair()?;
                 build_room_admin_proof(
                     RoomAdminOperation::Bootstrap,
                     attempt.room_id,

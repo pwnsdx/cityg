@@ -19,13 +19,12 @@ use cityg_client::{
     witness::SrxInputsOwned,
 };
 use cityg_config::CityGConfig;
+use cityg_pqc::test_utils::AsBytes as _;
 use msphf_orchestrator::{
     AnchorInstanceParts, DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
     ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair,
     compute_leaf_id, hdr,
 };
-use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use prost::Message as _;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -210,7 +209,7 @@ async fn bootstrap_room(
     room_id: &str,
     kbroad_public: &[u8],
 ) -> Result<()> {
-    let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+    let (pop_public_key, pop_secret_key) = generate_room_admin_keypair()?;
     let admin_proof = build_room_admin_proof(
         RoomAdminOperation::Bootstrap,
         room_id,
@@ -329,7 +328,7 @@ struct JoinedMember {
     join_finalize_auth_token: [u8; 32],
     current_revoked_occupancies: Vec<SlotLease>,
     pop_public_key: Vec<u8>,
-    pop_secret_key: dilithium5::SecretKey,
+    pop_secret_key: cityg_pqc::SecretKey,
     vrf_secret_key: Vec<u8>,
     vrf_public_key: Vec<u8>,
     forward_state: ForwardSecrecyState,
@@ -347,8 +346,7 @@ fn barrier_leaf_public_key() -> Vec<u8> {
 
 fn header_u64_field(bundle: &ClientEpochBundle, key: u64, name: &str) -> Result<u64> {
     match bundle.header_map.get(&key) {
-        Some(Value::Integer(value)) => value
-            .clone()
+        Some(Value::Integer(value)) => (*value)
             .try_into()
             .map_err(|_| anyhow!("{name} must be a uint")),
         _ => Err(anyhow!("{name} missing")),
@@ -378,7 +376,7 @@ fn demo_vrf_keys_for_seed(seed: u8) -> Result<(Vec<u8>, Vec<u8>)> {
 fn build_identity_binding(
     alias: &str,
     pop_public_key: &[u8],
-    pop_secret_key: &dilithium5::SecretKey,
+    pop_secret_key: &cityg_pqc::SecretKey,
 ) -> Result<IdentityBinding> {
     let message_data = (
         ByteBuf::from(alias.as_bytes().to_vec()),
@@ -386,7 +384,11 @@ fn build_identity_binding(
     );
     let mut message = Vec::new();
     ciborium::ser::into_writer(&message_data, &mut message)?;
-    let signature = dilithium5::detached_sign(message.as_slice(), pop_secret_key);
+    let signature = cityg_pqc::test_utils::sign(
+        pop_secret_key,
+        cityg_pqc::SignatureContext::IDENTITY_BINDING,
+        message.as_slice(),
+    );
     Ok(IdentityBinding {
         alias: alias.to_string(),
         pop_public_key: pop_public_key.to_vec(),
@@ -398,7 +400,7 @@ async fn bootstrap_room_with_admin_identity(
     client: &CitygApiClient,
     room_id: &str,
     admin_pop_public_key: &[u8],
-    admin_pop_secret_key: &dilithium5::SecretKey,
+    admin_pop_secret_key: &cityg_pqc::SecretKey,
 ) -> Result<()> {
     let admin_proof = build_room_admin_proof(
         RoomAdminOperation::Bootstrap,
@@ -419,7 +421,7 @@ async fn join_room_member(
     alias: &str,
     seed: u8,
 ) -> Result<JoinedMember> {
-    let (pop_pk, pop_sk) = dilithium5::keypair();
+    let (pop_pk, pop_sk) = cityg_pqc::test_utils::keypair();
     join_room_member_with_identity(
         client,
         room_id,
@@ -437,7 +439,7 @@ async fn join_room_member_with_identity(
     alias: &str,
     seed: u8,
     pop_public_key: Vec<u8>,
-    pop_sk: dilithium5::SecretKey,
+    pop_sk: cityg_pqc::SecretKey,
 ) -> Result<JoinedMember> {
     let identity_binding = build_identity_binding(alias, &pop_public_key, &pop_sk)?;
     let ticket = client
@@ -448,7 +450,7 @@ async fn join_room_member_with_identity(
     let expected_leaf_id = compute_leaf_id(
         LeafIdMode::PerGroup,
         &gid,
-        "ML-DSA-65",
+        "ML-DSA-87",
         pop_public_key.as_slice(),
     )?;
     assert_eq!(
@@ -499,7 +501,7 @@ async fn join_room_member_with_identity(
         srx: Some(srx_inputs),
         srx_mode: msphf_orchestrator::SrxMode::Complete,
         pop_keys: Some(PopKeypair {
-            algorithm: "ML-DSA-65",
+            algorithm: "ML-DSA-87",
             public_key: pop_public_key.as_slice(),
             secret_key: &pop_sk,
         }),
@@ -595,7 +597,7 @@ async fn build_join_finalize_bundle(
             local_barrier_version: ticket.barrier_version,
             local_kem_tree_hash_after: ticket.kem_tree_hash_after,
             local_current_history_commitment: Some(&ticket.current_history_commitment),
-            local_current_history_authority_extension: ticket.history_authority_extension.clone(),
+            local_current_history_authority_extension: ticket.history_authority_extension,
             fs_ec,
             fs_epoch_commit,
             fs_dev_prev_commit,
@@ -663,7 +665,7 @@ async fn build_leave_bundle(
             local_barrier_version: ticket.barrier_version,
             local_kem_tree_hash_after: ticket.kem_tree_hash_after,
             local_current_history_commitment: Some(&ticket.current_history_commitment),
-            local_current_history_authority_extension: ticket.history_authority_extension.clone(),
+            local_current_history_authority_extension: ticket.history_authority_extension,
             fs_ec,
             fs_epoch_commit,
             fs_dev_prev_commit,
@@ -1876,7 +1878,7 @@ async fn malformed_admin_expel_request_does_not_poison_restart_or_future_honest_
     sleep(Duration::from_millis(250)).await;
 
     let client = test_client(format!("http://127.0.0.1:{port}"));
-    let (alice_pk, alice_sk) = dilithium5::keypair();
+    let (alice_pk, alice_sk) = cityg_pqc::test_utils::keypair();
     bootstrap_room_with_admin_identity(&client, &room_id, alice_pk.as_bytes(), &alice_sk).await?;
 
     let author_leaf_id = [0xA1; 32];
@@ -1952,7 +1954,7 @@ async fn malformed_admin_expel_request_concurrent_with_honest_join_survives_rest
     sleep(Duration::from_millis(250)).await;
 
     let client = test_client(format!("http://127.0.0.1:{port}"));
-    let (alice_pk, alice_sk) = dilithium5::keypair();
+    let (alice_pk, alice_sk) = cityg_pqc::test_utils::keypair();
     bootstrap_room_with_admin_identity(&client, &room_id, alice_pk.as_bytes(), &alice_sk).await?;
 
     let malformed_request = RawExpelMemberTicketRequest {
@@ -2041,7 +2043,7 @@ async fn concurrent_malformed_admin_expel_request_and_honest_join_preserve_room_
     let base_url = format!("http://127.0.0.1:{port}");
     let client = test_client(base_url.clone());
     let honest_client = test_client(base_url.clone());
-    let (alice_pk, alice_sk) = dilithium5::keypair();
+    let (alice_pk, alice_sk) = cityg_pqc::test_utils::keypair();
     bootstrap_room_with_admin_identity(&client, &room_id, alice_pk.as_bytes(), &alice_sk).await?;
 
     let malformed_request = RawExpelMemberTicketRequest {
@@ -2147,7 +2149,7 @@ async fn restart_during_concurrent_malformed_admin_race_and_honest_join_recovers
     let control_client = test_client(base_url.clone());
     let honest_client = test_client(base_url.clone());
     let observe_client = test_client(base_url.clone());
-    let (alice_pk, alice_sk) = dilithium5::keypair();
+    let (alice_pk, alice_sk) = cityg_pqc::test_utils::keypair();
     bootstrap_room_with_admin_identity(&control_client, &room_id, alice_pk.as_bytes(), &alice_sk)
         .await?;
 
@@ -2261,8 +2263,8 @@ async fn malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart() -
     sleep(Duration::from_millis(250)).await;
 
     let client = test_client(format!("http://127.0.0.1:{port}"));
-    let (creator_pk, creator_sk) = dilithium5::keypair();
-    let (delegate_pk, _delegate_sk) = dilithium5::keypair();
+    let (creator_pk, creator_sk) = cityg_pqc::test_utils::keypair();
+    let (delegate_pk, _delegate_sk) = cityg_pqc::test_utils::keypair();
     bootstrap_room_with_admin_identity(&client, &room_id, creator_pk.as_bytes(), &creator_sk)
         .await?;
 
@@ -2398,8 +2400,8 @@ async fn replayed_room_admin_grant_proof_rejected_after_restart_without_poisonin
     sleep(Duration::from_millis(250)).await;
 
     let client = test_client(format!("http://127.0.0.1:{port}"));
-    let (creator_pk, creator_sk) = dilithium5::keypair();
-    let (delegate_pk, _delegate_sk) = dilithium5::keypair();
+    let (creator_pk, creator_sk) = cityg_pqc::test_utils::keypair();
+    let (delegate_pk, _delegate_sk) = cityg_pqc::test_utils::keypair();
     bootstrap_room_with_admin_identity(&client, &room_id, creator_pk.as_bytes(), &creator_sk)
         .await?;
 

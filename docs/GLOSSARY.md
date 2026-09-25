@@ -267,7 +267,7 @@ Concurrency control mechanism allowing up to `h_max` parallel anchors within a t
 ### ML-DSA
 Module Lattice Digital Signature Algorithm (NIST FIPS 204, formerly Dilithium). Used for Proof-of-Possession (PoP) signatures in City-G.
 
-**Variant**: ML-DSA-65
+**Variant**: ML-DSA-87
 **Security**: Post-quantum secure (~128-bit classical, ~96-bit quantum)
 
 ### ML-KEM
@@ -292,7 +292,7 @@ Forward secrecy component that rotates periodically (every `H` seconds) to provi
 **See also**: Forward Secrecy
 
 ### PoP (Proof-of-Possession)
-An ML-DSA-65 signature proving device key ownership. Every anchor includes a PoP signature from the publisher.
+An ML-DSA-87 signature proving device key ownership. Every anchor includes a PoP signature from the publisher.
 
 **See also**: ML-DSA, Publisher
 
@@ -332,7 +332,7 @@ Cryptographic property ensuring the server cannot decrypt messages or derive epo
 3. Code separation (no decryption functions in server path)
 4. Automated verification (`verify_no_secrets.sh`)
 
-**Important**: Server-blindness refers to **encryption key confidentiality** (server cannot learn hp, Y*, E_k, or eid). This does NOT mean sender anonymity — the server **CAN identify devices** via public keys (ML-DSA-65, ~2KB) transmitted in field #108 (HDR_POP_PK) during join/merge operations.
+**Important**: Server-blindness refers to **encryption key confidentiality** (server cannot learn hp, Y*, E_k, or eid). This does NOT mean sender anonymity — the server **CAN identify devices** via public keys (ML-DSA-87, ~2KB) transmitted in field #108 (HDR_POP_PK) during join/merge operations.
 
 **See also**: [Security Model](./protocol/10-security-model.md)
 
@@ -358,7 +358,7 @@ The witness validation system providing Merkle proofs of membership/non-membersh
 ### TOFU (Trust-On-First-Use)
 Security model where the first encountered public key for an identity is trusted, with warnings on subsequent key changes.
 
-**City-G Usage**: Optional identity binding with ML-DSA-65 PoP; alias→key mappings stored locally
+**City-G Usage**: Optional identity binding with ML-DSA-87 PoP; alias→key mappings stored locally
 
 ### tswe/msphf-we/fs-hybrid + prs-barrier
 The City-G protocol profile family name used by the current base profile:

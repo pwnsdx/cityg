@@ -686,7 +686,7 @@ Normative bounds:
 3. ZK-VRF proves Y\* correctness without revealing Y\* (output-hiding property)
 4. Masks M_A, M_B are commitments: `M = H(Y_full, hp_commit)` is one-way
 
-**Note**: "Server blindness" refers to **encryption key confidentiality** (the server cannot learn hp, Y*, E_k, or eid, and thus cannot decrypt messages). This does NOT mean device anonymity — the server CAN identify devices via public keys (ML-DSA-65) transmitted in field #108 during join/merge operations.
+**Note**: "Server blindness" refers to **encryption key confidentiality** (the server cannot learn hp, Y*, E_k, or eid, and thus cannot decrypt messages). This does NOT mean device anonymity — the server CAN identify devices via public keys (ML-DSA-87) transmitted in field #108 during join/merge operations.
 
 **Implementation verification**: See [10-security-model.md](10-security-model.md)
 
@@ -726,7 +726,7 @@ hash_full(sk_b, X_k) == hash_proj(hp_b, X_k, w)
 ### 10.5. Post-Quantum Security
 
 - **ML-KEM-768**: NIST-standardized lattice-based KEM (FIPS 203)
-- **ML-DSA-65**: NIST-standardized lattice-based signature (FIPS 204)
+- **ML-DSA-87**: NIST-standardized lattice-based signature (FIPS 204)
 - **RLWE-HPS**: Module-LWE hardness assumption
 - **RPO-256**: Rescue-Prime hash (algebraic security)
 

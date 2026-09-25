@@ -3010,7 +3010,7 @@ fn full_verification_witness_error_response(
             "revoked helper data mismatch with authenticated current state",
             400,
         ),
-        RoomFullVerificationWitnessPreparationError::CoverLeafIndexOutOfRange => {
+        RoomFullVerificationWitnessPreparationError::SlotIndexOutOfRange => {
             Response::error("slot_index out of range", 400)
         }
     }
@@ -3819,7 +3819,7 @@ struct RoomCheckpointSummary {
     stored_bundle_count: usize,
 }
 
-const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 22] = [
+const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 20] = [
     RoomScopedApiRoute::AcceptEpoch,
     RoomScopedApiRoute::Members,
     RoomScopedApiRoute::SearchMembers,

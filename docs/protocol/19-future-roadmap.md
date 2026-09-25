@@ -21,7 +21,7 @@
 
 ## 2. Cipher Migration Path
 
-**Problem**: The current profile hard-codes ML-KEM-768, ML-DSA-65, BLAKE3, and ChaCha20-Poly1305. If any primitive is broken or deprecated, no in-protocol negotiation mechanism exists.
+**Problem**: The current profile hard-codes ML-KEM-768, ML-DSA-87, BLAKE3, and ChaCha20-Poly1305. If any primitive is broken or deprecated, no in-protocol negotiation mechanism exists.
 
 **Planned Work**:
 - Define a `cipher_suite_id` field in the anchor header (similar to MLS cipher suites).

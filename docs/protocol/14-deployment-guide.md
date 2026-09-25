@@ -90,7 +90,7 @@ cargo tree | grep -E "kyber|dilithium|blake3|chacha20"
 
 **Key Dependencies** (verify versions):
 - `pqcrypto-kyber`: ML-KEM-768 (FIPS 203)
-- `pqcrypto-dilithium`: ML-DSA-65 (FIPS 204)
+- `pqcrypto-dilithium`: ML-DSA-87 (FIPS 204)
 - `blake3`: BLAKE3 hashing
 - `chacha20poly1305`: ChaCha20-Poly1305 AEAD
 

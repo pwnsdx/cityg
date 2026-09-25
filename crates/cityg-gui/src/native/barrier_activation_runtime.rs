@@ -30,6 +30,7 @@ fn map_pending_barrier_recovery_reason(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn trace_from_pending_history_resolution(
     pending: &BarrierPendingState,
     current_barrier_version: u64,

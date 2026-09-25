@@ -78,11 +78,22 @@ fn test_symbol_exists(
     Ok(false)
 }
 
+fn v02_manifest_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../kat/kat-v0.2-conformance-manifest.json")
+}
+
 fn validate_manifest(
     manifest: S14Manifest,
     expected: BTreeSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(manifest.profile_version, "v0.1.4");
+    validate_manifest_entries(manifest, expected)
+}
+
+fn validate_manifest_entries(
+    manifest: S14Manifest,
+    expected: BTreeSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(manifest.requirements.len(), expected.len());
 
     let mut ids = BTreeSet::new();
@@ -151,4 +162,18 @@ fn freeze_blockers_manifest_is_well_formed_and_complete() -> Result<(), Box<dyn 
         "ERRATA.4".to_string(),
     ]);
     validate_manifest(manifest, expected)
+}
+
+#[test]
+fn v02_manifest_is_well_formed_and_complete() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = fs::read(v02_manifest_path())?;
+    let manifest: S14Manifest = serde_json::from_slice(&bytes)?;
+    assert_eq!(manifest.profile_version, "v0.2");
+
+    let expected = BTreeSet::from([
+        "SIG.1".to_string(),
+        "SIG.2".to_string(),
+        "SIG.3".to_string(),
+    ]);
+    validate_manifest_entries(manifest, expected)
 }

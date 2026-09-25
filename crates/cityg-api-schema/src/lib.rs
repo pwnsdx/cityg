@@ -10,8 +10,7 @@ use std::{borrow::Cow, convert::TryInto};
 use ciborium::ser::into_writer;
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_pqc::{
-    ML_DSA_65_ALGORITHM, ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES,
-    verify_ml_dsa_65_detached_signature,
+    ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, SIGNATURE_ALGORITHM, SignatureContext,
 };
 use cityg_runtime::{
     AliasLeafEntry, FullVerificationWitnessRequest as RuntimeFullVerificationWitnessRequest,
@@ -679,10 +678,10 @@ impl JoinTicketRequestPreparationError {
 pub fn verify_identity_binding(
     binding: &pb::IdentityBinding,
 ) -> Result<(), IdentityBindingValidationError> {
-    if binding.pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
+    if binding.pop_public_key.len() != ML_DSA_87_PUBLIC_KEY_BYTES {
         return Err(IdentityBindingValidationError::InvalidPublicKeyLength);
     }
-    if binding.signature.len() != ML_DSA_65_SIGNATURE_BYTES {
+    if binding.signature.len() != ML_DSA_87_SIGNATURE_BYTES {
         return Err(IdentityBindingValidationError::InvalidSignatureLength);
     }
     if binding.alias.is_empty() {
@@ -697,22 +696,21 @@ pub fn verify_identity_binding(
     into_writer(&message_data, &mut message)
         .map_err(|_| IdentityBindingValidationError::EncodeMessage)?;
 
-    match verify_ml_dsa_65_detached_signature(&binding.pop_public_key, &message, &binding.signature)
-    {
+    match cityg_pqc::verify(
+        &binding.pop_public_key,
+        SignatureContext::IDENTITY_BINDING,
+        &message,
+        &binding.signature,
+    ) {
         Ok(()) => {}
-        Err(cityg_pqc::MlDsa65VerifyError::InvalidPublicKey) => {
+        Err(cityg_pqc::VerifyError::InvalidPublicKey) => {
             return Err(IdentityBindingValidationError::InvalidPublicKey);
         }
-        Err(cityg_pqc::MlDsa65VerifyError::InvalidSignature) => {
-            return Err(IdentityBindingValidationError::InvalidSignature);
-        }
         Err(
-            cityg_pqc::MlDsa65VerifyError::InvalidPublicKeyLength
-            | cityg_pqc::MlDsa65VerifyError::InvalidSignatureLength,
+            cityg_pqc::VerifyError::InvalidPublicKeyLength
+            | cityg_pqc::VerifyError::InvalidSignatureLength
+            | cityg_pqc::VerifyError::VerificationFailed,
         ) => {
-            return Err(IdentityBindingValidationError::VerificationFailed);
-        }
-        Err(cityg_pqc::MlDsa65VerifyError::VerificationFailed) => {
             return Err(IdentityBindingValidationError::VerificationFailed);
         }
     }
@@ -732,7 +730,7 @@ pub fn prepare_identity_binding(
     let requested_leaf_id = msphf_orchestrator::compute_leaf_id(
         msphf_orchestrator::LeafIdMode::PerGroup,
         gid,
-        ML_DSA_65_ALGORITHM,
+        SIGNATURE_ALGORITHM,
         &binding.pop_public_key,
     )
     .map_err(|error| PreparedIdentityBindingError::ComputeLeaf(error.to_string()))?;
@@ -1291,7 +1289,7 @@ pub fn validate_room_admin_mutation_request(
     request: pb::RoomAdminMutationRequest,
 ) -> Result<ValidatedRoomAdminMutationRequest, RoomAdminRequestValidationError> {
     let gid = parse_room_id_for_room_admin(request.room_id.as_str())?;
-    if request.target_pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
+    if request.target_pop_public_key.len() != ML_DSA_87_PUBLIC_KEY_BYTES {
         return Err(RoomAdminRequestValidationError::InvalidTargetPopPublicKeyLength);
     }
     let admin_proof = request
@@ -1682,10 +1680,10 @@ pub fn verify_room_admin_proof_payload(
     room_id: &str,
     payload: &[u8],
 ) -> Result<Vec<u8>, RoomAdminProofValidationError> {
-    if proof.pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
+    if proof.pop_public_key.len() != ML_DSA_87_PUBLIC_KEY_BYTES {
         return Err(RoomAdminProofValidationError::InvalidPublicKeyLength);
     }
-    if proof.signature.len() != ML_DSA_65_SIGNATURE_BYTES {
+    if proof.signature.len() != ML_DSA_87_SIGNATURE_BYTES {
         return Err(RoomAdminProofValidationError::InvalidSignatureLength);
     }
     if room_id.is_empty() {
@@ -1697,21 +1695,21 @@ pub fn verify_room_admin_proof_payload(
     into_writer(&message_data, &mut message)
         .map_err(|_| RoomAdminProofValidationError::EncodeProofMessage)?;
 
-    match verify_ml_dsa_65_detached_signature(&proof.pop_public_key, &message, &proof.signature) {
+    match cityg_pqc::verify(
+        &proof.pop_public_key,
+        SignatureContext::ROOM_ADMIN,
+        &message,
+        &proof.signature,
+    ) {
         Ok(()) => {}
-        Err(cityg_pqc::MlDsa65VerifyError::InvalidPublicKey) => {
+        Err(cityg_pqc::VerifyError::InvalidPublicKey) => {
             return Err(RoomAdminProofValidationError::InvalidPublicKey);
         }
-        Err(cityg_pqc::MlDsa65VerifyError::InvalidSignature) => {
-            return Err(RoomAdminProofValidationError::InvalidSignature);
-        }
         Err(
-            cityg_pqc::MlDsa65VerifyError::InvalidPublicKeyLength
-            | cityg_pqc::MlDsa65VerifyError::InvalidSignatureLength,
+            cityg_pqc::VerifyError::InvalidPublicKeyLength
+            | cityg_pqc::VerifyError::InvalidSignatureLength
+            | cityg_pqc::VerifyError::VerificationFailed,
         ) => {
-            return Err(RoomAdminProofValidationError::VerificationFailed);
-        }
-        Err(cityg_pqc::MlDsa65VerifyError::VerificationFailed) => {
             return Err(RoomAdminProofValidationError::VerificationFailed);
         }
     }
@@ -2050,9 +2048,8 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
     use cityg_client::demo::{DEMO_GID, demo_bundle};
+    use cityg_pqc::test_utils::AsBytes as _;
     use cityg_runtime::{AliasLeafEntry, MemberMetadata};
-    use pqcrypto_dilithium::dilithium5;
-    use pqcrypto_traits::sign::{DetachedSignature as DetachedSignatureTrait, PublicKey as _};
     use prost::Message;
     use serde_bytes::ByteBuf;
 
@@ -2171,7 +2168,7 @@ mod tests {
 
     #[test]
     fn prepare_identity_binding_derives_requested_leaf() {
-        let (public_key, secret_key) = dilithium5::keypair();
+        let (public_key, secret_key) = cityg_pqc::test_utils::keypair();
         let binding = signed_identity_binding("alice", public_key.as_bytes(), &secret_key);
 
         let prepared = prepare_identity_binding(&DEMO_GID, Some(&binding))
@@ -2184,7 +2181,7 @@ mod tests {
             msphf_orchestrator::compute_leaf_id(
                 msphf_orchestrator::LeafIdMode::PerGroup,
                 &DEMO_GID,
-                "ML-DSA-65",
+                "ML-DSA-87",
                 public_key.as_bytes(),
             )
             .expect("compute leaf"),
@@ -2193,11 +2190,11 @@ mod tests {
 
     #[test]
     fn prepare_identity_binding_rejects_invalid_signature() {
-        let (public_key, _) = dilithium5::keypair();
+        let (public_key, _) = cityg_pqc::test_utils::keypair();
         let binding = pb::IdentityBinding {
             alias: "alice".to_string(),
             pop_public_key: public_key.as_bytes().to_vec(),
-            signature: vec![0x42; dilithium5::signature_bytes()],
+            signature: vec![0x42; ML_DSA_87_SIGNATURE_BYTES],
         };
 
         let error =
@@ -2400,8 +2397,8 @@ mod tests {
     #[test]
     fn validate_room_admin_requests_projects_required_fields() {
         let proof = pb::RoomAdminProof {
-            pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES],
-            signature: vec![0x22; ML_DSA_65_SIGNATURE_BYTES],
+            pop_public_key: vec![0x11; ML_DSA_87_PUBLIC_KEY_BYTES],
+            signature: vec![0x22; ML_DSA_87_SIGNATURE_BYTES],
         };
 
         let bootstrap = validate_bootstrap_room_request(pb::BootstrapRoomRequest {
@@ -2415,14 +2412,14 @@ mod tests {
 
         let mutation = validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
             room_id: hex::encode(DEMO_GID),
-            target_pop_public_key: vec![0x44; ML_DSA_65_PUBLIC_KEY_BYTES],
+            target_pop_public_key: vec![0x44; ML_DSA_87_PUBLIC_KEY_BYTES],
             admin_proof: Some(proof.clone()),
         })
         .expect("validate mutation");
         assert_eq!(mutation.gid, DEMO_GID);
         assert_eq!(
             mutation.target_pop_public_key.len(),
-            ML_DSA_65_PUBLIC_KEY_BYTES
+            ML_DSA_87_PUBLIC_KEY_BYTES
         );
 
         let listed = validate_list_room_admins_request(pb::ListRoomAdminsRequest {
@@ -2443,7 +2440,7 @@ mod tests {
         assert_eq!(
             validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
                 room_id: "not-hex".to_string(),
-                target_pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES],
+                target_pop_public_key: vec![0x11; ML_DSA_87_PUBLIC_KEY_BYTES],
                 admin_proof: Some(pb::RoomAdminProof::default()),
             }),
             Err(RoomAdminRequestValidationError::InvalidRoomIdEncoding)
@@ -2451,7 +2448,7 @@ mod tests {
         assert_eq!(
             validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
                 room_id: hex::encode([0x11; 31]),
-                target_pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES - 1],
+                target_pop_public_key: vec![0x11; ML_DSA_87_PUBLIC_KEY_BYTES - 1],
                 admin_proof: None,
             }),
             Err(RoomAdminRequestValidationError::InvalidRoomIdLength)
@@ -2459,7 +2456,7 @@ mod tests {
         assert_eq!(
             validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
                 room_id: hex::encode(DEMO_GID),
-                target_pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES - 1],
+                target_pop_public_key: vec![0x11; ML_DSA_87_PUBLIC_KEY_BYTES - 1],
                 admin_proof: Some(pb::RoomAdminProof::default()),
             }),
             Err(RoomAdminRequestValidationError::InvalidTargetPopPublicKeyLength)
@@ -2476,8 +2473,8 @@ mod tests {
     #[test]
     fn validate_expel_member_ticket_request_projects_required_fields() {
         let proof = pb::RoomAdminProof {
-            pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES],
-            signature: vec![0x22; ML_DSA_65_SIGNATURE_BYTES],
+            pop_public_key: vec![0x11; ML_DSA_87_PUBLIC_KEY_BYTES],
+            signature: vec![0x22; ML_DSA_87_SIGNATURE_BYTES],
         };
         let validated = validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest {
             room_id: hex::encode(DEMO_GID),
@@ -2964,7 +2961,7 @@ mod tests {
 
     #[test]
     fn prepare_join_ticket_request_projects_gid_and_binding() {
-        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let (pop_pk, pop_sk) = cityg_pqc::test_utils::keypair();
         let binding = signed_identity_binding("alice", pop_pk.as_bytes(), &pop_sk);
         let prepared = prepare_join_ticket_request(pb::JoinTicketRequest {
             room_id: hex::encode(DEMO_GID),
@@ -2983,7 +2980,7 @@ mod tests {
                 msphf_orchestrator::compute_leaf_id(
                     msphf_orchestrator::LeafIdMode::PerGroup,
                     &DEMO_GID,
-                    ML_DSA_65_ALGORITHM,
+                    SIGNATURE_ALGORITHM,
                     pop_pk.as_bytes(),
                 )
                 .expect("compute leaf")
@@ -3016,8 +3013,8 @@ mod tests {
 
         let invalid_binding = pb::IdentityBinding {
             alias: String::new(),
-            pop_public_key: vec![0x22; ML_DSA_65_PUBLIC_KEY_BYTES],
-            signature: vec![0x33; ML_DSA_65_SIGNATURE_BYTES],
+            pop_public_key: vec![0x22; ML_DSA_87_PUBLIC_KEY_BYTES],
+            signature: vec![0x33; ML_DSA_87_SIGNATURE_BYTES],
         };
         assert_eq!(
             prepare_join_ticket_request(pb::JoinTicketRequest {
@@ -3047,7 +3044,7 @@ mod tests {
     fn signed_identity_binding(
         alias: &str,
         pop_public_key: &[u8],
-        secret_key: &dilithium5::SecretKey,
+        secret_key: &cityg_pqc::SecretKey,
     ) -> pb::IdentityBinding {
         let message = {
             let message_data = (
@@ -3058,11 +3055,12 @@ mod tests {
             into_writer(&message_data, &mut message).expect("encode message");
             message
         };
-        let signature = dilithium5::detached_sign(&message, secret_key);
+        let signature =
+            cityg_pqc::test_utils::sign(secret_key, SignatureContext::IDENTITY_BINDING, &message);
         pb::IdentityBinding {
             alias: alias.to_string(),
             pop_public_key: pop_public_key.to_vec(),
-            signature: signature.as_bytes().to_vec(),
+            signature,
         }
     }
 }

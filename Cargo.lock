@@ -1398,7 +1398,6 @@ dependencies = [
  "metrics-exporter-prometheus",
  "msphf-core",
  "msphf-orchestrator",
- "pqcrypto-dilithium",
  "pqcrypto-kyber",
  "pqcrypto-traits",
  "prost",
@@ -1427,11 +1426,10 @@ dependencies = [
  "ciborium",
  "cityg-api-schema",
  "cityg-client",
+ "cityg-pqc",
  "hex",
  "msphf-core",
  "msphf-orchestrator",
- "pqcrypto-dilithium",
- "pqcrypto-traits",
  "prost",
  "prost-types",
  "reqwest",
@@ -1455,8 +1453,6 @@ dependencies = [
  "hex",
  "msphf-core",
  "msphf-orchestrator",
- "pqcrypto-dilithium",
- "pqcrypto-traits",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
@@ -1473,12 +1469,12 @@ dependencies = [
  "anyhow",
  "chacha20poly1305",
  "ciborium",
+ "cityg-pqc",
  "dirs 6.0.0",
  "hex",
  "ml-kem",
  "msphf-core",
  "msphf-orchestrator",
- "pqcrypto-dilithium",
  "pqcrypto-kyber",
  "pqcrypto-traits",
  "rand 0.9.2",
@@ -1514,6 +1510,7 @@ dependencies = [
  "cityg-api-client",
  "cityg-client",
  "cityg-config",
+ "cityg-pqc",
  "cocoa 0.26.0",
  "core-text",
  "dirs 6.0.0",
@@ -1527,9 +1524,6 @@ dependencies = [
  "msphf-orchestrator",
  "msphf-rlwe",
  "objc",
- "pqcrypto-dilithium",
- "pqcrypto-kyber",
- "pqcrypto-traits",
  "proptest",
  "prost",
  "rand 0.10.0",
@@ -1550,11 +1544,11 @@ dependencies = [
 name = "cityg-pqc"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "fips204",
- "pqcrypto-dilithium",
- "pqcrypto-traits",
  "rand_core 0.6.4",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -1585,7 +1579,6 @@ dependencies = [
  "hex",
  "msphf-core",
  "msphf-orchestrator",
- "pqcrypto-dilithium",
  "pqcrypto-kyber",
  "pqcrypto-traits",
  "proptest",
@@ -4788,8 +4781,6 @@ dependencies = [
  "ciborium",
  "cityg-pqc",
  "hex-literal",
- "pqcrypto-dilithium",
- "pqcrypto-traits",
  "serde",
  "serde_bytes",
  "sha3 0.10.8",
@@ -4839,7 +4830,6 @@ dependencies = [
  "msphf-core",
  "msphf-lb-vrf",
  "msphf-rlwe",
- "pqcrypto-dilithium",
  "pqcrypto-kyber",
  "pqcrypto-traits",
  "rand 0.10.0",
@@ -4862,9 +4852,8 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "cityg-pqc",
  "msphf-core",
- "pqcrypto-dilithium",
- "pqcrypto-traits",
  "serde",
  "serde_bytes",
  "thiserror 2.0.18",
@@ -5764,31 +5753,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
-]
-
-[[package]]
-name = "pqcrypto-dilithium"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "685de0fa68c6786559d5fcdaa414f0cd68ef3f5d162f61823bd7424cd276726f"
-dependencies = [
- "cc",
- "glob",
- "libc",
- "pqcrypto-internals",
- "pqcrypto-traits",
-]
-
-[[package]]
-name = "pqcrypto-internals"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4a326caf27cbf2ac291ca7fd56300497ba9e76a8cc6a7d95b7a18b57f22b61d"
-dependencies = [
- "cc",
- "dunce",
- "getrandom 0.3.4",
- "libc",
 ]
 
 [[package]]

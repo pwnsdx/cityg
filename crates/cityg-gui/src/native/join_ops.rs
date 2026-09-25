@@ -6,12 +6,12 @@ use cityg_client::join_runtime::generate_join_runtime_material;
 
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 
-fn generate_room_identity() -> RoomIdentity {
-    cityg_api_client::generate_room_admin_identity()
+fn generate_room_identity() -> Result<RoomIdentity> {
+    Ok(cityg_api_client::generate_room_admin_identity()?)
 }
 
 fn rotate_room_identity(server_url: &str, room_id: &str) -> Result<RoomIdentity> {
-    let identity = generate_room_identity();
+    let identity = generate_room_identity()?;
     persist_room_identity(server_url, room_id, &identity)?;
     Ok(identity)
 }

@@ -8,6 +8,7 @@ use std::{
 
 use ciborium::ser::into_writer;
 use ciborium::value::{Integer, Value};
+use cityg_pqc::SecretKey as MlDsaSecretKey;
 use dirs::config_dir;
 use msphf_core::{
     merkle::{canonical_set_root, hash_interval_binding, hash_node},
@@ -23,19 +24,27 @@ use msphf_orchestrator::{
     ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair,
     SrxInputs, SrxMode, SrxNonMembershipAnchor, build_bootstrap_digest, compute_leaf_id,
 };
-use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign, keypair};
 use pqcrypto_kyber::kyber768::{SecretKey as MlKemSecretKey, keypair as kyber_keypair};
 use pqcrypto_kyber::kyber768::{
     public_key_bytes as kyber_public_key_bytes, secret_key_bytes as kyber_secret_key_bytes,
 };
-use pqcrypto_traits::{
-    kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecretKeyTrait},
-    sign::{DetachedSignature, PublicKey, SecretKey},
-};
+use pqcrypto_traits::kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecretKeyTrait};
 
 use crate::{CityGClient, CityGError, ClientEpochBundle, witness};
 
 pub const DEMO_GID: [u8; 32] = [0x43; 32];
+
+/// Demo ML-DSA-87 key pair: OS randomness, or a counter-derived seed if the
+/// OS RNG is unavailable (demo identities only).
+fn keypair() -> (Vec<u8>, MlDsaSecretKey) {
+    static FALLBACK_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    cityg_pqc::keypair().unwrap_or_else(|_| {
+        let counter = FALLBACK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut seed = [0x44u8; 32];
+        seed[..8].copy_from_slice(&counter.to_le_bytes());
+        cityg_pqc::keypair_from_seed(&seed)
+    })
+}
 
 #[derive(Clone)]
 struct DemoIdentity {
@@ -58,13 +67,12 @@ fn member_identity(label: &str) -> DemoIdentity {
     if let Some(existing) = guard.get(label) {
         existing.clone()
     } else {
-        let (pop_pk, pop_sk) = keypair();
-        let pop_public_key = pop_pk.as_bytes().to_vec();
-        let pop_secret_key = pop_sk.as_bytes().to_vec();
+        let (pop_public_key, pop_sk) = keypair();
+        let pop_secret_key = pop_sk.to_bytes();
         let leaf_id = match compute_leaf_id(
             LeafIdMode::PerGroup,
             &DEMO_GID,
-            "ML-DSA-65",
+            "ML-DSA-87",
             pop_public_key.as_slice(),
         ) {
             Ok(bytes) => bytes,
@@ -191,17 +199,14 @@ fn demo_bundle_inner(
 
     let (pop_pk_bytes, pop_sk_obj) = if join_leaves.len() == 1 {
         if let Some(identity) = identity_for_leaf(&join_leaves[0]) {
-            let pop_sk =
-                <MlDsaSecretKey as SecretKey>::from_bytes(identity.pop_secret_key.as_slice())
-                    .map_err(|_| CityGError::InvalidInput("demo pop secret malformed"))?;
+            let pop_sk = MlDsaSecretKey::from_bytes(identity.pop_secret_key.as_slice())
+                .map_err(|_| CityGError::InvalidInput("demo pop secret malformed"))?;
             (identity.pop_public_key, pop_sk)
         } else {
-            let (pop_pk, pop_sk) = keypair();
-            (pop_pk.as_bytes().to_vec(), pop_sk)
+            keypair()
         }
     } else {
-        let (pop_pk, pop_sk) = keypair();
-        (pop_pk.as_bytes().to_vec(), pop_sk)
+        keypair()
     };
 
     let header = base_header();
@@ -214,7 +219,7 @@ fn demo_bundle_inner(
         srx: Some(srx_inputs.clone()),
         srx_mode: SrxMode::Complete,
         pop_keys: Some(PopKeypair {
-            algorithm: "ML-DSA-65",
+            algorithm: "ML-DSA-87",
             public_key: pop_pk_bytes.as_slice(),
             secret_key: &pop_sk_obj,
         }),
@@ -339,8 +344,8 @@ fn load_or_generate_kbroad_keys() -> Result<(Vec<u8>, Vec<u8>), CityGError> {
 }
 
 fn load_or_generate_bootstrap_keys() -> Result<(Vec<u8>, Box<MlDsaSecretKey>), CityGError> {
-    let pk_len = pqcrypto_dilithium::dilithium5::public_key_bytes();
-    let sk_len = pqcrypto_dilithium::dilithium5::secret_key_bytes();
+    let pk_len = cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES;
+    let sk_len = cityg_pqc::ML_DSA_87_SECRET_KEY_BYTES;
 
     if let Some(path) = bootstrap_key_path() {
         if let Ok(bytes) = fs::read(&path)
@@ -358,13 +363,13 @@ fn load_or_generate_bootstrap_keys() -> Result<(Vec<u8>, Box<MlDsaSecretKey>), C
             fs::create_dir_all(parent)?;
         }
         let mut data = Vec::with_capacity(pk_len + sk_len);
-        data.extend_from_slice(pk.as_bytes());
-        data.extend_from_slice(sk.as_bytes());
+        data.extend_from_slice(pk.as_slice());
+        data.extend_from_slice(sk.to_bytes().as_slice());
         fs::write(path, data)?;
-        Ok((pk.as_bytes().to_vec(), Box::new(sk)))
+        Ok((pk, Box::new(sk)))
     } else {
         let (pk, sk) = keypair();
-        Ok((pk.as_bytes().to_vec(), Box::new(sk)))
+        Ok((pk, Box::new(sk)))
     }
 }
 
@@ -382,9 +387,12 @@ pub fn attach_bootstrap(bundle: &mut ClientEpochBundle) -> Result<(), CityGError
             &bundle.hp_binding.seed_bundle_commit,
         )
         .map_err(CityGError::from)?;
-        detached_sign(&digest, bootstrap_sk.as_ref())
-            .as_bytes()
-            .to_vec()
+        cityg_pqc::sign(
+            bootstrap_sk.as_ref(),
+            cityg_pqc::SignatureContext::ANCHOR_BOOTSTRAP,
+            &digest,
+        )
+        .map_err(|_| CityGError::InvalidInput("demo bootstrap signing failed"))?
     };
 
     bundle
@@ -932,11 +940,11 @@ mod tests {
 
         let (pk_first, sk_first) = load_or_generate_bootstrap_keys()?;
         let stored = fs::read(dir.join("demo-bootstrap.key"))?;
-        assert_eq!(stored.len(), pk_first.len() + sk_first.as_bytes().len());
+        assert_eq!(stored.len(), pk_first.len() + sk_first.to_bytes().len());
 
         let (pk_second, sk_second) = load_or_generate_bootstrap_keys()?;
         assert_eq!(pk_first, pk_second);
-        assert_eq!(sk_first.as_bytes(), sk_second.as_bytes());
+        assert_eq!(sk_first.to_bytes(), sk_second.to_bytes());
 
         teardown_demo_config_dir(&dir, previous);
         Ok(())
@@ -950,10 +958,10 @@ mod tests {
         fs::write(dir.join("demo-bootstrap.key"), [0xAA, 0xBB])?;
         let (pk, sk) = load_or_generate_bootstrap_keys()?;
         assert!(!pk.is_empty());
-        assert!(!sk.as_bytes().is_empty());
+        assert!(!sk.to_bytes().is_empty());
 
         let rewritten = fs::read(dir.join("demo-bootstrap.key"))?;
-        assert_eq!(rewritten.len(), pk.len() + sk.as_bytes().len());
+        assert_eq!(rewritten.len(), pk.len() + sk.to_bytes().len());
 
         teardown_demo_config_dir(&dir, previous);
         Ok(())

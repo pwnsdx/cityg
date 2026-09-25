@@ -1,9 +1,8 @@
 //! Canonical witness structures and structural validation helpers.
 
 use cityg_pqc::{
-    ML_DSA_65_PUBLIC_KEY_BYTES as ML_DSA65_PUBLIC_KEY_LEN,
-    ML_DSA_65_SIGNATURE_BYTES as ML_DSA65_SIGNATURE_LEN, MlDsa65VerifyError,
-    verify_ml_dsa_65_detached_signature,
+    ML_DSA_87_PUBLIC_KEY_BYTES as ML_DSA_PUBLIC_KEY_LEN,
+    ML_DSA_87_SIGNATURE_BYTES as ML_DSA_SIGNATURE_LEN, SignatureContext, VerifyError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -374,10 +373,10 @@ impl CanonicalWitness {
         membership: &ValidatedMembership,
         raw: &RawPopWitness,
     ) -> Result<ValidatedPop, MsphfError> {
-        if raw.public_key.len() != ML_DSA65_PUBLIC_KEY_LEN {
+        if raw.public_key.len() != ML_DSA_PUBLIC_KEY_LEN {
             return Err(WitnessValidationError::CborMalformed.into());
         }
-        if raw.signature.len() != ML_DSA65_SIGNATURE_LEN {
+        if raw.signature.len() != ML_DSA_SIGNATURE_LEN {
             return Err(WitnessValidationError::CborMalformed.into());
         }
         #[derive(Serialize)]
@@ -398,8 +397,13 @@ impl CanonicalWitness {
                 epoch: &anchor.we_epoch_id,
             },
         )?;
-        verify_ml_dsa_65_detached_signature(&raw.public_key, &msg_bytes, &raw.signature)
-            .map_err(map_cityg_pop_verify_error)?;
+        cityg_pqc::verify(
+            &raw.public_key,
+            SignatureContext::ANCHOR_POP,
+            &msg_bytes,
+            &raw.signature,
+        )
+        .map_err(map_cityg_pop_verify_error)?;
 
         #[derive(Serialize)]
         struct LeafBinding<'a> {
@@ -492,13 +496,12 @@ impl CanonicalWitness {
     }
 }
 
-fn map_cityg_pop_verify_error(error: MlDsa65VerifyError) -> MsphfError {
+fn map_cityg_pop_verify_error(error: VerifyError) -> MsphfError {
     let witness_error = match error {
-        MlDsa65VerifyError::VerificationFailed => WitnessValidationError::ProjEvalFail,
-        MlDsa65VerifyError::InvalidPublicKeyLength
-        | MlDsa65VerifyError::InvalidSignatureLength
-        | MlDsa65VerifyError::InvalidPublicKey
-        | MlDsa65VerifyError::InvalidSignature => WitnessValidationError::CborMalformed,
+        VerifyError::VerificationFailed => WitnessValidationError::ProjEvalFail,
+        VerifyError::InvalidPublicKeyLength
+        | VerifyError::InvalidSignatureLength
+        | VerifyError::InvalidPublicKey => WitnessValidationError::CborMalformed,
     };
     MsphfError::Witness(witness_error)
 }
@@ -511,8 +514,12 @@ mod tests {
         instance::AnchorInstance,
         merkle::{hash_interval, hash_leaf, hash_node},
     };
-    use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
-    use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
+    use cityg_pqc::test_utils::{AsBytes as _, keypair};
+
+    fn detached_sign(message: &[u8], secret_key: &cityg_pqc::SecretKey) -> Vec<u8> {
+        cityg_pqc::sign_deterministic(secret_key, SignatureContext::ANCHOR_POP, message)
+            .unwrap_or_default()
+    }
 
     fn anchor_for<'a>(
         parent_root: &'a [u8; 32],
@@ -1485,8 +1492,8 @@ mod tests {
                 &anchor,
                 &membership,
                 &RawPopWitness {
-                    public_key: vec![0x11; ML_DSA65_PUBLIC_KEY_LEN - 1],
-                    signature: vec![0x22; ML_DSA65_SIGNATURE_LEN],
+                    public_key: vec![0x11; ML_DSA_PUBLIC_KEY_LEN - 1],
+                    signature: vec![0x22; ML_DSA_SIGNATURE_LEN],
                 }
             ),
             Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
@@ -1496,8 +1503,8 @@ mod tests {
                 &anchor,
                 &membership,
                 &RawPopWitness {
-                    public_key: vec![0x11; ML_DSA65_PUBLIC_KEY_LEN],
-                    signature: vec![0x22; ML_DSA65_SIGNATURE_LEN - 1],
+                    public_key: vec![0x11; ML_DSA_PUBLIC_KEY_LEN],
+                    signature: vec![0x22; ML_DSA_SIGNATURE_LEN - 1],
                 }
             ),
             Err(MsphfError::Witness(WitnessValidationError::CborMalformed))

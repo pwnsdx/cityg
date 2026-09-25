@@ -203,6 +203,7 @@ pub(super) async fn resolve_authenticated_snapshot_for_hash(
         .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn ensure_current_state_commitment_aligned_snapshot(
     client: &CitygApiClient,
     room_id: &str,

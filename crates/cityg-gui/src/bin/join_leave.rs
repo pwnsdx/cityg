@@ -788,7 +788,7 @@ async fn prepare_join_session_with_identity(
 }
 
 async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
-    let identity = cityg_api_client::generate_room_admin_identity();
+    let identity = cityg_api_client::generate_room_admin_identity()?;
     prepare_join_session_with_identity(server_url, room_id, alias, identity).await
 }
 
@@ -1596,7 +1596,7 @@ mod tests {
     }
 
     fn sample_session(server_url: &str) -> Session {
-        let identity = cityg_api_client::generate_room_admin_identity();
+        let identity = cityg_api_client::generate_room_admin_identity().expect("room identity");
         Session {
             server_url: server_url.to_string(),
             room_id: hex::encode([0xAA; 32]),
@@ -1652,7 +1652,7 @@ mod tests {
 
     async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<()> {
         ensure_test_auth_env();
-        let identity = cityg_api_client::generate_room_admin_identity();
+        let identity = cityg_api_client::generate_room_admin_identity().expect("room identity");
         let admin_proof = identity.build_kbroad_proof(
             RoomAdminOperation::Bootstrap,
             room_id,
@@ -3236,7 +3236,7 @@ mod tests {
         let leaf_id = [0x44; 32];
         let timestamp_ms = 123_456u64;
         let plaintext = b"hello world";
-        let (public_key, secret_key) = generate_message_signing_keypair();
+        let (public_key, secret_key) = generate_message_signing_keypair()?;
         let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &secret_key)?;
         let encoded = encode_authenticated_message(
             timestamp_ms,
@@ -3885,7 +3885,7 @@ mod tests {
 
     #[test]
     fn log_helpers_cover_none_fingerprint_and_non_integer_fs_ec() {
-        let identity = cityg_api_client::generate_room_admin_identity();
+        let identity = cityg_api_client::generate_room_admin_identity().expect("room identity");
         let session = Session {
             server_url: "http://127.0.0.1:18080".to_string(),
             room_id: hex::encode([0xAA; 32]),
@@ -4018,7 +4018,8 @@ mod tests {
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex::encode([0x93u8; 32]);
         ensure_test_auth_env();
-        let alice_identity = cityg_api_client::generate_room_admin_identity();
+        let alice_identity =
+            cityg_api_client::generate_room_admin_identity().expect("room identity");
         let admin_proof = alice_identity.build_kbroad_proof(
             RoomAdminOperation::Bootstrap,
             &room_id,

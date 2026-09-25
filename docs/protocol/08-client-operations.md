@@ -50,7 +50,7 @@ header_map.insert(105, Value::Bytes(kbroad_pub.to_vec()));
 header_map.insert(106, Value::Bytes(params.params_id.to_vec()));
 
 // PoP
-header_map.insert(107, Value::Text("ML-DSA-65".to_string()));
+header_map.insert(107, Value::Text("ML-DSA-87".to_string()));
 header_map.insert(108, Value::Bytes(pop_pk.to_vec()));
 header_map.insert(109, Value::Bytes(pop_sig.to_vec()));
 

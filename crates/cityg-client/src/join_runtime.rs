@@ -21,7 +21,7 @@ pub struct JoinRuntimeMaterial {
 pub fn generate_join_runtime_material() -> Result<JoinRuntimeMaterial> {
     let (barrier_leaf_public_key, barrier_leaf_secret_key, barrier_leaf_pkhash) =
         generate_barrier_leaf_keypair()?;
-    let (msg_sign_public_key, msg_sign_secret_key) = generate_message_signing_keypair();
+    let (msg_sign_public_key, msg_sign_secret_key) = generate_message_signing_keypair()?;
     let (vrf_secret_key, vrf_public_key) = generate_vrf_keys()?;
 
     let mut k_fs = [0u8; 32];

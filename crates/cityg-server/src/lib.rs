@@ -79,9 +79,7 @@ use std::{
 use ciborium::value::{Integer, Value};
 use cityg_client::witness;
 use cityg_client::{CityGError, ClientEpochBundle, GroupMembership, MembershipDelta};
-use cityg_pqc::{
-    MlDsa65SecretKey, sign_ml_dsa_65_detached_signature, verify_ml_dsa_65_detached_signature,
-};
+use cityg_pqc::SignatureContext;
 use msphf_core::merkle::canonical_set_root;
 use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
 use msphf_core::{hash::h_l, serde_utils::to_cbor_vec};
@@ -1978,10 +1976,9 @@ impl CityGServer {
                 .iter()
                 .find(|(_, device_pk)| device_pk.as_slice() == pop_pk)
                 .map(|(leaf_id, _)| *leaf_id)
+            && let Some(record) = state.pending_join_finalize_auth.remove(&author_leaf_id)
         {
-            if let Some(record) = state.pending_join_finalize_auth.remove(&author_leaf_id) {
-                state.finalize_slot_reclaim(record.lease);
-            }
+            state.finalize_slot_reclaim(record.lease);
         }
         if let Some(validation) = barrier_validation.as_ref() {
             let predecessor_hash = compute_barrier_tree_hash(
@@ -2945,14 +2942,14 @@ impl CityGServer {
                     .revoked
                     .iter()
                     .map(|leaf| {
-                        let lease = require_revoked_slot_lease(state, leaf)
-                            .expect("revoked slot lease presence checked above");
-                        BarrierRevokedOccupancyRecord {
-                            slot_index: lease.slot_index,
-                            slot_generation: lease.slot_generation,
-                        }
+                        require_revoked_slot_lease(state, leaf).map(|lease| {
+                            BarrierRevokedOccupancyRecord {
+                                slot_index: lease.slot_index,
+                                slot_generation: lease.slot_generation,
+                            }
+                        })
                     })
-                    .collect()
+                    .collect::<Result<_, _>>()?
             };
         records.sort_by_key(|record| (record.slot_index, record.slot_generation));
         records.dedup();
@@ -4139,18 +4136,24 @@ fn encode_history_authority_descriptor(
 
 fn history_authority_secret_key(
     state: &HistoryAuthorityState,
-) -> Result<MlDsa65SecretKey, CityGError> {
-    MlDsa65SecretKey::from_bytes(&state.secret_key)
+) -> Result<cityg_pqc::SecretKey, CityGError> {
+    cityg_pqc::SecretKey::from_bytes(&state.secret_key)
         .map_err(|_| CityGError::InvalidInput("invalid history authority secret key"))
 }
 
+/// Sign a history-authority statement.
+///
+/// Uses the FIPS 204 deterministic variant: attestations, ticket artifacts and
+/// manifests are re-derived on demand and compared byte for byte (paginated
+/// public-tree responses, witness issuance), so one statement must always
+/// produce the same signature.
 fn sign_history_authority_message(
     state: &HistoryAuthorityState,
     payload: &[u8],
 ) -> Result<Vec<u8>, CityGError> {
     let secret_key = history_authority_secret_key(state)?;
-    sign_ml_dsa_65_detached_signature(&secret_key, payload)
-        .map_err(|_| CityGError::InvalidInput("invalid history authority secret key"))
+    cityg_pqc::sign_deterministic(&secret_key, SignatureContext::HISTORY_AUTHORITY, payload)
+        .map_err(|_| CityGError::InvalidInput("history authority signing failed"))
 }
 
 fn verify_history_authority_signature(
@@ -4158,8 +4161,13 @@ fn verify_history_authority_signature(
     payload: &[u8],
     signature: &[u8],
 ) -> Result<(), CityGError> {
-    verify_ml_dsa_65_detached_signature(&descriptor.public_key, payload, signature)
-        .map_err(|_| CityGError::InvalidInput("history authority signature verification failed"))
+    cityg_pqc::verify(
+        &descriptor.public_key,
+        SignatureContext::HISTORY_AUTHORITY,
+        payload,
+        signature,
+    )
+    .map_err(|_| CityGError::InvalidInput("history authority signature verification failed"))
 }
 
 fn global_history_parent_attestation_id(
@@ -4291,6 +4299,7 @@ fn encode_full_verification_receipt(
     })?)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn full_verification_receipt_payload(
     gid: &[u8; 32],
     author_leaf_id: &[u8; 32],
@@ -5592,12 +5601,12 @@ fn derive_implicit_genesis_slot_leases(
     if has_existing_group_state {
         return Ok(Vec::new());
     }
-    if !delta.revoked.is_empty() || delta.joined.len() != 1 {
-        if parse_barrier_update(header, state.n_max)?.is_some() {
-            return Err(CityGError::InvalidInput(
-                "genesis barrier update without slot lease must contain exactly one joined leaf",
-            ));
-        }
+    if (!delta.revoked.is_empty() || delta.joined.len() != 1)
+        && parse_barrier_update(header, state.n_max)?.is_some()
+    {
+        return Err(CityGError::InvalidInput(
+            "genesis barrier update without slot lease must contain exactly one joined leaf",
+        ));
     }
     if let Some(parsed) = parse_barrier_update(header, state.n_max)? {
         let slot_index = u32::try_from(parsed.updater_slot_index)
@@ -5859,9 +5868,12 @@ fn freeze_barrier_updater_invalid_error() -> CityGError {
     ))
 }
 
+/// Decoded receipt fields: (author_leaf_id, reason, slot_index, slot_generation, signature).
+type ParsedFullVerificationReceipt = ([u8; 32], u64, u64, u64, Vec<u8>);
+
 fn parse_full_verification_receipt(
     raw: &[u8],
-) -> Result<([u8; 32], u64, u64, u64, Vec<u8>), CityGError> {
+) -> Result<ParsedFullVerificationReceipt, CityGError> {
     let decoded = parse_deterministic_cbor::<FullVerificationReceiptWire>(raw)?;
     Ok((
         vec_to_32(decoded.author_leaf_id)?,
@@ -6014,8 +6026,9 @@ fn validate_history_authority_headers(
             raw_attestation,
             raw_barrier_update,
         )?;
-        verify_ml_dsa_65_detached_signature(
+        cityg_pqc::verify(
             author_pop_pk,
+            SignatureContext::BARRIER_RECEIPT,
             payload.as_slice(),
             signature.as_slice(),
         )
@@ -6839,6 +6852,8 @@ mod tests {
     };
     use ciborium::value::{Integer, Value};
     use cityg_client::{CityGClient, ClientEpochBundle, witness};
+    use cityg_pqc::SecretKey as MlDsaSecretKey;
+    use cityg_pqc::test_utils::{AsBytes as _, keypair as ml_dsa_keypair};
     use msphf_core::hash::h_l;
     use msphf_core::merkle::canonical_set_root;
     use msphf_core::serde_utils::to_cbor_vec;
@@ -6849,10 +6864,15 @@ mod tests {
         OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id, hdr,
         mhw::HeadRecord,
     };
-    use pqcrypto_dilithium::dilithium5::{
-        self, SecretKey as MlDsaSecretKey, keypair as ml_dsa_keypair,
-    };
-    use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey};
+
+    /// Author receipt signature over a barrier update (header key 181).
+    fn sign_receipt(payload: &[u8], secret_key: &MlDsaSecretKey) -> Vec<u8> {
+        cityg_pqc::test_utils::sign(
+            secret_key,
+            cityg_pqc::SignatureContext::BARRIER_RECEIPT,
+            payload,
+        )
+    }
     use proptest::prelude::*;
     use rand::{RngExt, SeedableRng, rngs::StdRng};
     use serde::Serialize;
@@ -7046,7 +7066,7 @@ mod tests {
         let leaf_id = compute_leaf_id(
             LeafIdMode::PerGroup,
             &gid,
-            "ML-DSA-65",
+            "ML-DSA-87",
             pop_public_key.as_slice(),
         )
         .map_err(|_| CityGError::InvalidInput("leaf id derivation"))?;
@@ -7100,7 +7120,7 @@ mod tests {
             srx: Some(srx_inputs),
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: pop_public_key.as_slice(),
                 secret_key: &pop_secret_key,
             }),
@@ -7167,7 +7187,7 @@ mod tests {
             compute_leaf_id(
                 LeafIdMode::PerGroup,
                 gid,
-                "ML-DSA-65",
+                "ML-DSA-87",
                 pop_public_key.as_slice(),
             )
             .map_err(|_| CityGError::InvalidInput("leaf id derivation"))?,
@@ -7212,7 +7232,7 @@ mod tests {
             srx: Some(srx_inputs),
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: pop_public_key.as_slice(),
                 secret_key: &pop_secret_key,
             }),
@@ -7729,7 +7749,7 @@ mod tests {
             srx: None,
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: generated.pop_public_key.as_slice(),
                 secret_key: &generated.pop_secret_key,
             }),
@@ -7804,9 +7824,7 @@ mod tests {
                 raw_barrier_update.as_slice(),
             )?;
             let receipt_signature =
-                dilithium5::detached_sign(receipt_payload.as_slice(), &generated.pop_secret_key)
-                    .as_bytes()
-                    .to_vec();
+                sign_receipt(receipt_payload.as_slice(), &generated.pop_secret_key);
             refresh_bundle.header_map.insert(
                 hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
                 Value::Bytes(super::encode_full_verification_receipt(
@@ -7975,9 +7993,7 @@ mod tests {
                 barrier_update.as_slice(),
             )?;
             let receipt_signature =
-                dilithium5::detached_sign(receipt_payload.as_slice(), &generated.pop_secret_key)
-                    .as_bytes()
-                    .to_vec();
+                sign_receipt(receipt_payload.as_slice(), &generated.pop_secret_key);
             header.insert(
                 hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
                 Value::Bytes(super::encode_full_verification_receipt(
@@ -8045,7 +8061,7 @@ mod tests {
             srx: Some(srx_inputs),
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: generated.pop_public_key.as_slice(),
                 secret_key: &generated.pop_secret_key,
             }),
@@ -8205,9 +8221,7 @@ mod tests {
                 barrier_update.as_slice(),
             )?;
             let receipt_signature =
-                dilithium5::detached_sign(receipt_payload.as_slice(), &generated.pop_secret_key)
-                    .as_bytes()
-                    .to_vec();
+                sign_receipt(receipt_payload.as_slice(), &generated.pop_secret_key);
             header.insert(
                 hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
                 Value::Bytes(super::encode_full_verification_receipt(
@@ -8275,7 +8289,7 @@ mod tests {
             srx: Some(srx_inputs),
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: generated.pop_public_key.as_slice(),
                 secret_key: &generated.pop_secret_key,
             }),

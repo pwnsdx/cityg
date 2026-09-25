@@ -880,6 +880,8 @@ mod tests {
         witness::SrxInputsOwned,
     };
     use cityg_config::CityGConfig;
+    use cityg_pqc::SecretKey as MlDsaSecretKey;
+    use cityg_pqc::test_utils::AsBytes as _;
     use cityg_runtime::should_prune as runtime_should_prune;
     use futures::{SinkExt, StreamExt};
     use msphf_core::MsphfError;
@@ -890,8 +892,6 @@ mod tests {
         FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair, SrxMode,
         compute_leaf_id, hdr, lb,
     };
-    use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
-    use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
     use prost::Message;
     use serde_bytes::ByteBuf;
     use serde_json::Value;
@@ -1073,7 +1073,11 @@ mod tests {
         let mut message = Vec::new();
         ciborium::ser::into_writer(&message_data, &mut message)
             .expect("encode identity binding message");
-        let signature = dilithium5::detached_sign(message.as_slice(), pop_secret_key);
+        let signature = cityg_pqc::test_utils::sign(
+            pop_secret_key,
+            cityg_pqc::SignatureContext::IDENTITY_BINDING,
+            message.as_slice(),
+        );
         IdentityBinding {
             alias: alias.to_string(),
             pop_public_key: pop_public_key.to_vec(),
@@ -1176,7 +1180,7 @@ mod tests {
             srx: Some(srx_inputs),
             srx_mode: SrxMode::Complete,
             pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
+                algorithm: "ML-DSA-87",
                 public_key: pop_public_key,
                 secret_key: pop_secret_key,
             }),
@@ -1715,7 +1719,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn test_identity_binding_creation_and_verification() {
         // Generate a keypair
-        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let (pop_pk, pop_sk) = cityg_pqc::test_utils::keypair();
         let pop_public_key = pop_pk.as_bytes().to_vec();
         let alias = "alice".to_string();
 
@@ -1729,7 +1733,11 @@ mod tests {
             .expect("encode identity binding message");
 
         // Sign the message
-        let signature = dilithium5::detached_sign(&message, &pop_sk);
+        let signature = cityg_pqc::test_utils::sign(
+            &pop_sk,
+            cityg_pqc::SignatureContext::IDENTITY_BINDING,
+            &message,
+        );
 
         // Create the identity binding
         let binding = IdentityBinding {
@@ -1746,13 +1754,17 @@ mod tests {
     #[test]
     fn test_identity_binding_wrong_signature() {
         // Generate a keypair
-        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let (pop_pk, pop_sk) = cityg_pqc::test_utils::keypair();
         let pop_public_key = pop_pk.as_bytes().to_vec();
         let alias = "alice".to_string();
 
         // Sign the wrong message
         let wrong_message = b"wrong message";
-        let signature = dilithium5::detached_sign(wrong_message, &pop_sk);
+        let signature = cityg_pqc::test_utils::sign(
+            &pop_sk,
+            cityg_pqc::SignatureContext::IDENTITY_BINDING,
+            wrong_message,
+        );
 
         // Create the identity binding with wrong signature
         let binding = IdentityBinding {
@@ -2004,7 +2016,7 @@ mod tests {
             ),
         };
 
-        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let (pop_pk, pop_sk) = cityg_pqc::test_utils::keypair();
         let alias = "alice".to_string();
         let pop_public_key = pop_pk.as_bytes().to_vec();
         let message_data = (
@@ -2014,7 +2026,11 @@ mod tests {
         let mut message = Vec::new();
         ciborium::ser::into_writer(&message_data, &mut message)
             .expect("encode identity binding message");
-        let signature = dilithium5::detached_sign(&message, &pop_sk);
+        let signature = cityg_pqc::test_utils::sign(
+            &pop_sk,
+            cityg_pqc::SignatureContext::IDENTITY_BINDING,
+            &message,
+        );
 
         let request = JoinTicketRequest {
             room_id: "ab".repeat(32),
@@ -2184,7 +2200,8 @@ mod tests {
             ApiError::InvalidRequest("kbroad_public has unexpected length")
         ));
 
-        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let (admin_pop_public_key, admin_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
         let room_id = hex::encode([0x66u8; 32]);
         let kbroad_public = vec![0x33; ml_kem_public_key_bytes()];
         let response = bootstrap_room(
@@ -2214,7 +2231,8 @@ mod tests {
         let gid = [0x77u8; 32];
         let kbroad_public = vec![0x44; ml_kem_public_key_bytes()];
         let room_id = hex::encode(gid);
-        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let (admin_pop_public_key, admin_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
         let encode = |request: BootstrapRoomRequest| -> Bytes {
             let mut body = Vec::new();
             request.encode(&mut body).expect("encode bootstrap request");
@@ -2292,7 +2310,8 @@ mod tests {
     async fn rotate_room_kbroad_validates_requests_and_updates_generation() {
         let state = test_api_state();
         let headers = room_admin_headers();
-        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let (admin_pop_public_key, admin_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
         let encode = |request: RotateRoomKbroadRequest| -> Bytes {
             let mut body = Vec::new();
             request.encode(&mut body).expect("encode rotate request");
@@ -2400,7 +2419,8 @@ mod tests {
     async fn rotate_room_kbroad_rejects_rooms_without_explicit_admin_acl() {
         let state = test_api_state();
         let headers = room_admin_headers();
-        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let (admin_pop_public_key, admin_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
         let room_id = hex::encode(DEMO_GID);
         let mut rotated = cityg_client::demo::kbroad_public().to_vec();
         rotated[0] ^= 0x22;
@@ -2432,7 +2452,8 @@ mod tests {
     async fn rotate_room_kbroad_maps_server_invalid_input_paths() {
         let state = test_api_state();
         let headers = room_admin_headers();
-        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let (admin_pop_public_key, admin_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
         let encode = |request: RotateRoomKbroadRequest| -> Bytes {
             let mut body = Vec::new();
             request.encode(&mut body).expect("encode rotate request");
@@ -2517,7 +2538,8 @@ mod tests {
         let room_id = hex::encode([0x99u8; 32]);
         let initial_kbroad_public = vec![0x41; ml_kem_public_key_bytes()];
         let rotated_kbroad_public = vec![0x42; ml_kem_public_key_bytes()];
-        let (creator_pop_public_key, creator_pop_secret_key) = generate_room_admin_keypair();
+        let (creator_pop_public_key, creator_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
         bootstrap_room(
             State(state.clone()),
             HeaderMap::new(),
@@ -2536,7 +2558,8 @@ mod tests {
         .await
         .expect("bootstrap should succeed");
 
-        let (other_pop_public_key, other_pop_secret_key) = generate_room_admin_keypair();
+        let (other_pop_public_key, other_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
         let err = rotate_room_kbroad(
             State(state),
             HeaderMap::new(),
@@ -2565,9 +2588,12 @@ mod tests {
         let state = test_api_state();
         let room_id = hex::encode([0xA1u8; 32]);
         let kbroad_public = vec![0x41; ml_kem_public_key_bytes()];
-        let (creator_pop_public_key, creator_pop_secret_key) = generate_room_admin_keypair();
-        let (delegate_pop_public_key, delegate_pop_secret_key) = generate_room_admin_keypair();
-        let (other_pop_public_key, other_pop_secret_key) = generate_room_admin_keypair();
+        let (creator_pop_public_key, creator_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
+        let (delegate_pop_public_key, delegate_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
+        let (other_pop_public_key, other_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
 
         bootstrap_room(
             State(state.clone()),
@@ -2741,7 +2767,8 @@ mod tests {
         let room_id = hex::encode(DEMO_GID);
         let author_leaf = cityg_client::demo::demo_member_leaf("alice");
         let target_leaf = cityg_client::demo::demo_member_leaf("bob");
-        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let (admin_pop_public_key, admin_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
 
         let missing_proof_err = expel_member_ticket(
             State(state.clone()),
@@ -3204,7 +3231,8 @@ mod tests {
             let gid = [seed; 32];
             let room_id = hex::encode(gid);
             let kbroad_public = vec![seed; ml_kem_public_key_bytes()];
-            let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+            let (pop_public_key, pop_secret_key) =
+                generate_room_admin_keypair().expect("room admin keypair");
             let request = BootstrapRoomRequest {
                 room_id: room_id.clone(),
                 kbroad_public: kbroad_public.clone(),
@@ -3773,22 +3801,22 @@ mod tests {
     fn identity_binding_validation_rejects_invalid_field_shapes() {
         let mut binding = IdentityBinding {
             alias: "alice".to_string(),
-            pop_public_key: vec![0u8; dilithium5::public_key_bytes().saturating_sub(1)],
-            signature: vec![0u8; dilithium5::signature_bytes()],
+            pop_public_key: vec![0u8; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES.saturating_sub(1)],
+            signature: vec![0u8; cityg_pqc::ML_DSA_87_SIGNATURE_BYTES],
         };
         assert!(matches!(
             verify_identity_binding(&binding),
             Err(ApiError::InvalidRequest("invalid pop_public_key length"))
         ));
 
-        binding.pop_public_key = vec![0u8; dilithium5::public_key_bytes()];
-        binding.signature = vec![0u8; dilithium5::signature_bytes().saturating_sub(1)];
+        binding.pop_public_key = vec![0u8; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES];
+        binding.signature = vec![0u8; cityg_pqc::ML_DSA_87_SIGNATURE_BYTES.saturating_sub(1)];
         assert!(matches!(
             verify_identity_binding(&binding),
             Err(ApiError::InvalidRequest("invalid signature length"))
         ));
 
-        binding.signature = vec![0u8; dilithium5::signature_bytes()];
+        binding.signature = vec![0u8; cityg_pqc::ML_DSA_87_SIGNATURE_BYTES];
         binding.alias.clear();
         assert!(matches!(
             verify_identity_binding(&binding),
@@ -3832,7 +3860,7 @@ mod tests {
     async fn join_ticket_success_persists_confirmed_alias_binding() {
         let state = test_api_state();
 
-        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let (pop_pk, pop_sk) = cityg_pqc::test_utils::keypair();
         let alias = "alice-joined".to_string();
         let pop_public_key = pop_pk.as_bytes().to_vec();
         let message_data = (
@@ -3842,7 +3870,11 @@ mod tests {
         let mut message = Vec::new();
         ciborium::ser::into_writer(&message_data, &mut message)
             .expect("encode identity binding message");
-        let signature = dilithium5::detached_sign(&message, &pop_sk);
+        let signature = cityg_pqc::test_utils::sign(
+            &pop_sk,
+            cityg_pqc::SignatureContext::IDENTITY_BINDING,
+            &message,
+        );
 
         let before = state.server.read().await.context().fs_base_ts();
         assert!(before.is_none(), "fs base ts should start unset");
@@ -3866,7 +3898,7 @@ mod tests {
         assert_eq!(decoded.leaf_id.len(), 32);
         let gid: [u8; 32] = decoded.gid.as_slice().try_into().expect("join ticket gid");
         let expected_leaf =
-            compute_leaf_id(LeafIdMode::PerGroup, &gid, "ML-DSA-65", &pop_public_key)
+            compute_leaf_id(LeafIdMode::PerGroup, &gid, "ML-DSA-87", &pop_public_key)
                 .expect("compute leaf from binding pop key");
         assert_eq!(decoded.leaf_id, expected_leaf.to_vec());
 
@@ -3897,7 +3929,8 @@ mod tests {
         let gid = [0x91u8; 32];
         let room_id = hex::encode(gid);
         let kbroad_public = cityg_client::demo::kbroad_public().to_vec();
-        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let (admin_pop_public_key, admin_pop_secret_key) =
+            generate_room_admin_keypair().expect("room admin keypair");
 
         bootstrap_room(
             State(state.clone()),
@@ -3930,7 +3963,7 @@ mod tests {
             );
         }
 
-        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let (pop_pk, pop_sk) = cityg_pqc::test_utils::keypair();
         let alias = "alice-bootstrapped";
         let join_response = join_ticket(
             State(state.clone()),

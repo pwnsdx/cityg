@@ -27,9 +27,7 @@ tokio-tungstenite = "0.29"
 futures = "0.3"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 rand = "0.10"
-pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
-pqcrypto-kyber = { version = "0.8", default-features = false, features = ["std"] }
-pqcrypto-traits = "0.3"
+cityg-pqc = { path = "../cityg-pqc" }
 ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
 hex = "0.4"
 ciborium = "0.2"
@@ -52,6 +50,7 @@ objc = "0.2.7"
 raw-window-handle = "0.6.2"
 
 [dev-dependencies]
+cityg-pqc = { path = "../cityg-pqc", features = ["test-utils"] }
 gpui = { version = "0.2.2", features = ["test-support"] }
 tempfile = "3"
 cityg-api = { path = "../cityg-api" }

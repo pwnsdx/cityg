@@ -267,8 +267,6 @@ pub fn prepare_barrier_snapshot_artifacts(
 mod tests {
     use super::*;
     use crate::barrier::expected_barrier_tree_nodes;
-    use pqcrypto_dilithium::dilithium5;
-    use pqcrypto_traits::sign::SecretKey;
     use std::sync::Arc;
 
     fn sample_commitment() -> BarrierHistoryCommitment {
@@ -281,8 +279,7 @@ mod tests {
     }
 
     fn blank_snapshot(n_max: u64) -> Result<Vec<Vec<u8>>> {
-        let tree_nodes = usize::try_from(expected_barrier_tree_nodes(n_max)?)
-            .expect("expected tree size fits usize");
+        let tree_nodes = expected_barrier_tree_nodes(n_max)?;
         Ok(vec![Vec::new(); tree_nodes])
     }
 
@@ -477,7 +474,8 @@ mod tests {
     fn prepare_barrier_snapshot_artifacts_adds_receipt_for_attested_state() -> Result<()> {
         let commitment = sample_commitment();
         let revocation_roots_hash = compute_revocation_roots_hash(&[0x44; 32], &[0x55; 32])?;
-        let (_, pop_secret_key) = dilithium5::keypair();
+        let (_, pop_secret_key) = cityg_pqc::test_utils::keypair();
+        let pop_secret_key = pop_secret_key.to_bytes();
         let snapshot_entries = blank_snapshot(2)?;
 
         let prepared = prepare_barrier_snapshot_artifacts(BarrierSnapshotArtifactsInput {
@@ -501,7 +499,7 @@ mod tests {
             join_records: &[],
             witness_revoked_records: &[],
             revocation_roots_hash,
-            pop_secret_key: pop_secret_key.as_bytes(),
+            pop_secret_key: pop_secret_key.as_slice(),
         })?;
 
         assert!(

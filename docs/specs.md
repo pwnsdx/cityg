@@ -45,8 +45,11 @@ Room-scoped governance rules for the current profile:
 
 Room admin proof registry for `v0.1.4`:
 * `RoomAdminProof := { pop_public_key:bstr, signature:bstr }`.
-* The only in-profile signature suite for `RoomAdminProof` is ML-DSA-87 /
-  Dilithium5.
+* The only in-profile signature suite for `RoomAdminProof` is FIPS 204
+  ML-DSA-87 (final standard, not pre-standard Dilithium5), signed with the
+  FIPS 204 context string `city-g/room-admin/v1`. Every signature of this
+  profile uses a per-usage FIPS 204 context string; see `cityg-pqc`
+  `SignatureContext` for the registry.
 * The signed message MUST be `CBOR_det((operation:tstr, room_id:tstr, payload:bstr))`.
 * `operation` is a closed-world registry in this profile:
   * `bootstrap_room_v1`
@@ -78,7 +81,7 @@ External proof / suite registry fixed by this profile:
   * `msphf_crs_id == "rlwe-merkle/v1"`
   * `msphf_params_id == "rlwe-params/mock"`
 * the in-profile room-admin and history-authority signature suite is
-  ML-DSA-87 / Dilithium5,
+  FIPS 204 ML-DSA-87,
 * any join/merge/provisioning artifact or ticket carrying different values for
   those closed-world suite identifiers is out of profile for `v0.1.4` and MUST
   be rejected by base-profile clients.
@@ -307,7 +310,7 @@ Deployments MAY negotiate `local-history-authority-v1` only for explicitly scope
 Requirements on that extension:
 * One negotiated `HistoryAuthorityDescriptor` object MUST identify the scope and the public verification key for that scope-local history authority.
 * `HistoryAuthorityDescriptor := [scope_id:bstr32, public_key:bstr]`.
-* The signature suite for `public_key` MUST be fixed by the negotiated extension. The current implementation uses ML-DSA-87 / Dilithium5 for this scope-local authority.
+* The signature suite for `public_key` MUST be fixed by the negotiated extension. The current implementation uses FIPS 204 ML-DSA-87 for this scope-local authority.
 * When this extension is negotiated, every successful A), B), C), and D) response consumed for one decision MUST carry the same non-empty `history_authority_descriptor`, and clients MUST reject descriptor drift across those responses.
 * When this extension is negotiated, every successful join/merge/provisioning/helper/lookup response carrying extension-defined objects MUST also carry `history_authority_extension == "local-history-authority-v1"`.
 * When this extension is negotiated, key `182` and the API fields named `global_history_attestation` / `current_global_history_attestation` carry a scope-local `GlobalHistoryAttestation` object rather than a federated/global consensus proof.
@@ -327,7 +330,7 @@ Requirements on that extension:
 * Successful join/merge/provisioning/helper/lookup responses carrying objects from this extension MUST carry `history_authority_extension == "global-history-authority-v1"`.
 * One negotiated `HistoryAuthorityDescriptor` object MUST identify the deployment-global history authority and its public verification key.
 * `HistoryAuthorityDescriptor := [scope_id:bstr32, public_key:bstr]`.
-* The signature suite for `public_key` MUST be fixed by the negotiated extension. The current implementation uses ML-DSA-87 / Dilithium5 for this deployment-global authority.
+* The signature suite for `public_key` MUST be fixed by the negotiated extension. The current implementation uses FIPS 204 ML-DSA-87 for this deployment-global authority.
 * Under `global-history-authority-v1`, `GlobalHistoryAttestation := [scope_id:bstr32, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, parent_attestation_id:bstr32, finality_kind:tstr, signature:bstr]`.
 * Under `global-history-authority-v1`, `finality_kind` MUST be exactly `"global-append-only"`.
 * Under `global-history-authority-v1`, `parent_attestation_id` MUST equal `H_L("barrier/global-history/parent-attestation", [scope_id, gid, prev_history_commitment_id])`, except that it MUST be all-zero when `prev_history_commitment_id` is all-zero.

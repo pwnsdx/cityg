@@ -1,0 +1,63 @@
+{
+  "profile_version": "v0.2",
+  "kind": "v0.2-conformance-manifest",
+  "notes": [
+    "This manifest links the requirements introduced by the v0.2 profile (audit docs/audits/audit-crypto-conformite-2026-09-25.md) to deterministic implementation tests.",
+    "Requirement IDs are grouped by area: SIG (signature suite, audit H-05)."
+  ],
+  "requirements": [
+    {
+      "id": "SIG.1",
+      "title": "FIPS 204 ML-DSA-87 is the only signature suite, with one backend on native and wasm32",
+      "coverage": [
+        {
+          "crate": "cityg-pqc",
+          "test": "tests::sizes_match_fips204_ml_dsa_87",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-pqc",
+          "test": "tests::deterministic_known_answer_is_stable",
+          "expectation": "kat_match"
+        },
+        {
+          "crate": "cityg-pqc",
+          "test": "tests::sign_and_verify_round_trip",
+          "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "SIG.2",
+      "title": "Every signature is bound to a per-usage FIPS 204 context string",
+      "coverage": [
+        {
+          "crate": "cityg-pqc",
+          "test": "tests::contexts_are_distinct_and_bind_signatures",
+          "expectation": "reject_cross_context"
+        },
+        {
+          "crate": "cityg-client",
+          "test": "message_auth::tests::message_signatures_are_bound_to_the_message_context",
+          "expectation": "reject_cross_context"
+        }
+      ]
+    },
+    {
+      "id": "SIG.3",
+      "title": "Malformed keys and signatures are rejected before verification",
+      "coverage": [
+        {
+          "crate": "cityg-pqc",
+          "test": "tests::malformed_inputs_are_rejected",
+          "expectation": "reject_malformed"
+        },
+        {
+          "crate": "cityg-pqc",
+          "test": "tests::secret_key_round_trips_through_bytes",
+          "expectation": "accept"
+        }
+      ]
+    }
+  ]
+}

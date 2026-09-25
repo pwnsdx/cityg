@@ -358,7 +358,7 @@ fn verify_client_visible_full_verification_receipt(
     let author_leaf_id = compute_leaf_id(
         LeafIdMode::PerGroup,
         input.gid,
-        "ML-DSA-65",
+        "ML-DSA-87",
         author_device_pk,
     )
     .map_err(|err| {

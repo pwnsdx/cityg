@@ -67,7 +67,7 @@ City-G `tswe/msphf-we/fs-hybrid` uses a carefully selected suite of cryptographi
 └───────────────────────┴─────────────────────────────────┘
                          ↓  ↑
 ┌───────────────────────┬─────────────────────────────────┐
-│   ML-DSA-65           │     ML-KEM-768                  │
+│   ML-DSA-87           │     ML-KEM-768                  │
 │  (Dilithium Sigs)     │    (Kyber KEM)                  │
 │  PoP, Bootstrap       │    KBROAD Envelope              │
 └───────────────────────┴─────────────────────────────────┘
@@ -80,7 +80,7 @@ City-G `tswe/msphf-we/fs-hybrid` uses a carefully selected suite of cryptographi
 | **BLAKE3** | 256-bit | 128-bit | - |
 | **RPO-256** | 256-bit | 128-bit | - |
 | **ML-KEM-768** | 256-bit | 192-bit | NIST Level 3 |
-| **ML-DSA-65** | 256-bit | 192-bit | NIST Level 3 |
+| **ML-DSA-87** | 256-bit | 192-bit | NIST Level 3 |
 | **ChaCha20-Poly1305** | 256-bit | 128-bit | IETF RFC 8439 |
 
 **All primitives provide at least 128-bit quantum security.**
@@ -320,10 +320,10 @@ let ss = decapsulate(&ct_kem, &receiver_secret);
 
 **Implementation:** [`crates/msphf-orchestrator/src/accept/mod.rs`](../../crates/msphf-orchestrator/src/accept/mod.rs) (validation only, no decapsulation)
 
-### 3.2 ML-DSA-65 (Digital Signatures)
+### 3.2 ML-DSA-87 (Digital Signatures)
 
 **Standard:** FIPS 204 (NIST PQC Standard)
-**Implementation:** `pqcrypto_dilithium::dilithium5` (Dilithium5 ≈ ML-DSA-65)
+**Implementation:** `pqcrypto_dilithium::dilithium5` (Dilithium5 ≈ ML-DSA-87)
 **Blueprint:** §12.1
 
 **Parameters:**
@@ -1119,7 +1119,7 @@ With separation:
 | **BLAKE3** | 256-bit | 128-bit | - | ✅ Deployed |
 | **RPO-256** | 256-bit | 128-bit | - | ✅ Analyzed |
 | **ML-KEM-768** | ≥192-bit (Category 3) | ≥96-bit (Category 3 quantum target) | FIPS 203 | ✅ NIST Std |
-| **ML-DSA-65** | ≥192-bit (Category 3) | ≥96-bit (Category 3 quantum target) | FIPS 204 | ✅ NIST Std |
+| **ML-DSA-87** | ≥192-bit (Category 3) | ≥96-bit (Category 3 quantum target) | FIPS 204 | ✅ NIST Std |
 | **ChaCha20-Poly1305** | 256-bit | 128-bit | RFC 8439 | ✅ IETF Std |
 | **RLWE-HPS A1** | ≥192-bit (matches ML-KEM-768) | ≈96-bit (quantum sieving ≈2^95 ops) | Annex C | ⚠️ Research |
 
@@ -1141,7 +1141,7 @@ With separation:
 **Lattice Attacks (BKZ, LLL):**
 - Best known: Exponential in dimension
   - ML-KEM-768: ≥96-bit quantum security target (NIST Category 3)
-  - ML-DSA-65: ≥96-bit quantum security target (NIST Category 3)
+  - ML-DSA-87: ≥96-bit quantum security target (NIST Category 3)
   - RLWE-HPS A1: ≈96-bit quantum security (Module-LWE instance costs ≈2^95 quantum operations per lattice-estimator)
 
 **Overall System Security:** Meets or exceeds NIST Category 3 targets across all primitives.
@@ -1176,7 +1176,7 @@ With separation:
 | **msphf-core** | `hash.rs`, `rpo256.rs`, `rlwe/` | Core crypto primitives |
 | **msphf-rlwe** | `lib.rs` | RLWE-HPS construction |
 | **pqcrypto_kyber** | External | ML-KEM-768 |
-| **pqcrypto_dilithium** | External | ML-DSA-65 |
+| **pqcrypto_dilithium** | External | ML-DSA-87 |
 | **blake3** | External | BLAKE3 hash |
 | **chacha20poly1305** | External | AEAD |
 | **sha3** | External | SHAKE-128 (matrix expansion) |

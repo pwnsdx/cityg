@@ -640,6 +640,7 @@ pub(crate) fn slot_index_for_leaf(leaf: &[u8; 32], n_max: u64) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

@@ -99,6 +99,7 @@ pub(super) fn validate_epoch_sync_barrier_bundle(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn reconcile_epoch_sync_barrier_bundle(
     client: &CitygApiClient,
     session: &mut AppSession,

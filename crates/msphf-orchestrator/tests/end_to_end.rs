@@ -15,6 +15,8 @@ use anchor_seed::{build_anchor_seed_ctx, compute_seed_ctx_hash};
 use blake3::Hasher;
 use ciborium::ser::into_writer;
 use ciborium::value::{Integer, Value};
+use cityg_pqc::SecretKey as MlDsaSecretKey;
+use cityg_pqc::test_utils::{AsBytes as _, keypair as dsa_keypair};
 use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_A1};
 use msphf_core::{
     hash::h_l,
@@ -35,13 +37,16 @@ use msphf_orchestrator::{
     build_bootstrap_digest, extract_epoch_msphf_or, joiner_kgen_merge_or, joiner_kgen_or,
     rebind_local_hp_envelope_with_barrier_key, recover_barrier_hp_material_from_header,
 };
-use pqcrypto_dilithium::dilithium5::{
-    SecretKey as MlDsaSecretKey, detached_sign, keypair as dsa_keypair,
-};
 use pqcrypto_kyber::kyber768::keypair as kyber_keypair;
-use pqcrypto_traits::sign::{
-    DetachedSignature as SignDetachedSignatureTrait, PublicKey as SignPublicKeyTrait,
-};
+
+/// Bootstrap CA signature over an anchor digest (header key 171).
+fn detached_sign(message: &[u8], secret_key: &MlDsaSecretKey) -> Vec<u8> {
+    cityg_pqc::test_utils::sign(
+        secret_key,
+        cityg_pqc::SignatureContext::ANCHOR_BOOTSTRAP,
+        message,
+    )
+}
 use serde::Serialize;
 
 fn fixture_pop_keys() -> (&'static [u8], &'static MlDsaSecretKey) {
@@ -570,7 +575,7 @@ fn make_anchor_fixture(
     let (pop_pk, pop_sk) = fixture_pop_keys();
     let mut join_leaves = config.join_leaves.clone();
     if let Ok(pop_leaf) =
-        msphf_orchestrator::compute_leaf_id(LeafIdMode::PerGroup, &config.gid, "ML-DSA-65", pop_pk)
+        msphf_orchestrator::compute_leaf_id(LeafIdMode::PerGroup, &config.gid, "ML-DSA-87", pop_pk)
     {
         join_leaves.push(pop_leaf);
     }
@@ -640,7 +645,7 @@ fn make_anchor_fixture(
         srx: Some(srx_inputs),
         srx_mode: SrxMode::Complete,
         pop_keys: Some(PopKeypair {
-            algorithm: "ML-DSA-65",
+            algorithm: "ML-DSA-87",
             public_key: pop_pk,
             secret_key: pop_sk,
         }),
@@ -740,7 +745,7 @@ struct JoinerFixture {
     witness_bytes: Vec<u8>,
     kbroad_registry: BTreeMap<Vec<u8>, Vec<u8>>,
     bootstrap_pk: Vec<u8>,
-    bootstrap_sk: pqcrypto_dilithium::dilithium5::SecretKey,
+    bootstrap_sk: MlDsaSecretKey,
     is_genesis: bool,
 }
 
@@ -921,7 +926,7 @@ fn attach_bootstrap(
     rho_commit: &[u8; 32],
     seed_bundle_commit: &[u8; 32],
     boot_pk: &[u8],
-    boot_sk: &pqcrypto_dilithium::dilithium5::SecretKey,
+    boot_sk: &MlDsaSecretKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     header.remove(&HDR_BOOTSTRAP_SIG);
     header.remove(&HDR_BOOTSTRAP_PK);

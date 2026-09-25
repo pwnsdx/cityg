@@ -34,6 +34,24 @@ license = "MIT"
 authors = ["Sabri Haddouche"]
 repository = "https://github.com/pwnsdx/cityg"
 
+# Optimize the post-quantum and hash primitives even in dev/test builds:
+# unoptimized FIPS 203/204 code is ~40x slower, which makes the protocol
+# integration tests slow and timing-sensitive.
+[profile.dev.package.fips204]
+opt-level = 3
+
+[profile.dev.package.ml-kem]
+opt-level = 3
+
+[profile.dev.package.sha3]
+opt-level = 3
+
+[profile.dev.package.keccak]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3
+
 [profile.release]
 lto = true              # Link-time optimization for better performance
 codegen-units = 1       # Single codegen unit for maximum optimization

@@ -6,7 +6,6 @@ use cityg_api_schema::pb::{
     JoinTicketResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus, MergeTicketResponse,
 };
 use msphf_core::hash::h_l;
-use pqcrypto_dilithium::dilithium5;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -527,20 +526,30 @@ where
     Ok(decoded)
 }
 
-pub(crate) fn verify_ml_dsa_signature(
+/// Verify a history-authority signature (FIPS 204 ML-DSA-87, history-authority context).
+pub(crate) fn verify_history_authority_signature(
     message: &[u8],
     public_key: &[u8],
     signature: &[u8],
 ) -> Result<(), Error> {
-    let pk = <dilithium5::PublicKey as pqcrypto_traits::sign::PublicKey>::from_bytes(public_key)
-        .map_err(|_| Error::Parse("invalid history authority public key".to_string()))?;
-    let sig =
-        <dilithium5::DetachedSignature as pqcrypto_traits::sign::DetachedSignature>::from_bytes(
-            signature,
-        )
-        .map_err(|_| Error::Parse("invalid history authority signature".to_string()))?;
-    dilithium5::verify_detached_signature(&sig, message, &pk)
-        .map_err(|_| Error::Parse("history authority signature verification failed".to_string()))
+    cityg_pqc::verify(
+        public_key,
+        cityg_pqc::SignatureContext::HISTORY_AUTHORITY,
+        message,
+        signature,
+    )
+    .map_err(|err| match err {
+        cityg_pqc::VerifyError::InvalidPublicKeyLength
+        | cityg_pqc::VerifyError::InvalidPublicKey => {
+            Error::Parse("invalid history authority public key".to_string())
+        }
+        cityg_pqc::VerifyError::InvalidSignatureLength => {
+            Error::Parse("invalid history authority signature".to_string())
+        }
+        cityg_pqc::VerifyError::VerificationFailed => {
+            Error::Parse("history authority signature verification failed".to_string())
+        }
+    })
 }
 
 pub(crate) fn compute_full_verification_barrier_update_digest(
@@ -720,7 +729,7 @@ pub(crate) fn verify_full_verification_witness(
         revoked_digest: &expected_revoked_digest,
         deployment_profile_manifest_digest: &expected_manifest_digest,
     })?;
-    verify_ml_dsa_signature(
+    verify_history_authority_signature(
         payload.as_slice(),
         authority.public_key.as_slice(),
         parsed.signature.as_slice(),
@@ -884,7 +893,7 @@ pub(crate) fn verify_join_provisioning_artifact(
         current_join_occupancies: join_records.as_slice(),
         current_revoked_occupancies: revoked_records.as_slice(),
     })?;
-    verify_ml_dsa_signature(
+    verify_history_authority_signature(
         payload.as_slice(),
         authority.public_key.as_slice(),
         artifact.signature.as_slice(),
@@ -1055,7 +1064,7 @@ pub(crate) fn verify_merge_ticket_artifact(
         fs_epoch_base_ts: response.fs_epoch_base_ts,
         kbroad_generation: response.kbroad_generation,
     })?;
-    verify_ml_dsa_signature(
+    verify_history_authority_signature(
         payload.as_slice(),
         authority.public_key.as_slice(),
         artifact.signature.as_slice(),
@@ -1133,7 +1142,7 @@ pub(crate) fn verify_deployment_profile_manifest(
         fs_forward_leap_slack_first_device: fs_forward_leap_policy.slack_first_device,
         fs_forward_leap_slack_device: fs_forward_leap_policy.slack_device,
     })?;
-    verify_ml_dsa_signature(
+    verify_history_authority_signature(
         payload.as_slice(),
         authority.public_key.as_slice(),
         manifest.signature.as_slice(),
@@ -1230,7 +1239,7 @@ pub fn parse_history_authority_descriptor_bytes(
     }
     let HistoryAuthorityDescriptorWire(scope_id, public_key) =
         decode_cbor_det("history_authority_descriptor", raw)?;
-    if public_key.len() != dilithium5::public_key_bytes() {
+    if public_key.len() != cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES {
         return Err(Error::Parse(
             "history_authority_descriptor public_key length mismatch".to_string(),
         ));
@@ -1299,7 +1308,7 @@ pub fn parse_global_history_attestation_bytes(
             &attestation.parent_attestation_id,
             attestation.finality_kind.as_str(),
         ))?;
-        verify_ml_dsa_signature(
+        verify_history_authority_signature(
             payload.as_slice(),
             authority.public_key.as_slice(),
             attestation.signature.as_slice(),
@@ -1379,7 +1388,7 @@ pub fn verify_revoked_occupancies_completeness_attestation(
             records,
         },
     })?;
-    verify_ml_dsa_signature(
+    verify_history_authority_signature(
         payload.as_slice(),
         authority.public_key.as_slice(),
         attestation.signature.as_slice(),
@@ -1408,7 +1417,7 @@ pub fn verify_join_occupancies_since_completeness_attestation(
             records,
         },
     })?;
-    verify_ml_dsa_signature(
+    verify_history_authority_signature(
         payload.as_slice(),
         authority.public_key.as_slice(),
         attestation.signature.as_slice(),
@@ -1437,7 +1446,7 @@ pub fn verify_fetch_public_tree_completeness_attestation(
             pk_entries,
         },
     })?;
-    verify_ml_dsa_signature(
+    verify_history_authority_signature(
         payload.as_slice(),
         authority.public_key.as_slice(),
         attestation.signature.as_slice(),
