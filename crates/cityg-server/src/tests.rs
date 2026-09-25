@@ -349,6 +349,67 @@ fn retention_keeps_the_latest_commit() {
     assert_eq!(page.head_seq, 7);
 }
 
+#[test]
+fn the_log_cap_never_drops_the_entry_it_appends() {
+    let config = RoomConfig {
+        max_log_entries: 3,
+        ..RoomConfig::default()
+    };
+    let mut f = fixture(config);
+    for _ in 0..3 {
+        f.commit(true);
+    }
+    // A log of commits only: the oldest ones go.
+    let page = f.room.log_after(0, usize::MAX);
+    assert_eq!(
+        page.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
+    assert_eq!(page.first_seq, 3);
+    assert_eq!(page.head_seq, 5);
+
+    // A message appended to a full log of commits is kept: an older commit
+    // goes, never the latest one.
+    let entry = f.send(true, b"kept");
+    assert_eq!(entry.seq, 6);
+    let page = f.room.log_after(0, usize::MAX);
+    assert_eq!(
+        page.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![4, 5, 6]
+    );
+    // The next message replaces the older message, not a commit.
+    f.send(true, b"newer");
+    let page = f.room.log_after(0, usize::MAX);
+    assert_eq!(
+        page.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![4, 5, 7]
+    );
+    // A cap of one keeps the latest commit next to a new message.
+    let mut tiny = fixture(RoomConfig {
+        max_log_entries: 1,
+        ..RoomConfig::default()
+    });
+    let entry = tiny.send(true, b"hi");
+    let page = tiny.room.log_after(0, usize::MAX);
+    assert_eq!(page.entries.len(), 2);
+    assert!(matches!(page.entries[0].body, LogBody::Commit { .. }));
+    assert_eq!(page.entries[1].seq, entry.seq);
+
+    // Replaying the journal rebuilds the same log.
+    let restored = restore_room(
+        &StoredRoom {
+            snapshot: None,
+            journal: f.journal.iter().map(|r| r.encode().unwrap()).collect(),
+        },
+        config,
+    )
+    .unwrap();
+    assert_eq!(
+        restored.to_snapshot().unwrap(),
+        f.room.to_snapshot().unwrap()
+    );
+}
+
 fn store_round_trip<S: RoomStore>(store: &mut S, f: &Fixture) {
     let gid = gid_of(&f.alice);
     assert!(store.load(&gid).unwrap().is_none());

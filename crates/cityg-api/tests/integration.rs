@@ -9,6 +9,7 @@ use cityg_api::routes::{ServiceState, router};
 use cityg_api_client::cityg_core::identity::DeviceIdentity;
 use cityg_api_client::{DsClient, InviteLink, Member};
 use cityg_runtime::{NativeRoomStore, ServiceConfig};
+use cityg_server::RoomConfig;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -19,7 +20,11 @@ struct Server {
 }
 
 async fn start(store: NativeRoomStore) -> Server {
-    let state = ServiceState::new(ServiceConfig::default(), store, 64);
+    start_with(ServiceConfig::default(), store).await
+}
+
+async fn start_with(config: ServiceConfig, store: NativeRoomStore) -> Server {
+    let state = ServiceState::new(config, store, 64);
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
@@ -156,6 +161,45 @@ async fn concurrent_commits_retry_and_lost_state_resyncs() {
     alice.sync().await.unwrap();
     assert!(!alice.session().roster().is_admin(&alice_pk));
     assert!(alice.create_invite_link(&server.url, 1_000).await.is_err());
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_that_missed_pruned_commits_resyncs() {
+    // A log of three entries: commits a member has not read are dropped.
+    let config = ServiceConfig {
+        room: RoomConfig {
+            max_log_entries: 3,
+            ..RoomConfig::default()
+        },
+        ..ServiceConfig::default()
+    };
+    let server = start_with(config, NativeRoomStore::for_state_path(None).unwrap()).await;
+    let mut alice = Member::create(DsClient::new(&server.url).unwrap(), identity(21), 8)
+        .await
+        .unwrap();
+    let link = alice.create_invite_link(&server.url, 60_000).await.unwrap();
+    let mut bob = join(&server, &link, 22).await;
+    alice.sync().await.unwrap();
+    for _ in 0..4 {
+        alice.self_update().await.unwrap();
+    }
+    assert_eq!(alice.session().epoch(), 5);
+    assert_eq!(bob.session().epoch(), 1);
+
+    // The oldest retained commit is not the next one Bob needs: he resyncs.
+    let report = bob.sync().await.unwrap();
+    assert!(report.resynced);
+    assert!(!report.removed);
+    assert_eq!(bob.session().epoch(), 6);
+    alice.sync().await.unwrap();
+    assert_eq!(
+        alice.session().transcript_fingerprint(),
+        bob.session().transcript_fingerprint()
+    );
+    bob.send_text("caught up").await.unwrap();
+    let report = alice.sync().await.unwrap();
+    assert_eq!(report.messages[0].plaintext, b"caught up");
     server.handle.abort();
 }
 

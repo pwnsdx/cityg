@@ -227,13 +227,17 @@ impl Room {
 
     fn enforce_log_cap(&mut self) {
         while self.log.len() > self.config.max_log_entries {
-            // Drop the oldest message; if only commits remain, the oldest
-            // commit that is not the latest.
+            // Drop the oldest message or proposal, else the oldest commit;
+            // never the entry just appended, nor the latest commit.
+            let newest = self.log.len() - 1;
+            let latest_commit = self.log.iter().rposition(LogEntry::is_commit);
+            let evictable = |index: usize| index != newest && Some(index) != latest_commit;
             let position = self
                 .log
                 .iter()
-                .position(|entry| !entry.is_commit())
-                .or_else(|| (self.log.len() > 1).then_some(0));
+                .enumerate()
+                .position(|(index, entry)| evictable(index) && !entry.is_commit())
+                .or_else(|| (0..newest).find(|index| evictable(*index)));
             match position {
                 Some(position) => {
                     self.log.remove(position);

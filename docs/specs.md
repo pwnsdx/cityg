@@ -704,10 +704,15 @@ reports) and an ordered *log*.
 Every accepted commit (with its GroupInfo), envelope and recorded removal
 proposal is appended to the group log with a sequence number `seq` (starting
 at 1 with the genesis commit), its epoch and the DS acceptance time. Members
-read the log in order. Messages expire after a retention period, commits
-after a longer one, and the log keeps at most a bounded number of entries
-(oldest messages first); the latest commit is always kept. A member whose
-position predates the oldest retained entry resyncs (section 13.2).
+read the log in order, in pages that also give `first_seq`, the oldest
+retained entry. Messages expire after a retention period, commits after a
+longer one, and the log keeps at most a bounded number of entries: when it
+is full, the oldest message or proposal goes first, then the oldest commit;
+neither the entry being appended nor the latest commit is ever dropped.
+Messages that expired
+before a member read them are lost to it; a member that meets a commit of a
+later epoch than the next one it needs has lost a commit and resyncs
+(section 13.2).
 
 <a id="12-3-journal"></a>
 ### 12.3 Persistence
@@ -737,7 +742,8 @@ written fails, and the in-memory group is reloaded from storage.
 
 A member processes log entries in order: commits (section 9.5), recorded
 proposals, and envelopes (section 11.3). If it cannot process a commit, it
-signs a cover-failure report and resyncs with a Resync commit. If the commit
+signs a cover-failure report and resyncs with a Resync commit; it also
+resyncs when a commit it needs is no longer in the log. If the commit
 removes it, it deletes the group state. A commit of its own that it did not
 see accepted (a lost reply) is recognised when it appears in the log.
 
@@ -818,9 +824,10 @@ Errors carry a protobuf `ErrorResponse {code, message}` with these HTTP
 statuses: 400 malformed request or non-deterministic encoding, 401 missing
 or invalid token, 403 not allowed (not a member, pending removal, not an
 admin), 404 unknown group or invite, 409 conflict (stale epoch, recorded
-removals not committed, replay, existing group), 410 log position no longer
-retained, 413 over a size or count limit, 422 verification failure, 429 rate
-limited, 500 internal error.
+removals not committed, replay, existing group), 410 a route of the removed
+v0.1.4 API, 413 over a size or count limit, 422 verification failure, 429
+rate limited (the reference DS does not rate-limit; a deployment may, in
+front of it), 500 internal error.
 
 **Notifications.** `GET /v2/ws?gid=<hex>&token=<hex>` upgrades to a
 WebSocket that sends `{"type":"head","gid":…,"head_seq":N}` when the log

@@ -552,12 +552,14 @@
     },
     {
       "id": "DS.5",
-      "title": "The log numbers entries from 1, expires messages before commits, bounds its size and always keeps the latest commit",
+      "title": "The log numbers entries from 1, expires messages before commits, bounds its size without dropping the entry it appends, and always keeps the latest commit",
       "spec": ["12-2-log"],
       "audit": ["M-06"],
       "tests": [
         {"binary": "cityg-server", "test": "tests::retention_keeps_the_latest_commit"},
-        {"binary": "cityg-server", "test": "tests::rooms_order_commits_and_messages"}
+        {"binary": "cityg-server", "test": "tests::the_log_cap_never_drops_the_entry_it_appends"},
+        {"binary": "cityg-server", "test": "tests::rooms_order_commits_and_messages"},
+        {"binary": "cityg-api::integration", "test": "a_member_that_missed_pruned_commits_resyncs"}
       ]
     },
     {
@@ -593,6 +595,7 @@
       "audit": ["M-05"],
       "tests": [
         {"binary": "cityg-api::integration", "test": "concurrent_commits_retry_and_lost_state_resyncs"},
+        {"binary": "cityg-api::integration", "test": "a_member_that_missed_pruned_commits_resyncs"},
         {"binary": "cityg-core", "test": "session::tests::identities_and_pending_states_are_checked"},
         {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::flows::gpui_send_after_removal_clears_the_session"},
         {"binary": "cityg-gui::bin/cityg-gui", "test": "native::engine::tests::membership_loss_detection"}
