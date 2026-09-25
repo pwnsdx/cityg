@@ -121,6 +121,9 @@ pub async fn cloudflare_fetch(req: Request, env: Env) -> Result<Response> {
             Response::error("method not allowed", 405)
         };
     }
+    if crate::cloudflare_v2::is_v2_path(req.path().as_str()) {
+        return crate::cloudflare_v2::forward_v2(req, &env).await;
+    }
     if let Some(message) = unsupported_native_worker_route_message(req.path().as_str()) {
         return Response::error(message, 501);
     }
@@ -179,6 +182,7 @@ pub struct CloudflareRoomDurableObject {
     store: Option<RefCell<DurableObjectRoomStateStore<CloudflareSqlDurableObjectStorage>>>,
     realtime: RefCell<RoomRealtimeState>,
     init_error: Option<String>,
+    v2: crate::cloudflare_v2::V2Room,
 }
 
 impl CloudflareRoomDurableObject {
@@ -193,6 +197,7 @@ impl CloudflareRoomDurableObject {
                 store: Some(RefCell::new(DurableObjectRoomStateStore::new(storage))),
                 realtime: RefCell::new(RoomRealtimeState::default()),
                 init_error: None,
+                v2: crate::cloudflare_v2::V2Room::default(),
             },
             Err(error) => Self {
                 object_id,
@@ -201,6 +206,7 @@ impl CloudflareRoomDurableObject {
                 store: None,
                 realtime: RefCell::new(RoomRealtimeState::default()),
                 init_error: Some(error.to_string()),
+                v2: crate::cloudflare_v2::V2Room::default(),
             },
         }
     }
@@ -214,6 +220,10 @@ impl CloudflareRoomDurableObject {
         }
 
         self.ensure_websocket_auto_response();
+
+        if crate::cloudflare_v2::is_v2_path(req.path().as_str()) {
+            return self.v2.fetch(&self.state, req).await;
+        }
 
         let path = req.path();
         let store = self

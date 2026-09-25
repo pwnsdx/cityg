@@ -8,8 +8,11 @@
 
 #[cfg(feature = "cloudflare")]
 mod cloudflare;
+#[cfg(feature = "cloudflare")]
+mod cloudflare_v2;
 mod do_store;
 mod rehydrate;
+mod v2_host;
 
 use std::time::Duration;
 
@@ -44,6 +47,7 @@ pub use do_store::{
     MemoryDurableObjectStorage,
 };
 pub use rehydrate::{WorkerRoomRehydrationError, rehydrate_runtime_room_from_checkpoint};
+pub use v2_host::{DoRoomStore, DoRoomStoreError, WorkerRoomHost};
 
 /// Preferred room coordination model for Cloudflare-native deployment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
