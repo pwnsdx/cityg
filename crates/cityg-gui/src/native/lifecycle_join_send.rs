@@ -4,7 +4,8 @@ use super::*;
 pub(super) async fn perform_join(request: JoinRequest) -> Result<AppSession> {
     match request {
         JoinRequest::Create { server_url, alias } => {
-            let member = engine::create_room(&server_url, &alias, engine::DEFAULT_ROOM_N_MAX).await?;
+            let member =
+                engine::create_room(&server_url, &alias, engine::DEFAULT_ROOM_N_MAX).await?;
             open_session(&server_url, &alias, member, None)
         }
         JoinRequest::Invite { link, alias } => {

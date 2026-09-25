@@ -162,7 +162,8 @@ impl Member {
     pub fn save(&self) -> Result<(), ClientError> {
         if let Some(sink) = &self.sink {
             let exported = self.export()?;
-            sink(&exported).map_err(|_| ClientError::State("failed to persist the member state"))?;
+            sink(&exported)
+                .map_err(|_| ClientError::State("failed to persist the member state"))?;
         }
         Ok(())
     }

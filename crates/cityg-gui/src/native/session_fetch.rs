@@ -81,10 +81,9 @@ impl AppModel {
         expected_leaf: [u8; 32],
         cx: &mut ViewContext<Self>,
     ) {
-        let matches_session = self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.room_id == expected_room && session.leaf_id == expected_leaf);
+        let matches_session = self.session.as_ref().is_some_and(|session| {
+            session.room_id == expected_room && session.leaf_id == expected_leaf
+        });
         if !matches_session {
             self.fetch_status = FetchStatus::Idle;
             return;
@@ -115,7 +114,8 @@ impl AppModel {
                 }
                 self.last_error = Some(format!("Failed to sync the room: {err:#}"));
                 if matches!(self.members_status, MembersStatus::Loading(_)) {
-                    self.members_status = MembersStatus::Error(format!("Roster sync failed: {err:#}"));
+                    self.members_status =
+                        MembersStatus::Error(format!("Roster sync failed: {err:#}"));
                 }
                 self.record_activity_with_detail(
                     ActivityKind::Sync,

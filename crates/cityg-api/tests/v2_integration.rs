@@ -272,11 +272,16 @@ async fn the_state_sink_makes_spent_generations_durable() {
     // persisted, which already accounts for the spent generation.
     let state = saved.lock().unwrap().clone();
     drop(alice);
-    let mut alice = Member::restore(DsClient::new(&server.url).unwrap(), identity(41), &state).unwrap();
+    let mut alice =
+        Member::restore(DsClient::new(&server.url).unwrap(), identity(41), &state).unwrap();
     assert_eq!(alice.session().next_own_generation(), 1);
     alice.send_text("two").await.unwrap();
     let report = bob.sync().await.unwrap();
-    let texts: Vec<_> = report.messages.iter().map(|m| m.plaintext.clone()).collect();
+    let texts: Vec<_> = report
+        .messages
+        .iter()
+        .map(|m| m.plaintext.clone())
+        .collect();
     assert_eq!(texts, vec![b"one".to_vec(), b"two".to_vec()]);
     assert_eq!(report.rejected, 0);
 

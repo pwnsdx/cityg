@@ -169,7 +169,9 @@ pub(super) fn categorize_error(err: &anyhow::Error, context: &str) -> Categorize
     }
 
     match client_error(err) {
-        Some(ClientError::Transport(_)) => return categorize_transport(&err_str, technical_details),
+        Some(ClientError::Transport(_)) => {
+            return categorize_transport(&err_str, technical_details);
+        }
         Some(ClientError::Decode(_)) => {
             return CategorizedError::new(
                 ErrorCategory::Server,
@@ -261,16 +263,51 @@ mod tests {
     #[test]
     fn api_errors_map_to_actionable_categories() {
         let cases = [
-            (ErrorCode::Conflict, "stale epoch", "The room moved on", true),
-            (ErrorCode::Forbidden, "not an admin", "Room admin rights required", false),
+            (
+                ErrorCode::Conflict,
+                "stale epoch",
+                "The room moved on",
+                true,
+            ),
+            (
+                ErrorCode::Forbidden,
+                "not an admin",
+                "Room admin rights required",
+                false,
+            ),
             (ErrorCode::Forbidden, "not a member", "Access denied", false),
-            (ErrorCode::NotFound, "unknown group", "Room not found", false),
+            (
+                ErrorCode::NotFound,
+                "unknown group",
+                "Room not found",
+                false,
+            ),
             (ErrorCode::Unauthorized, "expired", "Session refused", true),
-            (ErrorCode::Gone, "pruned", "History no longer available", true),
+            (
+                ErrorCode::Gone,
+                "pruned",
+                "History no longer available",
+                true,
+            ),
             (ErrorCode::PayloadTooLarge, "big", "Too large", false),
-            (ErrorCode::Unprocessable, "bad sig", "Verification failed", true),
-            (ErrorCode::BadRequest, "malformed", "Request rejected", false),
-            (ErrorCode::TooManyRequests, "slow down", "Rate limited", true),
+            (
+                ErrorCode::Unprocessable,
+                "bad sig",
+                "Verification failed",
+                true,
+            ),
+            (
+                ErrorCode::BadRequest,
+                "malformed",
+                "Request rejected",
+                false,
+            ),
+            (
+                ErrorCode::TooManyRequests,
+                "slow down",
+                "Rate limited",
+                true,
+            ),
             (ErrorCode::Internal, "boom", "Internal server error", true),
         ];
         for (code, message, expected, retryable) in cases {
@@ -286,12 +323,20 @@ mod tests {
 
     #[test]
     fn client_errors_are_categorized() {
-        let transport = |text: &str| {
-            categorize_error(&ClientError::Transport(text.to_string()).into(), "join")
-        };
-        assert_eq!(transport("Connection refused").user_message, "Connection refused");
-        assert_eq!(transport("operation timed out").user_message, "Connection timeout");
-        assert_eq!(transport("dns failure").user_message, "Unable to connect to server");
+        let transport =
+            |text: &str| categorize_error(&ClientError::Transport(text.to_string()).into(), "join");
+        assert_eq!(
+            transport("Connection refused").user_message,
+            "Connection refused"
+        );
+        assert_eq!(
+            transport("operation timed out").user_message,
+            "Connection timeout"
+        );
+        assert_eq!(
+            transport("dns failure").user_message,
+            "Unable to connect to server"
+        );
 
         let decode = categorize_error(&ClientError::Decode("x".into()).into(), "fetch");
         assert_eq!(decode.user_message, "Unexpected server reply");
@@ -324,7 +369,10 @@ mod tests {
             ("room admin", "Failed to change room admins"),
             ("other", "Operation failed"),
         ] {
-            assert_eq!(categorize_error(&anyhow!("boom"), context).user_message, expected);
+            assert_eq!(
+                categorize_error(&anyhow!("boom"), context).user_message,
+                expected
+            );
         }
         let chained = anyhow!("inner").context("outer").context("outer");
         assert_eq!(flatten_anyhow_chain(&chained), "outer: inner");

@@ -91,7 +91,10 @@ fn gpui_sync_results_update_messages_roster_and_security(cx: &mut TestAppContext
         // Resyncing is a security-relevant event.
         assert_eq!(model.security_events.len(), 1);
         assert!(model.security_events[0].description.contains("resync"));
-        assert_eq!(model.leaf_alias_index.get(&[7; 32]).map(String::as_str), Some("bob"));
+        assert_eq!(
+            model.leaf_alias_index.get(&[7; 32]).map(String::as_str),
+            Some("bob")
+        );
         assert!(
             model
                 .alias_bindings
@@ -187,7 +190,12 @@ fn gpui_sync_errors_and_stale_results(cx: &mut TestAppContext) {
         );
 
         // Losing the membership clears the session.
-        model.handle_sync_result(Err(api_error(ErrorCode::Forbidden, "not a member")), &room, leaf, cx);
+        model.handle_sync_result(
+            Err(api_error(ErrorCode::Forbidden, "not a member")),
+            &room,
+            leaf,
+            cx,
+        );
         assert!(model.session.is_none());
         assert!(
             model
@@ -424,7 +432,10 @@ fn gpui_admin_guards_and_revoke_confirmation(cx: &mut TestAppContext) {
         // The request itself fails offline and is reported.
         model.room_admin_status = RoomAdminStatus::Idle;
         model.start_room_admin_mutation(RoomAdminMutationKind::Grant, second.clone(), cx);
-        assert!(matches!(model.room_admin_status, RoomAdminStatus::Loading(_)));
+        assert!(matches!(
+            model.room_admin_status,
+            RoomAdminStatus::Loading(_)
+        ));
         // A second mutation while one runs is ignored.
         model.start_room_admin_mutation(RoomAdminMutationKind::Grant, second.clone(), cx);
 
@@ -568,7 +579,9 @@ fn websocket_notices_parse() {
 fn maintenance_picks_the_next_action() {
     let mut session = offline_session(8, "alice");
     let now = engine::now_ms();
-    session.self_update_clock.store(now, std::sync::atomic::Ordering::SeqCst);
+    session
+        .self_update_clock
+        .store(now, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(maintenance_action(&session, now), None);
 
     // Keys older than the FS/PCS window are refreshed.
@@ -619,7 +632,11 @@ fn gpui_maintenance_runs_and_reports(cx: &mut TestAppContext) {
 
     view.update(cx, |model, cx| {
         let current = model.session.as_ref().expect("session").view.clone();
-        model.on_maintenance_finished(MaintenanceAction::CommitRemovals, Ok(Some(current.clone())), cx);
+        model.on_maintenance_finished(
+            MaintenanceAction::CommitRemovals,
+            Ok(Some(current.clone())),
+            cx,
+        );
         assert!(
             model
                 .activity_events
@@ -634,9 +651,21 @@ fn gpui_maintenance_runs_and_reports(cx: &mut TestAppContext) {
                 .iter()
                 .any(|event| event.summary == "Refreshed this device's keys")
         );
-        model.session.as_mut().expect("session").view.has_previous_epoch_keys = true;
+        model
+            .session
+            .as_mut()
+            .expect("session")
+            .view
+            .has_previous_epoch_keys = true;
         model.on_maintenance_finished(MaintenanceAction::ExpireGrace, Ok(None), cx);
-        assert!(!model.session.as_ref().expect("session").view.has_previous_epoch_keys);
+        assert!(
+            !model
+                .session
+                .as_ref()
+                .expect("session")
+                .view
+                .has_previous_epoch_keys
+        );
         model.on_maintenance_finished(MaintenanceAction::RefreshKeys, Err(anyhow!("boom")), cx);
         assert!(model.fetch_in_flight);
         model.reset_fetch_state();

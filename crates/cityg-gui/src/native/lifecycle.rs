@@ -119,8 +119,10 @@ impl AppModel {
         cx.notify();
 
         let member = session.member.clone();
-        let task =
-            Tokio::spawn_result(cx, async move { engine::expel(&member, target_leaf_id).await });
+        let task = Tokio::spawn_result(
+            cx,
+            async move { engine::expel(&member, target_leaf_id).await },
+        );
 
         cx.spawn(async move |this, cx| {
             let outcome = task.await;

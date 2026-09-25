@@ -155,7 +155,9 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
                         .parse()
                         .map_err(|_| anyhow!("invalid leave order entry: {entry}"))?;
                     if index == 0 || index > count {
-                        return Err(anyhow!("leave order index {index} out of range (1..={count})"));
+                        return Err(anyhow!(
+                            "leave order index {index} out of range (1..={count})"
+                        ));
                     }
                     Ok(index)
                 })
@@ -204,8 +206,7 @@ fn write_artifact(dir: Option<&Path>, stage: &str, alias: &str, member: &Member)
     let Some(dir) = dir else {
         return Ok(());
     };
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let session = member.session();
     let artifact = SessionArtifact {
         stage,
@@ -293,7 +294,12 @@ async fn join_members(options: &CliOptions) -> Result<(Vec<Member>, Vec<String>)
             member.session().my_slot(),
             member.session().roster().len()
         );
-        write_artifact(options.session_artifact_dir.as_deref(), "joined", &alias, &member)?;
+        write_artifact(
+            options.session_artifact_dir.as_deref(),
+            "joined",
+            &alias,
+            &member,
+        )?;
         members.push(member);
         aliases.push(alias);
     }
@@ -304,7 +310,11 @@ async fn join_members(options: &CliOptions) -> Result<(Vec<Member>, Vec<String>)
     Ok((members, aliases))
 }
 
-async fn send_burst(members: &mut [Member], aliases: &[String], options: &CliOptions) -> Result<()> {
+async fn send_burst(
+    members: &mut [Member],
+    aliases: &[String],
+    options: &CliOptions,
+) -> Result<()> {
     for round in 0..options.message_burst_count {
         for (member, alias) in members.iter_mut().zip(aliases) {
             let sent = member
@@ -340,14 +350,20 @@ async fn sync_all(
     Ok(())
 }
 
-async fn leave_in_order(members: &mut [Member], aliases: &[String], options: &CliOptions) -> Result<()> {
+async fn leave_in_order(
+    members: &mut [Member],
+    aliases: &[String],
+    options: &CliOptions,
+) -> Result<()> {
     let default_order: Vec<usize> = (1..=members.len()).collect();
     let order = options.leave_order.clone().unwrap_or(default_order);
     let mut present = vec![true; members.len()];
     for index in order {
         let slot = index - 1;
         if !present[slot] {
-            return Err(anyhow!("leave order index {index} repeats a departed member"));
+            return Err(anyhow!(
+                "leave order index {index} repeats a departed member"
+            ));
         }
         write_artifact(
             options.session_artifact_dir.as_deref(),
@@ -361,7 +377,14 @@ async fn leave_in_order(members: &mut [Member], aliases: &[String], options: &Cl
         if let Some(committer) = present.iter().position(|here| *here) {
             members[committer].sync().await?;
             members[committer].commit_pending_removals().await?;
-            sync_all(members, aliases, &present, options.verbose, options.watch_mode).await?;
+            sync_all(
+                members,
+                aliases,
+                &present,
+                options.verbose,
+                options.watch_mode,
+            )
+            .await?;
         } else if !vacant {
             return Err(anyhow!("the last member left but the group is not vacant"));
         }
@@ -449,10 +472,22 @@ mod tests {
             (vec!["--count=x"], "invalid --count"),
             (vec!["--watch"], "--watch requires --count >= 2"),
             (vec!["--leave-order=1"], "--leave-order requires --batch"),
-            (vec!["--batch", "--count=2", "--leave-order=3"], "out of range"),
-            (vec!["--batch", "--count=2", "--leave-order=a"], "invalid leave order"),
-            (vec!["--message-burst-count=x"], "invalid --message-burst-count"),
-            (vec!["--message-burst-interval-ms=x"], "invalid --message-burst-interval-ms"),
+            (
+                vec!["--batch", "--count=2", "--leave-order=3"],
+                "out of range",
+            ),
+            (
+                vec!["--batch", "--count=2", "--leave-order=a"],
+                "invalid leave order",
+            ),
+            (
+                vec!["--message-burst-count=x"],
+                "invalid --message-burst-count",
+            ),
+            (
+                vec!["--message-burst-interval-ms=x"],
+                "invalid --message-burst-interval-ms",
+            ),
             (vec!["--n-max=x"], "invalid --n-max"),
             (vec!["--session-artifact-dir="], "non-empty path"),
             (vec!["--nope"], "unknown option"),

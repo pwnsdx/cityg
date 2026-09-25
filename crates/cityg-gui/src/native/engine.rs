@@ -403,7 +403,9 @@ pub(crate) mod tests {
             NativeRoomStore::for_state_path(None).unwrap(),
             64,
         );
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, router(state)).await.unwrap();
@@ -428,7 +430,12 @@ pub(crate) mod tests {
         let outcome = sync_room(&alice).await.unwrap();
         assert_eq!(outcome.view.roster.len(), 3);
         assert!(outcome.view.is_admin);
-        assert!(outcome.changes.iter().any(|c| matches!(c, RosterChange::Joined(_))));
+        assert!(
+            outcome
+                .changes
+                .iter()
+                .any(|c| matches!(c, RosterChange::Joined(_)))
+        );
         assert_eq!(outcome.aliases.values().filter(|a| *a == "bob").count(), 1);
 
         let sent = send_text(&alice, "hello").await.unwrap();
@@ -445,7 +452,11 @@ pub(crate) mod tests {
         // Carol leaves; Bob commits her removal.
         assert!(!leave_room(&carol).await.unwrap());
         let seen = sync_room(&bob).await.unwrap();
-        assert!(seen.changes.iter().any(|c| matches!(c, RosterChange::LeaveRequested(_))));
+        assert!(
+            seen.changes
+                .iter()
+                .any(|c| matches!(c, RosterChange::LeaveRequested(_)))
+        );
         assert_eq!(seen.view.pending_removals, 1);
         assert!(commit_pending(&bob).await.unwrap().is_some());
         assert!(commit_pending(&bob).await.unwrap().is_none());
@@ -454,7 +465,13 @@ pub(crate) mod tests {
         // Admin operations.
         let bob_key = bob.lock().await.identity().public_key().to_vec();
         let granted = set_admin(&alice, &bob_key, true).await.unwrap();
-        assert!(granted.view.roster.iter().any(|entry| entry.admin && entry.device_public_key == bob_key));
+        assert!(
+            granted
+                .view
+                .roster
+                .iter()
+                .any(|entry| entry.admin && entry.device_public_key == bob_key)
+        );
         assert!(set_admin(&alice, &[1, 2, 3], true).await.is_err());
         let refreshed = refresh_keys(&bob).await.unwrap();
         assert_eq!(refreshed.view.epochs_since_own_update, 0);
@@ -472,13 +489,12 @@ pub(crate) mod tests {
 
     #[test]
     fn membership_loss_detection() {
-        let forbidden: anyhow::Error = ClientError::Api(
-            cityg_api_client::v2::cityg_proto::ApiError::new(
+        let forbidden: anyhow::Error =
+            ClientError::Api(cityg_api_client::v2::cityg_proto::ApiError::new(
                 cityg_api_client::v2::cityg_proto::ErrorCode::Forbidden,
                 "not a member",
-            ),
-        )
-        .into();
+            ))
+            .into();
         assert!(is_membership_loss(&forbidden.context("sending")));
         assert!(!is_membership_loss(&anyhow!("network down")));
         let entry = IncomingMessage {

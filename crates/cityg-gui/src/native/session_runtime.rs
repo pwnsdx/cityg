@@ -115,11 +115,13 @@ impl AppModel {
                     // Spread concurrent committers to avoid losing the epoch.
                     let jitter = Duration::from_millis(u64::from(rand::random::<u16>() % 1500));
                     sleep(jitter).await;
-                    engine::commit_pending(&member).await.map(|outcome| outcome.map(|o| o.view))
+                    engine::commit_pending(&member)
+                        .await
+                        .map(|outcome| outcome.map(|o| o.view))
                 }
-                MaintenanceAction::RefreshKeys => {
-                    engine::refresh_keys(&member).await.map(|outcome| Some(outcome.view))
-                }
+                MaintenanceAction::RefreshKeys => engine::refresh_keys(&member)
+                    .await
+                    .map(|outcome| Some(outcome.view)),
                 MaintenanceAction::ExpireGrace => {
                     engine::expire_previous_epoch(&member).await.map(|_| None)
                 }
@@ -152,7 +154,10 @@ impl AppModel {
             Ok(view) => {
                 match action {
                     MaintenanceAction::CommitRemovals if view.is_some() => {
-                        self.record_activity(ActivityKind::Roster, "Committed a member's leave request");
+                        self.record_activity(
+                            ActivityKind::Roster,
+                            "Committed a member's leave request",
+                        );
                     }
                     MaintenanceAction::RefreshKeys => {
                         if let Some(session) = &self.session {

@@ -43,7 +43,10 @@ fn create_room_from_form(
 fn join_from_form(cx: &mut VisualTestContext, view: &Entity<AppModel>, invite: &str, alias: &str) {
     view.update(cx, |model, cx| {
         let link = parse_join_invite(invite).expect("parse").expect("invite");
-        model.join_form.apply_invite(invite, &link).expect("apply invite");
+        model
+            .join_form
+            .apply_invite(invite, &link)
+            .expect("apply invite");
         model.join_form.alias = alias.to_string();
         assert!(matches!(
             model.join_form.join_request(),
@@ -114,7 +117,10 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
     wait_for(cx, &view, "two joins", |model| {
         model.members_total == 3
             && model.leaf_alias_index.values().any(|alias| alias == "bob")
-            && model.leaf_alias_index.values().any(|alias| alias == "carol")
+            && model
+                .leaf_alias_index
+                .values()
+                .any(|alias| alias == "carol")
     });
     view.update(cx, |model, _| {
         assert!(has_activity(model, "Joined: bob"));
@@ -147,7 +153,12 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
         matches!(model.send_status, SendStatus::Idle) && has_message(model, "hello bob")
     });
     let bob_view = server.sync(&bob);
-    assert!(bob_view.messages.iter().any(|message| message.text == "hello bob"));
+    assert!(
+        bob_view
+            .messages
+            .iter()
+            .any(|message| message.text == "hello bob")
+    );
 
     // Admin rights: grant Bob, then revoke (the revoke needs a confirmation).
     let bob_pk = server.block_on(async { bob.lock().await.identity().public_key().to_vec() });
@@ -238,7 +249,10 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
         assert_eq!(session.alias, "alice");
         assert!(has_message(&restored, "hi alice"));
         assert!(has_message(&restored, "hello bob"));
-        assert_eq!(restored.info_message.as_deref(), Some("Restored saved session."));
+        assert_eq!(
+            restored.info_message.as_deref(),
+            Some("Restored saved session.")
+        );
     }
 
     // Alice expels Bob.
@@ -255,7 +269,9 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
     wait_for(cx, &view, "expel", |model| {
         matches!(model.leave_status, LeaveStatus::Idle) && model.members_total == 1
     });
-    view.update(cx, |model, _| assert!(has_activity(model, "Removed a member")));
+    view.update(cx, |model, _| {
+        assert!(has_activity(model, "Removed a member"))
+    });
     assert!(server.sync(&bob).removed);
 
     // Alice, the last member, leaves: the room is vacant and the local
@@ -464,10 +480,17 @@ fn gpui_join_failures_are_reported(cx: &mut TestAppContext) {
     });
 }
 
-fn join_from_form_expecting_error(cx: &mut VisualTestContext, view: &Entity<AppModel>, invite: &str) {
+fn join_from_form_expecting_error(
+    cx: &mut VisualTestContext,
+    view: &Entity<AppModel>,
+    invite: &str,
+) {
     view.update(cx, |model, cx| {
         let link = parse_join_invite(invite).expect("parse").expect("invite");
-        model.join_form.apply_invite(invite, &link).expect("apply invite");
+        model
+            .join_form
+            .apply_invite(invite, &link)
+            .expect("apply invite");
         model.join_form.alias = "mallory".to_string();
         model.start_join(cx);
     });

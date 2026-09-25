@@ -210,8 +210,7 @@ pub(super) fn read_last_session_pointer() -> Result<Option<LastSessionPointer>> 
         return Ok(None);
     }
     let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let pointer =
-        serde_json::from_slice(&data).context("invalid saved session pointer JSON")?;
+    let pointer = serde_json::from_slice(&data).context("invalid saved session pointer JSON")?;
     Ok(Some(pointer))
 }
 
@@ -234,8 +233,12 @@ pub(super) fn load_session_at(server_url: &str, room_id: &str) -> Result<Option<
         "member_state_hex",
         &persisted.member_state_hex,
     )?);
-    let member = Member::restore(DsClient::new(&persisted.server_url)?, identity, &member_state)
-        .context("failed to restore the saved session")?;
+    let member = Member::restore(
+        DsClient::new(&persisted.server_url)?,
+        identity,
+        &member_state,
+    )
+    .context("failed to restore the saved session")?;
     if hex_encode(member.gid()) != persisted.room_id {
         return Err(anyhow!("saved session does not match its room"));
     }

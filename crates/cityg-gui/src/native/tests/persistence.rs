@@ -70,7 +70,10 @@ fn sessions_are_saved_encrypted_and_restored() {
     assert_eq!(model.join_form.server, OFFLINE_URL);
     assert!(model.join_form.room_id.is_empty());
     assert!(model.join_form.active.is_none());
-    assert_eq!(model.info_message.as_deref(), Some("Restored saved session."));
+    assert_eq!(
+        model.info_message.as_deref(),
+        Some("Restored saved session.")
+    );
     assert!(model.fetch_task.is_none());
 
     // Removing it deletes every file and the pointer.
@@ -117,10 +120,17 @@ fn damaged_session_files_are_refused() {
 
     // Tampered ciphertext does not decrypt.
     let mut envelope: serde_json::Value = serde_json::from_slice(&original).expect("json");
-    let ciphertext = envelope["ciphertext_hex"].as_str().expect("hex").to_string();
+    let ciphertext = envelope["ciphertext_hex"]
+        .as_str()
+        .expect("hex")
+        .to_string();
     let flipped = format!(
         "{}{}",
-        if ciphertext.starts_with('0') { "1" } else { "0" },
+        if ciphertext.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        },
         &ciphertext[1..]
     );
     envelope["ciphertext_hex"] = serde_json::Value::String(flipped);
@@ -217,7 +227,13 @@ fn chat_history_keeps_the_newest_sent_messages() {
     assert!(load_history(OFFLINE_URL, &room).expect("empty").is_empty());
 
     let mut messages: Vec<ChatMessageEntry> = (0..(MAX_PERSISTED_MESSAGES + 3))
-        .map(|index| history_entry(&format!("m{index}"), &format!("k{index}"), MessageDelivery::Sent))
+        .map(|index| {
+            history_entry(
+                &format!("m{index}"),
+                &format!("k{index}"),
+                MessageDelivery::Sent,
+            )
+        })
         .collect();
     messages.push(history_entry("pending", "", MessageDelivery::Pending));
     messages.push(history_entry("failed", "", MessageDelivery::Failed));
@@ -225,7 +241,11 @@ fn chat_history_keeps_the_newest_sent_messages() {
 
     let loaded = load_history(OFFLINE_URL, &room).expect("load");
     assert!(loaded.len() <= MAX_PERSISTED_MESSAGES);
-    assert!(loaded.iter().all(|message| message.delivery == MessageDelivery::Sent));
+    assert!(
+        loaded
+            .iter()
+            .all(|message| message.delivery == MessageDelivery::Sent)
+    );
     assert!(loaded.iter().any(|message| message.plaintext == "m502"));
     assert!(!loaded.iter().any(|message| message.plaintext == "m0"));
     assert_eq!(loaded[0].sender_leaf, Some([0x21; 32]));
@@ -261,7 +281,11 @@ fn chat_history_keeps_the_newest_sent_messages() {
 fn alias_bindings_and_security_logs_round_trip() {
     let _config = ConfigDir::new();
     let room = "44".repeat(32);
-    assert!(load_alias_bindings(OFFLINE_URL, &room).expect("empty").is_empty());
+    assert!(
+        load_alias_bindings(OFFLINE_URL, &room)
+            .expect("empty")
+            .is_empty()
+    );
 
     let mut bindings = AHashMap::new();
     bindings.insert(
@@ -295,7 +319,11 @@ fn alias_bindings_and_security_logs_round_trip() {
     persist_alias_bindings(OFFLINE_URL, &room, &AHashMap::new()).expect("clear again");
 
     // Security log.
-    assert!(load_security_log(OFFLINE_URL, &room).expect("empty").is_empty());
+    assert!(
+        load_security_log(OFFLINE_URL, &room)
+            .expect("empty")
+            .is_empty()
+    );
     let events = vec![SecurityEvent {
         alias: "bob".to_string(),
         description: "TOFU alert".to_string(),
@@ -306,7 +334,11 @@ fn alias_bindings_and_security_logs_round_trip() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].description, "TOFU alert");
     remove_security_log(OFFLINE_URL, &room).expect("remove");
-    assert!(load_security_log(OFFLINE_URL, &room).expect("gone").is_empty());
+    assert!(
+        load_security_log(OFFLINE_URL, &room)
+            .expect("gone")
+            .is_empty()
+    );
     remove_security_log(OFFLINE_URL, &room).expect("remove again");
     persist_security_log(OFFLINE_URL, &room, &events).expect("persist");
     persist_security_log(OFFLINE_URL, &room, &[]).expect("clear");
@@ -324,11 +356,12 @@ fn file_helpers() {
     write_file_atomic(&target, b"two").expect("overwrite");
     assert_eq!(fs::read(&target).expect("read"), b"two");
     assert!(write_file_atomic(std::path::Path::new("/"), b"x").is_err());
-    assert!(
-        write_file_atomic(&config.dir.path().join("missing").join("file"), b"x").is_err()
-    );
+    assert!(write_file_atomic(&config.dir.path().join("missing").join("file"), b"x").is_err());
 
-    assert_eq!(decode_hex32("x", &"ab".repeat(32)).expect("hex32"), [0xAB; 32]);
+    assert_eq!(
+        decode_hex32("x", &"ab".repeat(32)).expect("hex32"),
+        [0xAB; 32]
+    );
     assert!(decode_hex32("x", "abcd").is_err());
     assert!(decode_hex_vec("x", "zz").is_err());
     assert!(session_dir().is_ok());

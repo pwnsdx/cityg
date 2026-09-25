@@ -127,11 +127,7 @@ fn gpui_render_every_panel_state(cx: &mut TestAppContext) {
             ErrorCategory::Validation,
         ] {
             model.categorized_error = Some(CategorizedError::new(
-                category,
-                "failure",
-                "details",
-                "retry",
-                true,
+                category, "failure", "details", "retry", true,
             ));
             let _ = model.render_error_box(cx);
         }
@@ -205,9 +201,9 @@ fn gpui_render_every_panel_state(cx: &mut TestAppContext) {
             // Room-admin panel: staged revoke, loading, error, locked.
             let session = model.session.clone().expect("session");
             model.room_admin_target.focus();
-            model
-                .room_admin_target
-                .set_value(hex_encode(vec![0xAA; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES]));
+            model.room_admin_target.set_value(hex_encode(
+                vec![0xAA; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES],
+            ));
             model.room_admin_revoke_confirmation =
                 Some(vec![0xAA; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES]);
             let _ = model.render_room_admin_panel(window, &session, cx);
@@ -301,7 +297,11 @@ fn gpui_callbacks_copy_toggle_and_reset(cx: &mut TestAppContext) {
                 Some(expected_roster.clone())
             );
 
-            model.set_error(&anyhow!("connection refused"), "send", Some(RetryAction::Send));
+            model.set_error(
+                &anyhow!("connection refused"),
+                "send",
+                Some(RetryAction::Send),
+            );
             model.on_copy_error_details(&event, window, cx);
             assert!(
                 cx.read_from_clipboard()
@@ -631,7 +631,9 @@ fn gpui_keystrokes_route_to_the_focused_input(cx: &mut TestAppContext) {
         model.join_status = JoinStatus::Idle;
     });
 
-    view.update(cx, |model, _| model.install_session(offline_session(27, "keys")));
+    view.update(cx, |model, _| {
+        model.install_session(offline_session(27, "keys"))
+    });
     cx.run_until_parked();
 
     // Room-admin target field.
@@ -842,7 +844,9 @@ fn gpui_members_search_filters_the_roster(cx: &mut TestAppContext) {
         model.submit_members_search(cx);
         assert!(matches!(model.members_mode, MembersMode::Full));
         assert_eq!(
-            model.member_label_for_leaf(&model.members[0].leaf_id).as_deref(),
+            model
+                .member_label_for_leaf(&model.members[0].leaf_id)
+                .as_deref(),
             model.members[0]
                 .alias
                 .as_deref()
@@ -895,10 +899,9 @@ fn message_list_bookkeeping() {
     );
     assert_eq!(model.messages[0].plaintext, "earlier");
     assert!(
-        model
-            .messages
-            .iter()
-            .all(|message| message.delivery == MessageDelivery::Sent && message.pending_id.is_none())
+        model.messages.iter().all(
+            |message| message.delivery == MessageDelivery::Sent && message.pending_id.is_none()
+        )
     );
 
     // A pending message confirmed with a key already shown is dropped.
@@ -917,7 +920,9 @@ fn message_list_bookkeeping() {
     model.mark_pending_message_failed(12345);
 
     assert_eq!(model.resolve_sender_label(&peer), "peer");
-    model.leaf_alias_index.insert([0x44; 32], "dora".to_string());
+    model
+        .leaf_alias_index
+        .insert([0x44; 32], "dora".to_string());
     assert!(model.resolve_sender_label(&peer).starts_with("dora ("));
 
     // Activity and security logs are bounded.
@@ -955,7 +960,11 @@ fn toasts_and_errors() {
     model.cleanup_expired_toasts();
     assert_eq!(model.toasts.len(), 1);
 
-    model.set_error(&anyhow!("connection reset"), "send", Some(RetryAction::Send));
+    model.set_error(
+        &anyhow!("connection reset"),
+        "send",
+        Some(RetryAction::Send),
+    );
     assert!(model.last_error.is_some());
     assert!(model.categorized_error.is_some());
     assert_eq!(model.last_retry_action, Some(RetryAction::Send));
@@ -1022,9 +1031,15 @@ fn join_form_requests_and_keystrokes() {
     form.active = None;
     assert!(matches!(form.handle_keystroke(&key("x")), KeyOutcome::None));
     form.active = Some(ActiveField::Alias);
-    assert!(matches!(form.handle_keystroke(&key("tab")), KeyOutcome::Updated));
+    assert!(matches!(
+        form.handle_keystroke(&key("tab")),
+        KeyOutcome::Updated
+    ));
     assert!(matches!(form.active, Some(ActiveField::Server)));
-    assert!(matches!(form.handle_keystroke(&key("shift-tab")), KeyOutcome::Updated));
+    assert!(matches!(
+        form.handle_keystroke(&key("shift-tab")),
+        KeyOutcome::Updated
+    ));
     assert!(matches!(form.active, Some(ActiveField::Alias)));
     assert_eq!(
         JoinFormState::next_field(ActiveField::Room),
@@ -1034,16 +1049,43 @@ fn join_form_requests_and_keystrokes() {
         JoinFormState::previous_field(ActiveField::Room),
         ActiveField::Server
     );
-    assert!(matches!(form.handle_keystroke(&key("backspace")), KeyOutcome::Updated));
-    assert!(matches!(form.handle_keystroke(&key("backspace")), KeyOutcome::None));
-    assert!(matches!(form.handle_keystroke(&key("space")), KeyOutcome::Updated));
-    assert!(matches!(form.handle_keystroke(&key("x->x")), KeyOutcome::Updated));
+    assert!(matches!(
+        form.handle_keystroke(&key("backspace")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        form.handle_keystroke(&key("backspace")),
+        KeyOutcome::None
+    ));
+    assert!(matches!(
+        form.handle_keystroke(&key("space")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        form.handle_keystroke(&key("x->x")),
+        KeyOutcome::Updated
+    ));
     assert_eq!(form.field(ActiveField::Alias), " x");
-    assert!(matches!(form.handle_keystroke(&key("ctrl-a")), KeyOutcome::None));
-    assert!(matches!(form.handle_keystroke(&key("enter")), KeyOutcome::Submit));
-    assert!(matches!(form.handle_keystroke(&key("delete")), KeyOutcome::Updated));
-    assert!(matches!(form.handle_keystroke(&key("enter")), KeyOutcome::None));
-    assert!(matches!(form.handle_keystroke(&key("escape")), KeyOutcome::Updated));
+    assert!(matches!(
+        form.handle_keystroke(&key("ctrl-a")),
+        KeyOutcome::None
+    ));
+    assert!(matches!(
+        form.handle_keystroke(&key("enter")),
+        KeyOutcome::Submit
+    ));
+    assert!(matches!(
+        form.handle_keystroke(&key("delete")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        form.handle_keystroke(&key("enter")),
+        KeyOutcome::None
+    ));
+    assert!(matches!(
+        form.handle_keystroke(&key("escape")),
+        KeyOutcome::Updated
+    ));
     assert!(form.active.is_none());
 }
 
@@ -1053,7 +1095,10 @@ fn input_helpers() {
     assert!(is_primary_shortcut(&key("ctrl-c"), "c"));
     assert!(!is_primary_shortcut(&key("alt-v"), "v"));
     assert!(!is_primary_shortcut(&key("v"), "v"));
-    assert_eq!(sanitize_clipboard_text("one\ntwo\tthree\r"), "one two three ");
+    assert_eq!(
+        sanitize_clipboard_text("one\ntwo\tthree\r"),
+        "one two three "
+    );
     assert_eq!(preferred_join_form_server(""), "");
     assert_eq!(preferred_join_form_server("http://127.0.0.1:8080"), "");
     assert_eq!(
@@ -1062,40 +1107,100 @@ fn input_helpers() {
     );
 
     let mut composer = MessageComposer::default();
-    assert!(matches!(composer.handle_keystroke(&key("a")), KeyOutcome::None));
+    assert!(matches!(
+        composer.handle_keystroke(&key("a")),
+        KeyOutcome::None
+    ));
     composer.focus();
-    assert!(matches!(composer.handle_keystroke(&key("backspace")), KeyOutcome::None));
+    assert!(matches!(
+        composer.handle_keystroke(&key("backspace")),
+        KeyOutcome::None
+    ));
     composer.set_text("hi".to_string());
-    assert!(matches!(composer.handle_keystroke(&key("backspace")), KeyOutcome::Updated));
-    assert!(matches!(composer.handle_keystroke(&key("space")), KeyOutcome::Updated));
+    assert!(matches!(
+        composer.handle_keystroke(&key("backspace")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        composer.handle_keystroke(&key("space")),
+        KeyOutcome::Updated
+    ));
     assert_eq!(composer.text(), "h ");
-    assert!(matches!(composer.handle_keystroke(&key("delete")), KeyOutcome::Updated));
+    assert!(matches!(
+        composer.handle_keystroke(&key("delete")),
+        KeyOutcome::Updated
+    ));
     assert!(!composer.is_ready());
     composer.set_text("ok".to_string());
-    assert!(matches!(composer.handle_keystroke(&key("enter")), KeyOutcome::Submit));
-    assert!(matches!(composer.handle_keystroke(&key("ctrl-a")), KeyOutcome::None));
-    assert!(matches!(composer.handle_keystroke(&key("escape")), KeyOutcome::Updated));
+    assert!(matches!(
+        composer.handle_keystroke(&key("enter")),
+        KeyOutcome::Submit
+    ));
+    assert!(matches!(
+        composer.handle_keystroke(&key("ctrl-a")),
+        KeyOutcome::None
+    ));
+    assert!(matches!(
+        composer.handle_keystroke(&key("escape")),
+        KeyOutcome::Updated
+    ));
     assert!(!composer.active);
 
     let mut search = MembersSearchState::default();
-    assert!(matches!(search.handle_keystroke(&key("a")), KeyOutcome::None));
+    assert!(matches!(
+        search.handle_keystroke(&key("a")),
+        KeyOutcome::None
+    ));
     search.focus();
     search.set_query("ab".to_string());
-    assert!(matches!(search.handle_keystroke(&key("backspace")), KeyOutcome::Updated));
-    assert!(matches!(search.handle_keystroke(&key("delete")), KeyOutcome::Updated));
-    assert!(matches!(search.handle_keystroke(&key("backspace")), KeyOutcome::None));
-    assert!(matches!(search.handle_keystroke(&key("enter")), KeyOutcome::Submit));
-    assert!(matches!(search.handle_keystroke(&key("x->x")), KeyOutcome::Updated));
-    assert!(matches!(search.handle_keystroke(&key("tab")), KeyOutcome::Updated));
+    assert!(matches!(
+        search.handle_keystroke(&key("backspace")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        search.handle_keystroke(&key("delete")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        search.handle_keystroke(&key("backspace")),
+        KeyOutcome::None
+    ));
+    assert!(matches!(
+        search.handle_keystroke(&key("enter")),
+        KeyOutcome::Submit
+    ));
+    assert!(matches!(
+        search.handle_keystroke(&key("x->x")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        search.handle_keystroke(&key("tab")),
+        KeyOutcome::Updated
+    ));
     assert!(!search.active);
 
     let mut target = RoomAdminTargetState::default();
-    assert!(matches!(target.handle_keystroke(&key("a->a")), KeyOutcome::None));
+    assert!(matches!(
+        target.handle_keystroke(&key("a->a")),
+        KeyOutcome::None
+    ));
     target.focus();
-    assert!(matches!(target.handle_keystroke(&key("a->a")), KeyOutcome::Updated));
-    assert!(matches!(target.handle_keystroke(&key("backspace")), KeyOutcome::Updated));
-    assert!(matches!(target.handle_keystroke(&key("enter")), KeyOutcome::Submit));
-    assert!(matches!(target.handle_keystroke(&key("escape")), KeyOutcome::Updated));
+    assert!(matches!(
+        target.handle_keystroke(&key("a->a")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        target.handle_keystroke(&key("backspace")),
+        KeyOutcome::Updated
+    ));
+    assert!(matches!(
+        target.handle_keystroke(&key("enter")),
+        KeyOutcome::Submit
+    ));
+    assert!(matches!(
+        target.handle_keystroke(&key("escape")),
+        KeyOutcome::Updated
+    ));
     target.clear();
     assert!(target.value().is_empty());
 

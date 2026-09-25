@@ -51,7 +51,11 @@ impl AppModel {
         ))
         .child(self.session_row(
             "Role",
-            if session.is_admin() { "Admin" } else { "Member" },
+            if session.is_admin() {
+                "Admin"
+            } else {
+                "Member"
+            },
         ))
         .child(self.render_regular_fingerprint_row(session, cx))
         .child(self.render_fs_fingerprint_row(session, cx))
