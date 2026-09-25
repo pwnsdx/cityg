@@ -37,6 +37,19 @@ jobs:
       - name: Security verification (server blindness)
         run: ./scripts/verify_no_secrets.sh --no-build
 
+  conformance-vectors:
+    name: Independent conformance vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install blake3
+        run: python -m pip install --quiet blake3
+      - name: Verify kat/v0.2/vectors.json from the specification
+        run: python kat/v0.2/verify_vectors.py
+
   release-matrix:
     name: Release Matrix (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -45,7 +58,7 @@ jobs:
       matrix:
         include:
           - name: cityg-core
-            command: cargo test -p cityg-core -p cityg-pqc
+            command: cargo test -p cityg-core -p cityg-pqc && cargo test -p cityg-core --test vectors --test conformance_manifest
             needs_ripgrep: false
             needs_native_linux_deps: false
           - name: delivery-service

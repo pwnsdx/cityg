@@ -23,5 +23,8 @@ cargo test --locked -p cityg-core -- \
   a_vacant_group_cannot_be_taken_over_with_a_stale_invite \
   decode_requires_deterministic_bytes \
   rejects_duplicate_keys_floats_and_tags \
+  the_gid_binds_the_creator_key_and_nonce \
+  the_announced_tree_and_roster_hashes_are_recomputed \
+  the_ledger_accepts_only_the_group_info_of_the_computed_epoch \
   --nocapture
 cargo test --locked -p cityg-server -p cityg-runtime -- --nocapture

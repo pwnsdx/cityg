@@ -1,237 +1,717 @@
 {
-  "profile_version": "v0.2",
-  "kind": "v0.2-conformance-manifest",
+  "profile": "city-g/v0.2",
+  "kind": "conformance-manifest",
+  "spec": "docs/specs.md",
+  "vectors": "kat/v0.2/vectors.json",
+  "independent_verifier": "kat/v0.2/verify_vectors.py",
+  "audit": "docs/audits/audit-crypto-conformite-2026-09-25.md",
   "notes": [
-    "This manifest links the requirements introduced by the v0.2 profile (audit docs/audits/audit-crypto-conformite-2026-09-25.md) to deterministic implementation tests.",
-    "Requirement IDs are grouped by area: SIG (signature suite, audit H-05), REM (member removal, audit C-03), MSG (message receipt, audit H-10), CFG (server configuration, audit M-06), SLOT (slot leases), PRIV (material that must not reach the server, audit C-01)."
+    "Each requirement names the sections of docs/specs.md that state it (their anchors), the conformance vectors that exercise it (JSON pointers into kat/v0.2/vectors.json; '#id' selects the array element with that id), the reference-implementation tests that check it (nextest binary id and test path), and the audit findings or proposals it closes.",
+    "crates/cityg-core/tests/conformance_manifest.rs checks that every anchor, vector and test exists, that every normative section and every vector section is covered, and that every test of cityg-core is mapped to a requirement.",
+    "Sections listed in informative_sections state no requirement: informative text, or a heading whose subsections carry the requirements."
   ],
+  "informative_sections": ["1-architecture", "10-signed-objects", "17-conformance", "18-changes"],
   "requirements": [
     {
-      "id": "SIG.1",
-      "title": "FIPS 204 ML-DSA-87 is the only signature suite, with one backend on native and wasm32",
-      "coverage": [
-        {
-          "crate": "cityg-pqc",
-          "test": "tests::sizes_match_fips204_ml_dsa_87",
-          "expectation": "accept"
-        },
-        {
-          "crate": "cityg-pqc",
-          "test": "tests::deterministic_known_answer_is_stable",
-          "expectation": "kat_match"
-        },
-        {
-          "crate": "cityg-pqc",
-          "test": "tests::sign_and_verify_round_trip",
-          "expectation": "accept"
-        }
+      "id": "SEC.1",
+      "title": "The protocol provides the properties of section 2.2 against the stated adversaries, and a deployment does not advertise more",
+      "spec": ["2-security-goals"],
+      "audit": ["C-02", "L-02", "P-1"],
+      "tests": [
+        {"binary": "cityg-core", "test": "tree::tests::members_agree_on_root_secret_across_commits_and_removals"},
+        {"binary": "cityg-core", "test": "session::tests::members_join_talk_and_leave"},
+        {"binary": "cityg-core", "test": "session::tests::a_member_that_lost_its_state_resyncs"}
       ]
     },
     {
-      "id": "SIG.2",
-      "title": "Every signature is bound to a per-usage FIPS 204 context string",
-      "coverage": [
-        {
-          "crate": "cityg-pqc",
-          "test": "tests::contexts_are_distinct_and_bind_signatures",
-          "expectation": "reject_cross_context"
-        },
-        {
-          "crate": "cityg-client",
-          "test": "message_auth::tests::message_signatures_are_bound_to_the_message_context",
-          "expectation": "reject_cross_context"
-        }
+      "id": "SEC.2",
+      "title": "The delivery service verifies commits against public state only and never holds a group secret",
+      "spec": ["2-security-goals", "12-delivery-service"],
+      "audit": ["C-01", "P-2"],
+      "tests": [
+        {"binary": "cityg-server", "test": "tests::rooms_order_commits_and_messages"},
+        {"binary": "cityg-runtime", "test": "tests::a_group_lives_through_the_service"}
+      ],
+      "checks": ["scripts/verify_no_secrets.sh"]
+    },
+    {
+      "id": "SUITE.1",
+      "title": "Signatures are FIPS 204 ML-DSA-87 with 32-byte seeds, hedged signing randomness from the caller, and the FIPS 204 sizes",
+      "spec": ["3-cryptographic-suite"],
+      "audit": ["H-05"],
+      "tests": [
+        {"binary": "cityg-pqc", "test": "tests::sizes_match_fips204_ml_dsa_87"},
+        {"binary": "cityg-pqc", "test": "tests::deterministic_known_answer_is_stable"},
+        {"binary": "cityg-pqc", "test": "tests::sign_and_verify_round_trip"},
+        {"binary": "cityg-pqc", "test": "tests::seeded_keys_and_deterministic_signatures_are_reproducible"},
+        {"binary": "cityg-core", "test": "identity::tests::signing_randomness_comes_from_the_rng"}
       ]
     },
     {
-      "id": "SIG.3",
-      "title": "Malformed keys and signatures are rejected before verification",
-      "coverage": [
-        {
-          "crate": "cityg-pqc",
-          "test": "tests::malformed_inputs_are_rejected",
-          "expectation": "reject_malformed"
-        },
-        {
-          "crate": "cityg-pqc",
-          "test": "tests::secret_key_round_trips_through_bytes",
-          "expectation": "accept"
-        }
+      "id": "SUITE.2",
+      "title": "Every signature uses the FIPS 204 context string of its usage; a signature does not verify under another context",
+      "spec": ["3-cryptographic-suite", "16-3-contexts"],
+      "audit": ["H-05", "H-10"],
+      "tests": [
+        {"binary": "cityg-pqc", "test": "tests::contexts_are_distinct_and_bind_signatures"},
+        {"binary": "cityg-core", "test": "identity::tests::signatures_round_trip_through_serialized_keys"}
+      ]
+    },
+    {
+      "id": "SUITE.3",
+      "title": "Malformed signing keys, public keys and signatures are rejected before use",
+      "spec": ["3-cryptographic-suite"],
+      "audit": ["H-05"],
+      "tests": [
+        {"binary": "cityg-pqc", "test": "tests::malformed_inputs_are_rejected"},
+        {"binary": "cityg-pqc", "test": "tests::secret_key_round_trips_through_bytes"}
+      ]
+    },
+    {
+      "id": "SUITE.4",
+      "title": "ML-KEM-768 keys derive from 64-byte seeds, encapsulation draws its randomness from the caller, and encapsulation keys pass the FIPS 203 input check",
+      "spec": ["3-cryptographic-suite"],
+      "audit": ["P-2", "P-3"],
+      "vectors": ["/key_schedule/external_init", "/path_wrap"],
+      "tests": [
+        {"binary": "cityg-core", "test": "kem::tests::derived_keys_round_trip_and_are_deterministic"},
+        {"binary": "cityg-core", "test": "kem::tests::malformed_inputs_are_rejected"}
+      ]
+    },
+    {
+      "id": "ENC.1",
+      "title": "Objects are exchanged as deterministic CBOR (RFC 8949 section 4.2.1); decoders re-encode and reject any other encoding",
+      "spec": ["4-encodings"],
+      "audit": ["H-06", "P-7"],
+      "vectors": ["/cbor_det"],
+      "tests": [
+        {"binary": "cityg-core", "test": "cbor::tests::encodes_rfc8949_examples"},
+        {"binary": "cityg-core", "test": "cbor::tests::sorts_map_keys_by_encoded_bytes"},
+        {"binary": "cityg-core", "test": "cbor::tests::decode_requires_deterministic_bytes"},
+        {"binary": "cityg-core", "test": "cbor::tests::rejects_duplicate_keys_floats_and_tags"},
+        {"binary": "cityg-core", "test": "cbor::tests::readers_check_shapes"},
+        {"binary": "cityg-core::vectors", "test": "vectors_match_the_published_file"}
+      ]
+    },
+    {
+      "id": "ENC.2",
+      "title": "H_L hashes the CBOR array [profile tag, label, args]; no map is ever an argument list",
+      "spec": ["4-2-labelled-hash", "16-1-labelled-hashes"],
+      "audit": ["H-06"],
+      "vectors": ["/h_l"],
+      "tests": [
+        {"binary": "cityg-core", "test": "hash::tests::labelled_hash_binds_label_and_arguments"},
+        {"binary": "cityg-core::vectors", "test": "vectors_match_the_published_file"}
+      ]
+    },
+    {
+      "id": "ENC.3",
+      "title": "Extract, ExpandLabel, DeriveSecret and MAC are keyed BLAKE3 with the label, context and length bound into the input",
+      "spec": ["4-3-kdf", "16-2-derivation-labels"],
+      "audit": ["P-2"],
+      "vectors": ["/kdf"],
+      "tests": [
+        {"binary": "cityg-core", "test": "hash::tests::expand_label_separates_labels_contexts_and_lengths"},
+        {"binary": "cityg-core", "test": "hash::tests::extract_and_mac_are_keyed"},
+        {"binary": "cityg-core::vectors", "test": "vectors_are_reproducible"}
+      ]
+    },
+    {
+      "id": "ENC.4",
+      "title": "Signed arrays carry their label and field count, which are checked before the signature over the rebuilt TBS",
+      "spec": ["4-4-signed-arrays"],
+      "audit": ["P-5", "P-7"],
+      "vectors": ["/signed_objects"],
+      "tests": [
+        {"binary": "cityg-core", "test": "signed::tests::signed_arrays_round_trip_and_bind_label_and_fields"}
+      ]
+    },
+    {
+      "id": "ID.1",
+      "title": "gid, leaf_id, invite_id, epoch_ref and H_pk are the labelled hashes of section 5",
+      "spec": ["5-identifiers"],
+      "audit": ["P-2", "P-4"],
+      "vectors": ["/identifiers"],
+      "tests": [
+        {"binary": "cityg-core", "test": "identity::tests::identifiers_bind_group_and_key"},
+        {"binary": "cityg-core", "test": "message::tests::epoch_refs_and_leaves"}
+      ]
+    },
+    {
+      "id": "ID.2",
+      "title": "The gid binds the creator's device key and nonce: a genesis is valid only if they hash to its gid",
+      "spec": ["5-identifiers", "9-3-kinds"],
+      "audit": ["H-01", "P-4"],
+      "vectors": ["/genesis/gid"],
+      "tests": [
+        {"binary": "cityg-core::genesis", "test": "the_gid_binds_the_creator_key_and_nonce"}
+      ]
+    },
+    {
+      "id": "TREE.1",
+      "title": "The barrier tree has n_max slots in heap order, a power of two between 2 and MAX_N_MAX; direct paths, copaths and resolutions follow section 6.1",
+      "spec": ["6-barrier-tree"],
+      "audit": ["P-3"],
+      "tests": [
+        {"binary": "cityg-core", "test": "tree::tests::tree_shape_helpers"}
+      ]
+    },
+    {
+      "id": "TREE.2",
+      "title": "The tree hash binds n_max, every slot's occupant (leaf_id, generation, key) and every parent key",
+      "spec": ["6-2-tree-hash"],
+      "audit": ["P-3"],
+      "vectors": ["/genesis/tree_hash", "/genesis/tree_parents"],
+      "tests": [
+        {"binary": "cityg-core", "test": "tree::tests::encodings_round_trip"},
+        {"binary": "cityg-core::genesis", "test": "the_announced_tree_and_roster_hashes_are_recomputed"}
+      ]
+    },
+    {
+      "id": "TREE.3",
+      "title": "Every commit renews its author's leaf key from a fresh leaf secret and re-keys its direct path; path secrets are wrapped to the copath resolutions with ML-KEM-768 and ChaCha20-Poly1305 bound to the wrap context",
+      "spec": ["6-3-update-path"],
+      "audit": ["H-03", "P-3"],
+      "vectors": ["/path_wrap", "/genesis/leaf_public_key"],
+      "tests": [
+        {"binary": "cityg-core", "test": "tree::tests::members_agree_on_root_secret_across_commits_and_removals"},
+        {"binary": "cityg-core", "test": "session::tests::concurrent_commits_are_ordered_by_the_ledger"}
+      ]
+    },
+    {
+      "id": "TREE.4",
+      "title": "Update paths are validated without secrets: occupied author slot, one entry per direct-path node, targets exactly the copath resolutions, valid keys and sizes",
+      "spec": ["6-3-update-path"],
+      "audit": ["P-3", "M-05"],
+      "tests": [
+        {"binary": "cityg-core", "test": "tree::tests::tampered_paths_are_rejected"},
+        {"binary": "cityg-core", "test": "tree::tests::encodings_round_trip"}
+      ]
+    },
+    {
+      "id": "TREE.5",
+      "title": "A receiver checks every derived node key against the published one; any decryption or key mismatch is a cover failure",
+      "spec": ["6-3-update-path", "10-4-cover-failure"],
+      "audit": ["M-05"],
+      "tests": [
+        {"binary": "cityg-core", "test": "tree::tests::tampered_paths_are_rejected"},
+        {"binary": "cityg-core", "test": "session::tests::a_member_that_lost_its_state_resyncs"}
+      ]
+    },
+    {
+      "id": "TREE.6",
+      "title": "An update path of a tree of n_max slots fits max_update_path_bytes(n_max) and a commit fits max_commit_bytes(n_max); n_max never exceeds MAX_N_MAX",
+      "spec": ["6-4-update-bound", "9-1-registry"],
+      "audit": ["H-08", "P-3"],
+      "tests": [
+        {"binary": "cityg-core", "test": "tree::tests::worst_case_update_paths_fit_the_bound"},
+        {"binary": "cityg-core", "test": "tree::tests::tree_shape_helpers"},
+        {"binary": "cityg-core", "test": "commit::tests::registry_and_signature_are_enforced"},
+        {"binary": "cityg-core", "test": "session::tests::full_groups_refuse_joiners"}
+      ]
+    },
+    {
+      "id": "ROS.1",
+      "title": "The roster hash covers the member records by slot, the admins sorted bytewise and the last generation of every slot",
+      "spec": ["7-roster"],
+      "audit": ["P-4"],
+      "vectors": ["/roster", "/genesis/roster_hash"],
+      "tests": [
+        {"binary": "cityg-core", "test": "roster::tests::membership_changes_update_the_hash"},
+        {"binary": "cityg-core", "test": "roster::tests::encoding_round_trips_and_is_checked"}
+      ]
+    },
+    {
+      "id": "ROS.2",
+      "title": "Slot generations count occupancies; a resyncing member keeps its identity, admission and admin rights under the next generation",
+      "spec": ["7-roster", "9-3-kinds"],
+      "audit": ["P-3", "P-4"],
+      "tests": [
+        {"binary": "cityg-core", "test": "roster::tests::renewal_keeps_identity_and_rights"},
+        {"binary": "cityg-core", "test": "roster::tests::membership_changes_update_the_hash"}
+      ]
+    },
+    {
+      "id": "ROS.3",
+      "title": "At most MAX_ADMINS admins; the last admin cannot be revoked; removed members lose admin rights; an adminless group promotes its lowest-slot member",
+      "spec": ["7-roster", "9-4-transition"],
+      "audit": ["P-4"],
+      "tests": [
+        {"binary": "cityg-core", "test": "roster::tests::admin_rules"},
+        {"binary": "cityg-core", "test": "session::tests::admins_remove_members_and_manage_rights"}
+      ]
+    },
+    {
+      "id": "KS.1",
+      "title": "GroupContext_n binds gid, epoch, tree hash, roster hash, profile and confirmed transcript hash into every epoch secret",
+      "spec": ["8-key-schedule"],
+      "audit": ["C-01", "P-2"],
+      "vectors": ["/key_schedule/group_context", "/genesis/group_context"],
+      "tests": [
+        {"binary": "cityg-core", "test": "key_schedule::tests::group_context_round_trips_and_binds_every_field"}
+      ]
+    },
+    {
+      "id": "KS.2",
+      "title": "Epoch secrets chain through init_secret: commit, epoch, init, msg, confirm and external secrets derive as in section 8",
+      "spec": ["8-key-schedule"],
+      "audit": ["C-01", "H-02", "P-2"],
+      "vectors": ["/key_schedule", "/genesis/init_secret", "/genesis/msg_secret", "/genesis/external_secret"],
+      "tests": [
+        {"binary": "cityg-core", "test": "key_schedule::tests::epoch_secrets_depend_on_every_input"},
+        {"binary": "cityg-core", "test": "session::tests::forks_and_foreign_commits_are_rejected"}
+      ]
+    },
+    {
+      "id": "KS.3",
+      "title": "Confirmed and interim transcript hashes chain every commit; the confirmation tag authenticates the confirmed transcript and is checked before any secret of the epoch is used",
+      "spec": ["8-key-schedule", "9-2-signature", "9-5-verification"],
+      "audit": ["H-04", "P-2"],
+      "vectors": ["/key_schedule/transcript", "/genesis/confirmed_transcript_hash", "/genesis/interim_transcript_hash", "/genesis/confirmation_tag"],
+      "tests": [
+        {"binary": "cityg-core", "test": "key_schedule::tests::transcript_hashes_chain"},
+        {"binary": "cityg-core", "test": "session::tests::forks_and_foreign_commits_are_rejected"}
+      ]
+    },
+    {
+      "id": "KS.4",
+      "title": "Members erase the secrets of an epoch when the next one becomes active, keeping only init and external secrets until then",
+      "spec": ["8-key-schedule", "13-4-maintenance"],
+      "audit": ["H-02", "P-2"],
+      "tests": [
+        {"binary": "cityg-core", "test": "key_schedule::tests::epoch_secrets_depend_on_every_input"},
+        {"binary": "cityg-core", "test": "session::tests::sessions_persist_and_resume"}
+      ]
+    },
+    {
+      "id": "KS.5",
+      "title": "External init: the epoch's external ML-KEM key derives from external_secret; a joiner's encapsulation yields the same init secret for every member",
+      "spec": ["8-1-external-init"],
+      "audit": ["H-01", "P-2", "P-4"],
+      "vectors": ["/key_schedule/external_init", "/key_schedule/external_kem_seed"],
+      "tests": [
+        {"binary": "cityg-core", "test": "key_schedule::tests::external_join_agrees_on_init_secret"},
+        {"binary": "cityg-core", "test": "session::tests::members_join_talk_and_leave"}
+      ]
+    },
+    {
+      "id": "COM.1",
+      "title": "A commit is a CBOR map with a closed key registry; unknown, missing or forbidden keys make it malformed",
+      "spec": ["9-commits", "9-1-registry"],
+      "audit": ["H-04", "P-5"],
+      "vectors": ["/genesis/commit"],
+      "tests": [
+        {"binary": "cityg-core", "test": "commit::tests::registry_and_signature_are_enforced"},
+        {"binary": "cityg-core", "test": "commit::tests::commits_round_trip_and_verify"},
+        {"binary": "cityg-core", "test": "commit::tests::admin_change_encoding"}
+      ]
+    },
+    {
+      "id": "COM.2",
+      "title": "Every commit carries exactly one ML-DSA-87 signature by its author over the map without keys 109 and 110, under context city-g/anchor/v2; author_leaf_id binds the author key",
+      "spec": ["9-2-signature"],
+      "audit": ["H-04", "P-5"],
+      "vectors": ["/genesis/anchor_tbs", "/genesis/author_leaf_id"],
+      "tests": [
+        {"binary": "cityg-core", "test": "commit::tests::registry_and_signature_are_enforced"},
+        {"binary": "cityg-core", "test": "commit::tests::commits_round_trip_and_verify"},
+        {"binary": "cityg-core::genesis", "test": "a_genesis_starts_the_transcript_at_epoch_zero"}
+      ]
+    },
+    {
+      "id": "COM.3",
+      "title": "A genesis is the epoch-0 commit of its creator: slot 0, generation 1, sole admin, ZERO32 initial secrets",
+      "spec": ["9-3-kinds"],
+      "audit": ["P-2", "P-4"],
+      "vectors": ["/genesis"],
+      "tests": [
+        {"binary": "cityg-core::genesis", "test": "an_honest_genesis_starts_a_ledger"},
+        {"binary": "cityg-core::genesis", "test": "a_genesis_starts_the_transcript_at_epoch_zero"},
+        {"binary": "cityg-core::vectors", "test": "vectors_match_the_published_file"}
+      ]
+    },
+    {
+      "id": "COM.4",
+      "title": "Transition order: authorized removals (never of the author), admin changes by an admin, entry at the lowest free slot with an admission from the remaining admins, promotion, then the update path",
+      "spec": ["9-4-transition"],
+      "audit": ["C-03", "H-01", "P-4"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::admins_remove_members_and_manage_rights"},
+        {"binary": "cityg-core", "test": "session::tests::joins_need_an_admission_from_a_current_admin"},
+        {"binary": "cityg-core", "test": "session::tests::members_join_talk_and_leave"},
+        {"binary": "cityg-core", "test": "session::tests::full_groups_refuse_joiners"},
+        {"binary": "cityg-core", "test": "proposal::tests::leave_and_admin_removals_are_authorized"}
+      ]
+    },
+    {
+      "id": "COM.5",
+      "title": "The resulting tree hash and roster hash must equal those the commit announces",
+      "spec": ["9-4-transition", "9-5-verification"],
+      "audit": ["P-3", "P-4"],
+      "tests": [
+        {"binary": "cityg-core::genesis", "test": "the_announced_tree_and_roster_hashes_are_recomputed"},
+        {"binary": "cityg-core", "test": "session::tests::forks_and_foreign_commits_are_rejected"}
+      ]
+    },
+    {
+      "id": "COM.6",
+      "title": "Verifiers check gid, epoch and the previous interim transcript hash, so commits of another group or a forked history are rejected",
+      "spec": ["9-5-verification"],
+      "audit": ["H-04", "P-2"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::forks_and_foreign_commits_are_rejected"},
+        {"binary": "cityg-core", "test": "session::tests::identities_and_pending_states_are_checked"}
+      ]
+    },
+    {
+      "id": "COM.7",
+      "title": "A member that lost its state or could not process a commit re-enters its own slot with a Resync commit through the external init",
+      "spec": ["9-3-kinds", "13-2-sync"],
+      "audit": ["M-05", "P-3"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::a_member_that_lost_its_state_resyncs"},
+        {"binary": "cityg-api::integration", "test": "concurrent_commits_retry_and_lost_state_resyncs"}
       ]
     },
     {
       "id": "REM.1",
-      "title": "A member never authors the barrier update that revokes it while other members remain; it leaves by signing a removal proposal that another member commits",
-      "coverage": [
-        {
-          "crate": "cityg-server",
-          "test": "tests::removal_proposals::pending_removal_blocks_refresh_and_self_revocation_until_committed",
-          "expectation": "reject_self_revocation"
-        },
-        {
-          "crate": "cityg-server",
-          "test": "tests::barrier_update_validation::validate_barrier_update_rejects_updater_revoked_by_its_own_anchor",
-          "expectation": "reject"
-        },
-        {
-          "crate": "cityg-gui",
-          "test": "native::tests::sequential_member_leaves_succeed",
-          "expectation": "accept"
-        },
-        {
-          "crate": "cityg-gui",
-          "test": "tests::join_leave_roundtrip_and_message_send",
-          "expectation": "accept"
-        }
+      "title": "A removal proposal is signed by its target (leave) or by an admin, matches one occupancy of the roster, and is single-use",
+      "spec": ["10-1-removal"],
+      "audit": ["C-03"],
+      "vectors": ["/signed_objects#remove-proposal"],
+      "tests": [
+        {"binary": "cityg-core", "test": "proposal::tests::leave_and_admin_removals_are_authorized"},
+        {"binary": "cityg-core", "test": "proposal::tests::signatures_and_encodings_are_checked"}
       ]
     },
     {
       "id": "REM.2",
-      "title": "Removal proposals are signed (context city-g/remove/v1) by their target or a room admin, bound to the target's slot occupancy, and short-lived",
-      "coverage": [
-        {
-          "crate": "cityg-client",
-          "test": "remove_proposal::tests::self_signed_proposal_round_trips_and_verifies",
-          "expectation": "accept"
-        },
-        {
-          "crate": "cityg-client",
-          "test": "remove_proposal::tests::tampered_or_foreign_proposals_are_rejected",
-          "expectation": "reject"
-        },
-        {
-          "crate": "cityg-client",
-          "test": "remove_proposal::tests::malformed_encodings_are_rejected",
-          "expectation": "reject_malformed"
-        },
-        {
-          "crate": "cityg-server",
-          "test": "tests::removal_proposals::submit_remove_proposal_validates_signer_target_and_lifetime",
-          "expectation": "reject"
-        },
-        {
-          "crate": "cityg-server",
-          "test": "tests::removal_proposals::room_admin_may_propose_another_members_removal",
-          "expectation": "accept"
-        },
-        {
-          "crate": "cityg-api-schema",
-          "test": "tests::remove_proposal_requests_validate_room_and_size",
-          "expectation": "reject_malformed"
-        }
+      "title": "A member never commits its own removal: another member commits it, or the next joiner once the group is vacant",
+      "spec": ["10-1-removal", "9-4-transition"],
+      "audit": ["C-03"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::members_join_talk_and_leave"},
+        {"binary": "cityg-core", "test": "session::tests::a_vacant_group_cannot_be_taken_over_with_a_stale_invite"},
+        {"binary": "cityg-api::integration", "test": "members_create_join_talk_leave_and_get_removed"}
       ]
     },
     {
       "id": "REM.3",
-      "title": "Every revocation is authorized by a pending removal proposal or a room-admin author, and a member-authored update commits every pending removal",
-      "coverage": [
-        {
-          "crate": "cityg-server",
-          "test": "tests::barrier_update_validation::validate_barrier_update_rejects_unauthorized_revocation",
-          "expectation": "reject"
-        },
-        {
-          "crate": "cityg-server",
-          "test": "tests::barrier_update_validation::validate_barrier_update_accepts_revocation_backed_by_pending_removal",
-          "expectation": "accept"
-        },
-        {
-          "crate": "cityg-server",
-          "test": "tests::barrier_update_validation::validate_barrier_update_accepts_revocation_authored_by_room_admin",
-          "expectation": "accept"
-        },
-        {
-          "crate": "cityg-server",
-          "test": "tests::barrier_update_validation::validate_barrier_update_rejects_updates_leaving_pending_removals_uncommitted",
-          "expectation": "reject"
-        }
+      "title": "Post-removal secrecy: a removed member is not covered by the next update path and derives no later epoch secret",
+      "spec": ["2-security-goals", "9-4-transition"],
+      "audit": ["C-03", "P-3"],
+      "tests": [
+        {"binary": "cityg-core", "test": "tree::tests::members_agree_on_root_secret_across_commits_and_removals"},
+        {"binary": "cityg-core", "test": "session::tests::admins_remove_members_and_manage_rights"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::flows::gpui_member_joins_by_invite_and_notices_its_removal"}
       ]
     },
     {
-      "id": "REM.4",
-      "title": "Only the last member of a room commits its own removal",
-      "coverage": [
-        {
-          "crate": "cityg-server",
-          "test": "tests::ticket_generation::merge_ticket_lets_only_the_last_member_revoke_itself",
-          "expectation": "accept"
-        }
+      "id": "ADM.1",
+      "title": "Invites are signed by an admin with an expiry; the invite key derives from a 32-byte invite seed and names the invite",
+      "spec": ["10-2-admission"],
+      "audit": ["H-01", "P-4"],
+      "vectors": ["/signed_objects#invite", "/identifiers/invite_id"],
+      "tests": [
+        {"binary": "cityg-core", "test": "admission::tests::invite_admissions_chain_to_an_admin"},
+        {"binary": "cityg-core", "test": "admission::tests::tampering_is_detected"}
       ]
     },
     {
-      "id": "REM.5",
-      "title": "Pending removal proposals survive a server restart",
-      "coverage": [
-        {
-          "crate": "cityg-server",
-          "test": "tests::removal_proposals::pending_removals_survive_restart",
-          "expectation": "accept"
-        }
+      "id": "ADM.2",
+      "title": "Admissions are signed by an admin (kind 0) or by an invite key whose invite an admin signed (kind 1), and are authorized against the admins remaining after the removals of the join",
+      "spec": ["10-2-admission", "9-4-transition"],
+      "audit": ["H-01", "P-4"],
+      "vectors": ["/signed_objects#admission/admin", "/signed_objects#admission/invite"],
+      "tests": [
+        {"binary": "cityg-core", "test": "admission::tests::admin_admissions_are_checked_against_the_admin_set"},
+        {"binary": "cityg-core", "test": "admission::tests::invite_admissions_chain_to_an_admin"},
+        {"binary": "cityg-core", "test": "session::tests::joins_need_an_admission_from_a_current_admin"}
       ]
     },
     {
-      "id": "REM.6",
-      "title": "The updater blanks the authority-signed revoked occupancies of its ticket and re-keys only its own path",
-      "coverage": [
-        {
-          "crate": "cityg-client",
-          "test": "barrier_snapshot_prepare::tests::derive_ticket_fields_and_witness_selection_cover_revocation_reason",
-          "expectation": "accept"
-        },
-        {
-          "crate": "cityg-gui",
-          "test": "native::tests::admin_expel::admin_expel_removes_member_and_preserves_survivor_messaging",
-          "expectation": "accept"
-        }
+      "id": "ADM.3",
+      "title": "The roster commits to each member's admission hash, so the delivery service cannot add a member on its own",
+      "spec": ["10-2-admission", "7-roster"],
+      "audit": ["H-01", "P-4"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::joins_need_an_admission_from_a_current_admin"},
+        {"binary": "cityg-core", "test": "session::tests::a_vacant_group_cannot_be_taken_over_with_a_stale_invite"}
+      ]
+    },
+    {
+      "id": "GI.1",
+      "title": "The GroupInfo of an epoch is signed by the commit author and verified against the tree and roster whose hashes its GroupContext carries",
+      "spec": ["10-3-group-info"],
+      "audit": ["H-01", "P-4"],
+      "vectors": ["/genesis/group_info"],
+      "tests": [
+        {"binary": "cityg-core", "test": "group_info::tests::group_info_verifies_against_its_epoch"},
+        {"binary": "cityg-core::genesis", "test": "the_ledger_accepts_only_the_group_info_of_the_computed_epoch"}
+      ]
+    },
+    {
+      "id": "CF.1",
+      "title": "A member that cannot process a commit signs a cover-failure report, which the delivery service records next to the commit",
+      "spec": ["10-4-cover-failure"],
+      "audit": ["M-05"],
+      "vectors": ["/signed_objects#cover-failure"],
+      "tests": [
+        {"binary": "cityg-core", "test": "cover::tests::reports_verify_against_the_roster"},
+        {"binary": "cityg-core", "test": "session::tests::a_member_that_lost_its_state_resyncs"}
       ]
     },
     {
       "id": "MSG.1",
-      "title": "Receivers drop messages whose sender is not a current member and display the signed timestamp",
-      "coverage": [
-        {
-          "crate": "cityg-gui",
-          "test": "native::tests::perform_fetch_shows_signed_timestamps_and_drops_removed_senders",
-          "expectation": "reject"
-        },
-        {
-          "crate": "cityg-gui",
-          "test": "native::tests::perform_fetch_rejects_sender_leaf_spoofing_with_mismatched_public_key",
-          "expectation": "reject"
-        }
+      "title": "Messages are FramedContent signed under city-g/msg/v3 and sealed in an envelope whose header (epoch_ref, sender, generation, key commitment) is the AEAD associated data",
+      "spec": ["11-message-plane", "11-1-framing"],
+      "audit": ["H-10", "M-01", "P-6"],
+      "vectors": ["/genesis/messages"],
+      "tests": [
+        {"binary": "cityg-core", "test": "message::tests::messages_round_trip_with_sender_authentication"},
+        {"binary": "cityg-core::vectors", "test": "vectors_match_the_published_file"}
       ]
     },
     {
-      "id": "CFG.1",
-      "title": "The default server configuration fails closed with the global history authority",
-      "coverage": [
-        {
-          "crate": "cityg-server",
-          "test": "tests::history_authority::default_server_config_fails_closed_with_global_history_authority",
-          "expectation": "accept"
-        }
+      "id": "MSG.2",
+      "title": "Each member sends on its own chain with strictly increasing generations derived from msg_secret; keys are erased once used",
+      "spec": ["11-2-ratchet"],
+      "audit": ["M-02", "P-6"],
+      "vectors": ["/genesis/messages", "/genesis/msg_secret"],
+      "tests": [
+        {"binary": "cityg-core", "test": "message::tests::out_of_order_delivery_and_window_bounds"},
+        {"binary": "cityg-core", "test": "message::tests::state_persists_across_encoding"},
+        {"binary": "cityg-core", "test": "message::tests::a_member_cannot_speak_for_another"}
       ]
     },
     {
-      "id": "SLOT.1",
-      "title": "A failed join ticket leaves the slot allocator untouched",
-      "coverage": [
-        {
-          "crate": "cityg-server",
-          "test": "tests::ticket_generation::failed_join_ticket_does_not_leak_a_slot_lease",
-          "expectation": "reject"
-        }
+      "id": "MSG.3",
+      "title": "Receivers accept a message only from a member of its epoch and of the current roster, within MAX_FORWARD_GENERATIONS and MAX_SKIPPED_KEYS, once, with framed fields matching the envelope and a valid signature",
+      "spec": ["11-3-receiving"],
+      "audit": ["H-10", "M-01", "M-03", "P-6"],
+      "tests": [
+        {"binary": "cityg-core", "test": "message::tests::membership_and_blocking_are_enforced"},
+        {"binary": "cityg-core", "test": "message::tests::a_member_cannot_speak_for_another"},
+        {"binary": "cityg-core", "test": "message::tests::out_of_order_delivery_and_window_bounds"},
+        {"binary": "cityg-core", "test": "message::tests::epoch_refs_and_leaves"}
       ]
     },
     {
-      "id": "PRIV.1",
-      "title": "The CAPSS witness (hp shares in clear) never leaves the device; acceptance recomputes what it needs from public inputs",
-      "coverage": [
-        {
-          "crate": "cityg-client",
-          "test": "tests::wire_bundle_never_carries_the_capss_witness",
-          "expectation": "accept"
-        }
+      "id": "MSG.4",
+      "title": "Messages of the previous epoch stay readable for GRACE_WINDOW_MS, then their keys are erased",
+      "spec": ["11-3-receiving", "13-4-maintenance"],
+      "audit": ["M-03", "P-6"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::late_messages_use_the_previous_epoch_during_the_grace_window"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::handlers::gpui_maintenance_runs_and_reports"}
+      ]
+    },
+    {
+      "id": "DS.1",
+      "title": "The ledger starts from a valid genesis and accepts the first valid commit of each epoch; a later commit for the same epoch gets an epoch mismatch",
+      "spec": ["12-1-ledger"],
+      "audit": ["H-04", "P-5"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::concurrent_commits_are_ordered_by_the_ledger"},
+        {"binary": "cityg-core::genesis", "test": "an_honest_genesis_starts_a_ledger"},
+        {"binary": "cityg-server", "test": "tests::rooms_order_commits_and_messages"},
+        {"binary": "cityg-runtime", "test": "tests::a_group_lives_through_the_service"},
+        {"binary": "cityg-api::integration", "test": "concurrent_commits_retry_and_lost_state_resyncs"}
+      ]
+    },
+    {
+      "id": "DS.2",
+      "title": "Authorized removal proposals are recorded once and every later commit must include them; a group whose members all have recorded removals is vacant",
+      "spec": ["12-1-ledger", "13-4-maintenance"],
+      "audit": ["C-03", "M-06"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::recorded_removals_must_be_committed"},
+        {"binary": "cityg-core", "test": "session::tests::a_vacant_group_cannot_be_taken_over_with_a_stale_invite"}
+      ]
+    },
+    {
+      "id": "DS.3",
+      "title": "The ledger stores admin-signed invites (at most MAX_INVITES) and refuses expired invites and joins that embed one",
+      "spec": ["12-1-ledger", "10-2-admission"],
+      "audit": ["H-01", "P-4"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::joins_need_an_admission_from_a_current_admin"},
+        {"binary": "cityg-server", "test": "tests::aliases_invites_and_limits"}
+      ]
+    },
+    {
+      "id": "DS.4",
+      "title": "The ledger relays an envelope once per (epoch, sender, generation), for the current epoch or the previous one during the grace window, only from a current member without a recorded removal",
+      "spec": ["12-1-ledger"],
+      "audit": ["H-10", "M-01"],
+      "tests": [
+        {"binary": "cityg-core", "test": "message::tests::replay_window_accepts_each_generation_once"},
+        {"binary": "cityg-core", "test": "session::tests::late_messages_use_the_previous_epoch_during_the_grace_window"},
+        {"binary": "cityg-server", "test": "tests::rooms_order_commits_and_messages"}
+      ]
+    },
+    {
+      "id": "DS.5",
+      "title": "The log numbers entries from 1, expires messages before commits, bounds its size and always keeps the latest commit",
+      "spec": ["12-2-log"],
+      "audit": ["M-06"],
+      "tests": [
+        {"binary": "cityg-server", "test": "tests::retention_keeps_the_latest_commit"},
+        {"binary": "cityg-server", "test": "tests::rooms_order_commits_and_messages"}
+      ]
+    },
+    {
+      "id": "DS.6",
+      "title": "The delivery service journals every change before answering and rebuilds a group deterministically from its snapshot and journal",
+      "spec": ["12-3-journal"],
+      "audit": ["M-06"],
+      "tests": [
+        {"binary": "cityg-server", "test": "tests::journal_replay_and_snapshots_rebuild_the_same_room"},
+        {"binary": "cityg-server", "test": "tests::file_store_round_trips_and_survives_torn_writes"},
+        {"binary": "cityg-server", "test": "tests::memory_store_round_trips"},
+        {"binary": "cityg-server", "test": "record::tests::records_round_trip"},
+        {"binary": "cityg-runtime", "test": "tests::native_stores_live_in_memory_or_in_the_state_directory"},
+        {"binary": "cityg-api::integration", "test": "rooms_survive_a_server_restart"},
+        {"binary": "cityg-worker", "test": "host::tests::a_durable_object_serves_and_persists_a_room"}
+      ]
+    },
+    {
+      "id": "MEM.1",
+      "title": "Members create groups and join with invite links: they verify the GroupInfo, sign their own admission and include every recorded removal",
+      "spec": ["13-member-behavior", "13-1-create-join"],
+      "audit": ["H-01", "P-4"],
+      "tests": [
+        {"binary": "cityg-api::integration", "test": "members_create_join_talk_leave_and_get_removed"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::flows::gpui_room_lifecycle_against_the_v2_service"},
+        {"binary": "cityg-gui::bin/join_leave", "test": "tests::watch_run_and_invite_join"}
+      ]
+    },
+    {
+      "id": "MEM.2",
+      "title": "Members follow the log in order, recognize their own commits, resync after a failure and delete the group state when removed",
+      "spec": ["13-2-sync"],
+      "audit": ["M-05"],
+      "tests": [
+        {"binary": "cityg-api::integration", "test": "concurrent_commits_retry_and_lost_state_resyncs"},
+        {"binary": "cityg-core", "test": "session::tests::identities_and_pending_states_are_checked"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::flows::gpui_send_after_removal_clears_the_session"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::engine::tests::membership_loss_detection"}
+      ]
+    },
+    {
+      "id": "MEM.3",
+      "title": "Members persist their state after encrypting and before sending, after every commit and after following the log, protected at rest",
+      "spec": ["13-3-persistence"],
+      "audit": ["M-02"],
+      "tests": [
+        {"binary": "cityg-api::integration", "test": "the_state_sink_makes_spent_generations_durable"},
+        {"binary": "cityg-core", "test": "session::tests::sessions_persist_and_resume"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::persistence::sessions_are_saved_encrypted_and_restored"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::persistence::the_state_sink_rewrites_the_session_file"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::persistence::damaged_session_files_are_refused"}
+      ]
+    },
+    {
+      "id": "MEM.4",
+      "title": "Members commit the recorded removals of others, re-key their leaf at least every FS_WINDOW, and stop committing and sending once their own removal is recorded",
+      "spec": ["13-4-maintenance"],
+      "audit": ["H-02", "H-03", "C-03"],
+      "tests": [
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::handlers::maintenance_picks_the_next_action"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::handlers::gpui_maintenance_runs_and_reports"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::engine::tests::engine_drives_a_room_end_to_end"}
+      ]
+    },
+    {
+      "id": "BIND.1",
+      "title": "Aliases are self-asserted signed bindings with validated display names; clients pin the key first seen for an alias",
+      "spec": ["14-deployment-binding", "14-1-binding-objects"],
+      "audit": ["L-02"],
+      "vectors": ["/signed_objects#alias"],
+      "tests": [
+        {"binary": "cityg-core", "test": "binding::tests::aliases_are_signed_and_validated"},
+        {"binary": "cityg-server", "test": "tests::aliases_invites_and_limits"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::persistence::alias_bindings_and_security_logs_round_trip"}
+      ]
+    },
+    {
+      "id": "BIND.2",
+      "title": "A fresh SessionAuth signed by a current member is exchanged for a bearer token that stops working when the member is removed",
+      "spec": ["14-1-binding-objects"],
+      "audit": ["M-06"],
+      "vectors": ["/signed_objects#session-auth"],
+      "tests": [
+        {"binary": "cityg-core", "test": "binding::tests::session_auth_is_signed_and_fresh"},
+        {"binary": "cityg-runtime", "test": "tests::sessions_are_checked"},
+        {"binary": "cityg-api::integration", "test": "members_wrap_only_their_own_sessions"}
+      ]
+    },
+    {
+      "id": "API.1",
+      "title": "The /v2 HTTP API carries protobuf requests whose field 1 is the gid, protocol objects as their exact bytes, and maps errors to the statuses of section 14.2",
+      "spec": ["14-2-api"],
+      "audit": ["M-06", "P-7"],
+      "tests": [
+        {"binary": "cityg-proto", "test": "tests::routes_round_trip_through_paths"},
+        {"binary": "cityg-proto", "test": "tests::gid_is_read_from_any_request"},
+        {"binary": "cityg-proto", "test": "tests::errors_and_tokens_encode"},
+        {"binary": "cityg-runtime", "test": "tests::errors_map_to_codes"},
+        {"binary": "cityg-worker", "test": "policy::tests::the_manifest_lists_every_route"},
+        {"binary": "cityg-api", "test": "tests::the_app_serves_health_metrics_and_the_api"}
+      ]
+    },
+    {
+      "id": "API.2",
+      "title": "The WebSocket notifies log heads and asks clients to fetch the log after dropped notices",
+      "spec": ["14-2-api"],
+      "audit": ["P-7"],
+      "tests": [
+        {"binary": "cityg-api::integration", "test": "websocket_notifies_log_heads"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::handlers::websocket_notices_parse"},
+        {"binary": "cityg-gui::bin/cityg-gui", "test": "native::tests::handlers::gpui_websocket_events_drive_syncs"}
+      ]
+    },
+    {
+      "id": "API.3",
+      "title": "Invite links use version 4 and carry the DS URL, gid and invite seed; other versions are refused",
+      "spec": ["14-3-invite-link"],
+      "audit": ["H-01", "P-4"],
+      "tests": [
+        {"binary": "cityg-api-client", "test": "invite::tests::links_round_trip_and_reject_old_versions"}
+      ]
+    },
+    {
+      "id": "PAR.1",
+      "title": "Protocol parameters and delivery-service defaults follow section 15 and are validated at configuration time",
+      "spec": ["15-parameters"],
+      "audit": ["H-08", "M-06"],
+      "tests": [
+        {"binary": "cityg-config", "test": "tests::defaults_are_valid"},
+        {"binary": "cityg-config", "test": "tests::validation_rejects_each_bad_value"},
+        {"binary": "cityg-runtime", "test": "tests::service_limits_follow_the_configuration"},
+        {"binary": "cityg-worker", "test": "policy::tests::service_limits_come_from_the_worker_config"}
+      ]
+    },
+    {
+      "id": "LBL.1",
+      "title": "Every labelled hash, derivation label, framing tag and object label is the one registered in section 16",
+      "spec": ["16-label-registry", "16-1-labelled-hashes", "16-2-derivation-labels"],
+      "audit": ["P-7"],
+      "vectors": ["/h_l", "/kdf", "/identifiers"],
+      "tests": [
+        {"binary": "cityg-core::vectors", "test": "vectors_match_the_published_file"},
+        {"binary": "cityg-core::vectors", "test": "vectors_are_reproducible"}
+      ]
+    },
+    {
+      "id": "LBL.2",
+      "title": "Every signed object uses the signature context registered for it in section 16.3",
+      "spec": ["16-3-contexts"],
+      "audit": ["H-05", "P-7"],
+      "vectors": ["/signed_objects"],
+      "tests": [
+        {"binary": "cityg-pqc", "test": "tests::contexts_are_distinct_and_bind_signatures"},
+        {"binary": "cityg-core::vectors", "test": "vectors_match_the_published_file"}
       ]
     }
   ]

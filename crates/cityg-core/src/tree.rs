@@ -932,4 +932,33 @@ mod tests {
         assert!(tree.add_leaf(0, tree.leaf(0).unwrap().clone()).is_err());
         assert!(tree.remove_leaf(3).is_err());
     }
+
+    #[test]
+    fn worst_case_update_paths_fit_the_bound() {
+        // A full tree without parent keys maximizes the copath resolutions:
+        // the author encrypts to every other leaf.
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+        for n_max in [2u32, 4, 16, 64] {
+            let mut tree = PublicTree::new(n_max).unwrap();
+            for slot in 0..n_max {
+                add_member(&mut tree, slot, &mut rng);
+            }
+            let context = PathContext {
+                gid: [3; 32],
+                epoch: 1,
+                author_slot: n_max - 1,
+            };
+            let (path, _) = generate_update_path(&tree, &context, &mut rng).unwrap();
+            validate_update_path(&tree, context.author_slot, &path).unwrap();
+            let targets: usize = path.nodes.iter().map(|node| node.targets.len()).sum();
+            assert_eq!(targets, n_max as usize - 1);
+            let encoded = encode(&update_path_to_value(&path)).unwrap();
+            assert!(
+                encoded.len() <= max_update_path_bytes(n_max),
+                "n_max {n_max}: {} > {}",
+                encoded.len(),
+                max_update_path_bytes(n_max)
+            );
+        }
+    }
 }
