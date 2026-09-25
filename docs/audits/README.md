@@ -13,3 +13,11 @@ For active protocol semantics, use:
 
 Do not treat archived audit wording as the canonical description of the current
 runtime profile.
+
+## Later audits
+
+- [`audit-crypto-conformite-2026-09-25.md`](audit-crypto-conformite-2026-09-25.md)
+  (French): cryptographic and code-versus-spec conformance audit of `71ee261`,
+  with reproducible PoCs in [`poc-2026-09-25/`](poc-2026-09-25/) and proposals
+  for a `v0.2` profile. It revisits several conclusions of
+  `final-verification-report-2026-03-26.md`.

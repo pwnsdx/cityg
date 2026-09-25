@@ -1,0 +1,26 @@
+# Audit PoCs (2026-09-25). Standalone package: NOT a member of the main workspace.
+# See README.md in this directory for prerequisites and usage.
+[package]
+name = "cityg-audit-poc-2026-09-25"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anchor-seed = { path = "../../../crates/anchor-seed" }
+cityg-client = { path = "../../../crates/cityg-client" }
+msphf-core = { path = "../../../crates/msphf-core" }
+msphf-rlwe = { path = "../../../crates/msphf-rlwe" }
+ciborium = "0.2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+# Signature-suite interoperability probe (finding H-05)
+fips204 = { version = "=0.4.6", default-features = false, features = ["ml-dsa-87", "default-rng"] }
+pqcrypto-dilithium = { version = "=0.5.0", default-features = false, features = ["std"] }
+pqcrypto-traits = "0.3"
+
+[patch.crates-io]
+pqcrypto-kyber = { path = "../../../crates/pqcrypto-kyber" }
+
+[workspace]
