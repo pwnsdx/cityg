@@ -98,7 +98,7 @@ table does not list as guaranteed for the stated adversary.
 | Sender authentication | guaranteed | guaranteed | guaranteed (cannot impersonate another member) | guaranteed | guaranteed | guaranteed for the other members |
 | Membership agreement | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed |
 | Admission control (no member added without an admin's signature) | guaranteed | guaranteed | n/a | guaranteed | guaranteed | guaranteed unless the device is an admin |
-| Post-removal secrecy (PRS) | guaranteed | guaranteed | n/a | guaranteed, including when it authored a commit before its removal | n/a | guaranteed once the device is removed |
+| Post-removal secrecy (PRS) | guaranteed | guaranteed | n/a | guaranteed, including when it authored a commit before its removal | n/a | guaranteed once the device, and any device it admitted, is removed |
 | Forward secrecy (FS) | guaranteed | guaranteed | n/a | n/a | window `FS_WINDOW` | guaranteed |
 | Post-compromise security (PCS) | n/a | n/a | n/a | n/a | after the next self-update of the compromised device | no, until the device is removed |
 | Liveness, availability | no | no | no | no | no | no |
@@ -131,8 +131,10 @@ Definitions (normative):
   never rotates. Whoever holds it can sign as the device: commits (including
   a Resync that re-enters the device's slot with keys of its choice, from
   which it derives the next epoch's secrets), messages, proposals, and
-  admissions if the device is an admin. The only repair is to remove the
-  device, which retires its key (section 7), and to admit a new one. The
+  admissions if the device is an admin, which lets the adversary admit
+  devices of its own. The only repair is to remove the device, which retires
+  its key (section 7), together with any device it admitted, and to admit a
+  new one. The
   device itself notices a commit authored in its name that it did not
   produce: it cannot process it and resyncs.
 
@@ -950,8 +952,13 @@ Any change to an encoding, a label or a context is a new profile version.
   messages.
 * [`kat/kat-v0.2-conformance-manifest.json`](../kat/kat-v0.2-conformance-manifest.json)
   maps each requirement to this document and to the vectors that exercise it.
-* The formal model in [`docs/formal/`](formal/) states the security goals of
-  section 2 for the key schedule, the barrier tree, removal and admission.
+* The symbolic model in [`docs/formal/`](formal/) (ProVerif) proves, in
+  bounded scenarios and with ideal primitives, the confidentiality of epoch
+  secrets against the delivery service, membership agreement, admission
+  control, forward secrecy, post-compromise security after a self-update,
+  post-removal secrecy, and sender authentication; two sanity scenarios show
+  the attacks that the author rule (section 9.4) and retired devices
+  (section 7) prevent. Its README lists the abstractions.
 
 <a id="18-changes"></a>
 ## 18. Changes from profile v0.1.4

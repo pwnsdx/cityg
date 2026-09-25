@@ -7,7 +7,8 @@
   "audit": "docs/audits/audit-crypto-conformite-2026-09-25.md",
   "notes": [
     "Each requirement names the sections of docs/specs.md that state it (their anchors), the conformance vectors that exercise it (JSON pointers into kat/v0.2/vectors.json; '#id' selects the array element with that id), the reference-implementation tests that check it (nextest binary id and test path), and the audit findings or proposals it closes.",
-    "crates/cityg-core/tests/conformance_manifest.rs checks that every anchor, vector and test exists, that every normative section and every vector section is covered, and that every test of cityg-core is mapped to a requirement.",
+    "crates/cityg-core/tests/conformance_manifest.rs checks that every anchor, vector, test, script and model file exists, that every normative section and every vector section is covered, and that every test of cityg-core is mapped to a requirement.",
+    "formal lists the ProVerif scenarios of docs/formal/ that state the requirement; docs/formal/run.sh checks their verdicts.",
     "Sections listed in informative_sections state no requirement: informative text, or a heading whose subsections carry the requirements."
   ],
   "informative_sections": ["1-architecture", "10-signed-objects", "17-conformance", "18-changes"],
@@ -17,6 +18,7 @@
       "title": "The protocol provides the properties of section 2.2 against the stated adversaries, and a deployment does not advertise more",
       "spec": ["2-security-goals"],
       "audit": ["C-02", "L-02", "P-1"],
+      "formal": ["docs/formal/key_schedule.pv", "docs/formal/forward_secrecy.pv", "docs/formal/post_compromise.pv", "docs/formal/removal.pv", "docs/formal/messages.pv"],
       "tests": [
         {"binary": "cityg-core", "test": "tree::tests::members_agree_on_root_secret_across_commits_and_removals"},
         {"binary": "cityg-core", "test": "session::tests::members_join_talk_and_leave"},
@@ -52,6 +54,7 @@
       "title": "Every signature uses the FIPS 204 context string of its usage; a signature does not verify under another context",
       "spec": ["3-cryptographic-suite", "16-3-contexts"],
       "audit": ["H-05", "H-10"],
+      "formal": ["docs/formal/messages.pv"],
       "tests": [
         {"binary": "cityg-pqc", "test": "tests::contexts_are_distinct_and_bind_signatures"},
         {"binary": "cityg-core", "test": "identity::tests::signatures_round_trip_through_serialized_keys"}
@@ -172,6 +175,7 @@
       "title": "Every commit renews its author's leaf key from a fresh leaf secret and re-keys its direct path; path secrets are wrapped to the copath resolutions with ML-KEM-768 and ChaCha20-Poly1305 bound to the wrap context",
       "spec": ["6-3-update-path"],
       "audit": ["H-03", "P-3"],
+      "formal": ["docs/formal/post_compromise.pv"],
       "vectors": ["/path_wrap", "/genesis/leaf_public_key"],
       "tests": [
         {"binary": "cityg-core", "test": "tree::tests::members_agree_on_root_secret_across_commits_and_removals"},
@@ -246,6 +250,7 @@
       "title": "A removed device is retired: it cannot join again with an admission it kept; the roster hash covers the last MAX_RETIRED retired leaf ids",
       "spec": ["7-roster", "9-4-transition", "2-security-goals"],
       "audit": ["C-03", "H-01", "P-4"],
+      "formal": ["docs/formal/removal.pv", "docs/formal/removal_without_retired_rule.pv"],
       "vectors": ["/roster/retired"],
       "tests": [
         {"binary": "cityg-core", "test": "session::tests::removed_devices_cannot_rejoin_with_their_old_admission"},
@@ -258,6 +263,7 @@
       "title": "GroupContext_n binds gid, epoch, tree hash, roster hash, profile and confirmed transcript hash into every epoch secret",
       "spec": ["8-key-schedule"],
       "audit": ["C-01", "P-2"],
+      "formal": ["docs/formal/key_schedule.pv"],
       "vectors": ["/key_schedule/group_context", "/genesis/group_context"],
       "tests": [
         {"binary": "cityg-core", "test": "key_schedule::tests::group_context_round_trips_and_binds_every_field"}
@@ -268,6 +274,7 @@
       "title": "Epoch secrets chain through init_secret: commit, epoch, init, msg, confirm and external secrets derive as in section 8",
       "spec": ["8-key-schedule"],
       "audit": ["C-01", "H-02", "P-2"],
+      "formal": ["docs/formal/key_schedule.pv"],
       "vectors": ["/key_schedule", "/genesis/init_secret", "/genesis/msg_secret", "/genesis/external_secret"],
       "tests": [
         {"binary": "cityg-core", "test": "key_schedule::tests::epoch_secrets_depend_on_every_input"},
@@ -279,6 +286,7 @@
       "title": "Confirmed and interim transcript hashes chain every commit; the confirmation tag authenticates the confirmed transcript and is checked before any secret of the epoch is used",
       "spec": ["8-key-schedule", "9-2-signature", "9-5-verification"],
       "audit": ["H-04", "P-2"],
+      "formal": ["docs/formal/key_schedule.pv"],
       "vectors": ["/key_schedule/transcript", "/genesis/confirmed_transcript_hash", "/genesis/interim_transcript_hash", "/genesis/confirmation_tag"],
       "tests": [
         {"binary": "cityg-core", "test": "key_schedule::tests::transcript_hashes_chain"},
@@ -290,6 +298,7 @@
       "title": "Members erase the secrets of an epoch when the next one becomes active, keeping only init and external secrets until then",
       "spec": ["8-key-schedule", "13-4-maintenance"],
       "audit": ["H-02", "P-2"],
+      "formal": ["docs/formal/forward_secrecy.pv"],
       "tests": [
         {"binary": "cityg-core", "test": "key_schedule::tests::epoch_secrets_depend_on_every_input"},
         {"binary": "cityg-core", "test": "session::tests::sessions_persist_and_resume"}
@@ -300,6 +309,7 @@
       "title": "External init: the epoch's external ML-KEM key derives from external_secret; a joiner's encapsulation yields the same init secret for every member",
       "spec": ["8-1-external-init"],
       "audit": ["H-01", "P-2", "P-4"],
+      "formal": ["docs/formal/key_schedule.pv"],
       "vectors": ["/key_schedule/external_init", "/key_schedule/external_kem_seed"],
       "tests": [
         {"binary": "cityg-core", "test": "key_schedule::tests::external_join_agrees_on_init_secret"},
@@ -347,6 +357,7 @@
       "title": "Transition order: authorized removals (never of the author), admin changes by an admin, entry at the lowest free slot with an admission from the remaining admins, promotion, then the update path",
       "spec": ["9-4-transition"],
       "audit": ["C-03", "H-01", "P-4"],
+      "formal": ["docs/formal/removal.pv"],
       "tests": [
         {"binary": "cityg-core", "test": "session::tests::admins_remove_members_and_manage_rights"},
         {"binary": "cityg-core", "test": "session::tests::joins_need_an_admission_from_a_current_admin"},
@@ -370,6 +381,7 @@
       "title": "Verifiers check gid, epoch and the previous interim transcript hash, so commits of another group or a forked history are rejected",
       "spec": ["9-5-verification"],
       "audit": ["H-04", "P-2"],
+      "formal": ["docs/formal/key_schedule.pv"],
       "tests": [
         {"binary": "cityg-core", "test": "session::tests::forks_and_foreign_commits_are_rejected"},
         {"binary": "cityg-core", "test": "session::tests::identities_and_pending_states_are_checked"}
@@ -401,6 +413,7 @@
       "title": "A member never commits its own removal: another member commits it, or the next joiner once the group is vacant",
       "spec": ["10-1-removal", "9-4-transition"],
       "audit": ["C-03"],
+      "formal": ["docs/formal/removal_without_author_rule.pv"],
       "tests": [
         {"binary": "cityg-core", "test": "session::tests::members_join_talk_and_leave"},
         {"binary": "cityg-core", "test": "session::tests::a_vacant_group_cannot_be_taken_over_with_a_stale_invite"},
@@ -412,6 +425,7 @@
       "title": "Post-removal secrecy: a removed member is not covered by the next update path and derives no later epoch secret",
       "spec": ["2-security-goals", "9-4-transition"],
       "audit": ["C-03", "P-3"],
+      "formal": ["docs/formal/removal.pv"],
       "tests": [
         {"binary": "cityg-core", "test": "tree::tests::members_agree_on_root_secret_across_commits_and_removals"},
         {"binary": "cityg-core", "test": "session::tests::admins_remove_members_and_manage_rights"},
@@ -434,6 +448,7 @@
       "title": "Admissions are signed by an admin (kind 0) or by an invite key whose invite an admin signed (kind 1), and are authorized against the admins remaining after the removals of the join",
       "spec": ["10-2-admission", "9-4-transition"],
       "audit": ["H-01", "P-4"],
+      "formal": ["docs/formal/key_schedule.pv", "docs/formal/removal.pv"],
       "vectors": ["/signed_objects#admission/admin", "/signed_objects#admission/invite"],
       "tests": [
         {"binary": "cityg-core", "test": "admission::tests::admin_admissions_are_checked_against_the_admin_set"},
@@ -446,6 +461,7 @@
       "title": "The roster commits to each member's admission hash, so the delivery service cannot add a member on its own",
       "spec": ["10-2-admission", "7-roster"],
       "audit": ["H-01", "P-4"],
+      "formal": ["docs/formal/removal.pv"],
       "tests": [
         {"binary": "cityg-core", "test": "session::tests::joins_need_an_admission_from_a_current_admin"},
         {"binary": "cityg-core", "test": "session::tests::a_vacant_group_cannot_be_taken_over_with_a_stale_invite"}
@@ -478,6 +494,7 @@
       "title": "Messages are FramedContent signed under city-g/msg/v3 and sealed in an envelope whose header (epoch_ref, sender, generation, key commitment) is the AEAD associated data",
       "spec": ["11-message-plane", "11-1-framing"],
       "audit": ["H-10", "M-01", "P-6"],
+      "formal": ["docs/formal/messages.pv"],
       "vectors": ["/genesis/messages"],
       "tests": [
         {"binary": "cityg-core", "test": "message::tests::messages_round_trip_with_sender_authentication"},
@@ -501,6 +518,7 @@
       "title": "Receivers accept a message only from a member of its epoch and of the current roster, within MAX_FORWARD_GENERATIONS and MAX_SKIPPED_KEYS, once, with framed fields matching the envelope and a valid signature",
       "spec": ["11-3-receiving"],
       "audit": ["H-10", "M-01", "M-03", "P-6"],
+      "formal": ["docs/formal/messages.pv"],
       "tests": [
         {"binary": "cityg-core", "test": "message::tests::membership_and_blocking_are_enforced"},
         {"binary": "cityg-core", "test": "message::tests::a_member_cannot_speak_for_another"},

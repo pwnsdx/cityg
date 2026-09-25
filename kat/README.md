@@ -53,14 +53,16 @@ Each entry of `kat-v0.2-conformance-manifest.json` has:
 * `tests`: tests of the reference implementation, by nextest binary id
   (`crate`, `crate::integration_test` or `crate::bin/name`) and test path;
 * `checks`: scripts that check it (optional);
+* `formal`: scenarios of the symbolic model in [`docs/formal/`](../docs/formal/)
+  that state it (optional);
 * `audit`: findings and proposals of
   [the 2026-09-25 audit](../docs/audits/audit-crypto-conformite-2026-09-25.md)
   that it closes.
 
 `crates/cityg-core/tests/conformance_manifest.rs` checks that every section,
-vector, test, script and audit item named in the manifest exists, that every
-normative section and every vector section is cited, and that every test of
-`cityg-core` is mapped to a requirement:
+vector, test, script, model scenario and audit item named in the manifest
+exists, that every normative section and every vector section is cited, and
+that every test of `cityg-core` is mapped to a requirement:
 
 ```bash
 cargo test -p cityg-core --test conformance_manifest

@@ -3,8 +3,8 @@
 //! requirements of `docs/specs.md` to the conformance vectors and to the
 //! tests of the reference implementation:
 //!
-//! * every section anchor, vector pointer, test, script and audit identifier
-//!   it names exists;
+//! * every section anchor, vector pointer, test, script, ProVerif scenario
+//!   and audit identifier it names exists;
 //! * every normative section of the specification, every vector section and
 //!   every signed-object vector is covered by a requirement;
 //! * every test of `cityg-core` is mapped to a requirement.
@@ -290,6 +290,14 @@ fn the_manifest_points_at_real_sections_vectors_and_tests() {
         for script in strings(requirement, "checks", id) {
             if !repo().join(&script).is_file() {
                 errors.push(format!("{id}: no script {script}"));
+            }
+        }
+        for model in strings(requirement, "formal", id) {
+            let path = repo().join(&model);
+            if !model.ends_with(".pv") || !path.is_file() {
+                errors.push(format!("{id}: no ProVerif scenario {model}"));
+            } else if !read(&path).contains("query") {
+                errors.push(format!("{id}: {model} states no query"));
             }
         }
         let tests = requirement["tests"].as_array().expect("tests");

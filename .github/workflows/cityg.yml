@@ -50,6 +50,25 @@ jobs:
       - name: Verify kat/v0.2/vectors.json from the specification
         run: python kat/v0.2/verify_vectors.py
 
+  formal-model:
+    name: Symbolic model (ProVerif)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ProVerif 2.05
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ocaml-nox ocaml-findlib
+          curl -fsSL https://bblanche.gitlabpages.inria.fr/proverif/proverif2.05.tar.gz -o "$RUNNER_TEMP/proverif.tar.gz"
+          echo "4871f53c32ab4a04669a060c4886ba5d9080496963fb980a9a62d2c429ceabc4  $RUNNER_TEMP/proverif.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/proverif.tar.gz" -C "$RUNNER_TEMP"
+          # The interactive simulator needs lablgtk2; the verifier does not.
+          cd "$RUNNER_TEMP/proverif2.05" && (./build || test -x proverif)
+      - name: Check the verdicts of every scenario
+        run: docs/formal/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
+
   release-matrix:
     name: Release Matrix (${{ matrix.name }})
     runs-on: ubuntu-latest
