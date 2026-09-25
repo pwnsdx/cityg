@@ -17,6 +17,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use cityg_api_client::cityg_core::identity::DeviceIdentity;
 use cityg_api_client::{DsClient, Member};
+use cityg_stress::capacity::{capacity_test_command, capacity_test_ran};
 use cityg_stress::metrics::{MetricsSnapshot, parse_metrics_snapshot};
 use clap::{ArgAction, Parser};
 use crossterm::{
@@ -959,12 +960,7 @@ async fn run_workers(
 async fn run_final_capacity_check(_config: &Config, log_path: &Path) -> Result<()> {
     let repo_root = repo_root()?;
     let output = Command::new("cargo")
-        .arg("test")
-        .arg("-p")
-        .arg("cityg-api")
-        .arg("window_full_rest_api_freeze")
-        .arg("--")
-        .arg("--exact")
+        .args(capacity_test_command())
         .current_dir(repo_root)
         .output()
         .await
@@ -973,10 +969,10 @@ async fn run_final_capacity_check(_config: &Config, log_path: &Path) -> Result<(
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&output.stdout);
     bytes.extend_from_slice(&output.stderr);
-    fs::write(log_path, bytes).with_context(|| format!("write {}", log_path.display()))?;
+    fs::write(log_path, &bytes).with_context(|| format!("write {}", log_path.display()))?;
 
     if output.status.success() {
-        Ok(())
+        capacity_test_ran(&String::from_utf8_lossy(&output.stdout)).map_err(|err| anyhow!(err))
     } else {
         Err(anyhow!(
             "capacity check exited with status {}",
