@@ -59,6 +59,10 @@ impl SignatureContext {
     pub const COVER_FAILURE: Self = Self(b"city-g/cover-failure/v1");
     /// Signed deployment policy documents.
     pub const POLICY: Self = Self(b"city-g/policy/v1");
+    /// Framed message content (profile v0.2 message plane v3).
+    pub const MESSAGE_V3: Self = Self(b"city-g/msg/v3");
+    /// Invitation delegating admission to an invite key (profile v0.2).
+    pub const INVITE: Self = Self(b"city-g/invite/v1");
 
     /// Context bytes passed to FIPS 204 as `ctx`.
     #[must_use]
@@ -204,6 +208,22 @@ pub fn sign_deterministic(
         .map_err(|_| SignError::SigningFailed)
 }
 
+/// FIPS 204 signature with caller-provided randomness `rnd` (hedged mode
+/// when `rnd` is fresh). Protocol cores that take an injectable RNG use this
+/// so that every random input comes from one source.
+pub fn sign_with_randomness(
+    secret_key: &SecretKey,
+    context: SignatureContext,
+    message: &[u8],
+    rnd: &[u8; 32],
+) -> Result<Vec<u8>, SignError> {
+    secret_key
+        .expanded
+        .try_sign_with_seed(rnd, message, context.as_bytes())
+        .map(|signature| signature.to_vec())
+        .map_err(|_| SignError::SigningFailed)
+}
+
 /// Sign with a secret key given as serialized bytes.
 pub fn sign_with_secret_key_bytes(
     secret_key: &[u8],
@@ -331,7 +351,7 @@ mod tests {
 
     use super::*;
 
-    const ALL_CONTEXTS: [SignatureContext; 13] = [
+    const ALL_CONTEXTS: [SignatureContext; 15] = [
         SignatureContext::ANCHOR_POP,
         SignatureContext::ANCHOR,
         SignatureContext::ANCHOR_BOOTSTRAP,
@@ -345,6 +365,8 @@ mod tests {
         SignatureContext::ADMISSION,
         SignatureContext::COVER_FAILURE,
         SignatureContext::POLICY,
+        SignatureContext::MESSAGE_V3,
+        SignatureContext::INVITE,
     ];
 
     #[test]
@@ -405,6 +427,14 @@ mod tests {
         let hedged_a = sign(&sk_a, SignatureContext::ANCHOR, b"m").expect("sign");
         let hedged_b = sign(&sk_a, SignatureContext::ANCHOR, b"m").expect("sign");
         assert_ne!(hedged_a, hedged_b, "hedged signatures use fresh randomness");
+
+        let with_zero = sign_with_randomness(&sk_a, SignatureContext::ANCHOR, b"m", &[0u8; 32])
+            .expect("sign with randomness");
+        assert_eq!(with_zero, sig_a, "rnd = 0^256 is the deterministic variant");
+        let with_rnd = sign_with_randomness(&sk_a, SignatureContext::ANCHOR, b"m", &[7u8; 32])
+            .expect("sign with randomness");
+        assert_ne!(with_rnd, sig_a);
+        verify(&pk_a, SignatureContext::ANCHOR, b"m", &with_rnd).expect("verify");
     }
 
     #[test]

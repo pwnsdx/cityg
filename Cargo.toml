@@ -6,6 +6,7 @@ members = [
     "crates/msphf-orchestrator",
     "crates/msphf-lb-vrf",
     "crates/cityg-pqc",
+    "crates/cityg-core",
     "crates/cityg-client",
     "crates/cityg-server",
     "crates/cityg-api",

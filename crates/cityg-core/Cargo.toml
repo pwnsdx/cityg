@@ -1,0 +1,27 @@
+[package]
+name = "cityg-core"
+version = "0.2.0"
+license = "MIT"
+authors = ["Sabri Haddouche"]
+edition.workspace = true
+description = "City-G v0.2 protocol core: key schedule, commits, barrier tree, admission and message plane (no I/O)"
+
+[features]
+test-utils = ["cityg-pqc/test-utils"]
+
+[dependencies]
+blake3 = "1"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+ciborium = "0.2"
+cityg-pqc = { path = "../cityg-pqc" }
+ml-kem = { version = "0.3.0-rc.0", default-features = false }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+cityg-pqc = { path = "../cityg-pqc", features = ["test-utils"] }
+hex = "0.4"
+rand_chacha = "0.3"
+serde_json = "1"
