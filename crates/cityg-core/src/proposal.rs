@@ -221,13 +221,24 @@ mod tests {
         ));
         assert!(leave.authorize(&[8; 32], &roster).is_err());
 
-        // Once the occupancy ends the proposal is stale.
+        // Once the occupancy ends the proposal is stale, and the removed
+        // device cannot come back.
         roster.remove_member(1, 1).unwrap();
         assert!(leave.authorize(&gid, &roster).is_err());
+        assert_eq!(
+            roster.add_member(MemberRecord {
+                generation: 2,
+                ..bob_record.clone()
+            }),
+            Err(CoreError::Unauthorized(
+                "a removed device cannot join again"
+            ))
+        );
+        let dave = DeviceIdentity::from_seed(&[4; 32]);
         roster
             .add_member(MemberRecord {
                 generation: 2,
-                ..bob_record.clone()
+                ..member(&gid, &dave, 1)
             })
             .unwrap();
         assert!(leave.authorize(&gid, &roster).is_err(), "single use");

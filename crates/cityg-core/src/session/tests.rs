@@ -867,3 +867,39 @@ fn a_vacant_group_cannot_be_taken_over_with_a_stale_invite() {
         Err(CoreError::Unauthorized(_))
     ));
 }
+
+#[test]
+fn removed_devices_cannot_rejoin_with_their_old_admission() {
+    let (mut world, mut alice) = World::create(40);
+    let mut bob = world.join_by_invite(&alice, 41);
+    world.sync(&mut alice);
+    // Alice admits Carol's device directly: an admin admission names the
+    // device, not an occupancy.
+    let carol_pk = DeviceIdentity::from_seed(&[42; 32]).public_key().to_vec();
+    let admission = alice
+        .session
+        .admit(&alice.identity, &carol_pk, &mut world.rng)
+        .unwrap();
+    let mut carol = world.join_with(42, admission.clone()).unwrap();
+    world.sync(&mut alice);
+    world.sync(&mut bob);
+
+    // Alice expels Carol.
+    let removal = alice
+        .session
+        .propose_removal(&alice.identity, carol.session.my_slot(), &mut world.rng)
+        .unwrap();
+    world.commit(&mut alice, &[removal], &[]).unwrap();
+    world.sync(&mut bob);
+    assert!(matches!(
+        world.sync(&mut carol).last(),
+        Some(ProcessedCommit::Removed(_))
+    ));
+
+    // Her old admission does not bring her back.
+    assert!(matches!(
+        world.join_with(42, admission),
+        Err(CoreError::Unauthorized(_))
+    ));
+    assert_eq!(world.ledger.roster().len(), 2);
+}

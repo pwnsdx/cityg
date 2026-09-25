@@ -80,7 +80,8 @@ test vectors reproducible.
 | A2 | Active DS | A1, and drops, delays, reorders or replays traffic, answers requests arbitrarily, and creates its own device keys. |
 | A3 | Malicious member | Holds the secrets of its own membership; deviates arbitrarily from the protocol. |
 | A4 | Removed or departed member | A3 for the epochs it belonged to; after its removal it has no further secret. |
-| A5 | Temporarily compromised device | Learns the full state of one device at one point in time, then loses access. |
+| A5 | Temporarily compromised device state | Learns the group state of one device (tree private keys, epoch secrets, message chains) at one point in time, then loses access. The device key stays secret, for instance in a hardware keystore. |
+| A6 | Compromised device key | Learns the ML-DSA-87 device key of one member device. |
 
 The network is controlled by A2. Admins are trusted to admit members: an
 admin that admits the adversary gives it membership.
@@ -91,17 +92,17 @@ admin that admits the adversary gives it membership.
 against that adversary. A deployment MUST NOT advertise a property that this
 table does not list as guaranteed for the stated adversary.
 
-| Property | A1 | A2 | A3 | A4 | A5 |
-| --- | --- | --- | --- | --- | --- |
-| Confidentiality of message content | guaranteed | guaranteed | no (insider) | guaranteed for epochs after its removal | guaranteed outside the FS and PCS windows |
-| Sender authentication | guaranteed | guaranteed | guaranteed (cannot impersonate another member) | guaranteed | guaranteed outside the PCS window |
-| Membership agreement | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed |
-| Admission control (no member added without an admin's signature) | guaranteed | guaranteed | n/a | guaranteed | guaranteed outside the PCS window |
-| Post-removal secrecy (PRS) | guaranteed | guaranteed | n/a | guaranteed, including when it authored a commit before its removal | n/a |
-| Forward secrecy (FS) | guaranteed | guaranteed | n/a | n/a | window `FS_WINDOW` |
-| Post-compromise security (PCS) | n/a | n/a | n/a | n/a | after the next self-update of the compromised device |
-| Liveness, availability | no | no | no | no | no |
-| Metadata privacy (who talks when, group size, roster) | no | no | no | no | no |
+| Property | A1 | A2 | A3 | A4 | A5 | A6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Confidentiality of message content | guaranteed | guaranteed | no (insider) | guaranteed for epochs after its removal | guaranteed outside the FS and PCS windows | no, until the device is removed |
+| Sender authentication | guaranteed | guaranteed | guaranteed (cannot impersonate another member) | guaranteed | guaranteed | guaranteed for the other members |
+| Membership agreement | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed |
+| Admission control (no member added without an admin's signature) | guaranteed | guaranteed | n/a | guaranteed | guaranteed | guaranteed unless the device is an admin |
+| Post-removal secrecy (PRS) | guaranteed | guaranteed | n/a | guaranteed, including when it authored a commit before its removal | n/a | guaranteed once the device is removed |
+| Forward secrecy (FS) | guaranteed | guaranteed | n/a | n/a | window `FS_WINDOW` | guaranteed |
+| Post-compromise security (PCS) | n/a | n/a | n/a | n/a | after the next self-update of the compromised device | no, until the device is removed |
+| Liveness, availability | no | no | no | no | no | no |
+| Metadata privacy (who talks when, group size, roster) | no | no | no | no | no | no |
 
 Definitions (normative):
 
@@ -111,18 +112,29 @@ Definitions (normative):
   (section 8), from which every secret of the epoch derives, and verified by
   the confirmation tag.
 * **PRS.** A member whose occupancy is ended by the commit of epoch `n` MUST
-  NOT be able to derive any secret of an epoch `>= n`. A member never authors
-  the commit that removes it (section 9.4), and the removed leaf and its
-  direct path are blanked in the tree the removing commit starts from.
+  NOT be able to derive any secret of an epoch `>= n`, unless an admin admits
+  it again as a new device. A member never authors the commit that removes it
+  (section 9.4), the removed leaf and its direct path are blanked in the tree
+  the removing commit starts from, and the removed device is retired: no
+  admission it held can bring it back (section 7).
 * **FS.** Compromise of a device at time `T` MUST NOT reveal message content
   of epochs whose keys the device erased before `T`. Members erase epoch
   secrets when the next epoch becomes active, erase each message key once
   used, keep previous-epoch message keys for at most `GRACE_WINDOW_MS`, and
   re-key their own leaf at least every `FS_WINDOW` (section 13.4), so the
   content of epochs older than `FS_WINDOW` stays confidential.
-* **PCS.** After a compromised device completes a self-update (a commit
-  re-keying its leaf from a fresh leaf secret), the attacker MUST NOT derive
-  secrets of later epochs, unless it compromises a member again.
+* **PCS.** After a device whose state was compromised completes a
+  self-update (a commit re-keying its leaf from a fresh leaf secret), the
+  attacker MUST NOT derive secrets of later epochs, unless it compromises a
+  member again.
+* **Device keys.** A device key is a long-term credential that the profile
+  never rotates. Whoever holds it can sign as the device: commits (including
+  a Resync that re-enters the device's slot with keys of its choice, from
+  which it derives the next epoch's secrets), messages, proposals, and
+  admissions if the device is an admin. The only repair is to remove the
+  device, which retires its key (section 7), and to admit a new one. The
+  device itself notices a commit authored in its name that it did not
+  produce: it cannot process it and resyncs.
 
 ### 2.3 Assumptions and limits
 
@@ -355,7 +367,8 @@ need sub-groups or federation, outside this profile.
 MemberRecord := [leaf_id, device_pk, slot, generation, admission_hash]
 roster_hash  := H_L("roster", [[MemberRecord, ... sorted by slot],
                                [admin device_pk, ... sorted bytewise],
-                               [[slot, last_generation], ... sorted by slot]])
+                               [[slot, last_generation], ... sorted by slot],
+                               [retired leaf_id, ... oldest first]])
 ```
 
 * `generation` counts the occupancies of a slot: the next occupant of slot
@@ -368,6 +381,13 @@ roster_hash  := H_L("roster", [[MemberRecord, ... sorted by slot],
 * At most `MAX_ADMINS` (64) admins. The last admin cannot be revoked. A
   removed member loses its admin rights. If members remain but no admin
   does, the member in the lowest occupied slot becomes admin.
+* **Retired devices.** When an occupancy ends by a removal (a leave or an
+  admin's removal), its `leaf_id` is appended to `retired`, which keeps the
+  last `MAX_RETIRED` (4096) entries, dropping the oldest first. A device
+  whose `leaf_id` is retired MUST NOT join again. A device key thus names one
+  membership, and an admission, which names a device, is good for one
+  occupancy: a removed member cannot come back with an admission it kept.
+  Clients use a fresh device key for every join.
 
 <a id="8-key-schedule"></a>
 ## 8. Key schedule
@@ -502,8 +522,9 @@ order:
    roster `n - 1`; grants and revokes apply in order.
 3. **Entry.** ExternalJoin: the joiner enters the *lowest free slot* after
    step 1, with generation `last_generation + 1`; its admission MUST be
-   authorized by the admins remaining after step 1. Resync: the author's own
-   slot gets the next generation and the new leaf key.
+   authorized by the admins remaining after step 1, and its `leaf_id` MUST
+   NOT be retired (including by the removals of step 1). Resync: the
+   author's own slot gets the next generation and the new leaf key.
 4. **Promotion.** If members remain but no admin does, the lowest-slot
    member becomes admin.
 5. **Update path.** The author's update path is validated against the tree
@@ -852,6 +873,7 @@ given a short lifetime (default 7 days).
 | --- | --- |
 | `MAX_N_MAX` | 1024 slots (`n_max` a power of two, at least 2) |
 | `MAX_ADMINS` | 64 |
+| `MAX_RETIRED` | 4096 retired leaf ids per roster |
 | `FS_WINDOW` | 24 hours (self-update interval) |
 | `GRACE_WINDOW_MS` | 600 000 (10 minutes) |
 | `MAX_FORWARD_GENERATIONS` | 1024 |
@@ -879,7 +901,7 @@ given a short lifetime (default 7 days).
 | `msg/epoch-ref` | `[gid, epoch]` | 5 |
 | `tree/leaf` | `[n_max, slot, occupant]` | 6.2 |
 | `tree/parent` | `[node, public_key or h'', left_hash, right_hash]` | 6.2 |
-| `roster` | `[members, admins, last_generations]` | 7 |
+| `roster` | `[members, admins, last_generations, retired]` | 7 |
 | `confirmed-transcript` | `[prev_interim, anchor_tbs, signature]` | 8 |
 | `interim-transcript` | `[confirmed, confirmation_tag]` | 8 |
 | `msg/key-commitment` | `[key, nonce]` | 11.2 |

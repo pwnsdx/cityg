@@ -242,6 +242,18 @@
       ]
     },
     {
+      "id": "ROS.4",
+      "title": "A removed device is retired: it cannot join again with an admission it kept; the roster hash covers the last MAX_RETIRED retired leaf ids",
+      "spec": ["7-roster", "9-4-transition", "2-security-goals"],
+      "audit": ["C-03", "H-01", "P-4"],
+      "vectors": ["/roster/retired"],
+      "tests": [
+        {"binary": "cityg-core", "test": "session::tests::removed_devices_cannot_rejoin_with_their_old_admission"},
+        {"binary": "cityg-core", "test": "roster::tests::removed_devices_are_retired_within_a_bound"},
+        {"binary": "cityg-core", "test": "proposal::tests::leave_and_admin_removals_are_authorized"}
+      ]
+    },
+    {
       "id": "KS.1",
       "title": "GroupContext_n binds gid, epoch, tree hash, roster hash, profile and confirmed transcript hash into every epoch secret",
       "spec": ["8-key-schedule"],

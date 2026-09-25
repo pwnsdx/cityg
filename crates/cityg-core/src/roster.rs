@@ -1,17 +1,24 @@
-//! Group roster: members, admins and slot generations (audit P-4).
+//! Group roster: members, admins, slot generations and retired devices
+//! (audit P-4).
 //!
 //! ```text
 //! MemberRecord := [leaf_id, device_pk, slot, generation, admission_hash]
 //! roster_hash  := H_L("roster", [[MemberRecord sorted by slot],
 //!                                [admin device keys, sorted],
-//!                                [[slot, last_generation] sorted by slot]])
+//!                                [[slot, last_generation] sorted by slot],
+//!                                [retired leaf_id, in removal order]])
 //! ```
 //!
 //! The roster hash enters every GroupContext, so every member and every
 //! joiner agrees on who is in the group, who administers it and which slot
 //! occupancy each member holds.
+//!
+//! When an occupancy ends, its `leaf_id` is retired: a device key names one
+//! membership, so an admission, which names a device, is good for one
+//! occupancy and cannot bring a removed device back. The last
+//! [`MAX_RETIRED`] retired leaf ids are kept.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ciborium::value::Value;
 
@@ -26,6 +33,8 @@ use crate::tree::next;
 
 /// Maximum number of admins of a group.
 pub const MAX_ADMINS: usize = 64;
+/// Number of retired leaf ids a roster keeps (the oldest go first).
+pub const MAX_RETIRED: usize = 4096;
 
 /// One member of the group.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,12 +72,13 @@ impl MemberRecord {
     }
 }
 
-/// Members, admins and per-slot generation counters.
+/// Members, admins, per-slot generation counters and retired devices.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Roster {
     members: BTreeMap<u32, MemberRecord>,
     admins: BTreeSet<Vec<u8>>,
     last_generation: BTreeMap<u32, u64>,
+    retired: VecDeque<Digest>,
 }
 
 impl Roster {
@@ -134,6 +144,17 @@ impl Roster {
         self.admins.iter()
     }
 
+    /// Whether the device of `leaf_id` held an occupancy that ended.
+    #[must_use]
+    pub fn is_retired(&self, leaf_id: &Digest) -> bool {
+        self.retired.contains(leaf_id)
+    }
+
+    /// Retired leaf ids, oldest first.
+    pub fn retired(&self) -> impl Iterator<Item = &Digest> {
+        self.retired.iter()
+    }
+
     /// Generation the next occupant of `slot` must carry.
     #[must_use]
     pub fn next_generation(&self, slot: u32) -> u64 {
@@ -151,13 +172,18 @@ impl Roster {
         if self.member_by_leaf(&record.leaf_id).is_some() {
             return Err(CoreError::Invalid("member already in roster"));
         }
+        if self.is_retired(&record.leaf_id) {
+            return Err(CoreError::Unauthorized(
+                "a removed device cannot join again",
+            ));
+        }
         self.last_generation.insert(record.slot, record.generation);
         self.members.insert(record.slot, record);
         Ok(())
     }
 
     /// Remove the member occupying `slot` with `generation`; a removed
-    /// member also loses its admin rights.
+    /// member also loses its admin rights, and its leaf id is retired.
     pub fn remove_member(&mut self, slot: u32, generation: u64) -> CoreResult<MemberRecord> {
         match self.members.get(&slot) {
             Some(member) if member.generation == generation => {}
@@ -169,6 +195,10 @@ impl Roster {
             .remove(&slot)
             .ok_or(CoreError::Invalid("removal of an empty slot"))?;
         self.admins.remove(&removed.device_pk);
+        self.retired.push_back(removed.leaf_id);
+        while self.retired.len() > MAX_RETIRED {
+            self.retired.pop_front();
+        }
         Ok(removed)
     }
 
@@ -234,6 +264,7 @@ impl Roster {
                     })
                     .collect(),
             ),
+            array(self.retired.iter().map(|leaf| bytes(leaf)).collect()),
         ])
     }
 
@@ -253,11 +284,22 @@ impl Roster {
     /// Decode a roster encoding, checking its internal consistency.
     pub fn from_cbor(encoded: &[u8], gid: &Digest) -> CoreResult<Self> {
         let mut parts =
-            expect_array(decode(encoded, 16 << 20, "roster")?, 3, "roster")?.into_iter();
+            expect_array(decode(encoded, 16 << 20, "roster")?, 4, "roster")?.into_iter();
         let members = expect_list(next(&mut parts, "roster")?, "roster members")?;
         let admins = expect_list(next(&mut parts, "roster")?, "roster admins")?;
         let generations = expect_list(next(&mut parts, "roster")?, "roster generations")?;
+        let retired = expect_list(next(&mut parts, "roster")?, "roster retired")?;
         let mut roster = Self::default();
+        if retired.len() > MAX_RETIRED {
+            return Err(CoreError::Malformed("roster retired"));
+        }
+        for leaf in retired {
+            let leaf = expect_bytes32(leaf, "roster retired leaf")?;
+            if roster.is_retired(&leaf) {
+                return Err(CoreError::Malformed("duplicate retired leaf"));
+            }
+            roster.retired.push_back(leaf);
+        }
         for pair in generations {
             let mut fields = expect_array(pair, 2, "roster generation")?.into_iter();
             let slot = expect_u32(&next(&mut fields, "roster generation")?, "roster slot")?;
@@ -277,6 +319,7 @@ impl Roster {
             let member = MemberRecord::from_value(member)?;
             if member.leaf_id != leaf_id(gid, &member.device_pk)?
                 || roster.last_generation.get(&member.slot) != Some(&member.generation)
+                || roster.is_retired(&member.leaf_id)
                 || roster.members.insert(member.slot, member).is_some()
             {
                 return Err(CoreError::Malformed("roster member"));
@@ -397,5 +440,69 @@ mod tests {
         );
         assert!(Roster::from_cbor(&[0x80], &gid).is_err());
         assert!(!roster.is_empty());
+    }
+
+    #[test]
+    fn removed_devices_are_retired_within_a_bound() {
+        let gid = [5; 32];
+        let mut roster = Roster::genesis(&gid, b"alice").unwrap();
+        roster.add_member(record(&gid, b"bob", 1, 1)).unwrap();
+        let before = roster.roster_hash().unwrap();
+        let bob = roster.remove_member(1, 1).unwrap();
+        assert!(roster.is_retired(&bob.leaf_id));
+        assert_ne!(roster.roster_hash().unwrap(), before);
+        // The device cannot take a new occupancy, in any slot.
+        assert_eq!(
+            roster.add_member(record(&gid, b"bob", 1, 2)),
+            Err(CoreError::Unauthorized(
+                "a removed device cannot join again"
+            ))
+        );
+        assert!(roster.add_member(record(&gid, b"bob", 2, 1)).is_err());
+        assert_eq!(
+            Roster::from_cbor(&roster.to_cbor().unwrap(), &gid).unwrap(),
+            roster
+        );
+
+        // Only the last MAX_RETIRED leaf ids are kept, oldest first.
+        for index in 0..MAX_RETIRED as u64 {
+            let device = index.to_be_bytes();
+            roster
+                .add_member(record(&gid, &device, 3, index + 1))
+                .unwrap();
+            roster.remove_member(3, index + 1).unwrap();
+        }
+        assert_eq!(roster.retired().count(), MAX_RETIRED);
+        assert!(!roster.is_retired(&bob.leaf_id), "the oldest goes first");
+        roster.add_member(record(&gid, b"bob", 1, 2)).unwrap();
+
+        // Decoding checks the retired list.
+        let mut duplicate = Roster::genesis(&gid, b"alice").unwrap();
+        duplicate.retired.push_back([9; 32]);
+        duplicate.retired.push_back([9; 32]);
+        assert_eq!(
+            Roster::from_cbor(&duplicate.to_cbor().unwrap(), &gid),
+            Err(CoreError::Malformed("duplicate retired leaf"))
+        );
+        let mut member_retired = Roster::genesis(&gid, b"alice").unwrap();
+        member_retired
+            .retired
+            .push_back(leaf_id(&gid, b"alice").unwrap());
+        assert_eq!(
+            Roster::from_cbor(&member_retired.to_cbor().unwrap(), &gid),
+            Err(CoreError::Malformed("roster member"))
+        );
+        let mut oversized = Roster::genesis(&gid, b"alice").unwrap();
+        oversized.retired = (0..=MAX_RETIRED as u64)
+            .map(|index| {
+                let mut leaf = [0u8; 32];
+                leaf[..8].copy_from_slice(&index.to_be_bytes());
+                leaf
+            })
+            .collect();
+        assert_eq!(
+            Roster::from_cbor(&oversized.to_cbor().unwrap(), &gid),
+            Err(CoreError::Malformed("roster retired"))
+        );
     }
 }

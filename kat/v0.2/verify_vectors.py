@@ -399,12 +399,16 @@ def check_key_schedule(report, ks):
     report.check("ks/ml-kem-768 ciphertext size", len(unhex(ext["kem_output"])) == 1088)
 
 
-def roster_hash(members, admins, last_generation):
+def roster_hash(members, admins, last_generation, retired):
     records = [
         [m["leaf_id"], m["device_pk"], m["slot"], m["generation"], m["admission_hash"]]
         for m in sorted(members, key=lambda m: m["slot"])
     ]
-    return H_L("roster", [records, sorted(admins), [list(pair) for pair in sorted(last_generation)]])
+    # Retired leaf ids stay in removal order (oldest first), not sorted.
+    return H_L(
+        "roster",
+        [records, sorted(admins), [list(pair) for pair in sorted(last_generation)], list(retired)],
+    )
 
 
 def check_roster(report, roster):
@@ -422,7 +426,9 @@ def check_roster(report, roster):
         members.append(record)
     admins = [unhex(a) for a in roster["admins"]]
     report.check("roster/admins sorted bytewise", admins == sorted(admins))
-    digest = roster_hash(members, admins, roster["last_generation"])
+    retired = [unhex(leaf) for leaf in roster["retired"]]
+    report.check("roster/retired leaves are not members", not any(m["leaf_id"] in retired for m in members))
+    digest = roster_hash(members, admins, roster["last_generation"], retired)
     report.check("roster/roster_hash", digest.hex() == roster["roster_hash"])
 
 
@@ -522,6 +528,7 @@ def check_genesis(report, g):
         [{"leaf_id": leaf_id, "device_pk": creator_pk, "slot": 0, "generation": 1, "admission_hash": ZERO32}],
         [creator_pk],
         [(0, 1)],
+        [],
     )
     report.check("genesis/roster_hash", roster.hex() == g["roster_hash"] and commit.get(7) == roster)
 

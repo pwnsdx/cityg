@@ -296,6 +296,18 @@ fn roster_case() -> Json {
         })
         .unwrap();
     roster.grant_admin(bob.public_key()).unwrap();
+    // Carol joins slot 2 and is removed: her leaf id is retired.
+    let carol = DeviceIdentity::from_seed(&filled(0x65));
+    roster
+        .add_member(MemberRecord {
+            leaf_id: leaf_id(&gid, carol.public_key()).unwrap(),
+            device_pk: carol.public_key().to_vec(),
+            slot: 2,
+            generation: 1,
+            admission_hash: filled(0x66),
+        })
+        .unwrap();
+    roster.remove_member(2, 1).unwrap();
     let member = |record: &MemberRecord| {
         json!({
             "leaf_id": hx(&record.leaf_id), "device_pk": hx(&record.device_pk),
@@ -307,7 +319,8 @@ fn roster_case() -> Json {
         "gid": hx(&gid),
         "members": roster.members().map(member).collect::<Vec<_>>(),
         "admins": roster.admins().map(|admin| hx(admin)).collect::<Vec<_>>(),
-        "last_generation": [[0, 1], [1, 1]],
+        "last_generation": [[0, 1], [1, 1], [2, 1]],
+        "retired": roster.retired().map(|leaf| hx(leaf)).collect::<Vec<_>>(),
         "roster_hash": hx(&roster.roster_hash().unwrap())
     })
 }
