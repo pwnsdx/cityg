@@ -1,0 +1,32 @@
+(* Scenario FAB without the init chain, signatures checked: as
+   fabrication_without_init.pv, but A also verifies the signature of the
+   assigned committer B over the epoch's context. The attacker can no longer
+   make A accept an epoch it knows: without the init chain, every member must
+   verify a signature in every window. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event AcceptedA(key).
+query es: key; event(AcceptedA(es)).
+
+process
+  new lsA: key; new lsB: key; new skB: skey;
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), spk(skB)));
+  (
+    new r2: key; new qa: key; new qb: key;
+    let gc2 = (N2, node_pk(r2)) in
+    let es2 = epoch_secret_noinit(r2, gc2) in
+    out(c, (wrap(leaf_pk(lsA), qa, r2), wrap(leaf_pk(lsB), qb, r2), gc2, tag(es2, gc2),
+            sign(skB, (N2, gc2, tag(es2, gc2)))))
+  ) | (
+    in(c, (w: bitstring, gc2: bitstring, tg: bitstring, sg: bitstring));
+    if checksign(spk(skB), (N2, gc2, tg), sg) = true then
+    let (=N2, pkr: kpk) = gc2 in
+    let r2 = unwrap(leaf_sk(lsA), w) in
+    if node_pk(r2) = pkr then
+    let es2 = epoch_secret_noinit(r2, gc2) in
+    if tag(es2, gc2) = tg then
+    event AcceptedA(es2);
+    out(c, aenc(msg_key(es2), MA))
+  )

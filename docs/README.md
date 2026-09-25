@@ -48,8 +48,10 @@ profile v0.1.4 in [`legacy/v0.1.4/`](legacy/v0.1.4/README.md).
 
 | Document | Content |
 | --- | --- |
-| [research/grands-groupes-2026-09-25.md](research/grands-groupes-2026-09-25.md) | Groups of millions of members (in French): why profile v0.3 stops at 8192, the lower bounds and related work, and a proposed architecture ("Cité": districts re-keyed in parallel by stateless committers, per-district delivery-service queues, taint tracking), with its costs, guarantees, risks and roadmap. Nothing in it is implemented. |
-| [research/rekey_sim.py](research/rekey_sim.py) | Cost model behind the note's figures. |
+| [research/grands-groupes-2026-09-25.md](research/grands-groupes-2026-09-25.md) | Groups of millions of members (in French): why profile v0.3 stops at 8192, the lower bounds and related work, and a proposed architecture ("Cité": districts re-keyed in parallel by committers that hold no state of their own, per-district delivery-service queues, taint tracking, district welcomes, anchored joins, sampling audits), with its costs, guarantees, risks and roadmap. Nothing in it is implemented. |
+| [research/rekey_sim.py](research/rekey_sim.py) | Cost model behind the note's figures: waves, placement of joins, district size, CPU, steady-state traffic, audits. |
+| [research/formal/](research/formal/README.md) | ProVerif model of the note's security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins. |
+| [research/bench/](research/bench/src/main.rs) | Micro-benchmarks of the primitives (X-Wing, ML-DSA-65, BLAKE3) through `cityg-core`, the source of the CPU figures. |
 
 ## Design notes
 

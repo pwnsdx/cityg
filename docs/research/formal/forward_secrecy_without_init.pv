@@ -1,0 +1,24 @@
+(* Scenario FS without the init chain (sanity check): as forward_secrecy.pv,
+   but the epoch secret derives from the root alone. The leaked leaf key
+   opens the wrap of window 1, hence epoch 1: the attacker must read M1. *)
+
+free M1: bitstring [private].
+query attacker(M1).
+
+process
+  new lsA: key; new lsB: key;
+  out(c, (leaf_pk(lsA), leaf_pk(lsB)));
+  (* Window 1 *)
+  new r1: key; new qa1: key; new qb1: key;
+  let gc1 = (N1, node_pk(r1)) in
+  let es1 = epoch_secret_noinit(r1, gc1) in
+  out(c, (wrap(leaf_pk(lsA), qa1, r1), wrap(leaf_pk(lsB), qb1, r1), gc1, tag(es1, gc1)));
+  out(c, aenc(msg_key(es1), M1));
+  (* Window 2 *)
+  new r2: key; new qa2: key; new qb2: key;
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret_noinit(r2, gc2) in
+  out(c, (wrap(leaf_pk(lsA), qa2, r2), wrap(leaf_pk(lsB), qb2, r2), gc2, tag(es2, gc2)));
+  (* A's device leaks. *)
+  phase 1;
+  out(c, (lsA, r2, es2))

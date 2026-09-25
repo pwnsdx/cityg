@@ -1,0 +1,16 @@
+[package]
+name = "cite-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Micro-benchmarks behind the CPU figures of docs/research/grands-groupes-2026-09-25.md"
+
+[dependencies]
+cityg-core = { path = "../../../crates/cityg-core" }
+cityg-pqc = { path = "../../../crates/cityg-pqc" }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+rand_chacha = "0.3"
+rand_core = "0.6"
+
+# Standalone crate, outside the repository's workspace.
+[workspace]

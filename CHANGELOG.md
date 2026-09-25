@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounds and related work, and a proposed architecture with parallel
   re-keying by district, per-district delivery-service queues and taint
   tracking. No protocol change.
+- Second revision of that note:
+  - It keeps the init chain, with district welcomes and tag-only checks in
+    every window.
+  - It requires the confirmation tag in the signed header, and drops
+    multi-recipient lattice KEMs (attacks by malicious public keys).
+  - It adds placement of joins, district sizing, measured CPU costs and
+    sampling audits.
+- A ProVerif model of the note's security choices
+  (`docs/research/formal/`, twelve scenarios) and micro-benchmarks of the
+  primitives through `cityg-core` (`docs/research/bench/`).
 
 ## [0.3.0] - 2026-09-25
 

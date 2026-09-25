@@ -1,0 +1,45 @@
+(* Scenario TAINT without the taint rule (sanity check): as taint.pv, but
+   window 2 re-keys only the path of the removed member M, as plain TreeKEM
+   would. The city committer wraps the new root to d1's current key, whose
+   secret M drew in window 1: the attacker must read epoch 2. *)
+
+free skA, skB, skC: skey [private].
+
+free M2: bitstring [private].
+query attacker(M2).
+
+event AcceptedA(key).
+query es: key; event(AcceptedA(es)).
+
+process
+  new lsA: key; new lsB: key; new lsC: key; new lsM: key;
+  new s1: key; new s2: key; new r1: key; new init1: key;
+  out(c, (lsM, s1, s2, r1, init1));
+  out(c, (spk(skA), spk(skB), spk(skC)));
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), leaf_pk(lsC), leaf_pk(lsM)));
+  (
+    (* District 2, committer C: a fresh secret for d2, wrapped to C only. *)
+    new t2: key; new rc: key;
+    out(c, (wrap(leaf_pk(lsC), rc, t2), node_pk(t2), sign(skC, (N2, D2, node_pk(t2)))))
+  ) | (
+    (* City committer C: d1 keeps the key M set in window 1. *)
+    in(c, (pk2: kpk, sig2: bitstring));
+    if checksign(spk(skC), (N2, D2, pk2), sig2) = true then
+    new r2: key; new q1: key; new q2: key;
+    let pk1 = node_pk(s1) in
+    let gc2 = (N2, pk1, pk2, node_pk(r2)) in
+    let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+    out(c, (wrap(pk1, q1, r2), wrap(pk2, q2, r2), gc2, tag(es2, gc2),
+            sign(skC, (N2, CITY, gc2, tag(es2, gc2)))))
+  ) | (
+    (* A decrypts the root with the d1 secret it holds since window 1. *)
+    in(c, (wr: bitstring, gc2: bitstring, tg: bitstring, sigc: bitstring));
+    if checksign(spk(skC), (N2, CITY, gc2, tg), sigc) = true then
+    let (=N2, pk1: kpk, pk2: kpk, pkr: kpk) = gc2 in
+    let r2 = unwrap(node_sk(s1), wr) in
+    if node_pk(r2) = pkr then
+    let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+    if tag(es2, gc2) = tg then
+    event AcceptedA(es2);
+    out(c, aenc(msg_key(es2), M2))
+  )

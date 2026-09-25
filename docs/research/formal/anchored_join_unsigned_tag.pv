@@ -1,0 +1,41 @@
+(* Scenario ANCHOR with an unsigned tag (sanity check): as anchored_join.pv,
+   but the committer signs the epoch's context without its confirmation tag.
+   The welcome is not signed either, so the delivery service replaces both:
+   J must enter an epoch the attacker knows. The signed header of a commit
+   must therefore carry the tag. *)
+
+free MJ: bitstring [private].
+query attacker(MJ).
+
+process
+  new skA: skey; new skB: skey; new skE: skey;
+  new lsJ: key; new ikJ: key; new init1: key;
+  out(c, (spk(skA), spk(skB), skE, leaf_pk(lsJ), kempk(ikJ)));
+  let th1 = hash((N1, spk(skA), spk(skB))) in
+  out(c, (th1, sign(skA, (N1, th1))));
+  (
+    new t2: key; new qj: key; new r2: key; new q2: key; new qw: key;
+    let gc2 = (N2, th1, node_pk(t2), node_pk(r2)) in
+    let js2 = joiner_secret(init1, r2, gc2) in
+    let es2 = epoch_secret(js2) in
+    out(c, (spk(skB), wrap(leaf_pk(lsJ), qj, t2), wrap(node_pk(t2), q2, r2), gc2,
+            tag(es2, gc2), sign(skB, (N2, gc2)), wrap(kempk(ikJ), qw, js2)))
+  ) | (
+    in(c, (th: bitstring, cp: bitstring));
+    if checksign(spk(skA), (N1, th), cp) = true then
+    in(c, (m1: spkey, m2: spkey));
+    if hash((N1, m1, m2)) = th then
+    in(c, (pkc: spkey, wj: bitstring, wr: bitstring, gc2: bitstring, tg: bitstring,
+           sg: bitstring, wel: bitstring));
+    if pkc = m1 || pkc = m2 then
+    if checksign(pkc, (N2, gc2), sg) = true then
+    let (=N2, =th, pk2: kpk, pkr: kpk) = gc2 in
+    let t2 = unwrap(leaf_sk(lsJ), wj) in
+    if node_pk(t2) = pk2 then
+    let r2 = unwrap(node_sk(t2), wr) in
+    if node_pk(r2) = pkr then
+    let js2 = unwrap(ikJ, wel) in
+    let es2 = epoch_secret(js2) in
+    if tag(es2, gc2) = tg then
+    out(c, aenc(msg_key(es2), MJ))
+  )
