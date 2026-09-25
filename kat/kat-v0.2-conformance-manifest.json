@@ -3,7 +3,7 @@
   "kind": "v0.2-conformance-manifest",
   "notes": [
     "This manifest links the requirements introduced by the v0.2 profile (audit docs/audits/audit-crypto-conformite-2026-09-25.md) to deterministic implementation tests.",
-    "Requirement IDs are grouped by area: SIG (signature suite, audit H-05), REM (member removal, audit C-03), MSG (message receipt, audit H-10), CFG (server configuration, audit M-06), SLOT (slot leases)."
+    "Requirement IDs are grouped by area: SIG (signature suite, audit H-05), REM (member removal, audit C-03), MSG (message receipt, audit H-10), CFG (server configuration, audit M-06), SLOT (slot leases), PRIV (material that must not reach the server, audit C-01)."
   ],
   "requirements": [
     {
@@ -220,6 +220,17 @@
           "crate": "cityg-server",
           "test": "tests::ticket_generation::failed_join_ticket_does_not_leak_a_slot_lease",
           "expectation": "reject"
+        }
+      ]
+    },
+    {
+      "id": "PRIV.1",
+      "title": "The CAPSS witness (hp shares in clear) never leaves the device; acceptance recomputes what it needs from public inputs",
+      "coverage": [
+        {
+          "crate": "cityg-client",
+          "test": "tests::wire_bundle_never_carries_the_capss_witness",
+          "expectation": "accept"
         }
       ]
     }

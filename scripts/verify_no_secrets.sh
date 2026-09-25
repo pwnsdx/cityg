@@ -1,8 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# verify_no_secrets.sh — Automated verification that server code has no access to secrets
+# verify_no_secrets.sh — Syntactic guardrail: server code must not import
+# decryption helpers or secret key types.
 # Usage: ./scripts/verify_no_secrets.sh
+#
+# This is a grep-based check, not a proof of server blindness: the
+# 2026-09-25 audit (C-01) shows the server can recompute E_k of JOIN anchors
+# from public data without importing any secret type.
 #
 # IMPORTANT: The exclusion filters below must NOT use substring matching
 # (e.g. `grep -v "test"`) because that would hide hits in production files
@@ -17,7 +22,7 @@ export CITYG_CARGO_TARGET_SLOT="${CITYG_CARGO_TARGET_SLOT:-verify-no-secrets}"
 source "$REPO_ROOT/scripts/cargo_repo_env.sh"
 
 echo "═══════════════════════════════════════════════════════════"
-echo "City-G Security Verification — No Secrets in Server Code"
+echo "City-G guardrail — no secret types or decryption helpers in server code"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 

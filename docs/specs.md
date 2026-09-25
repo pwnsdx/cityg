@@ -757,7 +757,9 @@ Where `E_k` is the locally derived epoch key for the active `weid`.
 `tau_e(t)` remains normative for FS chain/proof context per S6, while payload encryption in this profile binds to `E_k` in S8.
 
 Security note (informative):
-K_msg_epoch depends on E_k (ME-OR derived, independent of K_fs) and K_barrier (PRS derived, independent of K_fs). Compromise of K_fs alone does NOT yield K_msg_epoch or any payload decryption capability. Payload confidentiality requires compromise of both E_k and K_barrier for the authenticated epoch. Within an epoch, K_msg_epoch is shared across all messages; compromise of K_msg_epoch enables derivation of all K_msg values for that epoch via the deterministic msg_index binding in S8.4.
+K_msg_epoch depends on E_k (ME-OR derived, independent of K_fs) and K_barrier (PRS derived, independent of K_fs). Compromise of K_fs alone does NOT yield K_msg_epoch or any payload decryption capability. Because E_k is derivable from public data (see the security note below), payload confidentiality rests on K_barrier. Within an epoch, K_msg_epoch is shared across all messages; compromise of K_msg_epoch enables derivation of all K_msg values for that epoch via the deterministic msg_index binding in S8.4.
+
+Security note (audit C-01, normative for claims): in this profile `E_k` of JOIN anchors is computable from public header data, so payload confidentiality rests on `K_barrier` alone. Implementations and documentation MUST NOT claim that payload confidentiality requires compromise of both `E_k` and `K_barrier`.
 
 S8.4 K_msg, nonce, and AAD
 K_msg := HKDF-BLAKE3(
@@ -1456,6 +1458,9 @@ F) Updater identity binding + updater-not-revoked
 * Define `current_slot_lease(header[108]) := (slot_index, slot_generation)` as the unique currently active or pending slot lease for the acting `leaf_id`.
 * Require `updater_slot_index == current_slot_lease(header[108]).slot_index` and `CP.updater_slot_generation == current_slot_lease(header[108]).slot_generation`; else reject 960.1.
 * Require the exact updater lease `(updater_slot_index, CP.updater_slot_generation)` NOT appear in RevokedLeafSet for this update; else reject 960.1.
+* Require that neither the updater slot nor the author `leaf_id` appears in the revoked set of the anchor carrying this update (`header[112]` delta); else reject 960.1. Sole exception: the author is the only active member and the anchor revokes exactly that member (S11.15.4).
+* Every `leaf_id` revoked by the anchor MUST be backed by a live pending removal proposal (S11.15) or the author MUST be a room admin; else reject 960.14.
+* If header[178] is in {0,1}, every live pending removal proposal MUST be revoked by this anchor; else reject 960.15. header[178] == 2 (join_finalize) is exempt: the joiner commits no proposal and pending targets remain members until a later commit.
 * Let JoinSet := ResolveJoinOccupanciesSince(BU.prev_barrier_version).
 * Let JoinSlotSet := the set of active `slot_index` values carried by JoinSet.
 * The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `HistoryCommitment`; inability to establish a single common commitment -> reject 960.9.
@@ -1497,6 +1502,7 @@ Upon acceptance of this merge, server MUST set:
 and MUST persist the corresponding pk_entries snapshot_post as the current public tree.
 If header[178] == 2, the matched pending `join_finalize_auth` capability for that leaf MUST be consumed/cleared on acceptance.
 If any leaves are revoked by the accepted delta, any pending `join_finalize_auth` capability for those revoked leaves MUST be cleared.
+If any leaves are revoked by the accepted delta, their pending removal proposals (S11.15) MUST be consumed.
 
 NOTE (security model): server-side checks alone do not protect against an actively malicious server. Active-server injection protections are enforced by updater chain-check (S11.11.1), FULL client chain-check (S11.11.2), and FULL client ek_n verification (S11.13.6).
 
@@ -1718,6 +1724,40 @@ On restart, the updater MUST check for pending_* state:
 * If `LookupMergeAcceptance(pending_merge_locator)` returns `status == superseded` or `status == final_rejected`, the updater MUST discard pending_* state.
 * If `LookupMergeAcceptance(pending_merge_locator)` returns `status == pending`, or authenticated history is still insufficient to establish acceptance or non-acceptance under the rule above, the updater MUST retain pending_* state or transition to an explicit recovery-required state until authenticated history resolves acceptance or non-acceptance.
 
+S11.15 Member removal: proposals and commits (normative; audit C-03)
+
+S11.15.1 Rationale
+The author of a barrier_update chooses `K_barrier_new` (S11.9.1). A member that authored its own revocation would therefore learn the key that is meant to exclude it. A member MUST NOT author a barrier_update that revokes itself while other members remain; removal follows a proposal/commit split.
+
+S11.15.2 RemoveProposal (normative)
+RemoveProposalTBS := CBOR_det([
+  "city-g/remove/v1",
+  gid: bstr32,
+  target_leaf_id: bstr32,
+  target_slot_index: uint,
+  target_slot_generation: uint,
+  not_after_ms: uint
+])
+SignedRemoveProposal := CBOR_det([ the six elements of RemoveProposalTBS, signer_public_key: bstr, signature: bstr ])
+* signature := ML-DSA-87.Sign(signer_sk, RemoveProposalTBS, ctx = "city-g/remove/v1") (FIPS 204 context string).
+* The signer MUST be the target (`leaf_id(signer_public_key) == target_leaf_id` and `signer_public_key` equal to the target's bound device key) or a current room admin.
+* `(target_slot_index, target_slot_generation)` MUST equal the target's current active slot lease.
+* `not_after_ms` MUST NOT be in the past and MUST NOT exceed acceptance time + 7 days (`MAX_REMOVE_PROPOSAL_LIFETIME_MS`). The encoding MUST NOT exceed 8192 bytes.
+* Servers MUST verify the above before recording a proposal, MUST persist recorded proposals across restarts, and MUST drop a proposal once it expires or its slot lease changes.
+
+S11.15.3 Commit (normative)
+* A remaining member commits every live pending proposal with a MERGE anchor carrying a barrier_update with header[178] == 0 whose delta revokes the targets. The updater slot is the committer's own active slot.
+* The merge ticket MUST carry the revoked slot occupancies (`revoked_slot_leases`, sorted by `(slot_index, slot_generation)`), and they MUST be bound into the history-authority merge ticket artifact (label `cityg/merge-ticket-artifact-v3`).
+* The committer MUST add those occupancies to the committed revoked set of its snapshot (S11.6) before re-keying its own path. Its fs_ec MUST be strictly greater than the group's last accepted fs_ec when its local fs_ec does not exceed it (S6.6).
+* A refresh ticket (intent REFRESH) remains available while proposals are pending (clients sync from it); a PCS refresh update is then rejected with 960.15.
+
+S11.15.4 Last member
+When the author is the only active member, it MAY author a barrier_update revoking itself; no other member can be exposed. Servers MUST report this case to the proposer (status `self_commit`).
+
+S11.15.5 Receiver-side sender checks (normative; audit H-10)
+* Receivers MUST drop a payload whose `sender_leaf_id` is not in the current authenticated roster (S8.1), with the roster root recomputed from every returned leaf.
+* Receivers MUST display the timestamp covered by the sender's signature, not a server-supplied timestamp.
+
 S12. JOIN PROVISIONING REQUIREMENTS (NORMATIVE)
 
 S12.0 Genesis provisioning artifact (normative)
@@ -1886,6 +1926,10 @@ Scope: Server (acceptance gating)
 Scope: Server (acceptance gating)
 960.13 barrier_non_revocation_reason_forbidden_while_pending_revocations
 Scope: Server (acceptance gating)
+960.14 barrier_revocation_unauthorized
+Scope: Server (a revoked leaf is backed neither by a pending removal proposal nor by a room-admin author; S11.15)
+960.15 barrier_pending_removals_uncommitted
+Scope: Server (a member-authored barrier_update leaves a pending removal proposal uncommitted; S11.15)
 
 FS/acceptance codes
 907.1  malformed CBOR / unknown key / duplicate key

@@ -1,6 +1,6 @@
 # 18 — Async-First Join Provisioning
 
-This note summarizes the implemented `v0.1.4` design. It is explanatory, not normative; the normative rules live in `/Users/admin/Desktop/Repositories/cityg/docs/specs.md`.
+This note summarizes the implemented `v0.1.4` design. It is explanatory, not normative; the normative rules live in [`docs/specs.md`](../specs.md).
 
 ## Current State
 
@@ -13,9 +13,9 @@ The current implementation uses the barrier-sealed HP transport to:
 
 That behavior is visible in:
 
-- `/Users/admin/Desktop/Repositories/cityg/crates/cityg-client/src/lib.rs`
-- `/Users/admin/Desktop/Repositories/cityg/crates/cityg-gui/src/native.rs`
-- `/Users/admin/Desktop/Repositories/cityg/crates/msphf-orchestrator/src/lib.rs`
+- `crates/cityg-client/src/lib.rs`
+- `crates/cityg-gui/src/native/` (join flow: `join_ops.rs`)
+- `crates/msphf-orchestrator/src/lib.rs`
 
 ## Product Property
 

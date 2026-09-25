@@ -388,9 +388,44 @@ message ExpelMemberTicketRequest {
 - The acting admin proof is bound to both `author_leaf_id` and `target_leaf_id`
 - `author_leaf_id` must belong to the acting admin's current room membership
 - `target_leaf_id` must be a different current member leaf
-- Self-revocation is rejected here; use `merge_ticket` with `LEAVE` for a
-  controlled leave
+- Self-revocation is rejected here; a member leaves through
+  `POST /v1/rooms/remove_proposal`
+- The ticket's updater is the acting admin's own slot; the target's occupancy is
+  listed in `revoked_slot_leases` (and every pending removal proposal is
+  committed by the same update)
 - There is no legacy token fallback for this endpoint
+
+#### `POST /v1/rooms/remove_proposal`
+
+Records a signed removal proposal (spec S11.15). A member leaves by signing a
+proposal for its own leaf; a room admin may sign one for another member.
+Another member commits it with a `LEAVE` merge ticket.
+
+**Protobuf Request:** `SubmitRemoveProposalRequest`
+```protobuf
+message SubmitRemoveProposalRequest {
+  string room_id = 1;
+  // CBOR_det ["city-g/remove/v1", gid, target_leaf_id, target_slot_index,
+  // target_slot_generation, not_after_ms, signer_public_key, signature]
+  bytes signed_proposal = 2;
+}
+```
+
+**Protobuf Response:** `SubmitRemoveProposalResponse { string status = 1; }`
+- `"pending"`: another member commits the removal.
+- `"self_commit"`: the target is the last active member and commits its own
+  removal with a `LEAVE` merge ticket.
+
+**Notes:** requires the message auth header; the signature (ML-DSA-87, context
+`city-g/remove/v1`), signer, slot lease and lifetime (≤ 7 days) are verified
+before the proposal is stored; proposals persist across restarts.
+
+#### `POST /v1/rooms/pending_remove_proposals`
+
+Lists the live pending proposals (`repeated bytes signed_proposals`) of a room.
+Clients MUST verify each signature and `gid` before committing them.
+
+#### `POST /v1/rooms/rotate_kbroad`
 
 #### `POST /v1/rooms/rotate_kbroad`
 
@@ -539,9 +574,15 @@ let ticket = client.join_ticket("my-room", "alice", Some(identity)).await?;
 
 #### `POST /v1/rooms/merge_ticket`
 
-Requests a merge ticket for an existing member during self-directed
-merge/leave/refresh flow. Current server behavior includes requester
-self-revocation in the merge SRX delta for `LEAVE`.
+Requests a merge ticket for an existing member.
+
+- `LEAVE` commits every pending removal proposal (spec S11.15): the requester
+  is the updater (its own slot) and the targets are listed in
+  `revoked_slot_leases`. The requester may not be a pending target; only the
+  last active member receives a ticket revoking itself.
+- `REFRESH` returns the current state for a PCS refresh; clients also sync from
+  it. A refresh *update* is rejected (960.15) while removal proposals are
+  pending.
 
 **Protobuf Request:** `MergeTicketRequest`
 ```protobuf
@@ -597,6 +638,7 @@ message MergeTicketResponse {
   string history_authority_extension = 34;  // "global-history-authority-v1" in the base profile
   bytes merge_ticket_artifact = 35;
   bytes deployment_profile_manifest = 36;
+  repeated BarrierRevokedOccupancyRecord revoked_slot_leases = 38;  // bound into the artifact
 }
 ```
 
@@ -682,8 +724,8 @@ println!("Merge ticket pivots: {}", ticket.pivot_parity_cbor.len());
 ```
 
 **Use Cases:**
-- Controlled leave/rekey transitions
-- Refreshing parity context for merge-era state transitions
+- Committing pending removal proposals (`LEAVE`)
+- Refreshing parity context for merge-era state transitions (`REFRESH`)
 - Admin-driven expulsion uses `POST /v1/rooms/expel_member_ticket`, not this
   endpoint
 

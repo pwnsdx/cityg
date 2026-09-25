@@ -1,18 +1,18 @@
-## City‑G: Post-Quantum, Server-Blind E2EE for Large-Scale Groups
+## City‑G: Post-Quantum E2EE for Large Groups (research prototype)
 
 [![Status](https://img.shields.io/badge/status-research%20prototype-orange)]()
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**City‑G** is a research‑grade protocol for end‑to‑end encrypted groups designed for very large audiences (architecturally O(log N), targeting millions of members; tested to N_max=2048, large-scale benchmarks pending). The server validates activity cryptographically without ever learning message keys. New members can post and send messages even when everyone else is offline. The shipping profile is `tswe/msphf-we/fs-hybrid + prs-barrier`, integrating server blindness, multi-head windows, minutes-grade forward secrecy, and post-revocation secrecy by default.
+**City‑G** is a research protocol for end‑to‑end encrypted groups aimed at large audiences (O(log N) membership witnesses; tested to N_max=2048, larger benchmarks pending). Message payloads are encrypted under keys derived from `K_barrier`, a group key distributed to members through a post‑quantum KEM tree that the server never receives. New members self‑finalize their join without another member online. The current profile is `v0.1.4` (`tswe/msphf-we/fs-hybrid + prs-barrier`); a `v0.2` profile is in progress.
+
+> **Security status.** The [2026-09-25 audit](docs/audits/audit-crypto-conformite-2026-09-25.md) (in French) found that several headline claims of `v0.1.4` do not hold. In particular the server can recompute `E_k` for JOIN anchors (C-01), the SPHF/CAPSS/ZK-VRF transcripts prove nothing (C-02), and there is no minutes-grade forward secrecy (H-02). What holds is summarized in [Security claims status](#security-claims-status). This branch fixes the P0 findings (C-03, H-09, H-10 receipt checks, M-06, the `capss_witness` leak of C-01) and adopts FIPS 204 ML-DSA-87 (H-05).
 
 ---
 
 ## Who this is for
 
 * **Large-scale communities**: City/municipality groups, Discord/Telegram-style communities, public event coordination (conferences, open-source projects), large enterprise messaging.
-* **Broadcast channels**: Newsletter distribution, activist networks, emergency alert systems with cryptographic server-blindness guarantees.
+* **Broadcast channels**: Newsletter distribution, community announcements, emergency alert systems.
 * **High-concurrency scenarios**: Applications with frequent joins/leaves and many offline participants.
 * Teams that want **post‑quantum** building blocks now, not later.
 
@@ -20,13 +20,13 @@
 
 ## What makes City‑G different
 
-* **Server‑blind by construction.** Acceptance is "publisher‑blind": the service validates structure, policy, and zero‑knowledge proofs but **cannot** decrypt the protected header; decryption happens only on devices.
-* **Offline admission.** New devices and existing devices independently derive the same next‑epoch key; no handshake is required to start sending.
-* **Minutes‑grade, time‑blind FS.** Forward secrecy rotates on a short cadence and is enforced **without** trusting server clocks (clients police their own schedule).
-* **Built for scale.** Membership proofs are canonical and grow **O(log N)**; periodic **checkpoints/rollups** keep sync costs reasonable as groups grow.
-* **Post‑quantum by default.** The spec standardizes ML‑KEM/ML‑DSA with modern hashing and AEAD for simple interoperability.
+* **The server never holds message keys.** Payload keys derive from `K_barrier`, which travels only inside the ML‑KEM‑768 barrier tree; the server stores ciphertext and validates structure. It is *not* blind to epoch material in `v0.1.4`: `E_k` is computable from public data for JOIN anchors (C-01), so confidentiality rests on `K_barrier` alone.
+* **Offline admission.** A joiner self-finalizes (`join_finalize`) without another member online.
+* **Post-revocation secrecy on removal.** A member leaves by signing a removal proposal that a remaining member commits; the leaver never chooses the next `K_barrier` (audit C-03). Room admins expel members the same way.
+* **Built for scale.** Membership witnesses grow **O(log N)**; periodic **checkpoints/rollups** keep sync costs bounded.
+* **Post‑quantum primitives.** ML‑KEM‑768 (FIPS 203), ML‑DSA‑87 (FIPS 204) with a distinct context string per signature usage, BLAKE3, ChaCha20‑Poly1305.
 
-> **Not a metadata‑hiding system.** The server still sees public structure (that "an update happened") but not your message keys or plaintext.
+> **Not a metadata‑hiding system.** The server sees public structure (who joined or left, when, and which device authored an update).
 
 ---
 
@@ -38,32 +38,27 @@ City-G splits responsibilities between **trusted clients** and an **untrusted se
 
 **Join flow** (Bob joins a 7000-person group):
 1. **Bob fetches** group state: parent_root, frontier (~13 hashes for 7000 members), kbroad_pub
-2. **Bob creates** anchor locally: adds his leaf_id, generates proofs (CAPSS Smallwood ≤16KB, ZK-VRF ≤8KB), encrypts hp
+2. **Bob creates** anchor locally: adds his leaf_id, attaches the `v0.1.4` proof transcripts (CAPSS, ZK-VRF; see below), seals hp
 3. **Bob submits** anchor to server
-4. **Server validates** cryptographically: PoP signature, proofs, SRX witnesses, Merkle consistency (never decrypts KBROAD)
+4. **Server validates**: PoP signature, transcript structure, SRX witnesses, Merkle consistency (never decrypts KBROAD)
 5. **Server applies** policy: checks rate limits, blocklists (your application code)
-6. **Bob sends** messages encrypted with epoch key E_k
+6. **Bob sends** messages encrypted under a key derived from `K_barrier` and the epoch material
 
-**Result**: Bob knows hp, Y*, E_k. Server knows only Merkle roots, Bob's leaf_id (hash), and timing metadata—never the secrets or message content.
+**Result**: Bob and the other members hold `K_barrier`; the server never receives it, nor message plaintext. In `v0.1.4` the server can however recompute `E_k` for JOIN anchors from public data (audit C-01).
 
 For detailed diagrams, see [workflows.md](docs/workflows.md#join-flow) (sequence diagrams + visual guides) and [protocol/01-overview.md](docs/protocol/01-overview.md) (technical specifications).
 
-### Two Proof Systems
+### Proof transcripts (v0.1.4)
 
-City-G uses two complementary zero-knowledge proofs:
-
-- **CAPSS Smallwood** (~12KB): Proves seed→hp derivation was deterministic and binds forward-secrecy context. Prevents grinding attacks and epoch tampering.
-- **ZK-VRF** (≤8KB): Proves Y* correctness without revealing it (output-hiding). Prevents forgery.
-
-Both verify correctness without revealing secrets. See [workflows.md#two-proof-systems](docs/workflows.md#two-proof-systems) for visual diagram, or [crates/capss/README.md](crates/capss/README.md) and [crates/msphf-lb-vrf/README.md](crates/msphf-lb-vrf/README.md) for implementation details.
+Anchors carry two transcripts, **CAPSS Smallwood** (~12KB) and **ZK-VRF** (≤8KB). The audit (C-02) found that neither proves the relation it was meant to: CAPSS proves a toy relation derived from public data and its verifier does not evaluate constraints, and the VRF key is not bound to the device identity nor its output used. They are structural checks only and are scheduled for removal in `v0.2`. See [crates/capss/README.md](crates/capss/README.md) and [crates/msphf-lb-vrf/README.md](crates/msphf-lb-vrf/README.md).
 
 ### What the Server Sees (and Doesn't)
 
-**Server sees**: Merkle root transitions, leaf IDs (hashes), timing metadata, proof structures
-**Server validates**: Cryptography (proofs, signatures, witnesses) via `accept_anchor`
+**Server sees**: Merkle root transitions, leaf IDs (hashes), device public keys, timing metadata, sealed envelopes, transcript structures
+**Server validates**: signatures, witnesses and structure via `accept_anchor`, and barrier-update authorization (updater = author's own slot; every revocation backed by a signed removal proposal or a room admin)
 **Your app enforces**: Policy (rate limits, blocklists) by examining validated anchor fields
 
-**Server never sees**: hp, Y*, E_k (cryptographically hidden), device secret keys (only public keys), message content
+**Server never receives**: `K_barrier`, message keys, device secret keys, message content, the CAPSS witness. **Not hidden in `v0.1.4`**: `E_k` of JOIN anchors (C-01).
 
 See [workflows.md#what-the-server-sees-and-doesnt](docs/workflows.md#what-the-server-sees-and-doesnt) for a detailed diagram.
 
@@ -93,8 +88,9 @@ See [workflows.md#what-the-server-sees-and-doesnt](docs/workflows.md#what-the-se
     │ Alice's phone    │              │ AWS/GCP/on-prem  │
     └──────────────────┘              └──────────────────┘
 
-CI enforces separation: ./scripts/verify_no_secrets.sh checks that
-accept/ code path has NO access to MlKemSecretKey or decrypt functions
+CI runs ./scripts/verify_no_secrets.sh, a syntactic (grep) check that
+the accept/ code path does not import MlKemSecretKey or decrypt helpers.
+It is a guardrail, not a proof of server blindness.
 ```
 
 ### Policy vs Cryptography
@@ -102,8 +98,8 @@ accept/ code path has NO access to MlKemSecretKey or decrypt functions
 City-G separates **cryptographic validation** (protocol-level proofs) from **policy enforcement** (application-level rules):
 
 **Cryptographic layer** (`accept_anchor`):
-- Validates proofs (CAPSS Smallwood, ZK-VRF), signatures, SRX witnesses, Merkle consistency
-- Never learns hp, Y*, E_k (even if server compromised)
+- Validates signatures, SRX witnesses, Merkle consistency and transcript structure
+- Never receives `K_barrier` or message keys (`E_k` of JOIN anchors is not secret in `v0.1.4`, C-01)
 - Returns: Accept | Freeze(error_code)
 
 **Policy layer** (your application):
@@ -119,51 +115,45 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 
 ---
 
-## At‑a‑glance comparison
+## Security claims status
 
-| Property | **City‑G** | **MLS (IETF RFC 9420)** | **Signal** | **Matrix (Olm/Megolm)** |
-|----------|-----------|-------------------------|------------|-------------------------|
-| **Confidentiality & server blindness** | Server validates CAPSS Smallwood + ZK-VRF; epoch keys never reach the server. Metadata (who joined/when) remains visible. | Content keys stay client-side, but "server-blind acceptance" is not part of the protocol; operators must ship the audited binaries. | Content keys remain on devices; trust rests on Signal’s infrastructure choices. | Servers store ciphertext; clients share session keys out-of-band. No cryptographic proof that the homeserver stays blind beyond enforcing transport encryption. |
-| **Authentication & membership integrity** | ML-DSA PoP + SRX proofs + CAPSS Smallwood binding freeze anchors if roots or membership drift. | TreeKEM commits authenticate the tree but require an online committer. | Membership is service-controlled; no cryptographic completeness proof. | Membership events are server-signed; authenticity depends on the homeserver you trust. |
-| **Forward secrecy granularity** | Minutes-grade per epoch (`H`, default 5 min) with time-blind enforcement. Payload keys require both E_k (ME-OR, independent) and K_barrier (PRS, independent) — K_fs compromise alone cannot decrypt messages. | Per commit (interactive). | Per message (Double Ratchet + Sender Keys). | Megolm ratchets forward per message, but compromise leaks future traffic until the sender rotates the session. |
-| **Post-compromise recovery** | Publish a new anchor (FS purge) to rotate `K_fs` (PCS); K_barrier rotation via KEM-tree cover revokes access for compromised members (PRS). | Honest member must commit an update replacing the compromised leaf. | One new ratchet step (send/receive) restores PCS. | Requires establishing a new Megolm session; existing session remains compromised. |
-| **Asynchronous join?** | ✅ Yes — joiner fetches anchor + witness; server validates alone. | ⚠️ Needs a live committer. Batching is optional but adds latency while the batch finalises. | ❌ Requires admin/service interaction; no offline admission. | ⚠️ Homeserver accepts the join, but a member must be online to share session keys/history. |
-| **Scalability & concurrency** | Multi-Head Windows (default 16 parallel) + deterministic simulations to ~10⁶ members; real deployments >100k are still research pilots. | Sequential commits; batching reduces round-trips but increases wait time. OpenMLS reports strain beyond ≈1–2 k participants.[1] | Service limit 1 000 members per group.[2] | Large rooms are routine, but key-share fan-out grows with membership and stresses clients at very high scale. |
-| **Deniability** | Anchors use ML-DSA (non-deniable); application messages share epoch keys, yielding symmetric-key deniability similar to other shared-key groups. | Commit messages are signed (non-deniable). | Double Ratchet provides strong deniability. | Device identity keys are long-lived; deniability is limited. |
-| **Server-blindness verifiability** | `cargo test --all` + `./scripts/verify_no_secrets.sh` ensure no decryption helpers ship. | Depends on operator attestations/transparency logs; no built-in guard. | Relies on Signal Foundation operating the published stack. | Depends on homeserver operator policy; no automatic blindness proof. |
-| **Deployment maturity** | Research-grade prototype for the current `v0.1.4` base profile. | IETF standard with multiple implementations. | Global production deployment. | Production federated ecosystem. |
+| Property | Status on this branch | Audit |
+| --- | --- | --- |
+| Payload confidentiality against the server | Holds while `K_barrier` stays secret; `E_k` is not secret from the server | C-01 |
+| Post-revocation secrecy on leave/expel | Holds: the leaver never authors its own revocation; removals are signed proposals committed by another member | C-03 (fixed) |
+| Sender authentication | ML-DSA-87 signature under the `city-g/msg/v2` context; receivers drop senders outside the current roster and show the signed timestamp | H-05, H-10 (receipt checks fixed; context binding in `v0.2`) |
+| Forward secrecy | Granularity is one barrier version, no time bound; `K_fs` does not protect payloads | H-02 (`v0.2`) |
+| Post-compromise security | Manual PCS refresh; the barrier leaf key is not rotated | H-03 (`v0.2`) |
+| SPHF / CAPSS / ZK-VRF proofs | Structural checks only; parameters are labelled `rlwe-params/mock` | C-02 (removal in `v0.2`) |
+| Default server configuration | Fails closed: the global history authority is enabled by default | M-06 (fixed) |
 
-**Notes & sources.**
-- City‑G's “millions” figure refers to deterministic simulations and architectural limits documented in `docs/protocol/01-overview.md`; real-world deployments beyond ≈100 k members remain research pilots.
-- MLS scale observations reference OpenMLS' public benchmarks and documentation.[1]
-- Signal’s group size limit is published in the official help center.[2]
-- Matrix behaviour depends on homeserver policies; large deployments exist, but recovery from compromise requires session resets.
-- For rough codebase scale: City‑G 59,876 LOC total (46,675 LOC core protocol + 13,201 LOC GUI), OpenMLS 76,912 LOC, libsignal 133,424 LOC. Measured using tokei on Rust workspaces. See [docs/evidence/README.md](docs/evidence/README.md) for methodology.
+**Scale.** The O(log N) architecture has been simulated deterministically well beyond the tested `N_max=2048`; real deployments above ≈100k members have not been run. For rough codebase scale, see [docs/evidence/README.md](docs/evidence/README.md).
 
 ---
 
 ## What you get in this repository
 
-* **Profile**: `tswe/msphf-we/fs-hybrid + prs-barrier` — server-blind admission, merge/rollup, mandatory minutes-grade forward secrecy, and post-revocation secrecy via KEM-tree barrier.
-* **Server‑blindness guardrails**: automated checks in this repo fail CI if server code ever attempts to handle epoch secrets. It's evidence you can re‑run.
-* **Docs you can trace**: every public claim here maps to the final specs bundled in the repo.
+* **Profile**: `tswe/msphf-we/fs-hybrid + prs-barrier` (`v0.1.4`) with the audit's P0 fixes; `v0.2` work in progress.
+* **Guardrails**: `scripts/verify_no_secrets.sh` (syntactic checks that server code does not import decryption helpers), requirement manifests under [`kat/`](kat/) linking spec requirements to tests.
+* **Docs you can trace**: the normative spec [`docs/specs.md`](docs/specs.md) and the [audit report](docs/audits/audit-crypto-conformite-2026-09-25.md).
 
 ---
 
 ## Security model in one slide
 
-* **End‑to‑end confidentiality**: only devices hold decryption ability; the server validates proofs but cannot decrypt the protected header.
-* **Consistency**: receivers can verify who was added/removed as they adopt new epochs; **checkpoints/rollups** keep that view compact without granting anyone new decryption rights for the past.
-* **Forward secrecy**: keys evolve on a short schedule your devices enforce locally; the server cannot secretly widen that window because acceptance is **time‑blind**.
-* **Post‑revocation secrecy**: the PRS barrier (`K_barrier` + KEM-tree cover) ensures that revoked members lose access to future message keys, even if they cached prior group state.
+* **Confidentiality**: only members hold `K_barrier`, from which payload keys derive; the server stores ciphertext. Epoch material other than `K_barrier` is not secret from the server in `v0.1.4`.
+* **Consistency**: receivers verify roster roots as they adopt new epochs; **checkpoints/rollups** keep that view compact without granting new decryption rights for the past.
+* **Forward secrecy**: coarse, one barrier version at a time; a compromise of `K_barrier` exposes the current version since it started (H-02).
+* **Post‑revocation secrecy**: a removal is committed by a remaining member, who re-keys its own barrier path and blanks the removed leaf, so the removed member does not learn later barrier keys.
 
 ---
 
 ## Current limits & honest trade‑offs
 
-* **Metadata exposure**: City‑G does not hide metadata (e.g., that an update happened).
-* **FS granularity**: minutes‑grade epoch rotation for the FS chain; payload keys additionally depend on E_k (ME-OR, independent of K_fs) and K_barrier (PRS), so K_fs compromise alone does not yield payload decryption. Within an epoch, all messages share K_msg_epoch. If you need per‑message FS, that's a different trade‑off space.
-* **Scale in practice**: the architecture and simulations support millions; **real‑world** rollouts above **~100k** are still research pilots at this time.
+* **Metadata exposure**: City‑G does not hide metadata (who changed membership, when, from which device).
+* **FS granularity**: no minutes-grade forward secrecy; all messages of one barrier version share its key material.
+* **Proof layer**: the SPHF/CAPSS/ZK-VRF transcripts add no security (C-02).
+* **Scale in practice**: real‑world rollouts above **~100k** members have not been run.
 
 ---
 
@@ -180,7 +170,8 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 
 ## Read next
 
-* **Unified spec (v0.1.4):** publisher‑blind acceptance, offline admission, joins that self-finalize without another client online, merges/rollups, FS-hybrid, and PRS barrier — [`docs/specs.md`](docs/specs.md).
+* **Unified spec (v0.1.4):** anchor acceptance, offline admission, joins that self-finalize without another client online, merges/rollups, FS-hybrid, PRS barrier, and removal proposals — [`docs/specs.md`](docs/specs.md).
+* **Audit (2026-09-25, French):** findings and the `v0.2` proposals — [`docs/audits/audit-crypto-conformite-2026-09-25.md`](docs/audits/audit-crypto-conformite-2026-09-25.md).
 * **Protocol companion index:** explanatory and historical material — [`docs/protocol/`](docs/protocol/00-README.md).
 * **Workflows & diagrams:** visual sequence diagrams for common operations — [`docs/workflows.md`](docs/workflows.md).
 
@@ -188,15 +179,14 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 
 ## Short glossary
 
-* **Anchor** — a signed, server‑blind update (e.g., "X joined"). The server can validate it but cannot decrypt the header that protects the next keys. Devices derive and use those keys privately.
+* **Anchor** — a signed group update (e.g., "X joined"). The server validates its structure and signatures.
+* **Removal proposal** — a signed request (`city-g/remove/v1`) to remove a member, signed by that member (leave) or a room admin; another member commits it.
 * **Checkpoint / Rollup** — a compact summary that replaces many anchors so newcomers sync quickly **without** gaining any extra ability to decrypt past content.
-* **Minutes‑grade FS (time‑blind)** — your devices rotate secrets on a short timer and enforce adoption locally; the server never consults clocks to admit updates.
-* **CAPSS Smallwood** — Fiat-Shamir Linear Integrity proof (ROM soundness, ~12KB typical) that proves seed→hp derivation was deterministic and binds forward-secrecy metadata (fs_epoch_commit, device chain).
-* **ZK-VRF** — Zero-Knowledge Verifiable Random Function proof (≤8KB) that proves Y* correctness without revealing it (output-hiding).
-* **KBROAD** — Group key broadcasting envelope (ML-KEM-768 + ChaCha20-Poly1305) that encrypts hp; server validates structure without decryption.
-* **hp** — Hash projection key (RLWE parameters) used to compute Y* via smooth projective hash functions.
-* **Y\*** — VRF output computed via ME-OR (Masked-Equality OR), used to derive epoch key E_k.
-* **E_k** — Epoch key derived from SPHF output; in v0.1.4, message keys are further bound to `K_barrier` via HKDF-BLAKE3 (spec S8.3). E_k is independent of K_fs; payload confidentiality requires both E_k and K_barrier.
+* **CAPSS Smallwood / ZK-VRF** — proof transcripts carried by `v0.1.4` anchors; structural only (audit C-02), removed in `v0.2`.
+* **KBROAD** — ML-KEM-768 + ChaCha20-Poly1305 envelope that seals `hp`.
+* **hp, Y\*** — `v0.1.4` projection-key material and ME-OR output from which `E_k` derives.
+* **E_k** — epoch key; not secret from the server for JOIN anchors in `v0.1.4` (C-01). Message keys further bind `K_barrier` via HKDF-BLAKE3 (spec S8.3), which carries the confidentiality.
+* **K_barrier** — group key distributed through the ML-KEM-768 barrier tree; rotated on every barrier update.
 
 ---
 
@@ -206,7 +196,7 @@ For a clean local manual test with two GUI instances:
 
 **Terminal 1: API**
 ```bash
-cd /Users/admin/Desktop/Repositories/cityg
+cd cityg  # repository root
 export CITYG_SERVER_ADDRESS=127.0.0.1:8080
 export CITYG_SERVER_ROOMS_ADMIN_TOKEN=dev-admin-token
 export CITYG_SERVER_MESSAGE_AUTH_TOKEN=dev-message-token
@@ -215,7 +205,7 @@ cargo run -p cityg-api
 
 **Terminal 2: first GUI**
 ```bash
-cd /Users/admin/Desktop/Repositories/cityg
+cd cityg  # repository root
 export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
 export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
 export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-1
@@ -224,7 +214,7 @@ cargo run -p cityg-gui --features native-app
 
 **Terminal 3: second GUI**
 ```bash
-cd /Users/admin/Desktop/Repositories/cityg
+cd cityg  # repository root
 export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
 export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
 export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-2
@@ -302,25 +292,18 @@ If you use City-G in academic research, please cite:
 ## Frequently Asked Questions
 
 ### **Q: Is this production-ready?**
-**A:** It's a **research-grade prototype** and not production-ready:
-- Security audit complete (timing side-channels fixed)
-- `cargo test --all` targets currently pass (200+ core tests; protobuf compiler is automatically vendored)
-- CI-enforced server blindness checks (verify_no_secrets.sh)
-- Novel cryptography (less battle-tested than MLS)
-- Limited ecosystem (Rust only, no FFI yet)
-- RLWE-HPS A1 (Module-LWE with n=256, k=3, q=3329, η=2) maps to an LWE instance whose best-known classical attack costs about 2^99 operations and whose best-known quantum attack costs about 2^95 operations (per Albrecht's lattice-estimator); we therefore conservatively quote ≈96-bit quantum security.
+**A:** No. It is a **research prototype**:
+- The [2026-09-25 audit](docs/audits/audit-crypto-conformite-2026-09-25.md) reports critical findings (C-01, C-02) that only the `v0.2` redesign resolves; this branch fixes the P0 items.
+- The RLWE-HPS/SPHF parameters are labelled `rlwe-params/mock` and provide no security level (C-02); no quantum security estimate applies to them.
+- Novel, unproven construction; Rust only, no FFI yet.
 
-**Recommendation:** Suitable for **research deployments** and **experimental pilots** only. Not recommended for production use or consumer apps where MLS suffices.
+**Recommendation:** research deployments and experiments only. Prefer MLS for production.
 
-### **Q: How does server-blindness actually work?**
-**A:** Four layers:
-1. **Source discipline:** No `MlKemSecretKey` in `AcceptanceContext` (CI guard fails if added)
-2. **Functional:** No `ml_kem_decapsulate()` in server code (code review)
-3. **Cryptographic:** ML-KEM-768 IND-CCA2 + ZK-VRF output-hiding (FIPS 203)
-4. **Automated:** `./scripts/verify_no_secrets.sh` (10 checks, runs in CI)
+### **Q: What does the server learn, and what keeps it out?**
+**A:** The server never receives `K_barrier`, message keys or device secret keys, and the CAPSS witness no longer leaves the device (audit C-01). It can, however, recompute `E_k` for JOIN anchors from public data (C-01), so message confidentiality rests on `K_barrier` and on the ML-KEM-768 barrier tree. `scripts/verify_no_secrets.sh` is a syntactic guardrail (grep), not a proof.
 
 ### **Q: What's the security assumption?**
-**A:** Hardness of **Module-LWE** (NIST ML-KEM-768 foundation). If quantum computers break lattices, City-G breaks, but so does all post-quantum crypto.
+**A:** ML-KEM-768 (FIPS 203) for the barrier tree and KBROAD, ML-DSA-87 (FIPS 204) for signatures, and BLAKE3 / ChaCha20-Poly1305. The SPHF/ME-OR layer contributes no security (C-02).
 
 ### **Q: Who creates anchors? Can Bob self-join or does he need admin approval?**
 **A:** It depends on group policy. The protocol supports both:
@@ -339,8 +322,8 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 - `crates/cityg-client/` (SDK reference)
 - `crates/cityg-gui/` (desktop messaging client)
 
-### **Q: How do I ban or reinstate a member?**
-**A:** The **publisher** (orchestrator) generates a merge anchor via `joiner_kgen_merge_or`, adjusting `join_delta_root` and the `revoked_*` roots. The server validates it blindly. See the `ban_and_reinstate_member_flow` test ([crates/msphf-orchestrator/tests/end_to_end.rs](crates/msphf-orchestrator/tests/end_to_end.rs)) for a full example.
+### **Q: How does a member leave, or get removed?**
+**A:** Leaving signs a removal proposal (`POST /v1/rooms/remove_proposal`); a remaining member commits it with a LEAVE merge ticket, re-keying its own barrier path and blanking the leaver's leaf. The last member of a room commits its own removal. A room admin expels a member through `expel_member_ticket`, authoring the revocation from its own slot. See `crates/cityg-server/src/tests/removal_proposals.rs` and the GUI tests in `crates/cityg-gui/src/native/tests/`.
 
 ### **Q: What metadata does the server see?**
 **A:** The server sees:
@@ -352,7 +335,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 - **xk_hash**: commitment to anchor context (group+roots), NOT device identity
 
 The server **validates** (`accept_anchor`):
-- ✓ Cryptography: CAPSS Smallwood/ZK-VRF proofs, PoP signatures, SRX witnesses, Merkle consistency
+- ✓ Signatures, SRX witnesses, Merkle consistency, barrier-update authorization, transcript structure
 - ✓ Coarse policy (AcceptanceOptions): allowed SRX modes, params IDs, bootstrap policy
 
 **Your application** then **enforces fine-grained policy** (before persisting):
@@ -364,12 +347,14 @@ The server **validates** (`accept_anchor`):
 The server does **NOT** see:
 - **Device secret keys** (only public keys transmitted)
 - **Human identities** (Alice, Bob, etc.) — application-level mapping
-- **hp, Y*, E_k** (cryptographically hidden via KBROAD + ZK-VRF)
-- **Message content** (encrypted with E_k)
+- **`K_barrier` and message keys** (members only)
+- **Message content** (encrypted under keys derived from `K_barrier`)
+
+It can recompute `E_k` of JOIN anchors in `v0.1.4` (C-01).
 
 **Key distinction**: `accept_anchor` is policy-agnostic (validates crypto only). You enforce policy by examining validated anchor fields before persisting. Identity linking (leaf_hash → user) is also application-level.
 
-**Clarification on "Publisher-Blind"**: City-G is **cryptographically blind** to encryption keys (hp, Y*, E_k) and message content, but the server **CAN identify devices** via public keys transmitted in field #108 during join/merge. "Publisher-blind" means the server cannot decrypt messages or derive encryption keys, NOT sender anonymity. See [Security Model](docs/protocol/10-security-model.md) for details.
+**On "publisher-blind"**: the server cannot decrypt messages without `K_barrier`, but it is not blind to all epoch material (C-01), and it **can identify devices** via the public keys in field #108. See [Security Model](docs/protocol/10-security-model.md).
 
 **More Questions?** See [docs/protocol/17-faq.md](docs/protocol/17-faq.md)
 

@@ -304,14 +304,16 @@ impl ServerConfig {
 /// This struct is **not** thread-safe. Wrap in `Arc<Mutex<CityGServer>>` for
 /// concurrent access from multiple HTTP handlers.
 ///
-/// # Server-Blindness
+/// # What the server does not learn
 ///
-/// All validation operations preserve cryptographic blindness:
-/// - Server never decrypts KBROAD envelopes
-/// - Server never learns VRF outputs (Y*)
-/// - Server never derives epoch keys (E_k)
+/// - The server never decrypts KBROAD envelopes and never receives
+///   `K_barrier` or any message key derived from it.
+/// - It is *not* blind to `Y*` / `E_k` of JOIN anchors, which derive from
+///   public header data in profile v0.1.4 (audit C-01); message
+///   confidentiality rests on `K_barrier`.
 ///
-/// Verified by: `./scripts/verify_no_secrets.sh`
+/// `./scripts/verify_no_secrets.sh` is a syntactic guardrail that the
+/// acceptance code does not import decryption helpers, not a proof.
 ///
 /// # Examples
 /// ```no_run
@@ -1984,7 +1986,9 @@ impl CityGServer {
         replaying: bool,
     ) -> Result<(ServerOutcome, AcceptanceContext, ReceiverCache, GroupRoster), CityGError> {
         let mut staged_ctx = self.ctx.clone();
-        staged_ctx.set_pending_capss_witness(Some(bundle.capss_witness.clone()));
+        // The CAPSS witness never travels (audit C-01): acceptance recomputes
+        // it from public inputs.
+        staged_ctx.set_pending_capss_witness(None);
         let mut staged_receiver = self.receiver.clone();
         let mut staged_roster = self.roster.clone();
 

@@ -523,13 +523,11 @@ impl CityGClient {
 ///
 /// # Security
 ///
-/// All server-visible fields are either:
-/// - Public (gid, roots, leaf IDs)
-/// - Commitments/hashes (xk_hash, eid)
-/// - Encrypted (hp_ciphertext)
-/// - Zero-knowledge proofs (ZK-VRF)
-///
-/// The server cannot derive `Y*` or `E_k` from this bundle.
+/// Server-visible fields are public anchor data, commitments, the sealed
+/// `hp` envelope and the (profile v0.1.4) proof transcripts. The CAPSS
+/// witness stays local. Note that in profile v0.1.4 `E_k` is *not* secret
+/// from the server (audit C-01): message confidentiality rests on
+/// `K_barrier` alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientEpochBundle {
     /// Anchor instance data (gid, cat, roots)
@@ -542,7 +540,10 @@ pub struct ClientEpochBundle {
     pub hp_binding: BindingMaterial,
     /// Canonical SRX witness bytes (optional)
     pub witness: Option<Vec<u8>>,
-    /// CAPSS witness bundle for FS proof
+    /// CAPSS witness bundle for FS proof. Local only: it carries `hp` shares
+    /// in clear, so it is never serialized towards the server (audit C-01);
+    /// the server recomputes the witness it needs from public inputs.
+    #[serde(default, skip_serializing)]
     pub capss_witness: CapssWitnessBundle,
     /// Witness extraction epoch ID (32 bytes)
     pub we_epoch_id: [u8; 32],
@@ -1283,6 +1284,31 @@ mod tests {
         assert_eq!(bundle.epoch_key, [0u8; 32]);
         assert_eq!(bundle.eid, [0u8; 32]);
         assert_eq!(bundle.hp_aead_key, [0u8; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn wire_bundle_never_carries_the_capss_witness() -> Result<(), Box<dyn std::error::Error>> {
+        // Audit C-01: the witness holds hp shares in clear.
+        let bundle = demo_bundle_alice()?;
+        assert_ne!(
+            bundle.capss_witness,
+            CapssWitnessBundle::default(),
+            "the author keeps its witness locally"
+        );
+        let bytes = bundle.to_cbor()?;
+        let wire: Value = ciborium::de::from_reader(bytes.as_slice())?;
+        let Value::Map(entries) = wire else {
+            return Err("bundle must encode as a map".into());
+        };
+        assert!(
+            entries
+                .iter()
+                .all(|(key, _)| key.as_text() != Some("capss_witness")),
+            "capss_witness must not be serialized"
+        );
+        let decoded = ClientEpochBundle::from_cbor(&bytes)?;
+        assert_eq!(decoded.capss_witness, CapssWitnessBundle::default());
         Ok(())
     }
 

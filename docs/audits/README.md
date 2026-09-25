@@ -8,8 +8,8 @@ historical terms such as `cover_leaf_index` or `leaf_index`.
 
 For active protocol semantics, use:
 
-- [`/Users/admin/Desktop/Repositories/cityg/docs/specs.md`](/Users/admin/Desktop/Repositories/cityg/docs/specs.md)
-- [`/Users/admin/Desktop/Repositories/cityg/docs/protocol/21-slot-leases-v0.2.md`](/Users/admin/Desktop/Repositories/cityg/docs/protocol/21-slot-leases-v0.2.md)
+- [`docs/specs.md`](../specs.md)
+- [`docs/protocol/21-slot-leases-v0.2.md`](../protocol/21-slot-leases-v0.2.md)
 
 Do not treat archived audit wording as the canonical description of the current
 runtime profile.

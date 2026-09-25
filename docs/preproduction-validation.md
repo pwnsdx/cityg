@@ -30,7 +30,7 @@ A candidate build is considered pre-production ready only if all of the followin
 Prefer running the commands below after sourcing the repo-local Cargo environment:
 
 ```bash
-cd /Users/admin/Desktop/Repositories/cityg
+cd cityg  # repository root
 source ./scripts/cargo_repo_env.sh
 ```
 
@@ -59,7 +59,7 @@ Use this when you want to verify the real GUI flow before or after a stress camp
 Server:
 
 ```bash
-cd /Users/admin/Desktop/Repositories/cityg
+cd cityg  # repository root
 export CITYG_SERVER_ADDRESS=127.0.0.1:8080
 export CITYG_SERVER_MESSAGE_AUTH_TOKEN=dev-message-token
 cargo run -p cityg-api
@@ -68,7 +68,7 @@ cargo run -p cityg-api
 GUI instance 1:
 
 ```bash
-cd /Users/admin/Desktop/Repositories/cityg
+cd cityg  # repository root
 export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
 export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-1
 cargo run -p cityg-gui --features native-app
@@ -77,7 +77,7 @@ cargo run -p cityg-gui --features native-app
 GUI instance 2:
 
 ```bash
-cd /Users/admin/Desktop/Repositories/cityg
+cd cityg  # repository root
 export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
 export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-2
 cargo run -p cityg-gui --features native-app

@@ -7,6 +7,16 @@
 > If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and live code/tests.
 
 
+> [!WARNING]
+> **Corrections from the 2026-09-25 audit** ([report](../audits/audit-crypto-conformite-2026-09-25.md), in French). Several statements below are false for the `v0.1.4` profile and are kept only for traceability until the `v0.2` rewrite:
+> - **§5.4 / §6 server blindness**: the server can recompute `Y*` and `E_k` for JOIN anchors from public header data (C-01). Message confidentiality rests on `K_barrier` alone. The CAPSS witness (which carried `hp` shares) no longer leaves the device.
+> - **§5.3 uniqueness, §5.5 anti-grinding, §6.5, §9.3**: the SPHF, CAPSS Smallwood and ZK-VRF transcripts prove nothing (C-02); the RLWE parameters are labelled `rlwe-params/mock` and no security estimate applies to them.
+> - **§5.7 / FS claims**: there is no minutes-grade forward secrecy; `K_fs` does not protect payloads (H-02) and the barrier leaf key is not rotated (H-03).
+> - **§6.1–6.4**: the type-level and grep-based checks (`scripts/verify_no_secrets.sh`) are guardrails, not proofs.
+> - **§10 comparisons** rely on the claims above and should be disregarded.
+>
+> Fixed on this branch: a member no longer authors its own revocation (C-03; removal proposals committed by another member), receivers check sender membership and show the signed timestamp (H-10), signatures are FIPS 204 ML-DSA-87 with per-usage contexts (H-05), and the server fails closed by default (M-06).
+
 **Current profile coverage:** City-G `tswe/msphf-we/fs-hybrid + prs-barrier`
 **Historical blueprint lineage:** Alpha (0.1.0)
 **Status**: Normative (threat model informative, properties normative)
@@ -251,13 +261,13 @@ ML-DSA-87; CAPSS Smallwood FS proof (ROM soundness); ZK-VRF in QROM.
 
 ### 5.4 Server Blindness
 
-**Property**: The server cannot learn hp, Y\*, E_k, or eid.
+**Property (corrected, audit C-01)**: The server never receives `K_barrier`, message keys or device secret keys. It is **not** blind to `Y*`, `E_k` and `eid` of JOIN anchors, which derive from public header data.
 
-**Formal Statement**:
+**Statement**:
 ```
 ∀ server S, anchor A:
-  S.validate(A) ⇒ S learns (we_epoch_id, wid) only
-  S cannot compute: hp, Y*, E_k, eid
+  S.validate(A) ⇒ S does not learn K_barrier or any key derived from it
+  S may compute E_k (JOIN anchors, profile v0.1.4)
 ```
 
 **Clarification**: This property guarantees **encryption key confidentiality**, not sender anonymity. The server **CAN identify devices** via public keys transmitted in field #108 during join/merge. However, the server cannot decrypt messages or derive epoch keys.
