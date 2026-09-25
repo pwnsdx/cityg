@@ -11,14 +11,7 @@ pub(super) struct JoinFormState {
     pub(super) alias_editor: TextInputEditorState,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct JoinInvitePayload {
-    pub(super) version: u8,
-    pub(super) server_url: String,
-    pub(super) room_id: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ActiveField {
     Server,
     Room,
@@ -60,77 +53,67 @@ pub(super) fn preferred_join_form_server(default_server_url: &str) -> String {
     trimmed.to_string()
 }
 
-pub(super) fn build_join_invite(session: &AppSession) -> Result<String> {
-    let payload = JoinInvitePayload {
-        version: 3,
-        server_url: session.server_url.clone(),
-        room_id: session.room_id.clone(),
-    };
-    let encoded = serde_json::to_string(&payload).context("failed to encode room invite")?;
-    Ok(format!("{JOIN_INVITE_PREFIX}{encoded}"))
+/// Parse a pasted invite link (`Ok(None)` when the text is not one).
+pub(super) fn parse_join_invite(raw: &str) -> Result<Option<InviteLink>> {
+    Ok(InviteLink::parse(raw)?)
 }
 
-pub(super) fn parse_join_invite(raw: &str) -> Result<Option<JoinInvitePayload>> {
-    let trimmed = raw.trim();
-    let Some(payload) = trimmed.strip_prefix(JOIN_INVITE_PREFIX) else {
-        return Ok(None);
-    };
-
-    let invite: JoinInvitePayload =
-        serde_json::from_str(payload).context("invalid City-G invite payload")?;
-    if invite.version != 1 && invite.version != 2 && invite.version != 3 {
-        return Err(anyhow!(
-            "unsupported City-G invite version {}",
-            invite.version
-        ));
-    }
-    if invite.server_url.trim().is_empty() {
-        return Err(anyhow!(
-            "invite worker edge or compatible endpoint URL is missing"
-        ));
-    }
-    if !JoinFormState::is_valid_room_id(invite.room_id.trim()) {
-        return Err(anyhow!("invite room ID is not valid"));
-    }
-    Ok(Some(invite))
-}
-
-#[cfg(test)]
-pub(super) fn apply_join_field_paste(field: ActiveField, existing: &str, pasted: &str) -> String {
-    let sanitized = sanitize_clipboard_text(pasted);
-    if field == ActiveField::Room {
-        let trimmed = sanitized.trim();
-        if JoinFormState::is_valid_room_id(trimmed) {
-            return trimmed.to_string();
-        }
-    }
-
-    let mut updated = existing.to_string();
-    updated.push_str(&sanitized);
-    updated
+/// What the join form asks for.
+#[derive(Clone, Debug)]
+pub(super) enum JoinRequest {
+    /// Create a new room on `server_url`.
+    Create { server_url: String, alias: String },
+    /// Join the room of an invite link.
+    Invite { link: InviteLink, alias: String },
 }
 
 impl JoinFormState {
-    pub(super) fn apply_invite(&mut self, invite: JoinInvitePayload) -> Result<()> {
-        self.server = invite.server_url;
-        self.room_id = invite.room_id;
+    pub(super) fn apply_invite(&mut self, raw: &str, link: &InviteLink) -> Result<()> {
+        self.server = link.server_url.clone();
+        self.room_id = raw.trim().to_string();
         self.server_editor.reset_for_text(&self.server);
         self.room_editor.reset_for_text(&self.room_id);
         Ok(())
     }
 
-    pub(super) fn clear_invite_material(&mut self) {}
-
-    pub(super) fn is_ready(&self) -> bool {
-        let server = self.server.trim();
-        let room = self.room_id.trim();
-        let alias = self.alias.trim();
-
-        !server.is_empty() && !alias.is_empty() && Self::is_valid_room_id(room)
+    pub(super) fn clear_invite_material(&mut self) {
+        if self.room_id.trim().starts_with(INVITE_PREFIX) {
+            self.room_id.clear();
+            self.room_editor.reset_for_text("");
+        }
     }
 
-    pub(super) fn is_valid_room_id(room: &str) -> bool {
-        room.len() == 64 && room.chars().all(|c| c.is_ascii_hexdigit())
+    pub(super) fn is_ready(&self) -> bool {
+        self.join_request().is_ok()
+    }
+
+    /// The request the form describes: an empty room field creates a room,
+    /// an invite link joins its room.
+    pub(super) fn join_request(&self) -> Result<JoinRequest> {
+        let alias = self.alias.trim();
+        if alias.is_empty() {
+            return Err(anyhow!("choose an alias"));
+        }
+        let room = self.room_id.trim();
+        if room.is_empty() {
+            let server_url = self.server.trim();
+            if server_url.is_empty() {
+                return Err(anyhow!("enter the server URL"));
+            }
+            return Ok(JoinRequest::Create {
+                server_url: server_url.to_string(),
+                alias: alias.to_string(),
+            });
+        }
+        match InviteLink::parse(room)? {
+            Some(link) => Ok(JoinRequest::Invite {
+                link,
+                alias: alias.to_string(),
+            }),
+            None => Err(anyhow!(
+                "joining an existing room needs an invite link from one of its admins"
+            )),
+        }
     }
 
     pub(super) fn field_mut(&mut self, field: ActiveField) -> &mut String {
@@ -240,14 +223,6 @@ impl JoinFormState {
         }
 
         KeyOutcome::None
-    }
-
-    pub(super) fn join_params(&self) -> JoinParams {
-        JoinParams {
-            server_url: self.server.trim().to_string(),
-            room_id: self.room_id.trim().to_string(),
-            alias: self.alias.trim().to_string(),
-        }
     }
 
     pub(super) fn editor_for(&self, field: ActiveField) -> &TextInputEditorState {

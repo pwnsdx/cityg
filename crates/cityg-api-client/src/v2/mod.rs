@@ -7,7 +7,7 @@ mod member;
 
 pub use client::{ClientError, DsClient};
 pub use invite::{INVITE_PREFIX, INVITE_VERSION, InviteLink};
-pub use member::{CONTENT_TYPE_TEXT, Member, SentMessage, SyncReport};
+pub use member::{CONTENT_TYPE_TEXT, Member, SentMessage, StateSink, SyncReport};
 
 pub use cityg_core;
 pub use cityg_proto;

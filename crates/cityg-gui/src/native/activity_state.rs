@@ -60,8 +60,9 @@ pub(super) struct MemberEntry {
     pub(super) leaf_id: [u8; 32],
     pub(super) alias: Option<String>,
     pub(super) pop_public_key: Option<Vec<u8>>,
-    pub(super) join_timestamp_ms: Option<u64>,
-    pub(super) last_seen_timestamp_ms: Option<u64>,
+    pub(super) slot: u32,
+    pub(super) admin: bool,
+    pub(super) pending_removal: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]

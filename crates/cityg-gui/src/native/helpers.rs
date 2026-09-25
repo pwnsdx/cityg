@@ -1,17 +1,20 @@
 use super::*;
-#[cfg(test)]
-pub(super) use cityg_client::barrier_crypto::generate_kbroad_keypair;
-pub(super) use cityg_client::binary::{
-    bytes32, decode_hex_32, fingerprint_full_hex, fingerprint_preview_hex, header_bytes32,
-};
-#[cfg(test)]
-pub(super) use cityg_client::bundle_headers::compute_fs_fingerprint_from_header;
-pub(super) use cityg_client::bundle_headers::derive_fs_fingerprint_from_fields;
-#[cfg(test)]
-pub(super) use cityg_client::bundle_headers::{
-    header_bytes, header_bytes_opt, header_bytes32_opt, recompute_proofs_commit,
-    recompute_srx_commit,
-};
+
+pub(super) fn fingerprint_full_hex(bytes: &[u8; 32]) -> String {
+    hex_encode(bytes)
+}
+
+/// Grouped preview of a 32-byte fingerprint, for display.
+pub(super) fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
+    let hex = fingerprint_full_hex(bytes);
+    format!(
+        "{}-{} {}-{} …",
+        &hex[..4],
+        &hex[4..8],
+        &hex[8..12],
+        &hex[12..16]
+    )
+}
 
 pub(super) fn hex_encode_prefix(bytes: &[u8; 32], prefix_len: usize) -> String {
     let hex = hex_encode(bytes);
@@ -44,27 +47,6 @@ pub(super) fn format_regular_fingerprint(value: Option<&[u8; 32]>) -> String {
     }
 }
 
-pub(super) fn format_fs_fingerprint(value: Option<&[u8; 32]>, fs_ec: u64) -> String {
-    match value {
-        Some(bytes) => format!("{} · fs_ec {}", fingerprint_preview_hex(bytes), fs_ec),
-        None => "Not available".to_string(),
-    }
-}
-
-pub(super) fn header_text(header: &BTreeMap<u64, Value>, key: u64) -> Option<&str> {
-    match header.get(&key)? {
-        Value::Text(text) => Some(text.as_str()),
-        _ => None,
-    }
-}
-
-pub(super) fn header_u64(header: &BTreeMap<u64, Value>, key: u64) -> Option<u64> {
-    match header.get(&key)? {
-        Value::Integer(int) => (*int).try_into().ok(),
-        _ => None,
-    }
-}
-
 pub(super) fn decode_room_admin_target_hex(input: &str) -> Result<Vec<u8>> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -75,7 +57,7 @@ pub(super) fn decode_room_admin_target_hex(input: &str) -> Result<Vec<u8>> {
         .or_else(|| trimmed.strip_prefix("0X"))
         .unwrap_or(trimmed);
     let bytes = hex_decode(normalized).context("room admin target must be valid hex")?;
-    let expected_len = cityg_api_client::room_admin_public_key_bytes();
+    let expected_len = cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES;
     if bytes.len() != expected_len {
         return Err(anyhow!(
             "room admin target must be {} bytes (got {})",
@@ -84,32 +66,6 @@ pub(super) fn decode_room_admin_target_hex(input: &str) -> Result<Vec<u8>> {
         ));
     }
     Ok(bytes)
-}
-
-#[cfg(test)]
-pub(super) fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>> {
-    let raw = match std::env::var(var_name) {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => return Ok(None),
-        Err(err) => {
-            return Err(anyhow!("failed reading {}: {}", var_name, err));
-        }
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let normalized = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
-    if normalized.is_empty() {
-        return Ok(None);
-    }
-
-    let bytes =
-        hex_decode(normalized).with_context(|| format!("{var_name} must contain hex bytes"))?;
-    Ok(Some(bytes))
 }
 
 pub(super) fn format_member_label(member: &MemberEntry) -> String {

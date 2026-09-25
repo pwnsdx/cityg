@@ -17,21 +17,21 @@ pub(super) struct AppModel {
     pub(super) fetch_status: FetchStatus,
     pub(super) send_status: SendStatus,
     pub(super) composer: MessageComposer,
+    /// Running log sync (fetch of commits, messages and proposals).
     pub(super) fetch_task: Option<Task<()>>,
     pub(super) fetch_in_flight: bool,
-    pub(super) fetch_after_epoch_sync: bool,
+    /// Another sync was requested while one was running.
+    pub(super) sync_again: bool,
     pub(super) show_ciphertext: bool,
     pub(super) members: Vec<MemberEntry>,
     pub(super) members_status: MembersStatus,
     pub(super) members_total: u64,
     pub(super) members_next_offset: Option<u64>,
-    pub(super) members_loading_append: bool,
-    pub(super) members_auto_page: bool,
-    pub(super) members_alias_dirty: bool,
     pub(super) members_mode: MembersMode,
     pub(super) members_search: MembersSearchState,
-    pub(super) members_refresh_task: Option<Task<()>>,
-    /// A background commit of other members' leave requests is running.
+    /// Periodic maintenance: sync fallback, removal commits, key refresh.
+    pub(super) maintenance_task: Option<Task<()>>,
+    /// A background commit (pending removals or key refresh) is running.
     pub(super) removal_commit_in_flight: bool,
     pub(super) alias_bindings: AHashMap<String, AliasBindingRecord>,
     pub(super) leaf_alias_index: AHashMap<[u8; 32], String>,
@@ -40,15 +40,13 @@ pub(super) struct AppModel {
     pub(super) room_admin_status: RoomAdminStatus,
     pub(super) room_admin_target: RoomAdminTargetState,
     pub(super) room_admin_revoke_confirmation: Option<Vec<u8>>,
-    pub(super) epoch_sync_task: Option<Task<()>>, // Background task for membership-driven epoch sync
-    pub(super) ws_task: Option<Task<()>>,         // WebSocket connection task
+    pub(super) ws_task: Option<Task<()>>, // WebSocket connection task
     pub(super) endpoint_mode_task: Option<Task<()>>,
     pub(super) endpoint_mode_server_url: Option<String>,
     pub(super) endpoint_mode: EndpointMode,
     pub(super) ws_connected: bool, // WebSocket connection status
     pub(super) ws_autostart_attempted: bool,
     pub(super) window_active: bool,
-    pub(super) restore_epoch_sync_pending: bool,
     pub(super) last_retry_action: Option<RetryAction>, // Track what action to retry
     pub(super) security_events: Vec<SecurityEvent>,
     pub(super) security_unread: u32,

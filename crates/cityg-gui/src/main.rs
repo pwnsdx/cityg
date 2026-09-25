@@ -1,11 +1,5 @@
 #![allow(unexpected_cfgs)]
 
-#[cfg(feature = "native-app")]
-mod barrier_shared;
-mod client_env;
-#[cfg(feature = "native-app")]
-mod websocket_replay;
-
 #[cfg(not(feature = "native-app"))]
 fn main() {
     eprintln!("cityg-gui native binary is disabled in this build.");

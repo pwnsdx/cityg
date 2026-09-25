@@ -15,10 +15,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use cityg_api_client::{
-    CitygApiClient, RoomAdminOperation, build_room_admin_proof, generate_room_admin_keypair,
-};
-use cityg_client::demo;
+use cityg_api_client::v2::cityg_core::identity::DeviceIdentity;
+use cityg_api_client::v2::{DsClient, Member};
 use cityg_stress::metrics::{MetricsSnapshot, parse_metrics_snapshot};
 use clap::{ArgAction, Parser};
 use crossterm::{
@@ -41,8 +39,10 @@ use tracing_subscriber::EnvFilter;
 use ui::{AppState, draw};
 
 const DEFAULT_SERVER_BIND: &str = "127.0.0.1:18080";
-const DEFAULT_ADMIN_TOKEN: &str = "join-leave-admin-token";
-const DEFAULT_MESSAGE_TOKEN: &str = "join-leave-message-token";
+/// Slots of the rooms a worker reuses across rounds.
+const REUSED_ROOM_N_MAX: u32 = 256;
+/// Lifetime of the invite a worker hands to its rounds.
+const REUSED_ROOM_INVITE_TTL_MS: u64 = 24 * 3_600_000;
 const DEFAULT_WINDOW_TTL_SECS: u64 = 120;
 const DEFAULT_MAX_CONCURRENT_HEADS: u64 = 4;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
@@ -115,10 +115,6 @@ struct Cli {
         default_value_t = DEFAULT_SERVER_READY_TIMEOUT_SECS
     )]
     server_ready_timeout_secs: u64,
-    #[arg(long, env = "CITYG_STRESS_ADMIN_TOKEN")]
-    admin_token: Option<String>,
-    #[arg(long, env = "CITYG_STRESS_MESSAGE_TOKEN")]
-    message_token: Option<String>,
     #[arg(long, env = "CITYG_STRESS_SERVER_STATE_PATH")]
     server_state_path: Option<PathBuf>,
     #[arg(long, env = "CITYG_STRESS_API_BIN")]
@@ -157,8 +153,6 @@ struct Config {
     max_concurrent_heads: u64,
     poll_interval: Duration,
     server_ready_timeout: Duration,
-    admin_token: String,
-    message_token: String,
     server_state_path: Option<PathBuf>,
     api_bin: PathBuf,
     join_leave_bin: PathBuf,
@@ -277,12 +271,6 @@ impl ManagedServer {
         let mut command = Command::new(&self.config.api_bin);
         command
             .env("CITYG_SERVER_ADDRESS", &self.config.server_bind)
-            .env("CITYG_SERVER_ROOMS_ADMIN_TOKEN", &self.config.admin_token)
-            .env("CITYG_SERVER_WINDOW_ADMIN_TOKEN", &self.config.admin_token)
-            .env(
-                "CITYG_SERVER_MESSAGE_AUTH_TOKEN",
-                &self.config.message_token,
-            )
             .env(
                 "CITYG_PROTOCOL_WINDOW_DURATION_SECS",
                 self.config.window_ttl_secs.to_string(),
@@ -522,17 +510,6 @@ impl Config {
         let server_url = cli
             .server_url
             .unwrap_or_else(|| format!("http://{}", cli.server_bind));
-        let admin_token = cli
-            .admin_token
-            .or_else(|| read_env("CITYG_CLIENT_ADMIN_TOKEN"))
-            .or_else(|| read_env("CITYG_SERVER_ROOMS_ADMIN_TOKEN"))
-            .or_else(|| read_env("CITYG_SERVER_WINDOW_ADMIN_TOKEN"))
-            .unwrap_or_else(|| DEFAULT_ADMIN_TOKEN.to_string());
-        let message_token = cli
-            .message_token
-            .or_else(|| read_env("CITYG_CLIENT_MESSAGE_AUTH_TOKEN"))
-            .or_else(|| read_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
-            .unwrap_or_else(|| DEFAULT_MESSAGE_TOKEN.to_string());
         let api_bin = resolve_binary(
             cli.api_bin,
             repo_root.join("target/debug/cityg-api"),
@@ -573,8 +550,6 @@ impl Config {
             max_concurrent_heads: cli.max_concurrent_heads,
             poll_interval: Duration::from_millis(cli.poll_interval_ms),
             server_ready_timeout: Duration::from_secs(cli.server_ready_timeout_secs),
-            admin_token,
-            message_token,
             server_state_path,
             api_bin,
             join_leave_bin,
@@ -668,10 +643,6 @@ fn default_artifact_dir() -> PathBuf {
     env::temp_dir().join(format!("cityg-stress-{stamp}"))
 }
 
-fn read_env(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|value| !value.trim().is_empty())
-}
-
 fn open_append(path: &Path) -> Result<File> {
     OpenOptions::new()
         .create(true)
@@ -680,10 +651,33 @@ fn open_append(path: &Path) -> Result<File> {
         .with_context(|| format!("open {}", path.display()))
 }
 
-fn random_room_id() -> String {
-    let mut bytes = [0u8; 32];
-    rng().fill(&mut bytes);
-    hex_encode(bytes)
+/// Room reused by all rounds of a worker: an owner member created in
+/// process, and the invite link its rounds join through.
+struct ReusedRoom {
+    _owner: Member,
+    label: String,
+    invite: String,
+}
+
+async fn create_reused_room(server_url: &str) -> Result<ReusedRoom> {
+    let mut seed = [0u8; 32];
+    rng().fill(&mut seed);
+    let mut owner = Member::create(
+        DsClient::new(server_url)?,
+        DeviceIdentity::from_seed(&seed),
+        REUSED_ROOM_N_MAX,
+    )
+    .await
+    .context("create the worker's reused room")?;
+    let invite = owner
+        .create_invite_link(server_url, REUSED_ROOM_INVITE_TTL_MS)
+        .await
+        .context("invite into the worker's reused room")?;
+    Ok(ReusedRoom {
+        label: hex_encode(owner.gid()),
+        _owner: owner,
+        invite: invite.encode(),
+    })
 }
 
 fn random_leave_order(count: usize, limit: usize) -> String {
@@ -1005,16 +999,17 @@ async fn run_worker(
     active_rounds: Arc<AtomicUsize>,
     stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut api_client =
-        CitygApiClient::new(&config.server_url).with_admin_token(config.admin_token.clone());
-    api_client = api_client.with_message_auth_token(config.message_token.clone());
     let worker_log = config
         .artifact_dir
         .join(format!("worker-{worker_id:02}.log"));
     let worker_status = config
         .artifact_dir
         .join(format!("worker-{worker_id:02}.status"));
-    let reused_room_id = config.reuse_room_per_worker.then(random_room_id);
+    let reused_room = if config.reuse_room_per_worker {
+        Some(create_reused_room(&config.server_url).await?)
+    } else {
+        None
+    };
 
     'rounds: for round in 1..=config.rounds_per_worker {
         if *stop_rx.borrow() {
@@ -1043,7 +1038,9 @@ async fn run_worker(
             if *stop_rx.borrow() {
                 break 'rounds;
             }
-            let room_id = reused_room_id.clone().unwrap_or_else(random_room_id);
+            let room_id = reused_room
+                .as_ref()
+                .map_or_else(|| "new".to_string(), |room| room.label.clone());
             let round_started_at = Instant::now();
             let _ = event_tx.send(AppEvent::WorkerRoundStarted {
                 worker_id,
@@ -1055,7 +1052,6 @@ async fn run_worker(
             active_rounds.fetch_add(1, Ordering::SeqCst);
 
             let result = run_worker_round_attempt(
-                &api_client,
                 &config,
                 WorkerRoundAttempt {
                     worker_log: &worker_log,
@@ -1063,7 +1059,7 @@ async fn run_worker(
                     round,
                     attempt_index: attempt,
                     room_id: &room_id,
-                    bootstrap_room: !config.reuse_room_per_worker || round == 1,
+                    invite: reused_room.as_ref().map(|room| room.invite.as_str()),
                     count,
                     watch_mode,
                     leave_order: &leave_order,
@@ -1264,34 +1260,14 @@ struct WorkerRoundAttempt<'a> {
     round: usize,
     attempt_index: usize,
     room_id: &'a str,
-    bootstrap_room: bool,
+    invite: Option<&'a str>,
     count: usize,
     watch_mode: bool,
     leave_order: &'a str,
     inject_client_restart: bool,
 }
 
-async fn run_worker_round_attempt(
-    api_client: &CitygApiClient,
-    config: &Config,
-    attempt: WorkerRoundAttempt<'_>,
-) -> Result<()> {
-    if attempt.bootstrap_room {
-        api_client
-            .bootstrap_room_as_admin(attempt.room_id, demo::kbroad_public(), {
-                let (pop_public_key, pop_secret_key) = generate_room_admin_keypair()?;
-                build_room_admin_proof(
-                    RoomAdminOperation::Bootstrap,
-                    attempt.room_id,
-                    demo::kbroad_public(),
-                    &pop_public_key,
-                    &pop_secret_key,
-                )?
-            })
-            .await
-            .with_context(|| format!("bootstrap room {}", attempt.room_id))?;
-    }
-
+async fn run_worker_round_attempt(config: &Config, attempt: WorkerRoundAttempt<'_>) -> Result<()> {
     if config.jitter_max_secs > 0 {
         let jitter = rng().random_range(0..=config.jitter_max_secs);
         if jitter > 0 {
@@ -1314,9 +1290,11 @@ async fn run_worker_round_attempt(
         ))
     });
     let mut command = Command::new(&config.join_leave_bin);
+    command.arg(&config.server_url);
+    if let Some(invite) = attempt.invite {
+        command.arg(invite);
+    }
     command
-        .arg(&config.server_url)
-        .arg(attempt.room_id)
         .arg(&alias_base)
         .arg(format!("--count={}", attempt.count))
         .arg(format!("--leave-order={}", attempt.leave_order))
@@ -1329,8 +1307,6 @@ async fn run_worker_round_attempt(
             config.message_burst_interval_ms
         ))
         .arg("--verbose")
-        .env("CITYG_CLIENT_ADMIN_TOKEN", &config.admin_token)
-        .env("CITYG_CLIENT_MESSAGE_AUTH_TOKEN", &config.message_token)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(err_file));
     if let Some(artifact_dir) = session_artifact_dir.as_ref() {

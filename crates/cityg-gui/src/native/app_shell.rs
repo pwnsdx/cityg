@@ -1,6 +1,5 @@
 use super::endpoint_mode::EndpointMode;
 use super::*;
-use cityg_client::binary::random_hex_32;
 
 #[cfg(not(test))]
 pub(super) fn run_native_app() {
@@ -89,44 +88,12 @@ pub(super) fn run_native_app() {
 }
 
 impl AppModel {
-    pub(super) fn barrier_recovery_pending(&self) -> bool {
-        self.session
-            .as_ref()
-            .map(|session| session.barrier_state.barrier_recovery_pending)
-            .unwrap_or(false)
-    }
-
-    pub(super) fn barrier_recovery_issue(&self) -> Option<BarrierRecoveryIssue> {
-        self.session
-            .as_ref()
-            .and_then(|session| session.barrier_state.barrier_recovery_issue)
-    }
-
-    pub(super) fn barrier_recovery_wait_message() -> &'static str {
-        "Joined room. Waiting for barrier recovery before messaging."
-    }
-
-    pub(super) fn barrier_recovery_message_for_session(session: &AppSession) -> String {
-        let trace = session.barrier_state.last_pending_history_trace.as_ref();
-        let base = session
-            .barrier_state
-            .barrier_recovery_issue
-            .or_else(|| trace.and_then(|trace| trace.recovery_issue))
-            .map(BarrierRecoveryIssue::user_message)
-            .unwrap_or_else(Self::barrier_recovery_wait_message);
-        if let Some(trace) = trace {
-            format!("{base} {}", trace.user_summary())
-        } else {
-            base.to_string()
-        }
-    }
-
     pub(super) fn new(config: CityGConfig) -> Self {
         let mut model = Self {
             config: config.clone(),
             join_form: JoinFormState {
                 server: preferred_join_form_server(&config.client.default_server_url),
-                room_id: AppModel::random_room_id(),
+                room_id: String::new(),
                 alias: String::new(),
                 active: Some(ActiveField::Alias),
                 ..Default::default()
@@ -146,18 +113,15 @@ impl AppModel {
             composer: MessageComposer::default(),
             fetch_task: None,
             fetch_in_flight: false,
-            fetch_after_epoch_sync: false,
+            sync_again: false,
             show_ciphertext: false,
             members: Vec::new(),
             members_status: MembersStatus::Idle,
             members_total: 0,
             members_next_offset: None,
-            members_loading_append: false,
-            members_auto_page: false,
-            members_alias_dirty: false,
             members_mode: MembersMode::default(),
             members_search: MembersSearchState::default(),
-            members_refresh_task: None,
+            maintenance_task: None,
             removal_commit_in_flight: false,
             alias_bindings: AHashMap::new(),
             leaf_alias_index: AHashMap::new(),
@@ -166,7 +130,6 @@ impl AppModel {
             room_admin_status: RoomAdminStatus::Idle,
             room_admin_target: RoomAdminTargetState::default(),
             room_admin_revoke_confirmation: None,
-            epoch_sync_task: None,
             ws_task: None,
             endpoint_mode_task: None,
             endpoint_mode_server_url: None,
@@ -174,7 +137,6 @@ impl AppModel {
             ws_connected: false,
             ws_autostart_attempted: false,
             window_active: false,
-            restore_epoch_sync_pending: false,
             last_retry_action: None,
             security_events: Vec::new(),
             security_unread: 0,
@@ -195,42 +157,27 @@ impl AppModel {
         match load_last_session() {
             Ok(Some(saved)) => {
                 model.join_form.server = saved.server_url.clone();
-                model.join_form.room_id = saved.room_id.clone();
+                model.join_form.room_id = String::new();
                 model.join_form.alias = saved.alias.clone();
                 model
                     .join_form
                     .server_editor
                     .reset_for_text(&model.join_form.server);
-                model
-                    .join_form
-                    .room_editor
-                    .reset_for_text(&model.join_form.room_id);
+                model.join_form.room_editor.reset_for_text("");
                 model
                     .join_form
                     .alias_editor
                     .reset_for_text(&model.join_form.alias);
                 model.join_form.active = None;
-                model.session = Some(saved);
-                model.hydrate_alias_bindings_from_disk();
-                model.load_security_events_from_disk();
+                model.install_session(saved);
                 model.info_message = Some("Restored saved session.".to_string());
-                model.fetch_status = FetchStatus::Idle;
-                model.send_status = SendStatus::Idle;
-                model.messages.clear();
-                model.message_keys.clear();
-                model.composer.clear();
-                model.composer.blur();
-                model.fetch_task = None;
-                model.fetch_in_flight = false;
-                model.fetch_after_epoch_sync = false;
-                model.show_ciphertext = false;
-                model.restore_epoch_sync_pending = true;
-                model.endpoint_mode_server_url = None;
-                model.endpoint_mode = EndpointMode::Unknown;
             }
             Ok(None) => {}
             Err(err) => {
                 warn!("failed to load saved session: {err:?}");
+                model.info_message = Some(
+                    "The saved session could not be restored; join the room again.".to_string(),
+                );
             }
         }
 
@@ -302,11 +249,5 @@ impl Render for AppModel {
         }
 
         root
-    }
-}
-
-impl AppModel {
-    pub(super) fn random_room_id() -> String {
-        random_hex_32()
     }
 }

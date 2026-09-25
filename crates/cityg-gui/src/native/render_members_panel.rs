@@ -183,15 +183,14 @@ impl AppModel {
         let local_is_room_admin = local_session
             .and_then(|session| self.room_admin_membership(session.pop_public_key.as_slice()))
             .unwrap_or(false);
-        let membership_update_busy =
-            !matches!(self.leave_status, LeaveStatus::Idle) || self.barrier_recovery_pending();
+        let membership_update_busy = !matches!(self.leave_status, LeaveStatus::Idle);
 
         if self.members.is_empty() {
             list = list.child(
                 div()
                     .text_size(px(12.0))
                     .text_color(rgb(UI_SUBTLE_TEXT))
-                    .child("No members reported for this root."),
+                    .child("No members in the current epoch."),
             );
         } else {
             for member in &self.members {
@@ -221,23 +220,21 @@ impl AppModel {
                             .child(format!("leaf: {}", hex_encode(member.leaf_id))),
                     );
 
-                if let Some(joined) = member.join_timestamp_ms {
-                    entry = entry.child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(UI_MUTED_TEXT))
-                            .child(format!("joined {}", format_timestamp(joined))),
-                    );
-                }
-
-                if let Some(last_seen) = member.last_seen_timestamp_ms {
-                    entry = entry.child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(UI_MUTED_TEXT))
-                            .child(format!("last seen {}", format_timestamp(last_seen))),
-                    );
-                }
+                let facts = if member.pending_removal {
+                    format!("slot {} · removal pending", member.slot)
+                } else {
+                    format!("slot {}", member.slot)
+                };
+                entry = entry.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(if member.pending_removal {
+                            rgb(UI_WARN_TEXT)
+                        } else {
+                            rgb(UI_MUTED_TEXT)
+                        })
+                        .child(facts),
+                );
 
                 if let Some(pop_public_key) =
                     member.pop_public_key.as_ref().filter(|pk| !pk.is_empty())
@@ -252,7 +249,7 @@ impl AppModel {
                             )),
                     );
 
-                    if self.room_admin_membership(pop_public_key.as_slice()) == Some(true) {
+                    if member.admin {
                         identity_row = identity_row.child(
                             div()
                                 .px(px(8.0))
@@ -288,7 +285,10 @@ impl AppModel {
                     entry = entry.child(identity_row);
                 }
 
-                if local_is_room_admin && local_leaf_id != Some(member.leaf_id) {
+                if local_is_room_admin
+                    && local_leaf_id != Some(member.leaf_id)
+                    && !member.pending_removal
+                {
                     let target_leaf_id = member.leaf_id;
                     let mut expel_button = div()
                         .px(px(8.0))

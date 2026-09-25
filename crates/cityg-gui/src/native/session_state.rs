@@ -1,9 +1,99 @@
-use super::websocket::{
-    MembershipSignal, MembershipSignalKind, WebSocketMessageSignal, WebSocketSyncRequiredSignal,
-};
 use super::*;
 
 impl AppModel {
+    /// Make `session` the active session: restore its chat history, aliases
+    /// and security log from disk and derive the roster panels from its view.
+    pub(super) fn install_session(&mut self, session: AppSession) {
+        let history = load_history(&session.server_url, &session.room_id).unwrap_or_else(|err| {
+            warn!("failed to load chat history: {err:?}");
+            Vec::new()
+        });
+        let view = session.view.clone();
+        self.session = Some(session);
+        self.messages.clear();
+        self.message_keys.clear();
+        self.next_pending_message_id = 1;
+        self.append_messages(history);
+        self.hydrate_alias_bindings_from_disk();
+        self.load_security_events_from_disk();
+        self.apply_session_view(view);
+        self.fetch_status = FetchStatus::Idle;
+        self.send_status = SendStatus::Idle;
+        self.composer.clear();
+        self.composer.blur();
+        self.fetch_task = None;
+        self.fetch_in_flight = false;
+        self.sync_again = false;
+        self.show_ciphertext = false;
+        self.ws_autostart_attempted = false;
+        self.endpoint_mode_server_url = None;
+        self.endpoint_mode = super::endpoint_mode::EndpointMode::Unknown;
+    }
+
+    /// Record a new view of the session: roster, admins and members panel.
+    pub(super) fn apply_session_view(&mut self, view: SessionView) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        session.apply_view(view.clone());
+        self.room_admins = view
+            .roster
+            .iter()
+            .filter(|entry| entry.admin)
+            .map(|entry| entry.device_public_key.clone())
+            .collect();
+        self.room_admins_loaded = true;
+        for entry in &view.roster {
+            if let Some(alias) = &entry.alias {
+                self.leaf_alias_index.insert(entry.leaf_id, alias.clone());
+            }
+        }
+        self.rebuild_members();
+    }
+
+    /// Rebuild the members panel from the session roster and the search.
+    pub(super) fn rebuild_members(&mut self) {
+        let Some(session) = &self.session else {
+            self.members.clear();
+            self.members_total = 0;
+            return;
+        };
+        let query = match &self.members_mode {
+            MembersMode::Search { query } => Some(query.to_lowercase()),
+            MembersMode::Full => None,
+        };
+        self.members = session
+            .view
+            .roster
+            .iter()
+            .map(|entry| MemberEntry {
+                leaf_id: entry.leaf_id,
+                alias: entry
+                    .alias
+                    .clone()
+                    .or_else(|| self.leaf_alias_index.get(&entry.leaf_id).cloned())
+                    .or_else(|| (entry.leaf_id == session.leaf_id).then(|| session.alias.clone())),
+                pop_public_key: Some(entry.device_public_key.clone()),
+                slot: entry.slot,
+                admin: entry.admin,
+                pending_removal: entry.pending_removal,
+            })
+            .filter(|member| match &query {
+                None => true,
+                Some(query) => {
+                    member
+                        .alias
+                        .as_deref()
+                        .is_some_and(|alias| alias.to_lowercase().contains(query))
+                        || hex_encode(member.leaf_id).starts_with(query.as_str())
+                }
+            })
+            .collect();
+        self.members_total = session.view.roster.len() as u64;
+        self.members_next_offset = None;
+        self.members_status = MembersStatus::Idle;
+    }
+
     pub(super) fn append_messages(&mut self, new_messages: Vec<ChatMessageEntry>) -> usize {
         let mut inserted = 0usize;
         for mut message in new_messages {
@@ -31,16 +121,12 @@ impl AppModel {
     pub(super) fn queue_pending_message(&mut self, session: &AppSession, plaintext: &str) -> u64 {
         let pending_id = self.next_pending_message_id;
         self.next_pending_message_id = self.next_pending_message_id.saturating_add(1);
-        let timestamp_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
         self.messages.push(ChatMessageEntry {
             sender_leaf: Some(session.leaf_id),
             fallback_label: session.alias.clone(),
             plaintext: plaintext.to_string(),
             ciphertext_hex: String::new(),
-            timestamp_ms,
+            timestamp_ms: engine::now_ms(),
             delivery: MessageDelivery::Pending,
             pending_id: Some(pending_id),
         });
@@ -86,6 +172,15 @@ impl AppModel {
         }
     }
 
+    /// Persist the chat history of the active session.
+    pub(super) fn persist_history(&self) {
+        if let Some(session) = &self.session
+            && let Err(err) = persist_history(&session.server_url, &session.room_id, &self.messages)
+        {
+            warn!("failed to persist chat history: {err:?}");
+        }
+    }
+
     pub(super) fn resolve_sender_label(&self, message: &ChatMessageEntry) -> String {
         if let Some(leaf) = message.sender_leaf
             && let Some(label) = self.member_label_for_leaf(&leaf)
@@ -105,48 +200,43 @@ impl AppModel {
         None
     }
 
-    pub(super) fn reconcile_alias_bindings(&mut self, cx: &mut ViewContext<Self>) {
+    /// Check the aliases the delivery service returned against the keys
+    /// previously seen for them (trust on first use) and remember them.
+    pub(super) fn reconcile_alias_bindings(
+        &mut self,
+        aliases: &BTreeMap<[u8; 32], String>,
+        cx: &mut ViewContext<Self>,
+    ) {
         let Some(session) = &self.session else {
             return;
         };
         let server_url = session.server_url.clone();
         let room_id = session.room_id.clone();
+        let roster = session.view.roster.clone();
 
         let mut mismatches = Vec::new();
-        let mut refreshed: AHashMap<String, AliasBindingRecord> = AHashMap::new();
-
-        for member in &self.members {
-            let Some(alias) = member
-                .alias
-                .as_ref()
-                .map(|alias| alias.trim())
-                .filter(|alias| !alias.is_empty())
-                .map(|alias| alias.to_string())
-            else {
+        let mut refreshed = self.alias_bindings.clone();
+        for (leaf, alias) in aliases {
+            let Some(entry) = roster.iter().find(|entry| &entry.leaf_id == leaf) else {
                 continue;
             };
-
-            let Some(pop_key) = member.pop_public_key.as_ref().filter(|pk| !pk.is_empty()) else {
-                continue;
-            };
-
-            if let Some(existing) = self.alias_bindings.get(&alias)
-                && existing.pop_public_key != *pop_key
+            if let Some(existing) = self.alias_bindings.get(alias)
+                && existing.pop_public_key != entry.device_public_key
             {
                 mismatches.push(alias.clone());
             }
-
             refreshed.insert(
-                alias,
+                alias.clone(),
                 AliasBindingRecord {
-                    pop_public_key: pop_key.clone(),
-                    leaf_id: member.leaf_id,
+                    pop_public_key: entry.device_public_key.clone(),
+                    leaf_id: *leaf,
                 },
             );
         }
 
         for alias in mismatches {
-            let message = format!("TOFU alert: alias '{alias}' broadcast a new identity key.");
+            let message =
+                format!("TOFU alert: alias '{alias}' is now claimed by a different device key.");
             self.show_error_toast(message.clone(), cx);
             self.record_security_event(&alias, message, cx);
         }
@@ -154,6 +244,9 @@ impl AppModel {
         let changed = refreshed != self.alias_bindings;
         self.alias_bindings = refreshed;
         self.refresh_leaf_alias_index();
+        for (leaf, alias) in aliases {
+            self.leaf_alias_index.insert(*leaf, alias.clone());
+        }
 
         if changed
             && let Err(err) = persist_alias_bindings(&server_url, &room_id, &self.alias_bindings)
@@ -220,14 +313,10 @@ impl AppModel {
         description: impl Into<String>,
         cx: &mut ViewContext<Self>,
     ) {
-        let timestamp_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
         self.security_events.push(SecurityEvent {
             alias: alias.to_string(),
             description: description.into(),
-            timestamp_ms,
+            timestamp_ms: engine::now_ms(),
         });
         if self.security_events.len() > MAX_SECURITY_EVENTS {
             let drain = self.security_events.len() - MAX_SECURITY_EVENTS;
@@ -241,16 +330,6 @@ impl AppModel {
 
     pub(super) fn record_activity(&mut self, kind: ActivityKind, summary: impl Into<String>) {
         self.record_activity_with_detail(kind, summary, None);
-    }
-
-    pub(super) fn record_websocket_message_activity(&mut self, signal: &WebSocketMessageSignal) {
-        let summary = if signal.replayed {
-            "Replayed message notification after reconnect"
-        } else {
-            "New message notification"
-        };
-        let detail = websocket_activity_detail(signal.sequence, signal.replayed, None);
-        self.record_activity_with_detail(ActivityKind::Message, summary, detail);
     }
 
     pub(super) fn record_activity_with_detail(
@@ -271,82 +350,6 @@ impl AppModel {
         }
     }
 
-    pub(super) fn record_membership_activity(&mut self, signal: &MembershipSignal) {
-        let summary = match (signal.kind, signal.leaf_id, signal.replayed) {
-            (Some(MembershipSignalKind::Join), Some(leaf), true) => {
-                format!("Replayed roster join: {}", short_leaf_display(&leaf))
-            }
-            (Some(MembershipSignalKind::Revoke), Some(leaf), true) => {
-                format!("Replayed roster revoke: {}", short_leaf_display(&leaf))
-            }
-            (Some(MembershipSignalKind::Join), Some(leaf), false) => {
-                format!("Roster join: {}", short_leaf_display(&leaf))
-            }
-            (Some(MembershipSignalKind::Revoke), Some(leaf), false) => {
-                format!("Roster revoke: {}", short_leaf_display(&leaf))
-            }
-            (Some(MembershipSignalKind::Join), None, true) => {
-                "Replayed roster join detected".to_string()
-            }
-            (Some(MembershipSignalKind::Revoke), None, true) => {
-                "Replayed roster revoke detected".to_string()
-            }
-            (Some(MembershipSignalKind::Join), None, false) => "Roster join detected".to_string(),
-            (Some(MembershipSignalKind::Revoke), None, false) => {
-                "Roster revoke detected".to_string()
-            }
-            (None, Some(leaf), true) => {
-                format!("Replayed roster change: {}", short_leaf_display(&leaf))
-            }
-            (None, Some(leaf), false) => format!("Roster changed: {}", short_leaf_display(&leaf)),
-            (None, None, true) => "Replayed roster changed".to_string(),
-            (None, None, false) => "Roster changed".to_string(),
-        };
-        let detail =
-            websocket_activity_detail(signal.sequence, signal.replayed, signal.timestamp_ms);
-        self.record_activity_with_detail(ActivityKind::Roster, summary, detail);
-    }
-
-    pub(super) fn record_websocket_sync_required_activity(
-        &mut self,
-        signal: &WebSocketSyncRequiredSignal,
-    ) {
-        let mut detail = Vec::new();
-        detail.push(format!(
-            "{} messages fell outside the Worker replay window",
-            signal.lagged_messages
-        ));
-        if let Some(retained_from_sequence) = signal.retained_from_sequence {
-            detail.push(format!(
-                "buffer now retains notifications from sequence {}",
-                retained_from_sequence
-            ));
-        }
-        if let Some(reason) = signal.reason.as_deref() {
-            detail.push(format!("reason {reason}"));
-        }
-        if let Some(action) = signal.action.as_deref() {
-            detail.push(format!("action {action}"));
-        }
-        if let Some(reconcile_via) = signal.reconcile_via.as_deref() {
-            detail.push(format!("reconcile via {reconcile_via}"));
-        }
-        if let Some(sequence) = signal.sequence {
-            detail.push(format!("sequence {}", sequence));
-        }
-        if let Some(timestamp_ms) = signal.timestamp_ms {
-            detail.push(format!(
-                "server timestamp {}",
-                format_timestamp(timestamp_ms)
-            ));
-        }
-        self.record_activity_with_detail(
-            ActivityKind::Connection,
-            "Worker replay window exhausted; HTTP reconciliation required",
-            Some(detail.join(", ")),
-        );
-    }
-
     pub(super) fn acknowledge_security_alerts(&mut self) {
         if self.security_unread > 0 {
             self.security_unread = 0;
@@ -365,30 +368,5 @@ impl AppModel {
 
     pub(super) fn scroll_chat_to_bottom(&self) {
         self.chat_scroll_handle.scroll_to_bottom();
-    }
-}
-
-fn websocket_activity_detail(
-    sequence: Option<u64>,
-    replayed: bool,
-    timestamp_ms: Option<u64>,
-) -> Option<String> {
-    let mut parts = Vec::new();
-    if replayed {
-        parts.push("replayed after reconnect".to_string());
-    }
-    if let Some(sequence) = sequence {
-        parts.push(format!("sequence {}", sequence));
-    }
-    if let Some(timestamp_ms) = timestamp_ms {
-        parts.push(format!(
-            "server timestamp {}",
-            format_timestamp(timestamp_ms)
-        ));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(", "))
     }
 }

@@ -151,7 +151,7 @@ impl AppModel {
 
         if field == NativeTextFieldKind::JoinRoom {
             match parse_join_invite(&text) {
-                Ok(Some(invite)) => match self.join_form.apply_invite(invite) {
+                Ok(Some(invite)) => match self.join_form.apply_invite(&text, &invite) {
                     Ok(()) => {
                         self.clear_error();
                         self.info_message =
@@ -175,17 +175,9 @@ impl AppModel {
         }
 
         let sanitized = sanitize_clipboard_text(&text);
-        let updated = match field {
-            NativeTextFieldKind::JoinRoom if JoinFormState::is_valid_room_id(sanitized.trim()) => {
-                self.with_text_field_mut(field, |text, editor| {
-                    editor.replace_all(text, sanitized.trim());
-                    true
-                })
-            }
-            _ => self.with_text_field_mut(field, |text, editor| {
-                editor.replace_text_in_range(text, None, &sanitized)
-            }),
-        };
+        let updated = self.with_text_field_mut(field, |text, editor| {
+            editor.replace_text_in_range(text, None, &sanitized)
+        });
         if updated {
             self.after_text_field_edit(field);
             cx.notify();

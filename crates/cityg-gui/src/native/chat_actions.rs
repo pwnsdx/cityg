@@ -31,18 +31,33 @@ impl AppModel {
         }
     }
 
+    /// Create an invite link (admins only) and copy it to the clipboard.
     pub(super) fn copy_room_invite_to_clipboard(&mut self, cx: &mut ViewContext<Self>) {
-        if let Some(session) = &self.session {
-            match build_join_invite(session) {
-                Ok(invite) => {
-                    cx.write_to_clipboard(ClipboardItem::new_string(invite));
-                    self.show_success("Room invite copied", cx);
-                }
-                Err(err) => self.show_error_toast(err.to_string(), cx),
-            }
-        } else {
+        let Some(session) = self.session.clone() else {
             self.show_error_toast("No active session", cx);
+            return;
+        };
+        if !session.is_admin() {
+            self.show_error_toast("Only room admins can create invite links", cx);
+            return;
         }
+        let member = session.member.clone();
+        let task = Tokio::spawn_result(cx, async move { engine::create_invite(&member).await });
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                match outcome {
+                    Ok(link) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(link));
+                        model.show_success("Invite link copied (valid 7 days)", cx);
+                        model.record_activity(ActivityKind::Roster, "Created an invite link");
+                    }
+                    Err(err) => model.show_error_toast(format!("{err:#}"), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     #[cfg(test)]
@@ -112,23 +127,7 @@ impl AppModel {
         match self.last_retry_action {
             Some(RetryAction::Join) => self.start_join(cx),
             Some(RetryAction::Send) => self.start_send(cx),
-            Some(RetryAction::Leave) => {
-                if let Some(session) = &self.session {
-                    let request = LeaveRequest::from_session(session);
-                    self.leave_status = LeaveStatus::Leaving;
-                    self.clear_error();
-                    cx.notify();
-                    let task = Tokio::spawn_result(cx, async move { perform_leave(request).await });
-                    cx.spawn(async move |this, cx| {
-                        let outcome = task.await;
-                        let _ = this.update(cx, |model, cx| {
-                            model.on_leave_finished(outcome, cx);
-                            cx.notify();
-                        });
-                    })
-                    .detach();
-                }
-            }
+            Some(RetryAction::Leave) => self.start_leave(cx),
             Some(RetryAction::Refresh) => self.start_pcs_refresh(cx),
             None => {}
         }
@@ -172,13 +171,9 @@ impl AppModel {
         cx: &mut ViewContext<Self>,
     ) {
         if let Some(session) = &self.session {
-            if let Some(bytes) = session.regular_fingerprint {
-                let text = fingerprint_full_hex(&bytes);
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                self.show_success("Regular fingerprint copied", cx);
-            } else {
-                self.show_error_toast("Regular fingerprint unavailable", cx);
-            }
+            let text = fingerprint_full_hex(&session.view.transcript_fingerprint);
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.show_success("Security code copied", cx);
         } else {
             self.show_error_toast("No active session", cx);
         }
@@ -191,13 +186,9 @@ impl AppModel {
         cx: &mut ViewContext<Self>,
     ) {
         if let Some(session) = &self.session {
-            if let Some(bytes) = session.fs_fingerprint {
-                let text = fingerprint_full_hex(&bytes);
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                self.show_success("FS fingerprint copied", cx);
-            } else {
-                self.show_error_toast("FS fingerprint unavailable", cx);
-            }
+            let text = fingerprint_full_hex(&session.view.roster_hash);
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.show_success("Roster hash copied", cx);
         } else {
             self.show_error_toast("No active session", cx);
         }

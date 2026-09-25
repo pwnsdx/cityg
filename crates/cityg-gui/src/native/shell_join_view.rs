@@ -8,6 +8,7 @@ impl AppModel {
         let info_color = rgb(UI_SUCCESS_TEXT);
         let join_disabled =
             !self.join_form.is_ready() || matches!(self.join_status, JoinStatus::Joining);
+        let creating = self.join_form.room_id.trim().is_empty();
 
         let form = material_surface(
             window,
@@ -46,7 +47,7 @@ impl AppModel {
                         .child("Join a City-G Room"),
                 )
                 .child(div().text_size(px(14.0)).text_color(subtext_color).child(
-                    "Connect to a City-G Worker edge or compatible endpoint, pick your alias, and request a join ticket.",
+                    "Paste an invite link from a room admin to join its room, or leave it empty to create a new room on a City-G server.",
                 )),
         )
         .child(self.render_field(
@@ -57,9 +58,9 @@ impl AppModel {
             cx,
         ))
         .child(self.render_field(
-            "Room ID",
+            "Invite link",
             &self.join_form.room_id,
-            "64 hex characters",
+            "cityg-invite:{…} (empty: create a room)",
             ActiveField::Room,
             cx,
         ))
@@ -70,7 +71,7 @@ impl AppModel {
                 .items_center()
                 .text_size(px(12.0))
                 .text_color(subtext_color)
-                .child("Paste a City-G invite or enter a 64-character room ID.")
+                .child("An invite carries the server URL and a one-time admission key.")
                 .child(
                     div()
                         .px(px(12.0))
@@ -87,7 +88,7 @@ impl AppModel {
                             let hover_fill = ui_hover_fill(self.window_active);
                             move |style| style.bg(hover_fill)
                         })
-                        .child("Generate new ID")
+                        .child("New room")
                         .on_mouse_down(MouseButton::Left, cx.listener(Self::on_generate_room_id)),
                 ),
         )
@@ -100,7 +101,8 @@ impl AppModel {
         ))
         .child({
             let status_text = match self.join_status {
-                JoinStatus::Joining => Some("Requesting join ticket...".to_string()),
+                JoinStatus::Joining if creating => Some("Creating the room…".to_string()),
+                JoinStatus::Joining => Some("Joining with the invite…".to_string()),
                 JoinStatus::Idle => None,
             };
             let mut status_div = div()
@@ -142,10 +144,11 @@ impl AppModel {
                 } else {
                     CursorStyle::PointingHand
                 })
-                .child(if matches!(self.join_status, JoinStatus::Joining) {
-                    "Joining..."
-                } else {
-                    "Join room"
+                .child(match (&self.join_status, creating) {
+                    (JoinStatus::Joining, true) => "Creating…",
+                    (JoinStatus::Joining, false) => "Joining…",
+                    (JoinStatus::Idle, true) => "Create room",
+                    (JoinStatus::Idle, false) => "Join room",
                 });
 
             if !join_disabled {

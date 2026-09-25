@@ -34,7 +34,7 @@ impl AppModel {
 
         let prompt_message = format!("Expel {target_label} from this room?");
         let prompt_detail = format!(
-            "This publishes a revocation-style roster update for the member's current leaf.\nThey will need to rejoin to come back.\n\nLeaf: {}",
+            "This commits a signed removal: the member's keys stop opening anything from the next epoch on.\nThey will need a new invite to come back.\n\nLeaf: {}",
             hex_encode(target_leaf_id)
         );
         let answer = window.prompt(
@@ -67,13 +67,13 @@ impl AppModel {
             return;
         };
 
-        let request = LeaveRequest::from_session(session);
+        let member = session.member.clone();
         self.leave_status = LeaveStatus::Leaving;
         self.last_error = None;
         self.info_message = None;
         cx.notify();
 
-        let task = Tokio::spawn_result(cx, async move { perform_leave(request).await });
+        let task = Tokio::spawn_result(cx, async move { engine::leave_room(&member).await });
 
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
@@ -118,9 +118,9 @@ impl AppModel {
         self.info_message = None;
         cx.notify();
 
-        let task = Tokio::spawn_result(cx, async move {
-            perform_room_admin_expel(session, target_leaf_id).await
-        });
+        let member = session.member.clone();
+        let task =
+            Tokio::spawn_result(cx, async move { engine::expel(&member, target_leaf_id).await });
 
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
@@ -158,13 +158,13 @@ impl AppModel {
             return;
         };
 
-        let request = LeaveRequest::from_session(session);
+        let member = session.member.clone();
         self.leave_status = LeaveStatus::Refreshing;
         self.last_error = None;
         self.info_message = None;
         cx.notify();
 
-        let task = Tokio::spawn_result(cx, async move { perform_pcs_refresh(request).await });
+        let task = Tokio::spawn_result(cx, async move { engine::refresh_keys(&member).await });
 
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
@@ -178,32 +178,23 @@ impl AppModel {
 
     pub(super) fn on_refresh_finished(
         &mut self,
-        result: anyhow::Result<()>,
+        result: anyhow::Result<engine::RosterOutcome>,
         cx: &mut ViewContext<Self>,
     ) {
         self.leave_status = LeaveStatus::Idle;
         match result {
-            Ok(()) => {
+            Ok(outcome) => {
                 if let Some(session) = &self.session {
-                    match load_session_at(&session.server_url, &session.room_id) {
-                        Ok(Some(persisted)) => {
-                            self.session = Some(persisted);
-                            self.bootstrap_session_runtime(cx);
-                        }
-                        Ok(None) => {
-                            warn!("persisted session missing after PCS refresh");
-                        }
-                        Err(err) => {
-                            warn!("failed to reload session after PCS refresh: {err:?}");
-                        }
-                    }
+                    session.mark_self_update();
                 }
-
+                self.apply_session_view(outcome.view);
                 self.clear_error();
-                self.info_message =
-                    Some("PCS refresh submitted. Syncing latest epoch…".to_string());
-                self.show_success("PCS refresh submitted", cx);
-                self.schedule_epoch_sync(cx, "Syncing latest epoch after PCS refresh…");
+                self.info_message = Some(
+                    "Keys refreshed: this device re-keyed its leaf and path in a new epoch."
+                        .to_string(),
+                );
+                self.show_success("Keys refreshed", cx);
+                self.record_activity(ActivityKind::Sync, "Refreshed this device's keys");
             }
             Err(err) => {
                 self.set_error(&err, "refresh", Some(RetryAction::Refresh));
@@ -214,79 +205,31 @@ impl AppModel {
 
     pub(super) fn on_leave_finished(
         &mut self,
-        result: anyhow::Result<LeaveOutcome>,
+        result: anyhow::Result<bool>,
         cx: &mut ViewContext<Self>,
     ) {
         self.leave_status = LeaveStatus::Idle;
         match result {
-            Ok(outcome) => {
-                let (info, toast) = match outcome {
-                    LeaveOutcome::Left => ("Device left the room.", "Successfully left the room"),
-                    LeaveOutcome::RemovalRequested => (
+            Ok(vacant) => {
+                let (info, toast) = if vacant {
+                    ("Left the room. It has no member left.", "Left the room")
+                } else {
+                    (
                         "Leave requested. The remaining members commit your removal.",
                         "Leave request submitted",
-                    ),
+                    )
                 };
-                self.reset_fetch_state();
-                self.stop_epoch_sync_task();
-                self.stop_websocket();
-                self.stop_members_refresh_task();
-                if let Some(session) = self.session.take() {
-                    if let Err(err) = remove_security_log(&session.server_url, &session.room_id) {
-                        warn!("failed to remove security log: {err:?}");
-                    }
-                    match remove_persisted_session(&session.server_url, &session.room_id) {
-                        Ok(()) => {
-                            self.info_message = Some(info.to_string());
-                            self.clear_error();
-                            self.show_success(toast, cx);
-                        }
-                        Err(err) => {
-                            let message =
-                                format!("Left room, but failed to remove session data: {err}");
-                            warn!("{message}");
-                            self.last_error = Some(message.clone());
-                            self.info_message = None;
-                            self.show_error_toast(message, cx);
-                        }
-                    }
+                if let Err(err) = self.reset_session_state() {
+                    let message = format!("Left room, but failed to remove session data: {err}");
+                    warn!("{message}");
+                    self.last_error = Some(message.clone());
+                    self.info_message = None;
+                    self.show_error_toast(message, cx);
                 } else {
                     self.info_message = Some(info.to_string());
                     self.clear_error();
                     self.show_success(toast, cx);
                 }
-                self.messages.clear();
-                self.message_keys.clear();
-                self.next_pending_message_id = 1;
-                self.composer.clear();
-                self.composer.blur();
-                self.send_status = SendStatus::Idle;
-                self.fetch_status = FetchStatus::Idle;
-                self.members.clear();
-                self.members_status = MembersStatus::Idle;
-                self.members_total = 0;
-                self.members_next_offset = None;
-                self.members_loading_append = false;
-                self.alias_bindings.clear();
-                self.leaf_alias_index.clear();
-                self.endpoint_mode = EndpointMode::Unknown;
-                self.endpoint_mode_server_url = None;
-                self.endpoint_mode_task = None;
-                self.members_auto_page = false;
-                self.members_mode = MembersMode::Full;
-                self.members_search.clear();
-                self.members_search.blur();
-                self.members_alias_dirty = false;
-                self.room_admins.clear();
-                self.room_admins_loaded = false;
-                self.room_admin_status = RoomAdminStatus::Idle;
-                self.room_admin_target.clear();
-                self.room_admin_target.blur();
-                self.clear_room_admin_revoke_confirmation();
-                self.security_events.clear();
-                self.security_unread = 0;
-                self.security_panel_expanded = false;
-                self.activity_events.clear();
             }
             Err(err) => {
                 self.set_error(&err, "leave", Some(RetryAction::Leave));
@@ -297,19 +240,17 @@ impl AppModel {
 
     pub(super) fn on_member_expel_finished(
         &mut self,
-        result: anyhow::Result<AppSession>,
+        result: anyhow::Result<engine::RosterOutcome>,
         cx: &mut ViewContext<Self>,
     ) {
         self.leave_status = LeaveStatus::Idle;
         match result {
-            Ok(session) => {
-                self.session = Some(session);
+            Ok(outcome) => {
+                self.apply_session_view(outcome.view);
                 self.clear_error();
-                self.info_message = Some("Member expelled from the room.".to_string());
+                self.info_message = Some("Member removed from the room.".to_string());
                 self.show_success("Member expelled", cx);
-                self.reset_fetch_state();
-                self.bootstrap_session_runtime(cx);
-                self.refresh_members(cx);
+                self.record_activity(ActivityKind::Roster, "Removed a member");
             }
             Err(err) => {
                 self.set_error(&err, "expel", None);
@@ -334,25 +275,23 @@ impl AppModel {
         };
 
         self.reset_fetch_state();
-        self.fetch_task = None;
-        self.fetch_in_flight = false;
         self.join_status = JoinStatus::Idle;
         self.leave_status = LeaveStatus::Idle;
         self.send_status = SendStatus::Idle;
-        self.fetch_status = FetchStatus::Idle;
         self.session = None;
         self.endpoint_mode = EndpointMode::Unknown;
         self.endpoint_mode_server_url = None;
         self.endpoint_mode_task = None;
         self.stop_websocket();
-        self.stop_epoch_sync_task();
-        self.stop_members_refresh_task();
+        self.stop_maintenance_task();
         self.ws_autostart_attempted = false;
-        self.restore_epoch_sync_pending = false;
+        self.removal_commit_in_flight = false;
         self.alias_bindings.clear();
         self.leaf_alias_index.clear();
-        self.members_auto_page = false;
-        self.members_alias_dirty = false;
+        self.members.clear();
+        self.members_total = 0;
+        self.members_next_offset = None;
+        self.members_status = MembersStatus::Idle;
         self.members_mode = MembersMode::Full;
         self.members_search.clear();
         self.members_search.blur();

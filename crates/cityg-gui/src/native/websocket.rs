@@ -1,225 +1,74 @@
-use futures::{SinkExt, StreamExt, channel::mpsc as futures_mpsc};
+use futures::{StreamExt, channel::mpsc as futures_mpsc};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 
 use super::*;
-use crate::client_env::MESSAGE_AUTH_HEADER;
-use crate::websocket_replay::{
-    WebSocketReplayCursor, websocket_ack_message, websocket_lag_notice,
-    websocket_notification_replayed, websocket_notification_sequence, websocket_request,
-    websocket_resume_message, websocket_sync_required_notice,
-};
 
+/// Events of the log-head notification socket.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum WebSocketEvent {
     Connected,
     Disconnected,
-    Message(WebSocketMessageSignal),
-    Membership(MembershipSignal),
-    SyncRequired(WebSocketSyncRequiredSignal),
+    /// The room log grew up to `head_seq`.
+    Head(u64),
+    /// The server dropped notices; refetch.
+    Resync,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct WebSocketMessageSignal {
-    pub(super) sequence: Option<u64>,
-    pub(super) replayed: bool,
+/// Parse one notification frame.
+pub(super) fn parse_notice(text: &str) -> Option<WebSocketEvent> {
+    let notice: serde_json::Value = serde_json::from_str(text).ok()?;
+    match notice.get("type").and_then(|kind| kind.as_str()) {
+        Some("head") => notice
+            .get("head_seq")
+            .and_then(serde_json::Value::as_u64)
+            .map(WebSocketEvent::Head),
+        Some("resync") => Some(WebSocketEvent::Resync),
+        _ => None,
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum MembershipSignalKind {
-    Join,
-    Revoke,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct MembershipSignal {
-    pub(super) gid: [u8; 32],
-    pub(super) leaf_id: Option<[u8; 32]>,
-    pub(super) kind: Option<MembershipSignalKind>,
-    pub(super) sequence: Option<u64>,
-    pub(super) replayed: bool,
-    pub(super) timestamp_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct WebSocketSyncRequiredSignal {
-    pub(super) lagged_messages: u64,
-    pub(super) sequence: Option<u64>,
-    pub(super) timestamp_ms: Option<u64>,
-    pub(super) retained_from_sequence: Option<u64>,
-    pub(super) reason: Option<String>,
-    pub(super) action: Option<String>,
-    pub(super) reconcile_via: Option<String>,
-}
-
+/// Keep a notification socket open for the room of `member`, reconnecting
+/// after `reconnect_delay` (each connection uses a fresh session token).
 pub(super) async fn run_websocket_worker(
-    ws_url: String,
-    message_token: Option<String>,
+    member: SharedMember,
     reconnect_delay: Duration,
     tx: futures_mpsc::UnboundedSender<WebSocketEvent>,
 ) -> Result<()> {
-    let sequence_cursor = WebSocketReplayCursor::default();
     loop {
-        debug!("Attempting WebSocket connection to {}", ws_url);
-
-        let request = websocket_request(&ws_url, MESSAGE_AUTH_HEADER, message_token.as_deref())?;
-        match connect_async(request).await {
-            Ok((ws_stream, _)) => {
-                info!("WebSocket connected successfully");
-                if tx.unbounded_send(WebSocketEvent::Connected).is_err() {
-                    return Ok(());
-                }
-
-                let (mut write, mut read) = ws_stream.split();
-                'connection: {
-                    if sequence_cursor.last_sequence() > 0 {
-                        let resume = websocket_resume_message(sequence_cursor.last_sequence());
-                        if let Err(error) = write.send(WsMessage::Text(resume.into())).await {
-                            warn!("failed to send websocket resume frame: {}", error);
-                            break 'connection;
-                        }
+        let url = {
+            let mut member = member.lock().await;
+            member.websocket_url().await
+        };
+        match url {
+            Ok(url) => match connect_async(url.as_str()).await {
+                Ok((stream, _)) => {
+                    info!("WebSocket connected");
+                    if tx.unbounded_send(WebSocketEvent::Connected).is_err() {
+                        return Ok(());
                     }
-                    while let Some(msg_result) = read.next().await {
-                        match msg_result {
+                    let (_, mut read) = stream.split();
+                    while let Some(frame) = read.next().await {
+                        match frame {
                             Ok(WsMessage::Text(text)) => {
-                                debug!("WebSocket message received: {}", text);
-                                if let Ok(notification) =
-                                    serde_json::from_str::<serde_json::Value>(&text)
+                                if let Some(event) = parse_notice(&text)
+                                    && tx.unbounded_send(event).is_err()
                                 {
-                                    if let Some(sequence) =
-                                        websocket_notification_sequence(&notification)
-                                    {
-                                        sequence_cursor.observe(sequence);
-                                        let ack =
-                                            websocket_ack_message(sequence_cursor.last_sequence());
-                                        if let Err(error) =
-                                            write.send(WsMessage::Text(ack.into())).await
-                                        {
-                                            warn!("failed to send websocket ack frame: {}", error);
-                                            break 'connection;
-                                        }
-                                    }
-                                    if let Some(signal) =
-                                        websocket_sync_required_notice(&notification)
-                                    {
-                                        if tx
-                                            .unbounded_send(WebSocketEvent::SyncRequired(
-                                                WebSocketSyncRequiredSignal {
-                                                    lagged_messages: signal.lagged_messages,
-                                                    sequence: signal.sequence,
-                                                    timestamp_ms: signal.server_time_ms,
-                                                    retained_from_sequence: signal
-                                                        .retained_from_sequence,
-                                                    reason: signal.reason,
-                                                    action: signal.action,
-                                                    reconcile_via: signal.reconcile_via,
-                                                },
-                                            ))
-                                            .is_err()
-                                        {
-                                            return Ok(());
-                                        }
-                                        break 'connection;
-                                    }
-                                    if let Some(signal) = websocket_lag_notice(&notification) {
-                                        warn!(
-                                            "WebSocket lag notification: lagged_messages={} max_lag={:?} sequence={:?}",
-                                            signal.lagged_messages, signal.max_lag, signal.sequence,
-                                        );
-                                        continue;
-                                    }
-                                    match notification.get("type").and_then(|t| t.as_str()) {
-                                        Some("message") => {
-                                            let signal = WebSocketMessageSignal {
-                                                sequence: websocket_notification_sequence(
-                                                    &notification,
-                                                ),
-                                                replayed: websocket_notification_replayed(
-                                                    &notification,
-                                                ),
-                                            };
-                                            if tx
-                                                .unbounded_send(WebSocketEvent::Message(signal))
-                                                .is_err()
-                                            {
-                                                return Ok(());
-                                            }
-                                        }
-                                        Some("membership") => {
-                                            if let Some(gid_hex) =
-                                                notification.get("gid").and_then(|v| v.as_str())
-                                                && let Some(gid) = decode_hex_32(gid_hex)
-                                            {
-                                                let signal = MembershipSignal {
-                                                    gid,
-                                                    leaf_id: notification
-                                                        .get("leaf_id")
-                                                        .and_then(|v| v.as_str())
-                                                        .and_then(decode_hex_32),
-                                                    kind: match notification
-                                                        .get("event")
-                                                        .and_then(|v| v.as_str())
-                                                    {
-                                                        Some("join") => {
-                                                            Some(MembershipSignalKind::Join)
-                                                        }
-                                                        Some("revoke") => {
-                                                            Some(MembershipSignalKind::Revoke)
-                                                        }
-                                                        _ => None,
-                                                    },
-                                                    sequence: websocket_notification_sequence(
-                                                        &notification,
-                                                    ),
-                                                    replayed: websocket_notification_replayed(
-                                                        &notification,
-                                                    ),
-                                                    timestamp_ms: notification
-                                                        .get("timestamp_ms")
-                                                        .and_then(|v| v.as_u64()),
-                                                };
-                                                if tx
-                                                    .unbounded_send(WebSocketEvent::Membership(
-                                                        signal,
-                                                    ))
-                                                    .is_err()
-                                                {
-                                                    return Ok(());
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
+                                    return Ok(());
                                 }
                             }
-                            Ok(WsMessage::Close(_)) => {
-                                info!("WebSocket closed by server");
-                                break 'connection;
-                            }
-                            Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {
-                                debug!("WebSocket ping/pong");
-                            }
-                            Err(e) => {
-                                warn!("WebSocket error: {}", e);
-                                break 'connection;
-                            }
-                            _ => {}
+                            Ok(WsMessage::Close(_)) | Err(_) => break,
+                            Ok(_) => {}
                         }
                     }
                 }
-                info!(
-                    "WebSocket connection closed, will retry in {:?}",
-                    reconnect_delay
-                );
-            }
-            Err(e) => {
-                warn!("WebSocket connection failed: {}", e);
-            }
+                Err(err) => warn!("WebSocket connection failed: {err}"),
+            },
+            Err(err) => warn!("WebSocket token request failed: {err}"),
         }
-
         if tx.unbounded_send(WebSocketEvent::Disconnected).is_err() {
             return Ok(());
         }
-
         sleep(reconnect_delay).await;
     }
 }

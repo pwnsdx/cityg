@@ -1,47 +1,58 @@
 use super::*;
 
+/// How long the previous epoch's message keys are kept (profile grace
+/// window).
+const GRACE_WINDOW_MS: u64 = 10 * 60 * 1000;
+
+/// What the maintenance tick should do next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MaintenanceAction {
+    /// Commit other members' recorded leave requests.
+    CommitRemovals,
+    /// Re-key this device (forward secrecy / PCS window reached).
+    RefreshKeys,
+    /// Erase the previous epoch's message keys (grace window over).
+    ExpireGrace,
+}
+
+/// Pick the maintenance action for `session` at `now_ms`.
+pub(super) fn maintenance_action(session: &AppSession, now_ms: u64) -> Option<MaintenanceAction> {
+    let me_pending = session.removal_pending();
+    if session.view.pending_removals > 0 && !me_pending {
+        return Some(MaintenanceAction::CommitRemovals);
+    }
+    if !me_pending
+        && now_ms.saturating_sub(session.last_self_update_ms()) >= engine::SELF_UPDATE_INTERVAL_MS
+    {
+        return Some(MaintenanceAction::RefreshKeys);
+    }
+    if session.view.has_previous_epoch_keys
+        && now_ms.saturating_sub(session.epoch_started_ms) >= GRACE_WINDOW_MS
+    {
+        return Some(MaintenanceAction::ExpireGrace);
+    }
+    None
+}
+
 impl AppModel {
     pub(super) fn bootstrap_session_runtime(&mut self, cx: &mut ViewContext<Self>) {
         self.ensure_endpoint_mode_probe(cx);
-        if self.barrier_recovery_pending() {
-            self.reset_fetch_state();
-        } else {
-            self.ensure_fetch_loop(cx);
-        }
+        self.ensure_fetch_loop(cx);
         self.ensure_websocket_task(cx);
-        self.ensure_epoch_sync_task(cx);
-        self.ensure_members_refresh_task(cx);
-        self.ensure_room_admins_loaded(cx);
+        self.ensure_maintenance_task(cx);
     }
 
-    pub(super) fn ensure_members_refresh_task(&mut self, cx: &mut ViewContext<Self>) {
+    pub(super) fn ensure_maintenance_task(&mut self, cx: &mut ViewContext<Self>) {
         if self.session.is_none() {
-            self.stop_members_refresh_task();
+            self.stop_maintenance_task();
             return;
         }
-
-        if self.members_refresh_task.is_none() {
-            self.start_members_refresh_task(cx);
+        if self.maintenance_task.is_none() {
+            self.start_maintenance_task(cx);
         }
     }
 
-    pub(super) fn ensure_room_admins_loaded(&mut self, cx: &mut ViewContext<Self>) {
-        if self.session.is_none() {
-            self.room_admins.clear();
-            self.room_admins_loaded = false;
-            self.room_admin_status = RoomAdminStatus::Idle;
-            self.room_admin_target.clear();
-            self.room_admin_target.blur();
-            self.clear_room_admin_revoke_confirmation();
-            return;
-        }
-
-        if !self.room_admins_loaded && matches!(self.room_admin_status, RoomAdminStatus::Idle) {
-            self.refresh_room_admins(cx);
-        }
-    }
-
-    pub(super) fn start_members_refresh_task(&mut self, cx: &mut ViewContext<Self>) {
+    pub(super) fn start_maintenance_task(&mut self, cx: &mut ViewContext<Self>) {
         let interval = self.config.gui.members_refresh_interval();
         let task = cx.spawn(async move |this, cx| {
             loop {
@@ -51,20 +62,19 @@ impl AppModel {
                 }) {
                     Ok(task) => task,
                     Err(err) => {
-                        warn!("failed to schedule members refresh delay: {err}");
+                        warn!("failed to schedule the maintenance tick: {err}");
                         break;
                     }
                 };
                 if let Err(err) = delay.await {
-                    warn!("members refresh delay task failed: {err}");
+                    warn!("maintenance tick failed: {err}");
                     break;
                 }
 
                 let keep_running = this
                     .update(cx, |model, cx| {
                         if model.session.is_some() {
-                            model.refresh_members_soft(cx);
-                            model.commit_pending_removals_soft(cx);
+                            model.run_maintenance(cx);
                             true
                         } else {
                             false
@@ -73,53 +83,58 @@ impl AppModel {
                     .unwrap_or(false);
 
                 if !keep_running {
-                    info!("Stopping members refresh task (session ended)");
+                    info!("Stopping maintenance task (session ended)");
                     break;
                 }
             }
         });
 
-        self.members_refresh_task = Some(task);
+        self.maintenance_task = Some(task);
     }
 
-    /// Commit other members' pending leave requests (audit C-03): a leaving
-    /// device never revokes itself, so a remaining member publishes the
-    /// removal. Failures are logged and retried on the next tick.
-    pub(super) fn commit_pending_removals_soft(&mut self, cx: &mut ViewContext<Self>) {
-        if self.removal_commit_in_flight
-            || self.epoch_sync_task.is_some()
-            || !matches!(self.leave_status, LeaveStatus::Idle)
-        {
+    /// One maintenance tick: commit leave requests of others (audit C-03:
+    /// a leaving device never commits its own removal), re-key when the
+    /// FS/PCS window elapsed, and erase expired previous-epoch keys.
+    pub(super) fn run_maintenance(&mut self, cx: &mut ViewContext<Self>) {
+        if self.removal_commit_in_flight || !matches!(self.leave_status, LeaveStatus::Idle) {
             return;
         }
         let Some(session) = self.session.clone() else {
             return;
         };
-        if session.barrier_state.barrier_recovery_pending
-            || !session.barrier_state.current_barrier_full_verified
-        {
+        let Some(action) = maintenance_action(&session, engine::now_ms()) else {
             return;
-        }
+        };
 
         self.removal_commit_in_flight = true;
-        let expected_server = session.server_url.clone();
+        let member = session.member.clone();
         let expected_room = session.room_id.clone();
-        let expected_leaf = session.leaf_id;
-        let task = Tokio::spawn_result(
-            cx,
-            async move { perform_pending_removal_commit(session).await },
-        );
+        let task = Tokio::spawn_result(cx, async move {
+            match action {
+                MaintenanceAction::CommitRemovals => {
+                    // Spread concurrent committers to avoid losing the epoch.
+                    let jitter = Duration::from_millis(u64::from(rand::random::<u16>() % 1500));
+                    sleep(jitter).await;
+                    engine::commit_pending(&member).await.map(|outcome| outcome.map(|o| o.view))
+                }
+                MaintenanceAction::RefreshKeys => {
+                    engine::refresh_keys(&member).await.map(|outcome| Some(outcome.view))
+                }
+                MaintenanceAction::ExpireGrace => {
+                    engine::expire_previous_epoch(&member).await.map(|_| None)
+                }
+            }
+        });
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
             let _ = this.update(cx, |model, cx| {
                 model.removal_commit_in_flight = false;
-                let matches_session = model.session.as_ref().is_some_and(|session| {
-                    session.server_url == expected_server
-                        && session.room_id == expected_room
-                        && session.leaf_id == expected_leaf
-                });
+                let matches_session = model
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.room_id == expected_room);
                 if matches_session {
-                    model.on_pending_removal_commit_finished(outcome, cx);
+                    model.on_maintenance_finished(action, outcome, cx);
                 }
                 cx.notify();
             });
@@ -127,31 +142,46 @@ impl AppModel {
         .detach();
     }
 
-    pub(super) fn on_pending_removal_commit_finished(
+    pub(super) fn on_maintenance_finished(
         &mut self,
-        outcome: anyhow::Result<Option<AppSession>>,
+        action: MaintenanceAction,
+        outcome: anyhow::Result<Option<SessionView>>,
         cx: &mut ViewContext<Self>,
     ) {
         match outcome {
-            Ok(Some(session)) => {
-                self.session = Some(session);
-                self.record_activity(ActivityKind::Roster, "Committed a member's leave request");
-                self.reset_fetch_state();
-                self.bootstrap_session_runtime(cx);
-                self.refresh_members(cx);
+            Ok(view) => {
+                match action {
+                    MaintenanceAction::CommitRemovals if view.is_some() => {
+                        self.record_activity(ActivityKind::Roster, "Committed a member's leave request");
+                    }
+                    MaintenanceAction::RefreshKeys => {
+                        if let Some(session) = &self.session {
+                            session.mark_self_update();
+                        }
+                        self.record_activity(ActivityKind::Sync, "Refreshed this device's keys");
+                    }
+                    MaintenanceAction::ExpireGrace => {
+                        if let Some(session) = self.session.as_mut() {
+                            session.view.has_previous_epoch_keys = false;
+                        }
+                    }
+                    MaintenanceAction::CommitRemovals => {}
+                }
+                if let Some(view) = view {
+                    self.apply_session_view(view);
+                }
             }
-            Ok(None) => {}
             Err(err) => {
-                warn!("committing pending removal proposals failed: {err:#}");
-                self.schedule_epoch_sync(cx, "Syncing after a failed removal commit…");
+                warn!("maintenance {action:?} failed: {err:#}");
+                self.schedule_fetch(cx, Duration::from_millis(0));
             }
         }
     }
 
-    pub(super) fn stop_members_refresh_task(&mut self) {
-        if self.members_refresh_task.is_some() {
-            info!("Stopping members refresh task");
-            self.members_refresh_task = None;
+    pub(super) fn stop_maintenance_task(&mut self) {
+        if self.maintenance_task.is_some() {
+            info!("Stopping maintenance task");
+            self.maintenance_task = None;
         }
     }
 }

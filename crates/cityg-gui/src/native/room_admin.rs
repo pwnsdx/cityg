@@ -61,56 +61,14 @@ impl AppModel {
         self.show_info("Loaded member identity into room-admin target", cx);
     }
 
+    /// Refresh the admin list (a room sync: admins come from the roster).
     pub(super) fn refresh_room_admins(&mut self, cx: &mut ViewContext<Self>) {
-        let Some(params) = self
-            .session
-            .as_ref()
-            .map(RoomAdminQueryParams::from_session)
-        else {
-            return;
-        };
-        if matches!(self.room_admin_status, RoomAdminStatus::Loading(_)) {
+        if self.session.is_none() {
             return;
         }
         self.clear_room_admin_revoke_confirmation();
-        self.room_admin_status =
-            RoomAdminStatus::Loading("Loading room-admin identities…".to_string());
+        self.schedule_fetch(cx, Duration::from_millis(0));
         cx.notify();
-
-        let task = Tokio::spawn_result(cx, async move { perform_fetch_room_admins(params).await });
-        cx.spawn(async move |this, cx| {
-            let outcome = task.await;
-            let _ = this.update(cx, |model, cx| {
-                model.on_room_admins_refreshed(outcome, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    pub(super) fn on_room_admins_refreshed(
-        &mut self,
-        result: anyhow::Result<Vec<Vec<u8>>>,
-        cx: &mut ViewContext<Self>,
-    ) {
-        match result {
-            Ok(admins) => {
-                self.room_admins = admins;
-                self.room_admins_loaded = true;
-                self.room_admin_status = RoomAdminStatus::Idle;
-                self.clear_room_admin_revoke_confirmation();
-                cx.notify();
-            }
-            Err(err) => {
-                self.room_admins.clear();
-                self.room_admins_loaded = false;
-                self.room_admin_status =
-                    RoomAdminStatus::Error(categorize_error(&err, "room admin").user_message);
-                self.clear_room_admin_revoke_confirmation();
-                warn!("failed to refresh room admins: {err:?}");
-                cx.notify();
-            }
-        }
     }
 
     pub(super) fn start_room_admin_mutation(
@@ -119,11 +77,7 @@ impl AppModel {
         target_pop_public_key: Vec<u8>,
         cx: &mut ViewContext<Self>,
     ) {
-        let Some(query) = self
-            .session
-            .as_ref()
-            .map(RoomAdminQueryParams::from_session)
-        else {
+        let Some(session) = self.session.clone() else {
             return;
         };
         if matches!(self.room_admin_status, RoomAdminStatus::Loading(_)) {
@@ -133,13 +87,11 @@ impl AppModel {
         self.room_admin_status = RoomAdminStatus::Loading(kind.present_progressive().to_string());
         cx.notify();
 
-        let params = RoomAdminMutationParams {
-            query,
-            target_pop_public_key,
-            kind,
-        };
-        let task =
-            Tokio::spawn_result(cx, async move { perform_room_admin_mutation(params).await });
+        let member = session.member.clone();
+        let grant = matches!(kind, RoomAdminMutationKind::Grant);
+        let task = Tokio::spawn_result(cx, async move {
+            engine::set_admin(&member, &target_pop_public_key, grant).await
+        });
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
             let _ = this.update(cx, |model, cx| {
@@ -197,29 +149,22 @@ impl AppModel {
     pub(super) fn on_room_admin_mutation_finished(
         &mut self,
         kind: RoomAdminMutationKind,
-        result: anyhow::Result<RoomAdminMutationOutcome>,
+        result: anyhow::Result<engine::RosterOutcome>,
         cx: &mut ViewContext<Self>,
     ) {
         match result {
             Ok(outcome) => {
                 self.clear_room_admin_revoke_confirmation();
                 self.room_admin_status = RoomAdminStatus::Idle;
-                let success_message = match outcome.status.as_str() {
-                    "already_granted" => "Room admin was already granted",
-                    "already_revoked" => "Room admin was already revoked",
-                    _ => kind.success_message(),
-                };
-                if let Ok(target) = decode_room_admin_target_hex(self.room_admin_target.value()) {
-                    self.apply_room_admin_mutation_locally(kind, outcome.status.as_str(), target);
-                } else {
-                    self.room_admins_loaded = false;
-                }
+                self.apply_session_view(outcome.view);
+                let success_message = kind.success_message();
                 self.info_message = Some(format!(
                     "{} ({} admins).",
-                    success_message, outcome.admin_count
+                    success_message,
+                    self.room_admins.len()
                 ));
                 self.show_success(success_message, cx);
-                self.refresh_room_admins(cx);
+                self.record_activity(ActivityKind::Roster, success_message);
             }
             Err(err) => {
                 self.clear_room_admin_revoke_confirmation();
@@ -231,26 +176,27 @@ impl AppModel {
             }
         }
     }
+}
 
-    pub(super) fn apply_room_admin_mutation_locally(
-        &mut self,
-        kind: RoomAdminMutationKind,
-        status: &str,
-        target_pop_public_key: Vec<u8>,
-    ) {
-        if !self.room_admins_loaded {
-            return;
+/// Admin-set change requested from the room-admin panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RoomAdminMutationKind {
+    Grant,
+    Revoke,
+}
+
+impl RoomAdminMutationKind {
+    pub(super) fn present_progressive(self) -> &'static str {
+        match self {
+            Self::Grant => "Granting room-admin rights (signed commit)…",
+            Self::Revoke => "Revoking room-admin rights (signed commit)…",
         }
-        let mut admins: BTreeSet<Vec<u8>> = self.room_admins.iter().cloned().collect();
-        match (kind, status) {
-            (RoomAdminMutationKind::Grant, "granted" | "already_granted") => {
-                admins.insert(target_pop_public_key);
-            }
-            (RoomAdminMutationKind::Revoke, "revoked" | "already_revoked") => {
-                admins.remove(&target_pop_public_key);
-            }
-            _ => {}
+    }
+
+    pub(super) fn success_message(self) -> &'static str {
+        match self {
+            Self::Grant => "Room admin granted",
+            Self::Revoke => "Room admin revoked",
         }
-        self.room_admins = admins.into_iter().collect();
     }
 }

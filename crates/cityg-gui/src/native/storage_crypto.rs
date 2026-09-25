@@ -88,7 +88,9 @@ pub(super) fn decode_persisted_payload<T: DeserializeOwned>(
             .with_context(|| format!("invalid decrypted {payload_label} JSON"));
     }
 
-    serde_json::from_slice(data).with_context(|| format!("invalid legacy {payload_label} JSON"))
+    Err(anyhow!(
+        "{payload_label} is not an encrypted envelope; refusing to load it"
+    ))
 }
 
 pub(super) fn encrypt_persisted_session(
@@ -105,32 +107,18 @@ pub(super) fn decode_persisted_session(
     decode_persisted_payload(data, session_path, "session payload")
 }
 
-pub(super) fn encrypt_persisted_room_identity(
-    persisted: &PersistedRoomIdentity,
+pub(super) fn encrypt_persisted_history(
+    persisted: &PersistedHistory,
     path: &std::path::Path,
 ) -> Result<Vec<u8>> {
-    encrypt_persisted_payload(persisted, path, "room identity payload")
+    encrypt_persisted_payload(persisted, path, "chat history payload")
 }
 
-pub(super) fn decode_persisted_room_identity(
+pub(super) fn decode_persisted_history(
     data: &[u8],
     path: &std::path::Path,
-) -> Result<PersistedRoomIdentity> {
-    decode_persisted_payload(data, path, "room identity payload")
-}
-
-pub(super) fn encrypt_persisted_replay_progress(
-    persisted: &PersistedReplayProgress,
-    path: &std::path::Path,
-) -> Result<Vec<u8>> {
-    encrypt_persisted_payload(persisted, path, "replay progress payload")
-}
-
-pub(super) fn decode_persisted_replay_progress(
-    data: &[u8],
-    path: &std::path::Path,
-) -> Result<PersistedReplayProgress> {
-    decode_persisted_payload(data, path, "replay progress payload")
+) -> Result<PersistedHistory> {
+    decode_persisted_payload(data, path, "chat history payload")
 }
 
 pub(super) fn session_encryption_key(
@@ -160,7 +148,9 @@ pub(super) fn load_or_create_local_session_key(session_path: &std::path::Path) -
 
     let read_key = |path: &std::path::Path| -> Result<[u8; 32]> {
         let raw = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        bytes32("session local key", &raw)
+        raw.as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("session local key must be 32 bytes, got {}", raw.len()))
     };
 
     if key_path.exists() {

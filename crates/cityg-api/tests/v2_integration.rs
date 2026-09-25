@@ -249,3 +249,59 @@ async fn websocket_notifies_log_heads() {
     assert!(tokio_tungstenite::connect_async(bad).await.is_err());
     server.handle.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_state_sink_makes_spent_generations_durable() {
+    use std::sync::{Arc, Mutex};
+    let server = start(NativeRoomStore::for_state_path(None).unwrap()).await;
+    let mut alice = Member::create(DsClient::new(&server.url).unwrap(), identity(41), 4)
+        .await
+        .unwrap();
+    let link = alice.create_invite_link(&server.url, 60_000).await.unwrap();
+    let mut bob = join(&server, &link, 42).await;
+    alice.sync().await.unwrap();
+
+    let saved: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink_target = saved.clone();
+    alice.set_state_sink(Arc::new(move |state: &[u8]| {
+        *sink_target.lock().map_err(|_| "poisoned".to_string())? = state.to_vec();
+        Ok(())
+    }));
+    alice.send_text("one").await.unwrap();
+    // The device crashes right after sending: it restarts from what the sink
+    // persisted, which already accounts for the spent generation.
+    let state = saved.lock().unwrap().clone();
+    drop(alice);
+    let mut alice = Member::restore(DsClient::new(&server.url).unwrap(), identity(41), &state).unwrap();
+    assert_eq!(alice.session().next_own_generation(), 1);
+    alice.send_text("two").await.unwrap();
+    let report = bob.sync().await.unwrap();
+    let texts: Vec<_> = report.messages.iter().map(|m| m.plaintext.clone()).collect();
+    assert_eq!(texts, vec![b"one".to_vec(), b"two".to_vec()]);
+    assert_eq!(report.rejected, 0);
+
+    // A failing sink stops the send before anything leaves the device.
+    alice.set_state_sink(Arc::new(|_: &[u8]| Err("disk full".to_string())));
+    assert!(alice.send_text("three").await.is_err());
+    assert!(bob.sync().await.unwrap().messages.is_empty());
+    server.handle.abort();
+}
+
+#[test]
+fn members_wrap_only_their_own_sessions() {
+    use cityg_api_client::v2::cityg_core::session::GroupSession;
+    let owner = identity(9);
+    let (pending, _published) = GroupSession::create(&owner, 4, &mut rand_core::OsRng).unwrap();
+    let session = pending.into_session().unwrap();
+    let exported = session.export().unwrap();
+    let client = DsClient::new("http://127.0.0.1:9").unwrap();
+
+    let stranger = GroupSession::import(&exported).unwrap();
+    assert!(Member::from_session(client.clone(), identity(10), stranger, 1).is_err());
+
+    let member = Member::from_session(client.clone(), identity(9), session, 7).unwrap();
+    assert_eq!(member.log_seq(), 7);
+    let restored = Member::restore(client, identity(9), &member.export().unwrap()).unwrap();
+    assert_eq!(restored.gid(), member.gid());
+    assert_eq!(restored.log_seq(), 7);
+}

@@ -76,6 +76,12 @@ struct Unconfirmed {
     commit: Vec<u8>,
 }
 
+/// Receives the exported member state (secrets included) whenever it must
+/// be made durable: after a message is encrypted and before it is sent, and
+/// after every processed or published commit. Persisting it in that order
+/// guarantees a restarted device never reuses a message generation.
+pub type StateSink = std::sync::Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
+
 /// One device's membership in one group.
 pub struct Member {
     client: DsClient,
@@ -85,6 +91,7 @@ pub struct Member {
     token: Option<([u8; 32], u64)>,
     pending_removals: BTreeMap<u32, SignedRemoveProposal>,
     unconfirmed: Option<Unconfirmed>,
+    sink: Option<StateSink>,
 }
 
 impl core::fmt::Debug for Member {
@@ -113,7 +120,7 @@ fn pending_of(info: &pb::GroupInfoResponse) -> Result<Vec<SignedRemoveProposal>,
 }
 
 impl Member {
-    fn from_session(
+    fn assemble(
         client: DsClient,
         identity: DeviceIdentity,
         session: GroupSession,
@@ -127,7 +134,37 @@ impl Member {
             token: None,
             pending_removals: BTreeMap::new(),
             unconfirmed: None,
+            sink: None,
         }
+    }
+
+    /// Wrap a group session obtained out of band (a tool or a test);
+    /// `log_seq` is the last room log position it reflects. The session must
+    /// belong to `identity`.
+    pub fn from_session(
+        client: DsClient,
+        identity: DeviceIdentity,
+        session: GroupSession,
+        log_seq: u64,
+    ) -> Result<Self, ClientError> {
+        if session.my_leaf_id() != &identity.leaf_id(session.gid())? {
+            return Err(ClientError::State("the session belongs to another device"));
+        }
+        Ok(Self::assemble(client, identity, session, log_seq))
+    }
+
+    /// Install the sink that persists the member state.
+    pub fn set_state_sink(&mut self, sink: StateSink) {
+        self.sink = Some(sink);
+    }
+
+    /// Persist the current state through the sink, if any.
+    pub fn save(&self) -> Result<(), ClientError> {
+        if let Some(sink) = &self.sink {
+            let exported = self.export()?;
+            sink(&exported).map_err(|_| ClientError::State("failed to persist the member state"))?;
+        }
+        Ok(())
     }
 
     /// Create a group of `n_max` slots; this device is its first admin.
@@ -141,7 +178,7 @@ impl Member {
         let response = client
             .create_group(&gid, &published.commit, &published.group_info)
             .await?;
-        Ok(Self::from_session(
+        Ok(Self::assemble(
             client,
             identity,
             pending.into_session()?,
@@ -196,7 +233,7 @@ impl Member {
                 .await
             {
                 Ok(response) => {
-                    return Ok(Self::from_session(
+                    return Ok(Self::assemble(
                         client,
                         identity,
                         pending.into_session()?,
@@ -217,7 +254,7 @@ impl Member {
         gid: &Digest,
     ) -> Result<Self, ClientError> {
         let (session, seq) = resync_session(&client, &identity, gid).await?;
-        Ok(Self::from_session(client, identity, session, seq))
+        Ok(Self::assemble(client, identity, session, seq))
     }
 
     /// Restore a member from [`Member::export`].
@@ -238,7 +275,7 @@ impl Member {
             ));
         }
         let log_seq = cityg_core::cbor::expect_uint(&next()?, "member log position")?;
-        Ok(Self::from_session(client, identity, session, log_seq))
+        Ok(Self::assemble(client, identity, session, log_seq))
     }
 
     /// Export the member (session secrets included) for encrypted storage.
@@ -333,6 +370,15 @@ impl Member {
 
     /// Follow the log: process commits, decrypt messages, record proposals.
     pub async fn sync(&mut self) -> Result<SyncReport, ClientError> {
+        let start = self.log_seq;
+        let result = self.sync_inner().await;
+        if self.log_seq != start {
+            self.save()?;
+        }
+        result
+    }
+
+    async fn sync_inner(&mut self) -> Result<SyncReport, ClientError> {
         let mut report = SyncReport::default();
         loop {
             let page = match self.fetch_page().await {
@@ -466,7 +512,7 @@ impl Member {
         self.pending_removals.clear();
         self.unconfirmed = None;
         report.resynced = true;
-        Ok(())
+        self.save()
     }
 
     /// Publish a commit built by `build` on the latest state, rebuilding it
@@ -524,7 +570,7 @@ impl Member {
             Ok(_) => {
                 self.session.apply_own_commit(pending)?;
                 self.pending_removals.clear();
-                Ok(())
+                self.save()
             }
             Err(ClientError::Transport(message)) => {
                 // Accepted or not: the next sync tells.
@@ -617,6 +663,9 @@ impl Member {
                 timestamp,
                 &mut OsRng,
             )?;
+            // The generation is spent: make that durable before the
+            // ciphertext leaves the device.
+            self.save()?;
             let token = self.token().await?;
             match self.client.send(&gid, &envelope, &token).await {
                 Ok(response) => {
@@ -712,8 +761,9 @@ impl Member {
     }
 
     /// Erase the keys of the previous epoch (end of the grace window).
-    pub fn expire_previous_epoch(&mut self) {
+    pub fn expire_previous_epoch(&mut self) -> Result<(), ClientError> {
         self.session.expire_previous_epoch();
+        self.save()
     }
 }
 

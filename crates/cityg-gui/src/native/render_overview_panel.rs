@@ -38,37 +38,28 @@ impl AppModel {
             Self::on_copy_room_identity,
             cx,
         ))
-        .child(self.session_row("WEID", &hex_encode(session.we_epoch_id)))
-        .child(self.session_row("Epoch key", &hex_encode(session.epoch_key)))
-        .child(self.session_row("Parent root", &hex_encode(session.parent_root)))
-        .child(self.session_row("Join delta", &hex_encode(session.join_delta_root)))
-        .child(self.session_row("Revoked since", &hex_encode(session.revoked_since_root)))
-        .child(self.session_row("Revoked root", &hex_encode(session.revoked_root)))
+        .child(self.session_row("Profile", "City-G v0.2 (ML-KEM-768, ML-DSA-87)"))
+        .child(self.session_row(
+            "Epoch",
+            &format!(
+                "{} · slot {} of {} · {} member(s)",
+                session.view.epoch,
+                session.view.slot,
+                session.view.n_max,
+                session.view.roster.len()
+            ),
+        ))
+        .child(self.session_row(
+            "Role",
+            if session.is_admin() { "Admin" } else { "Member" },
+        ))
         .child(self.render_regular_fingerprint_row(session, cx))
         .child(self.render_fs_fingerprint_row(session, cx))
-        .child(self.session_row("Proof mode", &session.proof_mode))
-        .child(self.session_row("VRF suite", &session.vrf_id))
-        .child(self.session_row("Policy", &session.policy_version))
-        .child(self.session_row("FS policy", &session.fs_policy_version))
+        .child(self.session_row("Tree hash", &hex_encode(session.view.tree_hash)))
         .child(self.session_row(
-            "Barrier recovery",
-            if let Some(issue) = session.barrier_state.barrier_recovery_issue {
-                issue.user_message()
-            } else if session.barrier_state.barrier_recovery_pending {
-                "Pending"
-            } else {
-                "Ready"
-            },
+            "Pending leave requests",
+            &session.view.pending_removals.to_string(),
         ))
-        .when_some(
-            session.barrier_state.last_pending_history_trace.as_ref(),
-            |panel, trace| {
-                panel
-                    .child(self.session_row("Last pending check", &trace.user_summary()))
-                    .child(self.session_row("Pending trace", &trace.technical_summary()))
-            },
-        )
         .child(self.render_epoch_age_row(session))
-        .child(self.session_row("KBROAD key (hex)", &hex_encode(&session.kbroad_public)))
     }
 }

@@ -1,8 +1,12 @@
-#[cfg(test)]
-use super::fault_injection::{FaultInjectionCutPoint, trigger_fault};
 use super::*;
+use cityg_api_client::v2::cityg_core::identity::DeviceIdentity;
+use cityg_api_client::v2::{DsClient, StateSink};
 use rand::{RngExt, rng};
-use std::{fs, io::Write};
+use std::{
+    fs,
+    io::Write,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 pub(super) fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<()> {
     let parent = path
@@ -43,20 +47,8 @@ pub(super) fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<(
             let _ = fs::remove_file(&temp_path);
             return Err(err);
         }
-
-        #[cfg(test)]
-        trigger_fault(
-            FaultInjectionCutPoint::AfterTempWriteFsync,
-            Some(temp_path.as_path()),
-        )?;
-
         drop(file);
-
-        #[cfg(test)]
-        trigger_fault(
-            FaultInjectionCutPoint::BeforeAtomicRename,
-            Some(temp_path.as_path()),
-        )?;
+        set_sensitive_file_permissions(&temp_path)?;
 
         if let Err(err) = fs::rename(&temp_path, path) {
             let _ = fs::remove_file(&temp_path);
@@ -85,155 +77,145 @@ pub(super) fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<(
     ))
 }
 
-pub(super) fn persist_session(session: &AppSession) -> Result<()> {
-    let persisted = PersistedSession::from_session(session);
-    let path = session_file_path(&session.server_url, &session.room_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    #[cfg(test)]
-    trigger_fault(FaultInjectionCutPoint::BeforeSessionEncrypt, None)?;
-
-    let data = encrypt_persisted_session(&persisted, &path)?;
-
-    #[cfg(test)]
-    trigger_fault(FaultInjectionCutPoint::AfterSessionEncrypt, None)?;
-
-    write_file_atomic(&path, &data)?;
-
-    #[cfg(test)]
-    trigger_fault(
-        FaultInjectionCutPoint::AfterSessionWrite,
-        Some(path.as_path()),
-    )?;
-
-    persist_replay_progress(
-        &session.server_url,
-        &session.room_id,
-        session.last_fetch_timestamp_ms,
-        &session.msg_replay_state,
-    )?;
-
-    let pointer = LastSessionPointer {
-        server_url: session.server_url.clone(),
-        room_id: session.room_id.clone(),
-    };
-    let pointer_path = last_session_pointer_path()?;
-    if let Some(parent) = pointer_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let pointer_data = serde_json::to_vec(&pointer).context("failed to encode session pointer")?;
-
-    #[cfg(test)]
-    trigger_fault(
-        FaultInjectionCutPoint::BeforePointerWrite,
-        Some(pointer_path.as_path()),
-    )?;
-
-    write_file_atomic(&pointer_path, &pointer_data)?;
-
-    #[cfg(test)]
-    trigger_fault(
-        FaultInjectionCutPoint::AfterPointerWrite,
-        Some(pointer_path.as_path()),
-    )?;
-
-    Ok(())
+/// What the session file needs besides the member state.
+#[derive(Clone)]
+pub(super) struct SessionFileContext {
+    pub(super) server_url: String,
+    pub(super) room_id: String,
+    pub(super) alias: String,
+    pub(super) identity_secret_key: Arc<Zeroizing<Vec<u8>>>,
+    pub(super) last_self_update_ms: Arc<AtomicU64>,
 }
 
-pub(super) fn persist_replay_progress(
-    server_url: &str,
-    room_id: &str,
-    last_fetch_timestamp_ms: Option<u64>,
-    msg_replay_state: &MsgReplayState,
-) -> Result<()> {
-    let persisted =
-        PersistedReplayProgress::from_runtime(last_fetch_timestamp_ms, msg_replay_state);
-    let path = replay_progress_file_path(server_url, room_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let data = encrypt_persisted_replay_progress(&persisted, &path)?;
-    write_file_atomic(&path, &data)
-}
-
-pub(super) fn persist_room_identity(
-    server_url: &str,
-    room_id: &str,
-    identity: &RoomIdentity,
-) -> Result<()> {
-    let persisted = PersistedRoomIdentity::from_runtime(identity);
-    let path = room_identity_file_path(server_url, room_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let data = encrypt_persisted_room_identity(&persisted, &path)?;
-    write_file_atomic(&path, &data)
-}
-
-pub(super) fn remove_persisted_session(server_url: &str, room_id: &str) -> Result<()> {
-    let path = session_file_path(server_url, room_id)?;
-    if path.exists() {
-        fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
-    }
-    let replay_path = replay_progress_file_path(server_url, room_id)?;
-    if replay_path.exists() {
-        fs::remove_file(&replay_path)
-            .with_context(|| format!("failed to remove {}", replay_path.display()))?;
-    }
-
-    let pointer_path = last_session_pointer_path()?;
-    if pointer_path.exists() {
-        let should_remove = fs::read(&pointer_path)
-            .ok()
-            .and_then(|data| serde_json::from_slice::<LastSessionPointer>(&data).ok())
-            .map(|pointer| pointer.server_url == server_url && pointer.room_id == room_id)
-            .unwrap_or(false);
-
-        if should_remove {
-            fs::remove_file(&pointer_path)
-                .with_context(|| format!("failed to remove {}", pointer_path.display()))?;
+impl SessionFileContext {
+    pub(super) fn for_member(server_url: &str, alias: &str, member: &Member) -> Self {
+        Self {
+            server_url: server_url.to_string(),
+            room_id: hex_encode(member.gid()),
+            alias: alias.to_string(),
+            identity_secret_key: Arc::new(Zeroizing::new(
+                member.identity().secret_key_bytes().to_vec(),
+            )),
+            last_self_update_ms: Arc::new(AtomicU64::new(engine::now_ms())),
         }
     }
 
-    Ok(())
+    /// Encrypt and atomically write the session file for `member_state`.
+    pub(super) fn write(&self, member_state: &[u8]) -> Result<()> {
+        let persisted = PersistedSession {
+            version: SESSION_FORMAT_VERSION,
+            server_url: self.server_url.clone(),
+            room_id: self.room_id.clone(),
+            alias: self.alias.clone(),
+            identity_secret_key_hex: hex_encode(self.identity_secret_key.as_slice()),
+            member_state_hex: hex_encode(member_state),
+            last_self_update_ms: self.last_self_update_ms.load(Ordering::SeqCst),
+        };
+        let path = session_file_path(&self.server_url, &self.room_id)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let data = encrypt_persisted_session(&persisted, &path)?;
+        write_file_atomic(&path, &data)?;
+        write_last_session_pointer(&self.server_url, &self.room_id)
+    }
+
+    /// Sink writing the session file whenever the member state must be
+    /// durable (see `cityg_api_client::v2::StateSink`).
+    pub(super) fn sink(&self) -> StateSink {
+        let context = self.clone();
+        Arc::new(move |member_state: &[u8]| {
+            context
+                .write(member_state)
+                .map_err(|error| format!("{error:#}"))
+        })
+    }
 }
 
-pub(super) fn load_last_session() -> Result<Option<AppSession>> {
-    let pointer_path = last_session_pointer_path()?;
-    if !pointer_path.exists() {
-        return Ok(None);
+/// Install the persistence sink on a new member, save it once and wrap it in
+/// an [`AppSession`].
+pub(super) fn open_session(
+    server_url: &str,
+    alias: &str,
+    mut member: Member,
+    last_self_update_ms: Option<u64>,
+) -> Result<AppSession> {
+    let context = SessionFileContext::for_member(server_url, alias, &member);
+    if let Some(value) = last_self_update_ms {
+        context.last_self_update_ms.store(value, Ordering::SeqCst);
     }
-
-    let data = fs::read(&pointer_path)
-        .with_context(|| format!("failed to read {}", pointer_path.display()))?;
-    let pointer: LastSessionPointer =
-        serde_json::from_slice(&data).context("invalid session pointer JSON")?;
-    let session = load_session_at(&pointer.server_url, &pointer.room_id)?;
-    if session.is_none() {
-        let _ = fs::remove_file(&pointer_path);
-    }
+    member.set_state_sink(context.sink());
+    member.save().context("failed to save the session")?;
+    let mut session = AppSession::new(
+        server_url.to_string(),
+        alias.to_string(),
+        member,
+        context.last_self_update_ms.load(Ordering::SeqCst),
+    );
+    session.self_update_clock = context.last_self_update_ms;
     Ok(session)
 }
 
+fn write_last_session_pointer(server_url: &str, room_id: &str) -> Result<()> {
+    let pointer = LastSessionPointer {
+        server_url: server_url.to_string(),
+        room_id: room_id.to_string(),
+    };
+    let path = last_session_pointer_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let data = serde_json::to_vec_pretty(&pointer).context("failed to encode session pointer")?;
+    write_file_atomic(&path, &data)
+}
+
+/// Remove every file of the session `(server_url, room_id)`.
+pub(super) fn remove_persisted_session(server_url: &str, room_id: &str) -> Result<()> {
+    for path in [
+        session_file_path(server_url, room_id)?,
+        history_file_path(server_url, room_id)?,
+        roster_file_path(server_url, room_id)?,
+    ] {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+    }
+    if let Some(pointer) = read_last_session_pointer()?
+        && pointer.server_url == server_url
+        && pointer.room_id == room_id
+    {
+        let path = last_session_pointer_path()?;
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// The session the GUI used last, restored.
+pub(super) fn load_last_session() -> Result<Option<AppSession>> {
+    let Some(pointer) = read_last_session_pointer()? else {
+        return Ok(None);
+    };
+    load_session_at(&pointer.server_url, &pointer.room_id)
+}
+
 pub(super) fn read_last_session_pointer() -> Result<Option<LastSessionPointer>> {
-    let pointer_path = last_session_pointer_path()?;
-    if !pointer_path.exists() {
+    let path = last_session_pointer_path()?;
+    if !path.exists() {
         return Ok(None);
     }
-
-    let data = fs::read(&pointer_path)
-        .with_context(|| format!("failed to read {}", pointer_path.display()))?;
-    let pointer: LastSessionPointer =
-        serde_json::from_slice(&data).context("invalid session pointer JSON")?;
+    let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let pointer =
+        serde_json::from_slice(&data).context("invalid saved session pointer JSON")?;
     Ok(Some(pointer))
 }
 
+/// Restore the session `(server_url, room_id)` from disk.
 pub(super) fn load_session_at(server_url: &str, room_id: &str) -> Result<Option<AppSession>> {
     let path = session_file_path(server_url, room_id)?;
     if !path.exists() {
@@ -241,71 +223,83 @@ pub(super) fn load_session_at(server_url: &str, room_id: &str) -> Result<Option<
     }
     let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let persisted = decode_persisted_session(&data, &path)?;
-    let mut session = persisted.into_app_session()?;
-    if let Some((last_fetch_timestamp_ms, msg_replay_state)) =
-        load_replay_progress(server_url, room_id)?
-    {
-        session.last_fetch_timestamp_ms = last_fetch_timestamp_ms;
-        session.msg_replay_state = msg_replay_state;
+    persisted.check_version()?;
+    let identity_secret = Zeroizing::new(decode_hex_vec(
+        "identity_secret_key_hex",
+        &persisted.identity_secret_key_hex,
+    )?);
+    let identity = DeviceIdentity::from_secret_key_bytes(&identity_secret)
+        .map_err(|error| anyhow!("invalid saved identity: {error}"))?;
+    let member_state = Zeroizing::new(decode_hex_vec(
+        "member_state_hex",
+        &persisted.member_state_hex,
+    )?);
+    let member = Member::restore(DsClient::new(&persisted.server_url)?, identity, &member_state)
+        .context("failed to restore the saved session")?;
+    if hex_encode(member.gid()) != persisted.room_id {
+        return Err(anyhow!("saved session does not match its room"));
     }
+    let session = open_session(
+        &persisted.server_url,
+        &persisted.alias,
+        member,
+        Some(persisted.last_self_update_ms),
+    )?;
     Ok(Some(session))
 }
 
-pub(super) fn load_room_identity(server_url: &str, room_id: &str) -> Result<Option<RoomIdentity>> {
-    let path = room_identity_file_path(server_url, room_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let persisted = decode_persisted_room_identity(&data, &path)?;
-    persisted.into_runtime().map(Some)
-}
-
-pub(super) fn load_or_create_room_identity(
+/// Persist the chat history of a room (the newest messages).
+pub(super) fn persist_history(
     server_url: &str,
     room_id: &str,
-) -> Result<RoomIdentity> {
-    if let Some(identity) = load_room_identity(server_url, room_id)? {
-        return Ok(identity);
+    messages: &[ChatMessageEntry],
+) -> Result<()> {
+    let path = history_file_path(server_url, room_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-
-    let identity = cityg_api_client::generate_room_admin_identity()?;
-    persist_room_identity(server_url, room_id, &identity)?;
-    Ok(identity)
+    let start = messages.len().saturating_sub(MAX_PERSISTED_MESSAGES);
+    let history = PersistedHistory {
+        version: HISTORY_VERSION,
+        messages: messages[start..]
+            .iter()
+            .filter(|message| matches!(message.delivery, MessageDelivery::Sent))
+            .map(PersistedChatMessage::from_entry)
+            .collect(),
+    };
+    let data = encrypt_persisted_history(&history, &path)?;
+    write_file_atomic(&path, &data)
 }
 
-fn load_replay_progress(
-    server_url: &str,
-    room_id: &str,
-) -> Result<Option<(Option<u64>, MsgReplayState)>> {
-    let path = replay_progress_file_path(server_url, room_id)?;
+/// Load the chat history of a room.
+pub(super) fn load_history(server_url: &str, room_id: &str) -> Result<Vec<ChatMessageEntry>> {
+    let path = history_file_path(server_url, room_id)?;
     if !path.exists() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let persisted = decode_persisted_replay_progress(&data, &path)?;
-    persisted.into_runtime().map(Some)
+    let history = decode_persisted_history(&data, &path)?;
+    if history.version != HISTORY_VERSION {
+        return Err(anyhow!(
+            "unsupported chat history version {} (expected {HISTORY_VERSION})",
+            history.version
+        ));
+    }
+    Ok(history
+        .messages
+        .into_iter()
+        .map(PersistedChatMessage::into_entry)
+        .collect())
 }
 
 pub(super) fn decode_hex32(name: &str, value: &str) -> Result<[u8; 32]> {
-    let bytes = hex_decode(value).with_context(|| format!("{name} is not valid hex"))?;
+    let bytes = decode_hex_vec(name, value)?;
     bytes
-        .as_slice()
         .try_into()
-        .map_err(|_| anyhow!("{name} must decode to 32 bytes, got {}", bytes.len()))
-}
-
-pub(super) fn decode_hex32_or_zero(name: &str, value: &str) -> Result<[u8; 32]> {
-    if value.is_empty() {
-        Ok([0u8; 32])
-    } else {
-        decode_hex32(name, value)
-    }
+        .map_err(|bytes: Vec<u8>| anyhow!("{name} must be 32 bytes, got {}", bytes.len()))
 }
 
 pub(super) fn decode_hex_vec(name: &str, value: &str) -> Result<Vec<u8>> {
-    if value.is_empty() {
-        return Ok(Vec::new());
-    }
     hex_decode(value).with_context(|| format!("{name} is not valid hex"))
 }

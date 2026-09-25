@@ -510,11 +510,6 @@ impl TextInputEditorState {
         !self.selected_range.is_empty()
     }
 
-    pub(super) fn replace_all(&mut self, text: &mut String, new_text: &str) {
-        *text = new_text.to_string();
-        self.reset_for_text(text);
-    }
-
     pub(super) fn replace_text_in_range(
         &mut self,
         text: &mut String,

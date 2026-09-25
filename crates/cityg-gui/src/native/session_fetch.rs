@@ -16,8 +16,10 @@ impl AppModel {
         self.fetch_in_flight = false;
         self.fetch_status = FetchStatus::Idle;
         self.fetch_task = None;
+        self.sync_again = false;
     }
 
+    /// Sync the room log after `delay` (commits, messages, proposals).
     pub(super) fn schedule_fetch(&mut self, cx: &mut ViewContext<Self>, delay: Duration) {
         let Some(session) = self.session.clone() else {
             self.reset_fetch_state();
@@ -25,6 +27,9 @@ impl AppModel {
         };
 
         if self.fetch_in_flight {
+            if delay.is_zero() {
+                self.sync_again = true;
+            }
             return;
         }
 
@@ -33,44 +38,16 @@ impl AppModel {
             self.fetch_status = FetchStatus::Refreshing;
         }
 
-        let since = session.last_fetch_timestamp_ms;
-        let params = match FetchParams::from_session(&session, since) {
-            Ok(params) => params,
-            Err(err) => {
-                self.fetch_in_flight = false;
-                self.fetch_status = FetchStatus::Idle;
-                if session.barrier_state.barrier_recovery_pending {
-                    let detail = session
-                        .barrier_state
-                        .last_pending_history_trace
-                        .as_ref()
-                        .map(BarrierPendingHistoryTrace::technical_summary)
-                        .or_else(|| Some(err.to_string()));
-                    self.info_message = Some(Self::barrier_recovery_message_for_session(&session));
-                    self.record_activity_with_detail(
-                        ActivityKind::Message,
-                        "Message fetch deferred",
-                        detail,
-                    );
-                    return;
-                }
-                self.last_error = Some(format!("Failed to prepare message fetch: {err}"));
-                self.record_activity_with_detail(
-                    ActivityKind::Message,
-                    "Message fetch skipped",
-                    Some(err.to_string()),
-                );
-                return;
-            }
-        };
-        let expected_weid = session.we_epoch_id;
+        let member = session.member.clone();
+        let expected_room = session.room_id.clone();
+        let expected_leaf = session.leaf_id;
 
         let task = cx.spawn(async move |this, cx| {
-            let fetch_future = match Tokio::spawn_result(cx, async move {
+            let sync = match Tokio::spawn_result(cx, async move {
                 if !delay.is_zero() {
                     sleep(delay).await;
                 }
-                perform_fetch(params).await
+                engine::sync_room(&member).await
             }) {
                 Ok(task) => task,
                 Err(err) => {
@@ -78,36 +55,36 @@ impl AppModel {
                         model.fetch_task = None;
                         model.fetch_in_flight = false;
                         model.fetch_status = FetchStatus::Idle;
-                        model.last_error = Some(format!("Failed to schedule message fetch: {err}"));
+                        model.last_error = Some(format!("Failed to schedule room sync: {err}"));
                     });
                     return;
                 }
             };
 
-            let outcome = fetch_future.await;
+            let outcome = sync.await;
 
             let _ = this.update(cx, |model, cx| {
                 model.fetch_task = None;
                 model.fetch_in_flight = false;
-                model.handle_fetch_result(outcome, expected_weid, cx);
+                model.handle_sync_result(outcome, &expected_room, expected_leaf, cx);
+                cx.notify();
             });
         });
 
         self.fetch_task = Some(task);
     }
 
-    pub(super) fn handle_fetch_result(
+    pub(super) fn handle_sync_result(
         &mut self,
-        outcome: anyhow::Result<FetchOutcome>,
-        expected_weid: [u8; 32],
+        outcome: anyhow::Result<engine::SyncOutcome>,
+        expected_room: &str,
+        expected_leaf: [u8; 32],
         cx: &mut ViewContext<Self>,
     ) {
         let matches_session = self
             .session
             .as_ref()
-            .map(|session| session.we_epoch_id == expected_weid)
-            .unwrap_or(false);
-
+            .is_some_and(|session| session.room_id == expected_room && session.leaf_id == expected_leaf);
         if !matches_session {
             self.fetch_status = FetchStatus::Idle;
             return;
@@ -115,99 +92,35 @@ impl AppModel {
 
         let delay = match outcome {
             Ok(result) => {
-                let FetchOutcome {
-                    messages,
-                    last_timestamp_ms,
-                    msg_replay_state,
-                } = result;
-
-                if let Some(session) = self.session.as_mut() {
-                    let mut updated_session = session.clone();
-                    let mut should_persist = false;
-                    if updated_session.msg_replay_state != msg_replay_state {
-                        updated_session.msg_replay_state = msg_replay_state;
-                        should_persist = true;
-                    }
-                    if let Some(ts) = last_timestamp_ms {
-                        let timestamp_changed = updated_session
-                            .last_fetch_timestamp_ms
-                            .map(|prev| ts > prev)
-                            .unwrap_or(true);
-                        if timestamp_changed {
-                            updated_session.last_fetch_timestamp_ms = Some(ts);
-                            should_persist = true;
-                        }
-                    }
-                    if should_persist {
-                        if let Err(err) = persist_replay_progress(
-                            &updated_session.server_url,
-                            &updated_session.room_id,
-                            updated_session.last_fetch_timestamp_ms,
-                            &updated_session.msg_replay_state,
-                        ) {
-                            warn!("failed to persist replay progress after fetch update: {err:?}");
-                            self.last_error = Some(format!(
-                                "Failed to persist replay progress after fetch update: {err}"
-                            ));
-                            self.record_activity_with_detail(
-                                ActivityKind::Message,
-                                "Message fetch persistence failed",
-                                Some(err.to_string()),
-                            );
-                            self.fetch_status = FetchStatus::Idle;
-                            self.config.client.fetch_retry_interval()
-                        } else {
-                            *session = updated_session;
-                            if !messages.is_empty() {
-                                let added = self.append_messages(messages);
-                                if added > 0 {
-                                    self.info_message =
-                                        Some(format!("Fetched {added} new message(s)."));
-                                    self.record_activity(
-                                        ActivityKind::Message,
-                                        format!("Fetched {added} new message(s)"),
-                                    );
-                                    self.notify_background_messages(added);
-                                }
-                            }
-                            self.fetch_status = FetchStatus::Idle;
-                            self.config.client.fetch_poll_interval()
-                        }
-                    } else {
-                        if !messages.is_empty() {
-                            let added = self.append_messages(messages);
-                            if added > 0 {
-                                self.info_message =
-                                    Some(format!("Fetched {added} new message(s)."));
-                                self.record_activity(
-                                    ActivityKind::Message,
-                                    format!("Fetched {added} new message(s)"),
-                                );
-                                self.notify_background_messages(added);
-                            }
-                        }
-                        self.fetch_status = FetchStatus::Idle;
-                        self.config.client.fetch_poll_interval()
-                    }
+                if result.removed {
+                    self.on_removed_from_room(cx);
+                    return;
+                }
+                self.apply_sync_outcome(result, cx);
+                self.fetch_status = FetchStatus::Idle;
+                if std::mem::take(&mut self.sync_again) {
+                    Duration::from_millis(0)
                 } else {
-                    self.fetch_status = FetchStatus::Idle;
                     self.config.client.fetch_poll_interval()
                 }
             }
             Err(err) => {
-                if is_stale_server_session_error(&err) {
+                if engine::is_membership_loss(&err) {
                     self.fetch_status = FetchStatus::Idle;
                     self.handle_stale_server_session(
-                        "Saved session is no longer recognized by the server. Please join again.",
+                        "This device is no longer a member of the room. Join it again with a new invite.",
                         cx,
                     );
                     return;
                 }
-                self.last_error = Some(format!("Failed to fetch messages: {err}"));
+                self.last_error = Some(format!("Failed to sync the room: {err:#}"));
+                if matches!(self.members_status, MembersStatus::Loading(_)) {
+                    self.members_status = MembersStatus::Error(format!("Roster sync failed: {err:#}"));
+                }
                 self.record_activity_with_detail(
-                    ActivityKind::Message,
-                    "Message fetch failed",
-                    Some(err.to_string()),
+                    ActivityKind::Sync,
+                    "Room sync failed",
+                    Some(format!("{err:#}")),
                 );
                 self.fetch_status = FetchStatus::Idle;
                 self.config.client.fetch_retry_interval()
@@ -217,5 +130,118 @@ impl AppModel {
         if !self.fetch_in_flight {
             self.schedule_fetch(cx, delay);
         }
+    }
+
+    /// Apply what a sync observed: roster changes, messages, aliases, view.
+    pub(super) fn apply_sync_outcome(
+        &mut self,
+        result: engine::SyncOutcome,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let engine::SyncOutcome {
+            messages,
+            changes,
+            rejected,
+            resynced,
+            view,
+            aliases,
+            ..
+        } = result;
+
+        if resynced {
+            self.record_security_event(
+                "this device",
+                "This device could not follow a commit and re-entered its slot (resync).",
+                cx,
+            );
+        }
+        for change in &changes {
+            let summary = match change {
+                engine::RosterChange::Joined(leaf) => {
+                    format!("Joined: {}", self.label_for(leaf, &aliases))
+                }
+                engine::RosterChange::Removed(leaf) => {
+                    format!("Removed: {}", self.label_for(leaf, &aliases))
+                }
+                engine::RosterChange::Resynced(leaf) => {
+                    format!("Resynced: {}", self.label_for(leaf, &aliases))
+                }
+                engine::RosterChange::LeaveRequested(leaf) => {
+                    format!("Leave requested: {}", self.label_for(leaf, &aliases))
+                }
+                engine::RosterChange::AdminsChanged => "Room admins changed".to_string(),
+            };
+            self.record_activity(ActivityKind::Roster, summary);
+        }
+        if rejected > 0 {
+            self.record_activity_with_detail(
+                ActivityKind::Message,
+                "Rejected messages",
+                Some(format!(
+                    "{rejected} envelope(s) failed authentication, came from a removed sender or were replays"
+                )),
+            );
+        }
+
+        let epoch_changed = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.view.epoch != view.epoch);
+        // Aliases name members of the new roster: apply it first.
+        self.apply_session_view(view);
+        self.reconcile_alias_bindings(&aliases, cx);
+        if epoch_changed {
+            self.record_activity(ActivityKind::Sync, "Moved to a new epoch");
+        }
+
+        if !messages.is_empty() {
+            let entries: Vec<ChatMessageEntry> = messages
+                .into_iter()
+                .map(|message| ChatMessageEntry {
+                    sender_leaf: Some(message.sender_leaf),
+                    fallback_label: format!("{}✓", hex_encode(&message.sender_leaf[..4])),
+                    plaintext: message.text.clone(),
+                    ciphertext_hex: message.key(),
+                    timestamp_ms: message.signed_timestamp_ms,
+                    delivery: MessageDelivery::Sent,
+                    pending_id: None,
+                })
+                .collect();
+            let added = self.append_messages(entries);
+            if added > 0 {
+                self.persist_history();
+                self.info_message = Some(format!("Received {added} new message(s)."));
+                self.record_activity(
+                    ActivityKind::Message,
+                    format!("Received {added} new message(s)"),
+                );
+                self.notify_background_messages(added);
+            }
+        }
+    }
+
+    fn label_for(&self, leaf: &[u8; 32], aliases: &BTreeMap<[u8; 32], String>) -> String {
+        aliases
+            .get(leaf)
+            .map(|alias| format_alias_display(alias, leaf))
+            .or_else(|| self.member_label_for_leaf(leaf))
+            .unwrap_or_else(|| short_leaf_display(leaf))
+    }
+
+    /// The last sync showed this device was removed.
+    pub(super) fn on_removed_from_room(&mut self, cx: &mut ViewContext<Self>) {
+        self.fetch_status = FetchStatus::Idle;
+        let room = self
+            .session
+            .as_ref()
+            .map(|session| session.room_id.clone())
+            .unwrap_or_default();
+        warn!("this device was removed from room {room}");
+        if let Err(err) = self.reset_session_state() {
+            warn!("failed to remove session data after removal: {err:?}");
+        }
+        let message = "This device was removed from the room.".to_string();
+        self.info_message = Some(message.clone());
+        self.show_error_toast(message, cx);
     }
 }

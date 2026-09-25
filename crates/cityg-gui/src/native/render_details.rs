@@ -75,13 +75,7 @@ impl AppModel {
     }
 
     pub(super) fn render_epoch_age_row(&self, session: &AppSession) -> Div {
-        let epoch_age_secs = SystemTime::now()
-            .duration_since(session.fs_epoch_created_at)
-            .unwrap_or(Duration::from_secs(0))
-            .as_secs();
-
-        let rotation_interval = session.fs_epoch_rotation_interval_secs;
-
+        let epoch_age_secs = engine::now_ms().saturating_sub(session.epoch_started_ms) / 1000;
         let age_text = if epoch_age_secs < 60 {
             format!("{} seconds", epoch_age_secs)
         } else if epoch_age_secs < 3600 {
@@ -89,10 +83,12 @@ impl AppModel {
         } else {
             format!("{:.1} hours", epoch_age_secs as f64 / 3600.0)
         };
-
+        let key_age_secs = engine::now_ms().saturating_sub(session.last_self_update_ms()) / 1000;
         let value_text = format!(
-            "Epoch #{} - Age: {} (manual rekey target: {}s)",
-            session.fs_ec, age_text, rotation_interval
+            "Epoch #{} - active for {} (own keys refreshed {} min ago)",
+            session.view.epoch,
+            age_text,
+            key_age_secs / 60
         );
 
         div()
@@ -107,7 +103,7 @@ impl AppModel {
                 div()
                     .text_size(px(11.0))
                     .text_color(rgb(UI_MUTED_TEXT))
-                    .child("Forward Secrecy Epoch"),
+                    .child("Epoch"),
             )
             .child(
                 div()
@@ -123,9 +119,9 @@ impl AppModel {
         cx: &mut ViewContext<Self>,
     ) -> Div {
         self.render_fingerprint_row(
-            "Regular fingerprint",
-            format_regular_fingerprint(session.regular_fingerprint.as_ref()),
-            session.regular_fingerprint.is_some(),
+            "Security code (transcript)",
+            format_regular_fingerprint(Some(&session.view.transcript_fingerprint)),
+            true,
             Self::on_copy_regular_fingerprint,
             cx,
         )
@@ -137,9 +133,9 @@ impl AppModel {
         cx: &mut ViewContext<Self>,
     ) -> Div {
         self.render_fingerprint_row(
-            "FS fingerprint",
-            format_fs_fingerprint(session.fs_fingerprint.as_ref(), session.fs_ec),
-            session.fs_fingerprint.is_some(),
+            "Roster hash",
+            format_regular_fingerprint(Some(&session.view.roster_hash)),
+            true,
             Self::on_copy_fs_fingerprint,
             cx,
         )

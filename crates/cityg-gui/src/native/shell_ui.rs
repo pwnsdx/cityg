@@ -16,7 +16,6 @@ pub(super) const UI_DISABLED_FILL: u32 = 0x1a2026;
 pub(super) const UI_DANGER_FILL: u32 = 0xcf6274;
 pub(super) const UI_DANGER_MUTED_FILL: u32 = 0x553943;
 pub(super) const UI_ACCENT_SOFT_FILL: u32 = 0x173656;
-pub(super) const BARRIER_HP_MODE: &str = "barrier-sealed-v1";
 
 pub(super) fn ui_canvas_fill(window_active: bool) -> gpui::Rgba {
     if window_active {

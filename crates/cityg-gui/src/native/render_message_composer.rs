@@ -2,8 +2,10 @@ use super::*;
 
 impl AppModel {
     pub(super) fn render_message_composer(&self, cx: &mut ViewContext<Self>) -> Div {
-        let barrier_pending = self.barrier_recovery_pending();
-        let recovery_issue = self.barrier_recovery_issue();
+        let removal_pending = self
+            .session
+            .as_ref()
+            .is_some_and(AppSession::removal_pending);
         let border_color = if self.composer.active {
             rgb(UI_ACCENT_TEXT)
         } else {
@@ -20,24 +22,8 @@ impl AppModel {
         } else {
             rgb(UI_PANEL_TEXT)
         };
-        let pending_trace_summary = self
-            .session
-            .as_ref()
-            .and_then(|session| session.barrier_state.last_pending_history_trace.as_ref())
-            .map(BarrierPendingHistoryTrace::user_summary);
-
-        let placeholder = if let Some(issue) = recovery_issue {
-            match issue {
-                BarrierRecoveryIssue::ContradictoryAuthenticatedHistory => {
-                    "Recovery requires history reconciliation…"
-                }
-                BarrierRecoveryIssue::InsufficientAuthenticatedHistory
-                | BarrierRecoveryIssue::LegacyPendingLocatorMissing => {
-                    "Recovery requires authenticated history…"
-                }
-            }
-        } else if barrier_pending {
-            "Waiting for barrier recovery…"
+        let placeholder = if removal_pending {
+            "This device is being removed from the room…"
         } else if self.composer.active {
             "Type a message…"
         } else {
@@ -57,7 +43,7 @@ impl AppModel {
             .border_color(rgb(UI_PANEL_BORDER))
             .bg(ui_toolbar_fill(self.window_active));
 
-        let mut composer_panel = div()
+        let composer_panel = div()
             .flex_grow()
             .flex()
             .flex_col()
@@ -87,25 +73,16 @@ impl AppModel {
                         placeholder,
                     )),
             );
-        if let Some(summary) = pending_trace_summary {
-            composer_panel = composer_panel.child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(UI_SUBTLE_TEXT))
-                    .child(summary),
-            );
-        }
         row = row.child(composer_panel);
 
-        let send_disabled = barrier_pending
+        let send_disabled = removal_pending
             || !self.composer.is_ready()
             || matches!(self.send_status, SendStatus::Sending)
             || self.session.is_none();
 
         let label = match self.send_status {
             SendStatus::Sending => "Sending…",
-            SendStatus::Idle if recovery_issue.is_some() => "Recovery required",
-            SendStatus::Idle if barrier_pending => "Awaiting recovery",
+            SendStatus::Idle if removal_pending => "Removal pending",
             SendStatus::Idle => "Send",
         };
 

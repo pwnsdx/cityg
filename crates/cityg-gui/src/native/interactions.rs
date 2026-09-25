@@ -48,20 +48,19 @@ impl AppModel {
         cx.notify();
     }
 
+    /// Switch the join form to creating a new room (empty room field).
     pub(super) fn on_generate_room_id(
         &mut self,
         _: &MouseDownEvent,
         _: &mut Window,
         cx: &mut ViewContext<Self>,
     ) {
-        self.join_form.room_id = AppModel::random_room_id();
-        self.join_form
-            .room_editor
-            .reset_for_text(&self.join_form.room_id);
-        self.join_form.clear_invite_material();
-        self.join_form.active = Some(ActiveField::Room);
+        self.join_form.room_id.clear();
+        self.join_form.room_editor.reset_for_text("");
+        self.join_form.active = Some(ActiveField::Alias);
         self.last_error = None;
-        self.info_message = Some("Generated a new room identifier.".to_string());
+        self.info_message =
+            Some("A new room will be created; you will be its first admin.".to_string());
         cx.notify();
     }
 
