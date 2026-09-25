@@ -2025,7 +2025,7 @@ fn parse_barrier_update_reason(
         malformed_at(
             "range",
             "hdr.barrier_update_reason",
-            format!("barrier_update_reason must fit in u64, got {reason_int}"),
+            format!("barrier_update_reason must fit in u64, got {reason_int:?}"),
         )
     })?;
     if reason > 2 {
