@@ -296,13 +296,6 @@ pub(super) fn load_history(server_url: &str, room_id: &str) -> Result<Vec<ChatMe
         .collect())
 }
 
-pub(super) fn decode_hex32(name: &str, value: &str) -> Result<[u8; 32]> {
-    let bytes = decode_hex_vec(name, value)?;
-    bytes
-        .try_into()
-        .map_err(|bytes: Vec<u8>| anyhow!("{name} must be 32 bytes, got {}", bytes.len()))
-}
-
 pub(super) fn decode_hex_vec(name: &str, value: &str) -> Result<Vec<u8>> {
     hex_decode(value).with_context(|| format!("{name} is not valid hex"))
 }

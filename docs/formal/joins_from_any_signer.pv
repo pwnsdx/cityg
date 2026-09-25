@@ -1,0 +1,11 @@
+(* Sanity check (section 2.3): a joiner that accepts the GroupInfo of
+   whatever signer the tree it received names enters an epoch the adversary
+   fabricated, with a member it controls. Expected result: false.
+   Run: proverif -lib cityg.pvl joins_from_any_signer.pv *)
+
+query gc: bitstring, es: key;
+  event(Accepted(spk(skJ1), N2, gc, es)) && attacker(es) ==> false.
+
+process
+  out(c, (spk(skA), spk(skB), spk(skJ1), spk(skJ2)));
+  (JN_Setup | JN_J(skJ1, false, false))

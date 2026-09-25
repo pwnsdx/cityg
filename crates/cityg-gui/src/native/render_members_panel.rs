@@ -179,7 +179,7 @@ impl AppModel {
 
         let mut list = div().flex().flex_col().gap(px(6.0));
         let local_session = self.session.as_ref();
-        let local_leaf_id = local_session.map(|session| session.leaf_id);
+        let local_member = local_session.map(AppSession::me);
         let local_is_room_admin = local_session
             .and_then(|session| self.room_admin_membership(session.pop_public_key.as_slice()))
             .unwrap_or(false);
@@ -217,13 +217,16 @@ impl AppModel {
                         div()
                             .text_size(px(11.0))
                             .text_color(rgb(UI_SUBTLE_TEXT))
-                            .child(format!("leaf: {}", hex_encode(member.leaf_id))),
+                            .child(format!(
+                                "leaf {} · since epoch {}",
+                                member.member.leaf, member.member.since
+                            )),
                     );
 
                 let facts = if member.pending_removal {
-                    format!("slot {} · removal pending", member.slot)
+                    "removal pending".to_string()
                 } else {
-                    format!("slot {}", member.slot)
+                    "member".to_string()
                 };
                 entry = entry.child(
                     div()
@@ -286,10 +289,10 @@ impl AppModel {
                 }
 
                 if local_is_room_admin
-                    && local_leaf_id != Some(member.leaf_id)
+                    && local_member != Some(member.member)
                     && !member.pending_removal
                 {
-                    let target_leaf_id = member.leaf_id;
+                    let target = member.member;
                     let mut expel_button = div()
                         .px(px(8.0))
                         .py(px(4.0))
@@ -317,7 +320,7 @@ impl AppModel {
                             MouseButton::Left,
                             cx.listener(move |this, _, window, cx| {
                                 this.prompt_member_expulsion(
-                                    target_leaf_id,
+                                    target,
                                     expel_label.clone(),
                                     window,
                                     cx,

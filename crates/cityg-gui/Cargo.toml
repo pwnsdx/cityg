@@ -1,6 +1,6 @@
 [package]
 name = "cityg-gui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "City-G graphical client built with gpui"
 default-run = "cityg-gui"

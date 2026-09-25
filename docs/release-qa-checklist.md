@@ -19,8 +19,12 @@ With a fresh `cityg-api` (and, for Worker releases, a staging Worker):
 - [ ] Two GUI instances (`CITYG_GUI_CONFIG_DIR` apart): create a room, copy
       the invite link, join, exchange messages both ways, compare the
       security codes.
-- [ ] A third member joins with the same link while the others are offline,
-      then everyone syncs and agrees.
+- [ ] A third member joins with the same link while the others are offline
+      (it commits its own entry), then everyone syncs and agrees.
+- [ ] Several members join at once while one member is online: its
+      maintenance places them with one commit and they enter with their
+      welcomes (`cargo run -p cityg-gui --bin join_leave -- <url> --count=8
+      --batch`).
 - [ ] An admin expels a member: the member is told, can no longer send,
       and the others keep talking.
 - [ ] A member leaves: another member's maintenance commits the removal.

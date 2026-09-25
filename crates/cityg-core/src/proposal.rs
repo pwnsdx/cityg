@@ -1,60 +1,55 @@
 //! Removal proposals (audit C-03, P-3.c).
 //!
 //! ```text
-//! RemoveProposal       := ["city-g/remove/v2", gid, target_leaf_id,
-//!                          target_slot, target_generation, proposer_device_pk]
+//! RemoveProposal       := ["city-g/remove/v3", gid, target_leaf, target_since,
+//!                          proposer_device_pk]
 //! SignedRemoveProposal := [RemoveProposal..., signature]
-//!     signature := ML-DSA-87.Sign(proposer_sk, CBOR_det(RemoveProposal),
-//!                                 ctx = "city-g/remove/v1")
+//!     signature := ML-DSA-65.Sign(proposer_sk, CBOR_det(RemoveProposal),
+//!                                 ctx = "city-g/remove/v3")
+//! proposal_ref := H_L("proposal-ref", [SignedRemoveProposal])
 //! ```
 //!
-//! A proposal is authorized when its proposer is the target itself (a
-//! voluntary leave) or an admin of the roster it applies to. A target never
-//! authors the commit that removes it: removals are committed by another
-//! member (or by the next joiner once no member is left), so a departing
-//! member never chooses the secrets of the epoch that excludes it.
-//!
-//! The `(target_slot, target_generation)` pair makes every proposal single
-//! use: once the occupancy ends, the proposal no longer matches the roster.
+//! A proposal is authorized when its target occupancy `[target_leaf,
+//! target_since]` is current and its proposer is the target itself (a
+//! voluntary leave) or an admin. A target never authors the commit that
+//! removes it: removals are committed by another member or by a joiner, so
+//! a departing member never chooses the secrets of the epoch that excludes
+//! it. The occupancy pair makes every proposal single use: no later occupant
+//! of the leaf has the same `since`.
 
+use ciborium::value::Value;
 use cityg_pqc::SignatureContext;
 use rand_core::CryptoRngCore;
 
 use crate::cbor::{bytes, expect_bytes, expect_bytes32, expect_u32, expect_uint, text, uint};
 use crate::error::{CoreError, CoreResult};
-use crate::hash::Digest;
+use crate::hash::{Digest, h_l};
 use crate::identity::{DeviceIdentity, check_device_key};
-use crate::roster::{MemberRecord, Roster};
+use crate::registry::Membership;
 use crate::signed::{open_signed, sign_fields};
+use crate::tree::LeafNode;
 
 /// Label (first field) of a removal proposal.
-pub const REMOVE_PROPOSAL_LABEL: &str = "city-g/remove/v2";
+pub const REMOVE_PROPOSAL_LABEL: &str = "city-g/remove/v3";
 /// Upper bound on an encoded signed proposal.
-pub const MAX_REMOVE_PROPOSAL_BYTES: usize = 12 * 1024;
+pub const MAX_REMOVE_PROPOSAL_BYTES: usize = 8 * 1024;
 
-/// Proposal to end the occupancy `(target_slot, target_generation)`.
+/// `proposal_ref := H_L("proposal-ref", [encoded])`: the name of a signed
+/// removal proposal or join request.
+pub fn proposal_ref(encoded: &[u8]) -> CoreResult<Digest> {
+    h_l("proposal-ref", vec![bytes(encoded)])
+}
+
+/// Proposal to end the occupancy `[target_leaf, target_since]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoveProposal {
     pub gid: Digest,
-    pub target_leaf_id: Digest,
-    pub target_slot: u32,
-    pub target_generation: u64,
+    pub target_leaf: u32,
+    pub target_since: u64,
     pub proposer_device_pk: Vec<u8>,
 }
 
 impl RemoveProposal {
-    /// Proposal targeting `member`, proposed by `proposer_device_pk`.
-    #[must_use]
-    pub fn for_member(gid: &Digest, member: &MemberRecord, proposer_device_pk: &[u8]) -> Self {
-        Self {
-            gid: *gid,
-            target_leaf_id: member.leaf_id,
-            target_slot: member.slot,
-            target_generation: member.generation,
-            proposer_device_pk: proposer_device_pk.to_vec(),
-        }
-    }
-
     /// Sign the proposal with the proposer's identity.
     pub fn sign(
         self,
@@ -70,9 +65,8 @@ impl RemoveProposal {
             vec![
                 text(REMOVE_PROPOSAL_LABEL),
                 bytes(&self.gid),
-                bytes(&self.target_leaf_id),
-                uint(u64::from(self.target_slot)),
-                uint(self.target_generation),
+                uint(u64::from(self.target_leaf)),
+                uint(self.target_since),
                 bytes(&self.proposer_device_pk),
             ],
             identity,
@@ -96,16 +90,17 @@ impl SignedRemoveProposal {
         let opened = open_signed(
             encoded,
             REMOVE_PROPOSAL_LABEL,
-            6,
+            5,
             MAX_REMOVE_PROPOSAL_BYTES,
             "remove proposal",
         )?;
         let mut fields = opened.fields.iter().skip(1).cloned();
-        let mut next = || fields.next().ok_or(CoreError::Malformed("remove proposal"));
+        let mut next = || -> CoreResult<Value> {
+            fields.next().ok_or(CoreError::Malformed("remove proposal"))
+        };
         let gid = expect_bytes32(next()?, "remove proposal gid")?;
-        let target_leaf_id = expect_bytes32(next()?, "remove proposal target")?;
-        let target_slot = expect_u32(&next()?, "remove proposal slot")?;
-        let target_generation = expect_uint(&next()?, "remove proposal generation")?;
+        let target_leaf = expect_u32(&next()?, "remove proposal leaf")?;
+        let target_since = expect_uint(&next()?, "remove proposal since")?;
         let proposer_device_pk = expect_bytes(next()?, "remove proposal proposer")?;
         check_device_key(&proposer_device_pk, "remove proposal proposer")?;
         opened.verify(
@@ -116,9 +111,8 @@ impl SignedRemoveProposal {
         Ok(Self {
             proposal: RemoveProposal {
                 gid,
-                target_leaf_id,
-                target_slot,
-                target_generation,
+                target_leaf,
+                target_since,
                 proposer_device_pk,
             },
             encoded: encoded.to_vec(),
@@ -137,28 +131,33 @@ impl SignedRemoveProposal {
         &self.encoded
     }
 
+    /// `proposal_ref` of the proposal.
+    pub fn reference(&self) -> CoreResult<Digest> {
+        proposal_ref(&self.encoded)
+    }
+
     /// Whether the proposer is the target (a voluntary leave).
     #[must_use]
-    pub fn is_self_removal(&self, target: &MemberRecord) -> bool {
+    pub fn is_self_removal(&self, target: &LeafNode) -> bool {
         target.device_pk == self.proposal.proposer_device_pk
     }
 
-    /// Check the proposal against `roster` of group `gid`: the target
+    /// Check the proposal against the membership of group `gid`: the target
     /// occupancy is current and the proposer is the target or an admin.
-    /// Returns the target record.
-    pub fn authorize<'a>(&self, gid: &Digest, roster: &'a Roster) -> CoreResult<&'a MemberRecord> {
+    /// Returns the target's record.
+    pub fn authorize<'a>(
+        &self,
+        gid: &Digest,
+        membership: &Membership<'a>,
+    ) -> CoreResult<&'a LeafNode> {
         let proposal = &self.proposal;
         if &proposal.gid != gid {
             return Err(CoreError::Invalid("remove proposal for another group"));
         }
-        let target = roster
-            .member_in_slot(proposal.target_slot)
-            .filter(|member| {
-                member.generation == proposal.target_generation
-                    && member.leaf_id == proposal.target_leaf_id
-            })
+        let target = membership
+            .member(proposal.target_leaf, proposal.target_since)
             .ok_or(CoreError::Invalid("remove proposal target is not current"))?;
-        if !self.is_self_removal(target) && !roster.is_admin(&proposal.proposer_device_pk) {
+        if !self.is_self_removal(target) && !membership.is_admin_key(&proposal.proposer_device_pk) {
             return Err(CoreError::Unauthorized(
                 "removal proposed by neither the target nor an admin",
             ));
@@ -171,17 +170,32 @@ impl SignedRemoveProposal {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::identity::leaf_id;
+    use crate::kem::KemSecret;
+    use crate::registry::Registry;
+    use crate::tree::PublicTree;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
-    fn member(gid: &Digest, identity: &DeviceIdentity, slot: u32) -> MemberRecord {
-        MemberRecord {
-            leaf_id: leaf_id(gid, identity.public_key()).unwrap(),
-            device_pk: identity.public_key().to_vec(),
-            slot,
-            generation: 1,
-            admission_hash: [0; 32],
+    fn add(tree: &mut PublicTree, identity: &DeviceIdentity, since: u64, rng: &mut ChaCha20Rng) {
+        let leaf = tree.entry_leaf().unwrap();
+        tree.add_leaf(
+            leaf,
+            LeafNode {
+                device_pk: identity.public_key().to_vec(),
+                since,
+                encryption_key: KemSecret::generate(rng).public_key(),
+                admission_hash: [leaf as u8; 32],
+            },
+        )
+        .unwrap();
+    }
+
+    fn proposal(gid: &Digest, leaf: u32, since: u64, proposer: &DeviceIdentity) -> RemoveProposal {
+        RemoveProposal {
+            gid: *gid,
+            target_leaf: leaf,
+            target_since: since,
+            proposer_device_pk: proposer.public_key().to_vec(),
         }
     }
 
@@ -192,56 +206,43 @@ mod tests {
         let bob = DeviceIdentity::from_seed(&[2; 32]);
         let carol = DeviceIdentity::from_seed(&[3; 32]);
         let gid = [9; 32];
-        let mut roster = Roster::genesis(&gid, alice.public_key()).unwrap();
-        roster.add_member(member(&gid, &bob, 1)).unwrap();
-        roster.add_member(member(&gid, &carol, 2)).unwrap();
-        let bob_record = roster.member_in_slot(1).unwrap().clone();
+        let mut tree = PublicTree::new(4).unwrap();
+        add(&mut tree, &alice, 0, &mut rng);
+        add(&mut tree, &bob, 1, &mut rng);
+        add(&mut tree, &carol, 2, &mut rng);
+        let registry = Registry::genesis(4).unwrap();
+        let membership = Membership::new(&tree, &registry);
 
-        let leave = RemoveProposal::for_member(&gid, &bob_record, bob.public_key())
-            .sign(&bob, &mut rng)
-            .unwrap();
-        assert!(leave.is_self_removal(&bob_record));
-        assert_eq!(leave.authorize(&gid, &roster).unwrap(), &bob_record);
+        let leave = proposal(&gid, 1, 1, &bob).sign(&bob, &mut rng).unwrap();
+        let bob_record = tree.leaf(1).unwrap();
+        assert!(leave.is_self_removal(bob_record));
+        assert_eq!(leave.authorize(&gid, &membership).unwrap(), bob_record);
         assert_eq!(
             SignedRemoveProposal::decode(leave.encoded()).unwrap(),
             leave
         );
+        assert_ne!(leave.reference().unwrap(), proposal_ref(b"").unwrap());
 
-        let by_admin = RemoveProposal::for_member(&gid, &bob_record, alice.public_key())
-            .sign(&alice, &mut rng)
-            .unwrap();
-        by_admin.authorize(&gid, &roster).unwrap();
+        let by_admin = proposal(&gid, 1, 1, &alice).sign(&alice, &mut rng).unwrap();
+        by_admin.authorize(&gid, &membership).unwrap();
 
-        let by_peer = RemoveProposal::for_member(&gid, &bob_record, carol.public_key())
-            .sign(&carol, &mut rng)
-            .unwrap();
+        let by_peer = proposal(&gid, 1, 1, &carol).sign(&carol, &mut rng).unwrap();
         assert!(matches!(
-            by_peer.authorize(&gid, &roster),
+            by_peer.authorize(&gid, &membership),
             Err(CoreError::Unauthorized(_))
         ));
-        assert!(leave.authorize(&[8; 32], &roster).is_err());
+        assert!(leave.authorize(&[8; 32], &membership).is_err());
 
-        // Once the occupancy ends the proposal is stale, and the removed
-        // device cannot come back.
-        roster.remove_member(1, 1).unwrap();
-        assert!(leave.authorize(&gid, &roster).is_err());
+        // A proposal names one occupancy: once it ends, or for another
+        // occupant of the leaf, the proposal is stale.
+        let stale = proposal(&gid, 1, 0, &alice).sign(&alice, &mut rng).unwrap();
         assert_eq!(
-            roster.add_member(MemberRecord {
-                generation: 2,
-                ..bob_record.clone()
-            }),
-            Err(CoreError::Unauthorized(
-                "a removed device cannot join again"
-            ))
+            stale.authorize(&gid, &membership),
+            Err(CoreError::Invalid("remove proposal target is not current"))
         );
-        let dave = DeviceIdentity::from_seed(&[4; 32]);
-        roster
-            .add_member(MemberRecord {
-                generation: 2,
-                ..member(&gid, &dave, 1)
-            })
-            .unwrap();
-        assert!(leave.authorize(&gid, &roster).is_err(), "single use");
+        tree.remove_leaf(1).unwrap();
+        let membership = Membership::new(&tree, &registry);
+        assert!(leave.authorize(&gid, &membership).is_err());
     }
 
     #[test]
@@ -250,20 +251,13 @@ mod tests {
         let alice = DeviceIdentity::from_seed(&[1; 32]);
         let bob = DeviceIdentity::from_seed(&[2; 32]);
         let gid = [9; 32];
-        let record = member(&gid, &bob, 1);
-        assert!(
-            RemoveProposal::for_member(&gid, &record, bob.public_key())
-                .sign(&alice, &mut rng)
-                .is_err()
-        );
-        let signed = RemoveProposal::for_member(&gid, &record, bob.public_key())
-            .sign(&bob, &mut rng)
-            .unwrap();
+        assert!(proposal(&gid, 1, 1, &bob).sign(&alice, &mut rng).is_err());
+        let signed = proposal(&gid, 1, 1, &bob).sign(&bob, &mut rng).unwrap();
         let mut tampered = signed.encoded().to_vec();
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
         assert!(SignedRemoveProposal::decode(&tampered).is_err());
         assert!(SignedRemoveProposal::decode(&[0x80]).is_err());
-        assert_eq!(signed.proposal().target_slot, 1);
+        assert_eq!(signed.proposal().target_leaf, 1);
     }
 }

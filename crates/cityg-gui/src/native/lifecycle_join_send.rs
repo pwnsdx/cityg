@@ -5,7 +5,7 @@ pub(super) async fn perform_join(request: JoinRequest) -> Result<AppSession> {
     match request {
         JoinRequest::Create { server_url, alias } => {
             let member =
-                engine::create_room(&server_url, &alias, engine::DEFAULT_ROOM_N_MAX).await?;
+                engine::create_room(&server_url, &alias, engine::DEFAULT_ROOM_CAPACITY).await?;
             open_session(&server_url, &alias, member, None)
         }
         JoinRequest::Invite { link, alias } => {
@@ -140,7 +140,7 @@ impl AppModel {
             Ok(sent) => {
                 if let Some(session) = &self.session {
                     let entry = ChatMessageEntry {
-                        sender_leaf: Some(session.leaf_id),
+                        sender: Some(session.me()),
                         fallback_label: session.alias.clone(),
                         plaintext,
                         ciphertext_hex: sent.key,

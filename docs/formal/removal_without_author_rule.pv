@@ -1,6 +1,7 @@
-(* Sanity check: without the rule that a commit cannot remove its author
-   (section 9.4, audit C-03), the removed member authors its own removal
-   and learns the secret of the next epoch. Expected result: false.
+(* Sanity check: without the rule that a removal never targets the author
+   of the commit (section 9.4, audit C-03), the removed member authors a
+   Resync that includes its own removal, re-enters its leaf and learns the
+   secret of the next epoch. Expected result: false.
    Run: proverif -lib cityg.pvl removal_without_author_rule.pv *)
 
 query pk: spkey, gc: bitstring, es: key;

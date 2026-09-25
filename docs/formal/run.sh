@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run every scenario of the City-G v0.2 symbolic model and compare ProVerif's
+# Run every scenario of the City-G v0.3 symbolic model and compare ProVerif's
 # verdicts with the expected ones, query by query.
 # Usage: docs/formal/run.sh [path/to/proverif]    (default: proverif in PATH)
 set -euo pipefail
@@ -17,9 +17,13 @@ EXPECTED=(
   "key_schedule: true true true true"
   "forward_secrecy: true unproved"
   "post_compromise: true false"
+  "joins: true true true true true false false"
+  "join_secrecy: true false"
+  "joins_from_any_signer: false"
   "removal: true true true true false false"
   "removal_without_author_rule: false"
   "removal_without_retired_rule: false"
+  "rotation: true true true false false"
   "messages: true true false"
 )
 

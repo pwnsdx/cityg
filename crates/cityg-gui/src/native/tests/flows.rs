@@ -1,4 +1,4 @@
-//! End-to-end flows of the GUI against an in-process v2 delivery service.
+//! End-to-end flows of the GUI against an in-process v3 delivery service.
 
 use super::*;
 
@@ -64,7 +64,7 @@ fn sync_now(cx: &mut VisualTestContext, view: &Entity<AppModel>) {
 }
 
 #[gpui::test]
-fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
+fn gpui_room_lifecycle_against_the_v3_service(cx: &mut TestAppContext) {
     let config = ConfigDir::new();
     let server = TestServer::start();
     let (view, cx) = open_window(cx, None);
@@ -116,9 +116,12 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
     sync_now(cx, &view);
     wait_for(cx, &view, "two joins", |model| {
         model.members_total == 3
-            && model.leaf_alias_index.values().any(|alias| alias == "bob")
             && model
-                .leaf_alias_index
+                .member_alias_index
+                .values()
+                .any(|alias| alias == "bob")
+            && model
+                .member_alias_index
                 .values()
                 .any(|alias| alias == "carol")
     });
@@ -187,10 +190,9 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
     });
 
     // Carol leaves: her request is recorded; the maintenance commits it.
-    let vacant = server
+    server
         .block_on(engine::leave_room(&carol))
         .expect("carol leaves");
-    assert!(!vacant);
     sync_now(cx, &view);
     wait_for(cx, &view, "leave request", |model| {
         model
@@ -204,7 +206,7 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
         let session = model.session.as_ref().expect("session");
         assert_eq!(
             session_runtime::maintenance_action(session, engine::now_ms()),
-            Some(session_runtime::MaintenanceAction::CommitRemovals)
+            Some(session_runtime::MaintenanceAction::CommitPending)
         );
     });
     view.update(cx, |model, cx| model.run_maintenance(cx));
@@ -212,7 +214,10 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
         !model.removal_commit_in_flight && model.members_total == 2
     });
     view.update(cx, |model, _| {
-        assert!(has_activity(model, "Committed a member's leave request"));
+        assert!(has_activity(
+            model,
+            "Committed the pending leave and join requests"
+        ));
     });
 
     // PCS refresh from the session controls.
@@ -256,15 +261,15 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
     }
 
     // Alice expels Bob.
-    let bob_leaf = server.block_on(async { *bob.lock().await.session().my_leaf_id() });
+    let bob_ref = server.block_on(async { bob.lock().await.session().me() });
     cx.update(|window, app| {
         view.update(app, |model, cx| {
-            model.prompt_member_expulsion(bob_leaf, "bob".to_string(), window, cx);
+            model.prompt_member_expulsion(bob_ref, "bob".to_string(), window, cx);
         });
     });
     let (question, detail) = cx.pending_prompt().expect("expel prompt");
     assert_eq!(question, "Expel bob from this room?");
-    assert!(detail.contains(&hex_encode(bob_leaf)));
+    assert!(detail.contains(&member_ref_text(bob_ref)));
     cx.simulate_prompt_answer("Expel");
     wait_for(cx, &view, "expel", |model| {
         matches!(model.leave_status, LeaveStatus::Idle) && model.members_total == 1
@@ -274,8 +279,8 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
     });
     assert!(server.sync(&bob).removed);
 
-    // Alice, the last member, leaves: the room is vacant and the local
-    // state is erased.
+    // Alice, the last member, leaves: her leave is recorded (nobody is left
+    // to commit it) and the local state is erased.
     view.update(cx, |model, cx| {
         model.start_leave(cx);
         assert!(matches!(model.leave_status, LeaveStatus::Leaving));
@@ -284,7 +289,7 @@ fn gpui_room_lifecycle_against_the_v2_service(cx: &mut TestAppContext) {
     view.update(cx, |model, _| {
         assert_eq!(
             model.info_message.as_deref(),
-            Some("Left the room. It has no member left.")
+            Some("Leave requested. The remaining members commit your removal.")
         );
         assert!(model.members.is_empty());
         assert!(model.maintenance_task.is_none());
@@ -368,7 +373,7 @@ fn gpui_member_joins_by_invite_and_notices_its_removal(cx: &mut TestAppContext) 
         .roster
         .iter()
         .find(|entry| entry.alias.as_deref() == Some("bob"))
-        .map(|entry| entry.leaf_id)
+        .map(|entry| entry.member)
         .expect("bob in the roster");
     server
         .block_on(engine::expel(&alice, bob_leaf))
@@ -411,7 +416,7 @@ fn gpui_send_after_removal_clears_the_session(cx: &mut TestAppContext) {
         .roster
         .iter()
         .find(|entry| !entry.admin)
-        .map(|entry| entry.leaf_id)
+        .map(|entry| entry.member)
         .expect("bob in the roster");
     server
         .block_on(engine::expel(&alice, bob_leaf))

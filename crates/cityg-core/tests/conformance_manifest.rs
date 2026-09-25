@@ -1,10 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Checks `kat/kat-v0.2-conformance-manifest.json`, the map from the
+//! Checks `kat/kat-v0.3-conformance-manifest.json`, the map from the
 //! requirements of `docs/specs.md` to the conformance vectors and to the
 //! tests of the reference implementation:
 //!
 //! * every section anchor, vector pointer, test, script, ProVerif scenario
-//!   and audit identifier it names exists;
+//!   and origin (audit finding, audit proposal or design decision) it names
+//!   exists;
 //! * every normative section of the specification, every vector section and
 //!   every signed-object vector is covered by a requirement;
 //! * every test of `cityg-core` is mapped to a requirement.
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value as Json;
 
-const MANIFEST: &str = "kat/kat-v0.2-conformance-manifest.json";
+const MANIFEST: &str = "kat/kat-v0.3-conformance-manifest.json";
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -55,9 +56,11 @@ fn spec_anchors(spec: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Finding and proposal identifiers of the audit report (`### C-01 — ...`).
-fn audit_ids(report: &str) -> BTreeSet<String> {
-    report
+/// Identifiers of the findings and proposals of an audit report and of the
+/// decisions of a design note, taken from their headings (`### C-01 — ...`,
+/// `### D-1 — ...`).
+fn origin_ids(document: &str) -> BTreeSet<String> {
+    document
         .lines()
         .filter_map(|line| line.strip_prefix("### "))
         .filter_map(|title| title.split_whitespace().next())
@@ -65,7 +68,7 @@ fn audit_ids(report: &str) -> BTreeSet<String> {
             let mut parts = id.split('-');
             matches!(
                 (parts.next(), parts.next(), parts.next()),
-                (Some("C" | "H" | "M" | "L" | "P"), Some(number), None)
+                (Some("C" | "H" | "M" | "L" | "P" | "D"), Some(number), None)
                     if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
             )
         })
@@ -238,10 +241,13 @@ fn the_manifest_points_at_real_sections_vectors_and_tests() {
     assert_eq!(manifest["profile"], vectors["profile"]);
     let spec_path = manifest["spec"].as_str().expect("spec path");
     let anchors = spec_anchors(&read(&repo().join(spec_path)));
-    let audit = audit_ids(&read(
-        &repo().join(manifest["audit"].as_str().expect("audit path")),
-    ));
-    assert!(audit.contains("C-01") && audit.contains("P-8"), "{audit:?}");
+    let origins: BTreeSet<String> = strings(&manifest, "origins", "manifest")
+        .iter()
+        .flat_map(|document| origin_ids(&read(&repo().join(document))))
+        .collect();
+    for id in ["C-01", "P-8", "D-1", "D-9"] {
+        assert!(origins.contains(id), "{id} not in {origins:?}");
+    }
     let verifier = manifest["independent_verifier"].as_str().expect("verifier");
     assert!(repo().join(verifier).is_file(), "{verifier}");
 
@@ -273,13 +279,13 @@ fn the_manifest_points_at_real_sections_vectors_and_tests() {
                 errors.push(format!("{id}: no anchor {section} in {spec_path}"));
             }
         }
-        let findings = strings(requirement, "audit", id);
-        if findings.is_empty() {
-            errors.push(format!("{id}: no audit reference"));
+        let cited = strings(requirement, "origin", id);
+        if cited.is_empty() {
+            errors.push(format!("{id}: no origin"));
         }
-        for finding in findings {
-            if !audit.contains(&finding) {
-                errors.push(format!("{id}: unknown audit item {finding}"));
+        for origin in cited {
+            if !origins.contains(&origin) {
+                errors.push(format!("{id}: unknown origin {origin}"));
             }
         }
         for reference in strings(requirement, "vectors", id) {
@@ -422,7 +428,7 @@ fn the_checker_resolves_modules_and_rejects_missing_tests() {
         check_test("cityg-core", "cbor::tests::uint").is_err(),
         "helpers are not tests"
     );
-    let vectors = load_json("kat/v0.2/vectors.json");
+    let vectors = load_json("kat/v0.3/vectors.json");
     assert!(resolve_vector(&vectors, "/signed_objects#invite").is_ok());
     assert!(resolve_vector(&vectors, "/signed_objects#nothing").is_err());
     assert!(resolve_vector(&vectors, "/nothing").is_err());
@@ -432,4 +438,9 @@ fn the_checker_resolves_modules_and_rejects_missing_tests() {
     );
     assert_eq!(declares_module("mod tests;", "tests"), Some(false));
     assert_eq!(declares_module("mod testsuite;", "tests"), None);
+    let ids = origin_ids("### C-01 — a\n### D-12 — b\n### D-x — c\n### 6.1 Constats\n## P-2 d");
+    assert_eq!(
+        ids.into_iter().collect::<Vec<_>>(),
+        vec!["C-01".to_owned(), "D-12".to_owned()]
+    );
 }

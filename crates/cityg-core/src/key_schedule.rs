@@ -1,33 +1,41 @@
-//! Epoch-chained key schedule (audit P-2, replaces ME-OR, `E_k` and `K_fs`).
+//! Epoch-chained key schedule (audit P-2), with the joiner step of batched
+//! joins.
 //!
 //! ```text
-//! GroupContext_n := CBOR_det(["city-g/group-context/v2", gid, n, tree_hash_n,
-//!                             roster_hash_n, profile_id, confirmed_transcript_hash_n])
-//! commit_secret_n := DeriveSecret(root path secret of commit n, "commit")
-//! epoch_secret_n  := ExpandLabel(Extract(init_secret_{n-1}, commit_secret_n),
-//!                                "epoch", H(GroupContext_n), 32)
+//! GroupContext_n := CBOR_det(["city-g/group-context/v3", gid, n, tree_hash_n,
+//!                             registry_hash_n, profile_id, confirmed_transcript_hash_n])
+//! commit_secret_n := path_secret[d] of commit n (one step past the root)
+//! joiner_secret_n := ExpandLabel(Extract(init_secret_{n-1}, commit_secret_n),
+//!                                "joiner", H(GroupContext_n), 32)
+//! epoch_secret_n    := DeriveSecret(joiner_secret_n, "epoch")
 //! init_secret_n     := DeriveSecret(epoch_secret_n, "init")
 //! msg_secret_n      := DeriveSecret(epoch_secret_n, "msg")
 //! confirm_key_n     := DeriveSecret(epoch_secret_n, "confirm")
 //! external_secret_n := DeriveSecret(epoch_secret_n, "external")
 //! confirmation_tag_n := MAC(confirm_key_n, confirmed_transcript_hash_n)
 //! confirmed_transcript_hash_n := H_L("confirmed-transcript",
-//!                                    [interim_transcript_hash_{n-1}, anchor_tbs_n, signature_n])
+//!     [interim_transcript_hash_{n-1}, anchor_tbs_n, signature_n, rotation_signature_n or h''])
 //! interim_transcript_hash_n := H_L("interim-transcript",
 //!                                  [confirmed_transcript_hash_n, confirmation_tag_n])
 //! ```
 //!
 //! `init_secret_{-1}` and `interim_transcript_hash_{-1}` are `ZERO32`.
-//! Members erase `epoch_secret_{n-1}` and `init_secret_{n-1}` once epoch `n`
-//! is active (forward secrecy per epoch). The GroupContext binds the tree,
-//! the roster and the full transcript into every epoch secret, so members
-//! with diverging views derive different keys and fail the confirmation tag.
+//! Members erase `joiner_secret_n`, `epoch_secret_n` and `init_secret_{n-1}`
+//! once epoch `n` is active (forward secrecy per epoch). The GroupContext
+//! binds the tree, the registry and the full transcript into every epoch
+//! secret, so members with diverging views derive different keys and fail
+//! the confirmation tag.
 //!
-//! **External join.** From `external_secret_n` everyone in epoch `n` derives
-//! the ML-KEM-768 key pair `external_n`. A joiner encapsulates to its public
-//! key (published in the signed GroupInfo) and uses the resulting
+//! **Joiners.** A member that enters the tree through a commit it did not
+//! author receives `joiner_secret_n` in a welcome and derives the rest; it
+//! never learns `init_secret_{n-1}`, hence nothing of earlier epochs.
+//!
+//! **External commits.** From `external_secret_n` everyone in epoch `n`
+//! derives the X-Wing key pair `external_n`. The author of an external
+//! commit (a joiner, or a member that lost its state) encapsulates to its
+//! public key, published in the signed GroupInfo, and uses the resulting
 //! `external_init_secret` in place of `init_secret_n`; members recover it by
-//! decapsulation. No member has to be online for the join.
+//! decapsulation. No member has to be online.
 
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -38,7 +46,7 @@ use crate::hash::{Digest, ZERO32, derive_secret, expand_label32, extract, h, h_l
 use crate::kem::{KemSecret, encapsulate};
 
 /// Profile identifier bound into every GroupContext.
-pub const PROFILE_ID: &str = "city-g/v0.2";
+pub const PROFILE_ID: &str = "city-g/v0.3";
 
 /// Public context of epoch `n`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,7 +54,7 @@ pub struct GroupContext {
     pub gid: Digest,
     pub epoch: u64,
     pub tree_hash: Digest,
-    pub roster_hash: Digest,
+    pub registry_hash: Digest,
     pub confirmed_transcript_hash: Digest,
 }
 
@@ -54,11 +62,11 @@ impl GroupContext {
     /// `CBOR_det` encoding.
     pub fn encode(&self) -> CoreResult<Vec<u8>> {
         encode(&array(vec![
-            text("city-g/group-context/v2"),
+            text("city-g/group-context/v3"),
             bytes(&self.gid),
             uint(self.epoch),
             bytes(&self.tree_hash),
-            bytes(&self.roster_hash),
+            bytes(&self.registry_hash),
             text(PROFILE_ID),
             bytes(&self.confirmed_transcript_hash),
         ]))
@@ -72,14 +80,14 @@ impl GroupContext {
             expect_array(decode(encoded, 512, "group context")?, 7, "group context")?.into_iter();
         expect_label(
             &next(&mut items, "group context")?,
-            "city-g/group-context/v2",
+            "city-g/group-context/v3",
             "group context",
         )?;
         let gid = expect_bytes32(next(&mut items, "group context")?, "group context gid")?;
         let epoch = expect_uint(&next(&mut items, "group context")?, "group context epoch")?;
         let tree_hash = expect_bytes32(next(&mut items, "group context")?, "group context tree")?;
-        let roster_hash =
-            expect_bytes32(next(&mut items, "group context")?, "group context roster")?;
+        let registry_hash =
+            expect_bytes32(next(&mut items, "group context")?, "group context registry")?;
         expect_label(
             &next(&mut items, "group context")?,
             PROFILE_ID,
@@ -93,7 +101,7 @@ impl GroupContext {
             gid,
             epoch,
             tree_hash,
-            roster_hash,
+            registry_hash,
             confirmed_transcript_hash,
         })
     }
@@ -104,16 +112,12 @@ impl GroupContext {
     }
 }
 
-/// `commit_secret := DeriveSecret(root_path_secret, "commit")`.
-pub fn commit_secret(root_path_secret: &[u8; 32]) -> CoreResult<Zeroizing<[u8; 32]>> {
-    derive_secret(root_path_secret, "commit")
-}
-
 /// `confirmed_transcript_hash_n`.
 pub fn confirmed_transcript_hash(
     prev_interim_transcript_hash: &Digest,
     anchor_tbs: &[u8],
     signature: &[u8],
+    rotation_signature: Option<&[u8]>,
 ) -> CoreResult<Digest> {
     h_l(
         "confirmed-transcript",
@@ -121,6 +125,7 @@ pub fn confirmed_transcript_hash(
             bytes(prev_interim_transcript_hash),
             bytes(anchor_tbs),
             bytes(signature),
+            bytes(rotation_signature.unwrap_or_default()),
         ],
     )
 }
@@ -134,6 +139,17 @@ pub fn interim_transcript_hash(
         "interim-transcript",
         vec![bytes(confirmed_transcript_hash), bytes(confirmation_tag)],
     )
+}
+
+/// `joiner_secret_n := ExpandLabel(Extract(init_secret_{n-1}, commit_secret_n),
+/// "joiner", H(GroupContext_n), 32)`.
+pub fn joiner_secret(
+    prev_init_secret: &[u8; 32],
+    commit_secret: &[u8; 32],
+    context: &GroupContext,
+) -> CoreResult<Zeroizing<[u8; 32]>> {
+    let prk = extract(prev_init_secret, commit_secret);
+    expand_label32(&prk, "joiner", &context.hash()?)
 }
 
 /// Secrets of one epoch. Dropping the value zeroizes them.
@@ -160,8 +176,14 @@ impl EpochSecrets {
         commit_secret: &[u8; 32],
         context: &GroupContext,
     ) -> CoreResult<Self> {
-        let prk = extract(prev_init_secret, commit_secret);
-        let epoch_secret = expand_label32(&prk, "epoch", &context.hash()?)?;
+        let joiner = joiner_secret(prev_init_secret, commit_secret, context)?;
+        Self::from_joiner_secret(&joiner)
+    }
+
+    /// Secrets of an epoch from its joiner secret (how a welcomed joiner
+    /// derives them).
+    pub fn from_joiner_secret(joiner_secret: &[u8; 32]) -> CoreResult<Self> {
+        let epoch_secret = derive_secret(joiner_secret, "epoch")?;
         Ok(Self {
             epoch_secret: *epoch_secret,
             init_secret: *derive_secret(&epoch_secret, "init")?,
@@ -188,7 +210,7 @@ impl EpochSecrets {
         mac(&self.confirm_key, confirmed_transcript_hash)
     }
 
-    /// The external ML-KEM-768 key pair of the epoch.
+    /// The external X-Wing key pair of the epoch.
     pub fn external_key(&self) -> CoreResult<KemSecret> {
         external_key(&self.external_secret)
     }
@@ -251,7 +273,7 @@ impl RetainedEpochSecrets {
         &self.external_secret
     }
 
-    /// The external ML-KEM-768 key pair of the epoch.
+    /// The external X-Wing key pair of the epoch.
     pub fn external_key(&self) -> CoreResult<KemSecret> {
         external_key(&self.external_secret)
     }
@@ -295,7 +317,7 @@ mod tests {
             gid: [1; 32],
             epoch,
             tree_hash: [2; 32],
-            roster_hash: [3; 32],
+            registry_hash: [3; 32],
             confirmed_transcript_hash: [4; 32],
         }
     }
@@ -319,7 +341,7 @@ mod tests {
                 ..base.clone()
             },
             GroupContext {
-                roster_hash: [9; 32],
+                registry_hash: [9; 32],
                 ..base.clone()
             },
             GroupContext {
@@ -344,6 +366,14 @@ mod tests {
         for other in [&c, &d, &e] {
             assert_ne!(other.msg_secret(), a.msg_secret());
         }
+        let joiner = joiner_secret(&[1; 32], &[2; 32], &context(1)).unwrap();
+        let welcomed = EpochSecrets::from_joiner_secret(&joiner).unwrap();
+        assert_eq!(
+            welcomed.msg_secret(),
+            a.msg_secret(),
+            "a joiner derives the same epoch"
+        );
+        assert_ne!(*joiner, *derive_secret(&joiner, "epoch").unwrap());
         let tag = a.confirmation_tag(&[5; 32]).unwrap();
         assert_eq!(tag, b.confirmation_tag(&[5; 32]).unwrap());
         assert_ne!(tag, c.confirmation_tag(&[5; 32]).unwrap());
@@ -384,20 +414,23 @@ mod tests {
 
     #[test]
     fn transcript_hashes_chain() {
-        let confirmed = confirmed_transcript_hash(&[0; 32], b"tbs", b"sig").unwrap();
+        let confirmed = confirmed_transcript_hash(&[0; 32], b"tbs", b"sig", None).unwrap();
         assert_ne!(
             confirmed,
-            confirmed_transcript_hash(&[1; 32], b"tbs", b"sig").unwrap()
+            confirmed_transcript_hash(&[1; 32], b"tbs", b"sig", None).unwrap()
         );
         assert_ne!(
             confirmed,
-            confirmed_transcript_hash(&[0; 32], b"tbs", b"sig2").unwrap()
+            confirmed_transcript_hash(&[0; 32], b"tbs", b"sig2", None).unwrap()
+        );
+        assert_ne!(
+            confirmed,
+            confirmed_transcript_hash(&[0; 32], b"tbs", b"sig", Some(b"rot")).unwrap()
         );
         let interim = interim_transcript_hash(&confirmed, &[7; 32]).unwrap();
         assert_ne!(
             interim,
             interim_transcript_hash(&confirmed, &[8; 32]).unwrap()
         );
-        assert_ne!(*commit_secret(&[1; 32]).unwrap(), [1; 32]);
     }
 }

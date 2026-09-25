@@ -1,8 +1,8 @@
-//! Error type shared by every City-G v0.2 core operation.
+//! Error type shared by every City-G v0.3 core operation.
 
 use thiserror::Error;
 
-/// Why a City-G v0.2 object or transition was rejected.
+/// Why a City-G v0.3 object or transition was rejected.
 ///
 /// Variants carry static context only: errors may be logged or returned to
 /// peers and must never embed secret material.

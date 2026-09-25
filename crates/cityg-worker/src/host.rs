@@ -1,12 +1,12 @@
 //! Room host of a Durable Object.
 //!
-//! One Durable Object serves one room (named `v2-<gid hex>`). Its storage
+//! One Durable Object serves one room (named `v3-<gid hex>`). Its storage
 //! holds the room as a snapshot plus journal records under these keys:
 //!
 //! ```text
-//! v2/<gid hex>/generation              current generation g (u64 BE)
-//! v2/<gid hex>/snapshot/<g>            room snapshot of generation g
-//! v2/<gid hex>/journal/<g>/<index>     records since that snapshot
+//! v3/<gid hex>/generation              current generation g (u64 BE)
+//! v3/<gid hex>/snapshot/<g>            room snapshot of generation g
+//! v3/<gid hex>/journal/<g>/<index>     records since that snapshot
 //! ```
 //!
 //! Compaction writes snapshot `g + 1` and bumps the generation before it
@@ -35,7 +35,7 @@ pub struct DoRoomStore<S> {
 }
 
 fn prefix(gid: &Digest) -> String {
-    format!("v2/{}", hex::encode(gid))
+    format!("v3/{}", hex::encode(gid))
 }
 
 fn journal_key(gid: &Digest, generation: u64, index: u64) -> String {
@@ -144,11 +144,11 @@ impl<S: DurableObjectStorage> RoomStore for DoRoomStore<S> {
     fn list(&self) -> Result<Vec<Digest>, Self::Error> {
         let mut gids: Vec<Digest> = self
             .storage
-            .list_prefix("v2/")
+            .list_prefix("v3/")
             .map_err(Self::backend)?
             .into_iter()
             .filter_map(|(key, _)| {
-                let hex = key.strip_prefix("v2/")?.get(..64)?;
+                let hex = key.strip_prefix("v3/")?.get(..64)?;
                 hex::decode(hex).ok()?.try_into().ok()
             })
             .collect();

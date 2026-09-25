@@ -124,7 +124,7 @@ impl AppModel {
             maintenance_task: None,
             removal_commit_in_flight: false,
             alias_bindings: AHashMap::new(),
-            leaf_alias_index: AHashMap::new(),
+            member_alias_index: AHashMap::new(),
             room_admins: Vec::new(),
             room_admins_loaded: false,
             room_admin_status: RoomAdminStatus::Idle,

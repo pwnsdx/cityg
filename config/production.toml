@@ -1,4 +1,4 @@
-# City-G production configuration (profile v0.2).
+# City-G production configuration (profile v0.3).
 
 [server]
 address = "0.0.0.0:8080"

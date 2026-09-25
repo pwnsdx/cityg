@@ -1,9 +1,10 @@
 # Contributing to City-G
 
 City-G is a research protocol for end-to-end encrypted groups with
-post-quantum primitives. Its current profile is `city-g/v0.2`, specified in
-[`docs/specs.md`](docs/specs.md). The [glossary](docs/GLOSSARY.md) defines
-its terms.
+post-quantum primitives. Its current profile is `city-g/v0.3`, specified in
+[`docs/specs.md`](docs/specs.md); the [design note](docs/design-v0.3.md)
+explains its choices and the [glossary](docs/GLOSSARY.md) defines its
+terms.
 
 ## Code of conduct
 
@@ -14,8 +15,8 @@ help newcomers, and report concerning behavior to the maintainers.
 
 Prerequisites: a recent stable Rust toolchain (the workspace uses edition
 2024), Git, and for the GUI on Linux the packages `pkg-config libxcb1-dev
-libxkbcommon-dev libxkbcommon-x11-dev`. Python 3 with the `blake3` package
-runs the independent vector check.
+libxkbcommon-dev libxkbcommon-x11-dev`. Python 3 with the `blake3`,
+`kyber-py` and `dilithium-py` packages runs the independent vector check.
 
 ```bash
 git clone https://github.com/pwnsdx/cityg.git
@@ -23,7 +24,7 @@ cd cityg
 cargo test --workspace                                  # every crate
 cargo test -p cityg-gui --features native-app           # the GUI
 ./scripts/verify_no_secrets.sh --no-build               # server-blindness guardrail
-python3 -m pip install blake3 && python3 kat/v0.2/verify_vectors.py
+python3 -m pip install blake3 kyber-py dilithium-py && python3 kat/v0.3/verify_vectors.py
 ```
 
 ### Where things are
@@ -31,14 +32,14 @@ python3 -m pip install blake3 && python3 kat/v0.2/verify_vectors.py
 | Path | Content |
 | --- | --- |
 | `docs/specs.md` | Normative specification. |
-| `crates/cityg-pqc` | ML-DSA-87 (FIPS 204) with per-usage contexts. |
-| `crates/cityg-core` | Protocol core without I/O: encodings, KDF, tree, key schedule, commits, admission, messages, member session, delivery-service ledger. |
-| `crates/cityg-proto` | Protobuf schema and routes of the `/v2` API. |
+| `crates/cityg-pqc` | ML-DSA-65 (FIPS 204) with per-usage contexts. |
+| `crates/cityg-core` | Protocol core without I/O: encodings, KDF, X-Wing, tree and leaf proofs, key schedule, commits, admission, joins and welcomes, messages, full and light member sessions, delivery-service ledger. |
+| `crates/cityg-proto` | Protobuf schema and routes of the `/v3` API. |
 | `crates/cityg-server` | Rooms of the delivery service: log, journal, stores. |
 | `crates/cityg-runtime` | Request handlers and sessions, shared by the two transports. |
 | `crates/cityg-api` | Native HTTP server. |
 | `crates/cityg-worker` | Cloudflare Worker (one Durable Object per room). |
-| `crates/cityg-api-client` | HTTP client and member driver. |
+| `crates/cityg-api-client` | HTTP client and member drivers (full and light). |
 | `crates/cityg-gui` | Desktop client and the `join_leave` CLI. |
 | `crates/cityg-stress` | Load and chaos tool. |
 | `crates/cityg-config` | Configuration. |
@@ -76,23 +77,24 @@ python3 -m pip install blake3 && python3 kat/v0.2/verify_vectors.py
 The specification comes first; the code implements it.
 
 - Any change to an encoding, a label, a signature context, an algorithm or
-  a parameter is a **new profile version**: it changes `city-g/v0.2` and
+  a parameter is a **new profile version**: it changes `city-g/v0.3` and
   every vector.
-- Register new labels and contexts (specs.md, section 16).
+- Register new labels and contexts (specs.md, section 17).
 - Regenerate the vectors, review the diff, and keep the independent verifier
   in step:
 
   ```bash
   CITYG_WRITE_VECTORS=1 cargo test -p cityg-core --test vectors
-  python3 kat/v0.2/verify_vectors.py
+  python3 kat/v0.3/verify_vectors.py
   ```
 
-- Map each new requirement in `kat/kat-v0.2-conformance-manifest.json` to
-  its section, its vectors and its tests. `cargo test -p cityg-core --test
+- Map each new requirement in `kat/kat-v0.3-conformance-manifest.json` to
+  its section, its vectors, its tests and its origin. `cargo test -p cityg-core --test
   conformance_manifest` fails if a section, a vector section or a test of
   `cityg-core` is left out.
 - Update the formal model in `docs/formal/` if the change touches the key
-  schedule, the tree, removal or admission.
+  schedule, joins and welcomes, the tree, removal, admission or key
+  rotation.
 
 ### Security-critical code
 

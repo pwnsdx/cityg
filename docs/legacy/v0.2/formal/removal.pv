@@ -1,0 +1,25 @@
+(* Post-removal secrecy and admission (sections 2.2, 7, 9.4, 10): a
+   malicious member C is removed by an admin; it learns nothing of the
+   following epochs and cannot come back with the admission it kept.
+   Run: proverif -lib cityg.pvl removal.pv *)
+
+(* PRS: the epoch created by C's removal is secret. *)
+query pk: spkey, gc: bitstring, es: key;
+  event(Accepted(pk, N3, gc, es)) && attacker(es) ==> false.
+
+(* The next epoch too, whoever joins. *)
+query pk: spkey, gc: bitstring, es: key;
+  event(Accepted(pk, N4, gc, es)) && attacker(es) ==> false.
+
+(* Admission control, and C never comes back. *)
+query x: spkey, g: bitstring;
+  event(AcceptedJoin(spk(skA), N4, x)) ==> event(Admitted(spk(skA), g, x)).
+query event(AcceptedJoin(spk(skA), N4, spk(skC))) ==> false.
+
+(* Reachability, expected to be false: the removal and D's join happen. *)
+query gc: bitstring, es: key; event(Accepted(spk(skB), N3, gc, es)) ==> false.
+query event(AcceptedJoin(spk(skA), N4, spk(skD))) ==> false.
+
+process
+  out(c, (spk(skA), spk(skB), spk(skD)));
+  (RM_Setup | RM_A3 | RM_B3(true) | RM_A4(true) | RM_D4)

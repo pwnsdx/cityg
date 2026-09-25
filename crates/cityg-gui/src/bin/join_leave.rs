@@ -1,19 +1,20 @@
-//! `join_leave`: drive simulated City-G v0.2 members against a delivery
+//! `join_leave`: drive simulated City-G v0.3 members against a delivery
 //! service from the command line.
 //!
 //! ```text
 //! join_leave [server] [invite-link] [alias] [--count=N] [--batch|--watch]
 //!            [--leave-order=i,j,...] [--message-burst-count=N]
-//!            [--message-burst-interval-ms=MS] [--n-max=N]
+//!            [--message-burst-interval-ms=MS] [--capacity=N]
 //!            [--session-artifact-dir=PATH] [--verbose]
 //! ```
 //!
 //! Without an invite link, the first simulated member creates a new group
 //! and invites the others; with one, every simulated member joins through
-//! it. `--batch` joins everyone, sends the message burst and then makes the
-//! members leave in `--leave-order`, each departure being committed by a
-//! remaining member. `--watch` does the same while every member follows the
-//! group log and prints what it receives.
+//! it. The joiners after the first one join together: their requests are
+//! committed in one batch. `--batch` joins everyone, sends the message
+//! burst and then makes the members leave in `--leave-order`, each
+//! departure being committed by a remaining member. `--watch` does the same
+//! while every member follows the group log and prints what it receives.
 
 #[cfg(not(test))]
 use std::env;
@@ -31,8 +32,9 @@ use serde::Serialize;
 use tokio::time::sleep;
 
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
-const DEFAULT_N_MAX: u32 = 64;
+const DEFAULT_CAPACITY: u32 = 64;
 const INVITE_TTL_MS: u64 = 24 * 3_600_000;
+const INVITE_USES: u64 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliOptions {
@@ -46,7 +48,7 @@ struct CliOptions {
     leave_order: Option<Vec<usize>>,
     message_burst_count: usize,
     message_burst_interval_ms: u64,
-    n_max: u32,
+    capacity: u32,
     session_artifact_dir: Option<PathBuf>,
 }
 
@@ -75,7 +77,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
     let mut leave_order_raw: Option<String> = None;
     let mut message_burst_count = 0usize;
     let mut message_burst_interval_ms = 0u64;
-    let mut n_max = DEFAULT_N_MAX;
+    let mut capacity = DEFAULT_CAPACITY;
     let mut session_artifact_dir = None;
 
     for arg in args {
@@ -103,10 +105,10 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
             message_burst_interval_ms = rest
                 .parse()
                 .map_err(|_| anyhow!("invalid --message-burst-interval-ms value: {rest}"))?;
-        } else if let Some(rest) = arg.strip_prefix("--n-max=") {
-            n_max = rest
+        } else if let Some(rest) = arg.strip_prefix("--capacity=") {
+            capacity = rest
                 .parse()
-                .map_err(|_| anyhow!("invalid --n-max value: {rest}"))?;
+                .map_err(|_| anyhow!("invalid --capacity value: {rest}"))?;
         } else if let Some(rest) = arg.strip_prefix("--session-artifact-dir=") {
             if rest.trim().is_empty() {
                 return Err(anyhow!("--session-artifact-dir requires a non-empty path"));
@@ -134,7 +136,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
             return Err(anyhow!(
                 "unexpected extra argument: {arg}. usage: [server] [invite-link] [alias] \
                  [--count=N] [--batch|--watch] [--leave-order=...] [--message-burst-count=N] \
-                 [--message-burst-interval-ms=MS] [--n-max=N] [--session-artifact-dir=PATH] \
+                 [--message-burst-interval-ms=MS] [--capacity=N] [--session-artifact-dir=PATH] \
                  [--verbose]"
             ));
         }
@@ -175,7 +177,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
         leave_order,
         message_burst_count,
         message_burst_interval_ms,
-        n_max,
+        capacity,
         session_artifact_dir,
     })
 }
@@ -195,8 +197,8 @@ struct SessionArtifact<'a> {
     alias: &'a str,
     gid: String,
     epoch: u64,
-    slot: u32,
-    leaf_id: String,
+    leaf: u32,
+    since: u64,
     members: usize,
     log_seq: u64,
     transcript_fingerprint: String,
@@ -213,9 +215,9 @@ fn write_artifact(dir: Option<&Path>, stage: &str, alias: &str, member: &Member)
         alias,
         gid: hex::encode(session.gid()),
         epoch: session.epoch(),
-        slot: session.my_slot(),
-        leaf_id: hex::encode(session.my_leaf_id()),
-        members: session.roster().len(),
+        leaf: session.me().leaf,
+        since: session.me().since,
+        members: session.tree().member_count(),
         log_seq: member.log_seq(),
         transcript_fingerprint: hex::encode(session.transcript_fingerprint()),
     };
@@ -234,8 +236,8 @@ fn fresh_identity() -> DeviceIdentity {
 fn print_report(alias: &str, report: &SyncReport, verbose: bool) {
     for message in &report.messages {
         println!(
-            "[{alias}] message from slot {} at {} ms: {}",
-            message.sender_slot,
+            "[{alias}] message from leaf {} at {} ms: {}",
+            message.sender.leaf,
             message.signed_timestamp_ms,
             String::from_utf8_lossy(&message.plaintext)
         );
@@ -247,7 +249,7 @@ fn print_report(alias: &str, report: &SyncReport, verbose: bool) {
                 commit.epoch,
                 commit.kind,
                 commit.removed.len(),
-                usize::from(commit.entered.is_some())
+                commit.joined.len() + usize::from(commit.author_entry.is_some())
             );
         }
         if report.rejected > 0 {
@@ -259,49 +261,50 @@ fn print_report(alias: &str, report: &SyncReport, verbose: bool) {
 async fn join_members(options: &CliOptions) -> Result<(Vec<Member>, Vec<String>)> {
     let client = DsClient::new(&options.server_url)?;
     let mut members = Vec::with_capacity(options.count);
-    let mut aliases = Vec::with_capacity(options.count);
-    let mut link = options
-        .invite
-        .as_deref()
-        .map(|raw| {
-            InviteLink::parse(raw)?.ok_or(cityg_api_client::ClientError::InvalidInvite(
-                "not an invite link",
-            ))
-        })
-        .transpose()?;
-    for index in 0..options.count {
-        let alias = alias_for(&options.alias_base, options.count, index);
-        let mut member = match &link {
-            Some(link) => Member::join_with_invite(client.clone(), fresh_identity(), link).await?,
-            None => Member::create(client.clone(), fresh_identity(), options.n_max).await?,
-        };
-        member.bind_alias(&alias).await?;
-        if link.is_none() {
-            let created = member
-                .create_invite_link(&options.server_url, INVITE_TTL_MS)
+    let mut aliases: Vec<String> = (0..options.count)
+        .map(|index| alias_for(&options.alias_base, options.count, index))
+        .collect();
+    let link = match options.invite.as_deref() {
+        Some(raw) => InviteLink::parse(raw)?.ok_or(
+            cityg_api_client::ClientError::InvalidInvite("not an invite link"),
+        )?,
+        None => {
+            let mut creator =
+                Member::create(client.clone(), fresh_identity(), options.capacity).await?;
+            let created = creator
+                .create_invite_link(&options.server_url, INVITE_TTL_MS, INVITE_USES)
                 .await?;
             println!("invite: {}", created.encode());
-            link = Some(created);
+            members.push(creator);
+            created
         }
+    };
+    // The remaining members join together: one of them commits the batch.
+    let joins = (members.len()..options.count)
+        .map(|_| Member::join_with_invite(client.clone(), fresh_identity(), &link));
+    for joined in futures::future::join_all(joins).await {
+        members.push(joined?);
+    }
+    for (member, alias) in members.iter_mut().zip(aliases.iter_mut()) {
+        member.sync().await?;
+        member.bind_alias(alias).await?;
         println!(
             "server={} room={} alias={alias}",
             options.server_url,
             hex::encode(member.gid())
         );
         println!(
-            "join ok: epoch={} slot={} members={}",
+            "join ok: epoch={} leaf={} members={}",
             member.session().epoch(),
-            member.session().my_slot(),
-            member.session().roster().len()
+            member.session().my_leaf(),
+            member.session().tree().member_count()
         );
         write_artifact(
             options.session_artifact_dir.as_deref(),
             "joined",
-            &alias,
-            &member,
+            alias,
+            member,
         )?;
-        members.push(member);
-        aliases.push(alias);
     }
     for (member, alias) in members.iter_mut().zip(&aliases) {
         let report = member.sync().await?;
@@ -372,11 +375,11 @@ async fn leave_in_order(
             &members[slot],
         )?;
         println!("leaving alias={}", aliases[slot]);
-        let vacant = members[slot].leave().await?;
+        members[slot].leave().await?;
         present[slot] = false;
         if let Some(committer) = present.iter().position(|here| *here) {
             members[committer].sync().await?;
-            members[committer].commit_pending_removals().await?;
+            members[committer].commit_pending().await?;
             sync_all(
                 members,
                 aliases,
@@ -385,10 +388,11 @@ async fn leave_in_order(
                 options.watch_mode,
             )
             .await?;
-        } else if !vacant {
-            return Err(anyhow!("the last member left but the group is not vacant"));
+            println!("leave ok");
+        } else {
+            // Nobody is left to commit it: the next joiner will.
+            println!("leave ok (recorded; no member left to commit it)");
         }
-        println!("leave ok{}", if vacant { " (group vacant)" } else { "" });
     }
     Ok(())
 }
@@ -450,7 +454,7 @@ mod tests {
             "--leave-order=2,,3,1",
             "--message-burst-count=2",
             "--message-burst-interval-ms=5",
-            "--n-max=16",
+            "--capacity=16",
             "--session-artifact-dir=/tmp/x",
             "--verbose",
         ]))
@@ -458,7 +462,7 @@ mod tests {
         assert_eq!(options.server_url, "http://srv");
         assert_eq!(options.alias_base, "alice");
         assert_eq!(options.leave_order, Some(vec![2, 3, 1]));
-        assert_eq!(options.n_max, 16);
+        assert_eq!(options.capacity, 16);
         assert!(options.batch_mode && options.verbose && !options.watch_mode);
         let watch = parse_cli_args(args(&["http://srv", "--watch", "--count=2"])).unwrap();
         assert!(watch.watch_mode && watch.batch_mode);
@@ -488,7 +492,7 @@ mod tests {
                 vec!["--message-burst-interval-ms=x"],
                 "invalid --message-burst-interval-ms",
             ),
-            (vec!["--n-max=x"], "invalid --n-max"),
+            (vec!["--capacity=x"], "invalid --capacity"),
             (vec!["--session-artifact-dir="], "non-empty path"),
             (vec!["--nope"], "unknown option"),
             (vec!["s", "a", "b"], "unexpected extra argument"),
@@ -517,7 +521,7 @@ mod tests {
         .unwrap();
         run_with_options(options).await.unwrap();
         let artifact = std::fs::read_to_string(dir.path().join("tester-2-joined.json")).unwrap();
-        assert!(artifact.contains("\"slot\": 1"));
+        assert!(artifact.contains("\"members\": 3"));
         assert!(dir.path().join("tester-3-pre-leave.json").exists());
     }
 
@@ -539,12 +543,12 @@ mod tests {
         let mut owner = Member::create(DsClient::new(&url).unwrap(), fresh_identity(), 8)
             .await
             .unwrap();
-        let link = owner.create_invite_link(&url, 60_000).await.unwrap();
+        let link = owner.create_invite_link(&url, 60_000, 2).await.unwrap();
         let options = parse_cli_args(vec![url.clone(), link.encode(), "guest".into()]).unwrap();
         run_with_options(options).await.unwrap();
         let report = owner.sync().await.unwrap();
         assert_eq!(report.commits.len(), 1);
-        assert_eq!(owner.session().roster().len(), 2);
+        assert_eq!(owner.session().tree().member_count(), 2);
 
         let broken = parse_cli_args(vec![url, "cityg-invite:{".into()]).unwrap();
         assert!(run_with_options(broken).await.is_err());

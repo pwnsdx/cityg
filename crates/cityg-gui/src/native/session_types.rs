@@ -1,6 +1,8 @@
 use super::*;
 
-pub(super) use super::engine::{RosterEntry, SessionView, SharedMember};
+pub(super) use super::engine::{
+    MemberRef, RosterEntry, SessionView, SharedMember, member_ref_text, parse_member_ref,
+};
 
 /// An active room session.
 ///
@@ -12,8 +14,7 @@ pub(super) struct AppSession {
     /// Hex of the group identifier.
     pub(super) room_id: String,
     pub(super) alias: String,
-    pub(super) leaf_id: [u8; 32],
-    /// ML-DSA-87 device public key (the member's identity key).
+    /// ML-DSA-65 device public key (the member's identity key).
     pub(super) pop_public_key: Vec<u8>,
     pub(super) member: SharedMember,
     pub(super) view: SessionView,
@@ -37,7 +38,6 @@ impl AppSession {
             server_url,
             room_id: hex_encode(member.gid()),
             alias,
-            leaf_id: *member.session().my_leaf_id(),
             pop_public_key: member.identity().public_key().to_vec(),
             member: Arc::new(tokio::sync::Mutex::new(member)),
             view,
@@ -73,17 +73,19 @@ impl AppSession {
         self.view.is_admin
     }
 
+    /// This device's occupancy (it changes when the device resyncs).
+    pub(super) fn me(&self) -> MemberRef {
+        self.view.me
+    }
+
     /// Whether a removal of this device is recorded and awaits a commit.
     pub(super) fn removal_pending(&self) -> bool {
-        self.roster_entry(&self.leaf_id)
+        self.roster_entry(self.me())
             .is_some_and(|entry| entry.pending_removal)
     }
 
-    /// Roster entry of `leaf_id`.
-    pub(super) fn roster_entry(&self, leaf_id: &[u8; 32]) -> Option<&RosterEntry> {
-        self.view
-            .roster
-            .iter()
-            .find(|entry| &entry.leaf_id == leaf_id)
+    /// Roster entry of `member`.
+    pub(super) fn roster_entry(&self, member: MemberRef) -> Option<&RosterEntry> {
+        self.view.roster.iter().find(|entry| entry.member == member)
     }
 }

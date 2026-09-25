@@ -1,25 +1,26 @@
 use super::*;
 
-/// How long the previous epoch's message keys are kept (profile grace
+/// How long the previous epochs' message keys are kept (profile grace
 /// window).
 const GRACE_WINDOW_MS: u64 = 10 * 60 * 1000;
 
 /// What the maintenance tick should do next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MaintenanceAction {
-    /// Commit other members' recorded leave requests.
-    CommitRemovals,
+    /// Commit the recorded proposals: other members' leave requests and
+    /// join requests.
+    CommitPending,
     /// Re-key this device (forward secrecy / PCS window reached).
     RefreshKeys,
-    /// Erase the previous epoch's message keys (grace window over).
+    /// Erase the previous epochs' message keys (grace window over).
     ExpireGrace,
 }
 
 /// Pick the maintenance action for `session` at `now_ms`.
 pub(super) fn maintenance_action(session: &AppSession, now_ms: u64) -> Option<MaintenanceAction> {
     let me_pending = session.removal_pending();
-    if session.view.pending_removals > 0 && !me_pending {
-        return Some(MaintenanceAction::CommitRemovals);
+    if (session.view.pending_removals > 0 || session.view.pending_joins > 0) && !me_pending {
+        return Some(MaintenanceAction::CommitPending);
     }
     if !me_pending
         && now_ms.saturating_sub(session.last_self_update_ms()) >= engine::SELF_UPDATE_INTERVAL_MS
@@ -92,9 +93,9 @@ impl AppModel {
         self.maintenance_task = Some(task);
     }
 
-    /// One maintenance tick: commit leave requests of others (audit C-03:
-    /// a leaving device never commits its own removal), re-key when the
-    /// FS/PCS window elapsed, and erase expired previous-epoch keys.
+    /// One maintenance tick: commit the recorded proposals (audit C-03: a
+    /// leaving device never commits its own removal), re-key when the FS/PCS
+    /// window elapsed, and erase expired previous-epoch keys.
     pub(super) fn run_maintenance(&mut self, cx: &mut ViewContext<Self>) {
         if self.removal_commit_in_flight || !matches!(self.leave_status, LeaveStatus::Idle) {
             return;
@@ -111,7 +112,7 @@ impl AppModel {
         let expected_room = session.room_id.clone();
         let task = Tokio::spawn_result(cx, async move {
             match action {
-                MaintenanceAction::CommitRemovals => {
+                MaintenanceAction::CommitPending => {
                     // Spread concurrent committers to avoid losing the epoch.
                     let jitter = Duration::from_millis(u64::from(rand::random::<u16>() % 1500));
                     sleep(jitter).await;
@@ -123,7 +124,7 @@ impl AppModel {
                     .await
                     .map(|outcome| Some(outcome.view)),
                 MaintenanceAction::ExpireGrace => {
-                    engine::expire_previous_epoch(&member).await.map(|_| None)
+                    engine::expire_previous_epochs(&member).await.map(|()| None)
                 }
             }
         });
@@ -153,10 +154,10 @@ impl AppModel {
         match outcome {
             Ok(view) => {
                 match action {
-                    MaintenanceAction::CommitRemovals if view.is_some() => {
+                    MaintenanceAction::CommitPending if view.is_some() => {
                         self.record_activity(
                             ActivityKind::Roster,
-                            "Committed a member's leave request",
+                            "Committed the pending leave and join requests",
                         );
                     }
                     MaintenanceAction::RefreshKeys => {
@@ -170,7 +171,7 @@ impl AppModel {
                             session.view.has_previous_epoch_keys = false;
                         }
                     }
-                    MaintenanceAction::CommitRemovals => {}
+                    MaintenanceAction::CommitPending => {}
                 }
                 if let Some(view) = view {
                     self.apply_session_view(view);

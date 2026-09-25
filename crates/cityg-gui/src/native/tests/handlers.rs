@@ -15,10 +15,8 @@ fn api_error(code: ErrorCode, message: &str) -> anyhow::Error {
 
 fn roster_entry(leaf: u8, alias: &str, admin: bool) -> RosterEntry {
     RosterEntry {
-        leaf_id: [leaf; 32],
+        member: mref(leaf),
         device_public_key: vec![leaf; 16],
-        slot: u32::from(leaf),
-        generation: 0,
         admin,
         alias: Some(alias.to_string()),
         pending_removal: false,
@@ -30,7 +28,7 @@ fn gpui_sync_results_update_messages_roster_and_security(cx: &mut TestAppContext
     let _config = ConfigDir::new();
     let session = offline_session(1, "alice");
     let room = session.room_id.clone();
-    let leaf = session.leaf_id;
+    let device = session.pop_public_key.clone();
     let (view, cx) = open_window(cx, Some(session));
 
     view.update(cx, |model, cx| {
@@ -38,20 +36,21 @@ fn gpui_sync_results_update_messages_roster_and_security(cx: &mut TestAppContext
         sync_view.epoch += 1;
         sync_view.roster.push(roster_entry(7, "bob", false));
         let mut aliases = BTreeMap::new();
-        aliases.insert([7; 32], "bob".to_string());
+        aliases.insert(mref(7), "bob".to_string());
         let outcome = engine::SyncOutcome {
             messages: vec![engine::IncomingMessage {
-                sender_leaf: [7; 32],
+                sender: mref(7),
                 text: "hi".to_string(),
                 signed_timestamp_ms: 42,
                 epoch: 2,
                 generation: 0,
             }],
             changes: vec![
-                engine::RosterChange::Joined([7; 32]),
-                engine::RosterChange::Removed([8; 32]),
-                engine::RosterChange::Resynced([7; 32]),
-                engine::RosterChange::LeaveRequested([7; 32]),
+                engine::RosterChange::Joined(mref(7)),
+                engine::RosterChange::Removed(mref(8)),
+                engine::RosterChange::Resynced(mref(7)),
+                engine::RosterChange::LeaveRequested(mref(7)),
+                engine::RosterChange::KeyRotated(mref(7)),
                 engine::RosterChange::AdminsChanged,
             ],
             rejected: 2,
@@ -61,7 +60,7 @@ fn gpui_sync_results_update_messages_roster_and_security(cx: &mut TestAppContext
             aliases,
         };
         model.fetch_in_flight = true;
-        model.handle_sync_result(Ok(outcome), &room, leaf, cx);
+        model.handle_sync_result(Ok(outcome), &room, &device, cx);
 
         assert_eq!(model.members_total, 2);
         assert_eq!(model.messages.len(), 1);
@@ -75,6 +74,7 @@ fn gpui_sync_results_update_messages_roster_and_security(cx: &mut TestAppContext
             "Removed: ",
             "Resynced: bob",
             "Leave requested: bob",
+            "Device key rotated: bob",
             "Room admins changed",
             "Rejected messages",
             "Moved to a new epoch",
@@ -92,21 +92,21 @@ fn gpui_sync_results_update_messages_roster_and_security(cx: &mut TestAppContext
         assert_eq!(model.security_events.len(), 1);
         assert!(model.security_events[0].description.contains("resync"));
         assert_eq!(
-            model.leaf_alias_index.get(&[7; 32]).map(String::as_str),
+            model.member_alias_index.get(&mref(7)).map(String::as_str),
             Some("bob")
         );
         assert!(
             model
                 .alias_bindings
                 .get("bob")
-                .is_some_and(|binding| binding.leaf_id == [7; 32])
+                .is_some_and(|binding| binding.member == Some(mref(7)))
         );
         assert!(matches!(model.fetch_status, FetchStatus::Idle));
 
         // The same message again is not duplicated.
         let again = engine::SyncOutcome {
             messages: vec![engine::IncomingMessage {
-                sender_leaf: [7; 32],
+                sender: mref(7),
                 text: "hi".to_string(),
                 signed_timestamp_ms: 42,
                 epoch: 2,
@@ -115,33 +115,57 @@ fn gpui_sync_results_update_messages_roster_and_security(cx: &mut TestAppContext
             view: model.session.as_ref().expect("session").view.clone(),
             ..engine::SyncOutcome::default()
         };
-        model.handle_sync_result(Ok(again), &room, leaf, cx);
+        model.handle_sync_result(Ok(again), &room, &device, cx);
         assert_eq!(model.messages.len(), 1);
 
         // A different key claiming Bob's alias raises a TOFU alert.
         let mut hijack_view = model.session.as_ref().expect("session").view.clone();
         hijack_view.roster.push(RosterEntry {
-            leaf_id: [9; 32],
+            member: mref(9),
             device_public_key: vec![9; 16],
-            slot: 9,
-            generation: 0,
             admin: false,
             alias: None,
             pending_removal: false,
         });
         let mut aliases = BTreeMap::new();
-        aliases.insert([9; 32], "bob".to_string());
+        aliases.insert(mref(9), "bob".to_string());
         let hijack = engine::SyncOutcome {
             view: hijack_view,
             aliases,
             ..engine::SyncOutcome::default()
         };
-        model.handle_sync_result(Ok(hijack), &room, leaf, cx);
-        assert!(
+        model.handle_sync_result(Ok(hijack), &room, &device, cx);
+        let alerts = |model: &AppModel| {
             model
                 .security_events
                 .iter()
-                .any(|event| event.description.contains("TOFU alert"))
+                .filter(|event| event.description.contains("TOFU alert"))
+                .count()
+        };
+        assert_eq!(alerts(model), 1);
+
+        // A new key on the same occupancy is a rotation its old key signed:
+        // no alert.
+        let mut rotated_view = model.session.as_ref().expect("session").view.clone();
+        for entry in &mut rotated_view.roster {
+            if entry.member == mref(9) {
+                entry.device_public_key = vec![10; 16];
+            }
+        }
+        let mut aliases = BTreeMap::new();
+        aliases.insert(mref(9), "bob".to_string());
+        let rotated = engine::SyncOutcome {
+            view: rotated_view,
+            aliases,
+            ..engine::SyncOutcome::default()
+        };
+        model.handle_sync_result(Ok(rotated), &room, &device, cx);
+        assert_eq!(alerts(model), 1);
+        assert!(
+            model
+                .alias_bindings
+                .get("bob")
+                .is_some_and(|binding| binding.pop_public_key == vec![10; 16])
         );
     });
 
@@ -161,20 +185,20 @@ fn gpui_sync_errors_and_stale_results(cx: &mut TestAppContext) {
     let _config = ConfigDir::new();
     let session = offline_session(2, "alice");
     let room = session.room_id.clone();
-    let leaf = session.leaf_id;
+    let device = session.pop_public_key.clone();
     let (view, cx) = open_window(cx, Some(session.clone()));
 
     view.update(cx, |model, cx| {
         // A result for another session is ignored.
         model.fetch_status = FetchStatus::Refreshing;
-        model.handle_sync_result(Ok(engine::SyncOutcome::default()), "other", leaf, cx);
+        model.handle_sync_result(Ok(engine::SyncOutcome::default()), "other", &device, cx);
         assert!(matches!(model.fetch_status, FetchStatus::Idle));
         assert!(model.session.is_some());
 
         // A transient failure is reported and retried.
         model.members_status = MembersStatus::Loading("Syncing the roster…".to_string());
         model.fetch_in_flight = true;
-        model.handle_sync_result(Err(anyhow!("connection reset")), &room, leaf, cx);
+        model.handle_sync_result(Err(anyhow!("connection reset")), &room, &device, cx);
         assert!(
             model
                 .last_error
@@ -193,7 +217,7 @@ fn gpui_sync_errors_and_stale_results(cx: &mut TestAppContext) {
         model.handle_sync_result(
             Err(api_error(ErrorCode::Forbidden, "not a member")),
             &room,
-            leaf,
+            &device,
             cx,
         );
         assert!(model.session.is_none());
@@ -212,7 +236,7 @@ fn gpui_sync_errors_and_stale_results(cx: &mut TestAppContext) {
             removed: true,
             ..engine::SyncOutcome::default()
         };
-        model.handle_sync_result(Ok(removed), &room, leaf, cx);
+        model.handle_sync_result(Ok(removed), &room, &device, cx);
         assert!(model.session.is_none());
         assert_eq!(
             model.info_message.as_deref(),
@@ -357,7 +381,7 @@ fn gpui_send_join_and_membership_completions(cx: &mut TestAppContext) {
         model.on_leave_finished(Err(anyhow!("boom")), cx);
         assert_eq!(model.last_retry_action, Some(RetryAction::Leave));
         assert!(model.session.is_some());
-        model.on_leave_finished(Ok(false), cx);
+        model.on_leave_finished(Ok(()), cx);
         assert!(model.session.is_none());
         assert_eq!(
             model.info_message.as_deref(),
@@ -385,7 +409,7 @@ fn gpui_leave_cleanup_failure_is_surfaced(cx: &mut TestAppContext) {
     std::fs::create_dir_all(&blocking).expect("block the session file");
     let (view, cx) = open_window(cx, Some(session));
     view.update(cx, |model, cx| {
-        model.on_leave_finished(Ok(true), cx);
+        model.on_leave_finished(Ok(()), cx);
         assert!(
             model
                 .last_error
@@ -400,8 +424,8 @@ fn gpui_admin_guards_and_revoke_confirmation(cx: &mut TestAppContext) {
     let _config = ConfigDir::new();
     let session = offline_session(6, "alice");
     let (view, cx) = open_window(cx, Some(session.clone()));
-    let first = vec![0x44; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES];
-    let second = vec![0x55; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES];
+    let first = vec![0x44; cityg_pqc::PUBLIC_KEY_BYTES];
+    let second = vec![0x55; cityg_pqc::PUBLIC_KEY_BYTES];
 
     view.update(cx, |model, cx| {
         // Invalid targets are rejected before any request.
@@ -452,12 +476,12 @@ fn gpui_admin_guards_and_revoke_confirmation(cx: &mut TestAppContext) {
             RoomAdminStatus::Error(message) if message.contains("room-admin authority")
         ));
         model.leave_status = LeaveStatus::Idle;
-        model.start_member_expulsion([0x11; 32], cx);
+        model.start_member_expulsion(mref(0x11), cx);
         assert!(matches!(model.leave_status, LeaveStatus::Idle));
 
         // Expelling this device is refused (leave instead).
         model.room_admins = vec![session.pop_public_key.clone()];
-        model.start_member_expulsion(session.leaf_id, cx);
+        model.start_member_expulsion(session.me(), cx);
         assert!(matches!(model.leave_status, LeaveStatus::Idle));
         assert!(
             model
@@ -469,16 +493,16 @@ fn gpui_admin_guards_and_revoke_confirmation(cx: &mut TestAppContext) {
     cx.update(|window, app| {
         view.update(app, |model, cx| {
             // The same guards apply to the confirmation prompt.
-            model.prompt_member_expulsion(session.leaf_id, "me".to_string(), window, cx);
+            model.prompt_member_expulsion(session.me(), "me".to_string(), window, cx);
             let mut other = session.pop_public_key.clone();
             other[0] ^= 0xFF;
             model.room_admins = vec![other];
-            model.prompt_member_expulsion([0x11; 32], "bob".to_string(), window, cx);
+            model.prompt_member_expulsion(mref(0x11), "bob".to_string(), window, cx);
             assert!(matches!(model.room_admin_status, RoomAdminStatus::Error(_)));
             model.room_admins = vec![session.pop_public_key.clone()];
-            model.prompt_member_expulsion([0x11; 32], "bob".to_string(), window, cx);
+            model.prompt_member_expulsion(mref(0x11), "bob".to_string(), window, cx);
             model.leave_status = LeaveStatus::Leaving;
-            model.prompt_member_expulsion([0x11; 32], "bob".to_string(), window, cx);
+            model.prompt_member_expulsion(mref(0x11), "bob".to_string(), window, cx);
             model.leave_status = LeaveStatus::Idle;
         });
     });
@@ -493,7 +517,7 @@ fn gpui_admin_guards_and_revoke_confirmation(cx: &mut TestAppContext) {
     });
     cx.update(|window, app| {
         view.update(app, |model, cx| {
-            model.prompt_member_expulsion([0x11; 32], "bob".to_string(), window, cx);
+            model.prompt_member_expulsion(mref(0x11), "bob".to_string(), window, cx);
         });
     });
     cx.simulate_prompt_answer("Expel");
@@ -598,13 +622,20 @@ fn maintenance_picks_the_next_action() {
     });
     assert_eq!(
         maintenance_action(&session, now),
-        Some(MaintenanceAction::CommitRemovals)
+        Some(MaintenanceAction::CommitPending)
+    );
+    // Recorded join requests alone are committed too.
+    session.view.pending_removals = 0;
+    session.view.pending_joins = 2;
+    assert_eq!(
+        maintenance_action(&session, now),
+        Some(MaintenanceAction::CommitPending)
     );
 
     // A device whose own removal is pending does neither (audit C-03).
-    let leaf = session.leaf_id;
+    let me = session.me();
     for entry in &mut session.view.roster {
-        if entry.leaf_id == leaf {
+        if entry.member == me {
             entry.pending_removal = true;
         }
     }
@@ -633,7 +664,7 @@ fn gpui_maintenance_runs_and_reports(cx: &mut TestAppContext) {
     view.update(cx, |model, cx| {
         let current = model.session.as_ref().expect("session").view.clone();
         model.on_maintenance_finished(
-            MaintenanceAction::CommitRemovals,
+            MaintenanceAction::CommitPending,
             Ok(Some(current.clone())),
             cx,
         );
@@ -641,9 +672,9 @@ fn gpui_maintenance_runs_and_reports(cx: &mut TestAppContext) {
             model
                 .activity_events
                 .iter()
-                .any(|event| event.summary == "Committed a member's leave request")
+                .any(|event| event.summary == "Committed the pending leave and join requests")
         );
-        model.on_maintenance_finished(MaintenanceAction::CommitRemovals, Ok(None), cx);
+        model.on_maintenance_finished(MaintenanceAction::CommitPending, Ok(None), cx);
         model.on_maintenance_finished(MaintenanceAction::RefreshKeys, Ok(Some(current)), cx);
         assert!(
             model

@@ -4,7 +4,7 @@ use super::*;
 impl AppModel {
     pub(super) fn prompt_member_expulsion(
         &mut self,
-        target_leaf_id: [u8; 32],
+        target: MemberRef,
         target_label: String,
         window: &mut Window,
         cx: &mut ViewContext<Self>,
@@ -23,7 +23,7 @@ impl AppModel {
             self.show_error_toast(message, cx);
             return;
         }
-        if session.leaf_id == target_leaf_id {
+        if session.me() == target {
             let message =
                 "Use Leave room to remove this device instead of expelling the local member."
                     .to_string();
@@ -34,8 +34,8 @@ impl AppModel {
 
         let prompt_message = format!("Expel {target_label} from this room?");
         let prompt_detail = format!(
-            "This commits a signed removal: the member's keys stop opening anything from the next epoch on.\nThey will need a new invite to come back.\n\nLeaf: {}",
-            hex_encode(target_leaf_id)
+            "This commits a signed removal: the member's keys stop opening anything from the next epoch on.\nThey will need a new invite to come back.\n\nMember: #{}",
+            member_ref_text(target)
         );
         let answer = window.prompt(
             PromptLevel::Critical,
@@ -52,7 +52,7 @@ impl AppModel {
                 return;
             }
             let _ = this.update(cx, |model, cx| {
-                model.start_member_expulsion(target_leaf_id, cx);
+                model.start_member_expulsion(target, cx);
                 cx.notify();
             });
         })
@@ -85,11 +85,7 @@ impl AppModel {
         .detach();
     }
 
-    pub(super) fn start_member_expulsion(
-        &mut self,
-        target_leaf_id: [u8; 32],
-        cx: &mut ViewContext<Self>,
-    ) {
+    pub(super) fn start_member_expulsion(&mut self, target: MemberRef, cx: &mut ViewContext<Self>) {
         if !matches!(self.leave_status, LeaveStatus::Idle) {
             return;
         }
@@ -104,7 +100,7 @@ impl AppModel {
             self.show_error_toast(message, cx);
             return;
         }
-        if session.leaf_id == target_leaf_id {
+        if session.me() == target {
             let message =
                 "Use Leave room to remove this device instead of expelling the local member."
                     .to_string();
@@ -119,10 +115,7 @@ impl AppModel {
         cx.notify();
 
         let member = session.member.clone();
-        let task = Tokio::spawn_result(
-            cx,
-            async move { engine::expel(&member, target_leaf_id).await },
-        );
+        let task = Tokio::spawn_result(cx, async move { engine::expel(&member, target).await });
 
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
@@ -207,20 +200,16 @@ impl AppModel {
 
     pub(super) fn on_leave_finished(
         &mut self,
-        result: anyhow::Result<bool>,
+        result: anyhow::Result<()>,
         cx: &mut ViewContext<Self>,
     ) {
         self.leave_status = LeaveStatus::Idle;
         match result {
-            Ok(vacant) => {
-                let (info, toast) = if vacant {
-                    ("Left the room. It has no member left.", "Left the room")
-                } else {
-                    (
-                        "Leave requested. The remaining members commit your removal.",
-                        "Leave request submitted",
-                    )
-                };
+            Ok(()) => {
+                let (info, toast) = (
+                    "Leave requested. The remaining members commit your removal.",
+                    "Leave request submitted",
+                );
                 if let Err(err) = self.reset_session_state() {
                     let message = format!("Left room, but failed to remove session data: {err}");
                     warn!("{message}");
@@ -289,7 +278,7 @@ impl AppModel {
         self.ws_autostart_attempted = false;
         self.removal_commit_in_flight = false;
         self.alias_bindings.clear();
-        self.leaf_alias_index.clear();
+        self.member_alias_index.clear();
         self.members.clear();
         self.members_total = 0;
         self.members_next_offset = None;

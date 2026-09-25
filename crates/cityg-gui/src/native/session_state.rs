@@ -45,7 +45,7 @@ impl AppModel {
         self.room_admins_loaded = true;
         for entry in &view.roster {
             if let Some(alias) = &entry.alias {
-                self.leaf_alias_index.insert(entry.leaf_id, alias.clone());
+                self.member_alias_index.insert(entry.member, alias.clone());
             }
         }
         self.rebuild_members();
@@ -67,14 +67,13 @@ impl AppModel {
             .roster
             .iter()
             .map(|entry| MemberEntry {
-                leaf_id: entry.leaf_id,
+                member: entry.member,
                 alias: entry
                     .alias
                     .clone()
-                    .or_else(|| self.leaf_alias_index.get(&entry.leaf_id).cloned())
-                    .or_else(|| (entry.leaf_id == session.leaf_id).then(|| session.alias.clone())),
+                    .or_else(|| self.member_alias_index.get(&entry.member).cloned())
+                    .or_else(|| (entry.member == session.me()).then(|| session.alias.clone())),
                 pop_public_key: Some(entry.device_public_key.clone()),
-                slot: entry.slot,
                 admin: entry.admin,
                 pending_removal: entry.pending_removal,
             })
@@ -85,7 +84,7 @@ impl AppModel {
                         .alias
                         .as_deref()
                         .is_some_and(|alias| alias.to_lowercase().contains(query))
-                        || hex_encode(member.leaf_id).starts_with(query.as_str())
+                        || member_ref_text(member.member).starts_with(query.trim_start_matches('#'))
                 }
             })
             .collect();
@@ -104,7 +103,7 @@ impl AppModel {
             message.pending_id = None;
             let key = MessageKey {
                 ciphertext_hex: message.ciphertext_hex.clone(),
-                sender_leaf: message.sender_leaf,
+                sender: message.sender,
             };
             if self.message_keys.insert(key) {
                 self.messages.push(message);
@@ -122,7 +121,7 @@ impl AppModel {
         let pending_id = self.next_pending_message_id;
         self.next_pending_message_id = self.next_pending_message_id.saturating_add(1);
         self.messages.push(ChatMessageEntry {
-            sender_leaf: Some(session.leaf_id),
+            sender: Some(session.me()),
             fallback_label: session.alias.clone(),
             plaintext: plaintext.to_string(),
             ciphertext_hex: String::new(),
@@ -140,7 +139,7 @@ impl AppModel {
         entry.pending_id = None;
         let key = MessageKey {
             ciphertext_hex: entry.ciphertext_hex.clone(),
-            sender_leaf: entry.sender_leaf,
+            sender: entry.sender,
         };
 
         if self.message_keys.insert(key) {
@@ -182,29 +181,31 @@ impl AppModel {
     }
 
     pub(super) fn resolve_sender_label(&self, message: &ChatMessageEntry) -> String {
-        if let Some(leaf) = message.sender_leaf
-            && let Some(label) = self.member_label_for_leaf(&leaf)
+        if let Some(sender) = message.sender
+            && let Some(label) = self.member_label_for(sender)
         {
             return label;
         }
         message.fallback_label.clone()
     }
 
-    pub(super) fn member_label_for_leaf(&self, leaf: &[u8; 32]) -> Option<String> {
-        if let Some(member) = self.members.iter().find(|member| &member.leaf_id == leaf) {
+    pub(super) fn member_label_for(&self, target: MemberRef) -> Option<String> {
+        if let Some(member) = self.members.iter().find(|member| member.member == target) {
             return Some(format_member_label(member));
         }
-        if let Some(alias) = self.leaf_alias_index.get(leaf) {
-            return Some(format_alias_display(alias, leaf));
+        if let Some(alias) = self.member_alias_index.get(&target) {
+            return Some(format_alias_display(alias, target));
         }
         None
     }
 
     /// Check the aliases the delivery service returned against the keys
-    /// previously seen for them (trust on first use) and remember them.
+    /// previously seen for them (trust on first use) and remember them. A
+    /// new key on the same occupancy is a device-key rotation, which the
+    /// old key signed: it is not a mismatch.
     pub(super) fn reconcile_alias_bindings(
         &mut self,
-        aliases: &BTreeMap<[u8; 32], String>,
+        aliases: &BTreeMap<MemberRef, String>,
         cx: &mut ViewContext<Self>,
     ) {
         let Some(session) = &self.session else {
@@ -216,12 +217,13 @@ impl AppModel {
 
         let mut mismatches = Vec::new();
         let mut refreshed = self.alias_bindings.clone();
-        for (leaf, alias) in aliases {
-            let Some(entry) = roster.iter().find(|entry| &entry.leaf_id == leaf) else {
+        for (member, alias) in aliases {
+            let Some(entry) = roster.iter().find(|entry| entry.member == *member) else {
                 continue;
             };
             if let Some(existing) = self.alias_bindings.get(alias)
                 && existing.pop_public_key != entry.device_public_key
+                && existing.member != Some(*member)
             {
                 mismatches.push(alias.clone());
             }
@@ -229,7 +231,7 @@ impl AppModel {
                 alias.clone(),
                 AliasBindingRecord {
                     pop_public_key: entry.device_public_key.clone(),
-                    leaf_id: *leaf,
+                    member: Some(*member),
                 },
             );
         }
@@ -243,9 +245,9 @@ impl AppModel {
 
         let changed = refreshed != self.alias_bindings;
         self.alias_bindings = refreshed;
-        self.refresh_leaf_alias_index();
-        for (leaf, alias) in aliases {
-            self.leaf_alias_index.insert(*leaf, alias.clone());
+        self.refresh_member_alias_index();
+        for (member, alias) in aliases {
+            self.member_alias_index.insert(*member, alias.clone());
         }
 
         if changed
@@ -260,17 +262,17 @@ impl AppModel {
             match load_alias_bindings(&session.server_url, &session.room_id) {
                 Ok(bindings) => {
                     self.alias_bindings = bindings;
-                    self.refresh_leaf_alias_index();
+                    self.refresh_member_alias_index();
                 }
                 Err(err) => {
                     warn!("failed to load alias bindings: {err:?}");
                     self.alias_bindings.clear();
-                    self.leaf_alias_index.clear();
+                    self.member_alias_index.clear();
                 }
             }
         } else {
             self.alias_bindings.clear();
-            self.leaf_alias_index.clear();
+            self.member_alias_index.clear();
         }
     }
 
@@ -356,13 +358,12 @@ impl AppModel {
         }
     }
 
-    pub(super) fn refresh_leaf_alias_index(&mut self) {
-        self.leaf_alias_index.clear();
+    pub(super) fn refresh_member_alias_index(&mut self) {
+        self.member_alias_index.clear();
         for (alias, record) in &self.alias_bindings {
-            if record.leaf_id.iter().all(|&b| b == 0) {
-                continue;
+            if let Some(member) = record.member {
+                self.member_alias_index.insert(member, alias.clone());
             }
-            self.leaf_alias_index.insert(record.leaf_id, alias.clone());
         }
     }
 

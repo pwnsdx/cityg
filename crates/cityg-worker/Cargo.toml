@@ -1,11 +1,11 @@
 [package]
 name = "cityg-worker"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
 readme = "README.md"
-description = "Cloudflare Worker transport of the City-G v0.2 delivery service"
+description = "Cloudflare Worker transport of the City-G v0.3 delivery service"
 
 [lib]
 crate-type = ["rlib", "cdylib"]

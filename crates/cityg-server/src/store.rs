@@ -123,7 +123,7 @@ mod file {
         Corrupt(String),
     }
 
-    /// Rooms stored under `root/rooms-v2/<gid hex>/`: `snapshot-<g>.cbor`
+    /// Rooms stored under `root/rooms-v3/<gid hex>/`: `snapshot-<g>.cbor`
     /// and `journal-<g>.log` (records as big-endian u32 length frames),
     /// where `g` is the journal generation.
     #[derive(Clone, Debug)]
@@ -150,7 +150,7 @@ mod file {
     impl FileRoomStore {
         /// Store rooms under `root`.
         pub fn new(root: impl Into<PathBuf>) -> Result<Self, FileRoomStoreError> {
-            let root = root.into().join("rooms-v2");
+            let root = root.into().join("rooms-v3");
             fs::create_dir_all(&root)?;
             Ok(Self {
                 root,

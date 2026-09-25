@@ -23,7 +23,7 @@ use rand_core::CryptoRngCore;
 use crate::cbor::{bytes, expect_bytes, expect_bytes32, expect_uint, text, uint};
 use crate::error::{CoreError, CoreResult};
 use crate::hash::Digest;
-use crate::identity::{DeviceIdentity, check_device_key, leaf_id};
+use crate::identity::{DeviceIdentity, check_device_key, device_id};
 use crate::signed::{open_signed, sign_fields};
 
 /// Label of an alias binding.
@@ -105,9 +105,9 @@ impl AliasBinding {
         })
     }
 
-    /// Leaf of the binding's device in its group.
-    pub fn leaf_id(&self) -> CoreResult<Digest> {
-        leaf_id(&self.gid, &self.device_pk)
+    /// `device_id` of the binding's device in its group.
+    pub fn device_id(&self) -> CoreResult<Digest> {
+        device_id(&self.gid, &self.device_pk)
     }
 
     /// Deterministic encoding (signature included).
@@ -180,9 +180,9 @@ impl SessionAuth {
         Ok(())
     }
 
-    /// Leaf of the requesting device in its group.
-    pub fn leaf_id(&self) -> CoreResult<Digest> {
-        leaf_id(&self.gid, &self.device_pk)
+    /// `device_id` of the requesting device in its group.
+    pub fn device_id(&self) -> CoreResult<Digest> {
+        device_id(&self.gid, &self.device_pk)
     }
 
     /// Deterministic encoding (signature included).
@@ -206,7 +206,7 @@ mod tests {
         let gid = [2; 32];
         let binding = AliasBinding::sign(&gid, "Alice", &alice, &mut rng).unwrap();
         assert_eq!(AliasBinding::decode(binding.encoded()).unwrap(), binding);
-        assert_eq!(binding.leaf_id().unwrap(), alice.leaf_id(&gid).unwrap());
+        assert_eq!(binding.device_id().unwrap(), alice.device_id(&gid).unwrap());
         for bad in ["", " padded", "tab\there", &"x".repeat(MAX_ALIAS_BYTES + 1)] {
             assert!(AliasBinding::sign(&gid, bad, &alice, &mut rng).is_err());
         }
@@ -223,7 +223,7 @@ mod tests {
         let gid = [3; 32];
         let auth = SessionAuth::sign(&gid, 10_000, &alice, &mut rng).unwrap();
         assert_eq!(SessionAuth::decode(auth.encoded()).unwrap(), auth);
-        assert_eq!(auth.leaf_id().unwrap(), alice.leaf_id(&gid).unwrap());
+        assert_eq!(auth.device_id().unwrap(), alice.device_id(&gid).unwrap());
         auth.check_fresh(10_500, 1_000).unwrap();
         auth.check_fresh(9_500, 1_000).unwrap();
         assert!(auth.check_fresh(20_000, 1_000).is_err());

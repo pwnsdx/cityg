@@ -1,20 +1,37 @@
-//! Barrier tree v2: a TreeKEM-style ratchet tree over ML-KEM-768 (audit P-3).
+//! Ratchet tree v3: TreeKEM over X-Wing, in the array layout of RFC 9420.
 //!
-//! The tree has `n_max` leaf slots (a power of two, `2 <= n_max <= MAX_N_MAX`)
-//! stored in heap order: node 0 is the root, node `i` has children `2i + 1`
-//! and `2i + 2`, and slot `s` is leaf node `n_max - 1 + s`.
+//! The tree has `width` leaves, a power of two. Leaf `i` is node `2i`,
+//! parent nodes have odd indices, the level of node `x` is the number of
+//! trailing one bits of `x`, and the root of a tree of `width` leaves is
+//! node `width - 1`. Node indices never change when the tree grows (the old
+//! root becomes the left child of a new root) or shrinks (the right half is
+//! dropped), so members keep their keys across both.
 //!
-//! Changes from the v0.1.4 barrier:
-//! * every update renews the author's leaf key from its fresh leaf secret
-//!   (P-3.a, audit H-03);
-//! * leaves bind `(leaf_id, generation)` into the tree hash (P-3.f);
-//! * removing a member blanks its leaf and direct path once, in the tree that
-//!   the next commit starts from (P-3.d);
-//! * the size of an update is bounded by `max_update_path_bytes(n_max)`
-//!   (P-3.g);
-//! * joins are external commits authored by the joiner, which re-key its own
-//!   path, so no leaf is ever added without a fresh path (this subsumes the
-//!   unmerged-leaves mechanism of P-3.e).
+//! * A leaf is blank or holds a member: `[device_pk, since, encryption_key,
+//!   admission_hash]`. The tree is the member list of the group.
+//! * A parent is blank or holds `[encryption_key, unmerged]`, where
+//!   `unmerged` lists the leaves below it that entered after its key was set
+//!   and therefore do not hold its private key.
+//! * `width` is the smallest power of two covering the rightmost occupied
+//!   leaf, and at most the group's capacity.
+//! * The tree hash commits to every node:
+//!   `leaf_hash(i) = H_L("tree/leaf", [i, leaf or null])` and
+//!   `parent_hash(x) = H_L("tree/parent", [node_digest(x) or null,
+//!   hash(left), hash(right)])`, where `node_digest(x) =
+//!   H_L("tree/parent-node", [encryption_key, unmerged])`. Hashing a parent's
+//!   content first keeps a [`LeafProof`] of a leaf to its leaf record and 64
+//!   bytes per level.
+//!
+//! Changes from the v0.2 barrier tree:
+//! * the tree grows by doubling and shrinks by halving instead of having a
+//!   fixed number of slots, and holds the member records itself;
+//! * a member that enters without committing (a batched join) keeps the keys
+//!   of the parents above it: it is recorded as an *unmerged leaf* of each of
+//!   them, and encryptors add it to their resolution, instead of blanking
+//!   its path;
+//! * the KEM is X-Wing (ML-KEM-768 and X25519);
+//! * the path-secret chain has one more step, `commit_secret = path_secret[d]`,
+//!   so a tree of one leaf (no parent) still yields a fresh commit secret.
 
 use std::collections::BTreeMap;
 
@@ -30,182 +47,478 @@ use crate::cbor::{
 };
 use crate::error::{CoreError, CoreResult};
 use crate::hash::{Digest, derive_secret, expand_label_into, h_l};
+use crate::identity::check_device_key;
 use crate::kem::{
     KEM_CIPHERTEXT_BYTES, KEM_PUBLIC_KEY_BYTES, KemSecret, encapsulate, pk_hash,
     validate_public_key,
 };
 
-/// Largest tree the base profile supports: the worst-case update then stays
-/// near 1.2 MB (P-3.g). Larger groups need sub-groups or federation.
-pub const MAX_N_MAX: u32 = 1024;
+/// Largest capacity a group can have. The worst-case update path of a full
+/// tree then stays under 10 MB.
+pub const MAX_CAPACITY: u32 = 8192;
 /// Size of a wrapped path secret (32-byte secret + 16-byte tag).
 pub const WRAPPED_SECRET_BYTES: usize = 48;
 
-/// Upper bound on the encoding of an update path for a tree of `n_max`
-/// leaves: every copath resolution holds at most `n_max - 1` targets overall.
+/// Upper bound on the encoding of an update path in a tree of at most
+/// `capacity` leaves: the copath resolutions cover every other occupied leaf
+/// once, so they hold at most `capacity - 1` targets overall.
 #[must_use]
-pub fn max_update_path_bytes(n_max: u32) -> usize {
-    let n = n_max as usize;
-    let depth = n_max.trailing_zeros() as usize;
+pub fn max_update_path_bytes(capacity: u32) -> usize {
+    let n = capacity as usize;
+    let depth = capacity.trailing_zeros() as usize;
     let per_key = KEM_PUBLIC_KEY_BYTES + 8;
     let per_target = KEM_CIPHERTEXT_BYTES + WRAPPED_SECRET_BYTES + 16;
     64 + per_key * (depth + 1) + 16 * depth + per_target * n.saturating_sub(1)
 }
 
-/// Validate a tree size.
-pub fn validate_n_max(n_max: u32) -> CoreResult<()> {
-    if !(2..=MAX_N_MAX).contains(&n_max) || !n_max.is_power_of_two() {
-        return Err(CoreError::Invalid("n_max"));
+/// Validate a group capacity: a power of two between 2 and [`MAX_CAPACITY`].
+pub fn validate_capacity(capacity: u32) -> CoreResult<()> {
+    if !(2..=MAX_CAPACITY).contains(&capacity) || !capacity.is_power_of_two() {
+        return Err(CoreError::Invalid("capacity"));
     }
     Ok(())
 }
 
-/// Occupied leaf slot.
+/// Node index of leaf `leaf`.
+#[must_use]
+pub fn leaf_node(leaf: u32) -> u32 {
+    2 * leaf
+}
+
+/// Level of `node`: 0 for a leaf, the height of its subtree for a parent.
+#[must_use]
+pub fn level(node: u32) -> u32 {
+    node.trailing_ones()
+}
+
+/// Root of a tree of `width` leaves (`width` a power of two).
+#[must_use]
+pub fn root(width: u32) -> u32 {
+    width - 1
+}
+
+fn left(node: u32) -> u32 {
+    node ^ (1 << (level(node) - 1))
+}
+
+fn right(node: u32) -> u32 {
+    node ^ (3 << (level(node) - 1))
+}
+
+fn parent(node: u32) -> u32 {
+    let k = level(node);
+    let b = (node >> (k + 1)) & 1;
+    (node | (1 << k)) ^ (b << (k + 1))
+}
+
+fn sibling(node: u32) -> u32 {
+    let p = parent(node);
+    if node < p { right(p) } else { left(p) }
+}
+
+/// Whether `node` is `ancestor` or lies in its subtree.
+#[must_use]
+pub fn is_ancestor_or_self(ancestor: u32, node: u32) -> bool {
+    let span = (1u32 << level(ancestor)) - 1;
+    node >= ancestor - span && node <= ancestor + span
+}
+
+/// Ancestor of `leaf` at `level` (the leaf node itself at level 0). Node
+/// indices do not depend on the width of the tree.
+#[must_use]
+pub fn ancestor(leaf: u32, level: u32) -> u32 {
+    ((leaf >> level) << (level + 1)) + (1 << level) - 1
+}
+
+/// Level of the lowest common ancestor of two distinct leaves: the author's
+/// path entry `level - 1` is the one encrypted to the other leaf's side.
+#[must_use]
+pub fn common_ancestor_level(a: u32, b: u32) -> u32 {
+    u32::BITS - (a ^ b).leading_zeros()
+}
+
+/// Canonical width of a tree whose occupied leaves are `leaves`: the
+/// smallest power of two covering the rightmost one (1 when empty).
+pub fn canonical_width(leaves: impl IntoIterator<Item = u32>) -> u32 {
+    leaves
+        .into_iter()
+        .max()
+        .map_or(1, |rightmost| (rightmost + 1).next_power_of_two())
+}
+
+/// Leaf the next member enters, given the occupied leaves (increasing) and
+/// the capacity: the lowest blank leaf, if below the capacity.
+pub fn entry_leaf_of(occupied: impl IntoIterator<Item = u32>, capacity: u32) -> Option<u32> {
+    let mut candidate = 0u32;
+    for leaf in occupied {
+        if leaf != candidate {
+            break;
+        }
+        candidate += 1;
+    }
+    (candidate < capacity).then_some(candidate)
+}
+
+/// An occupancy `[leaf, since]`: the member that entered `leaf` at epoch
+/// `since`. It names a member in messages, proposals and admin changes; a
+/// resync starts a new occupancy, a key rotation does not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MemberRef {
+    pub leaf: u32,
+    pub since: u64,
+}
+
+impl MemberRef {
+    /// `[leaf, since]`.
+    #[must_use]
+    pub fn to_value(self) -> Value {
+        array(vec![uint(u64::from(self.leaf)), uint(self.since)])
+    }
+
+    /// Decode `[leaf, since]`.
+    pub fn from_value(value: Value) -> CoreResult<Self> {
+        let mut fields = expect_array(value, 2, "member reference")?.into_iter();
+        Ok(Self {
+            leaf: expect_u32(&next(&mut fields, "member reference")?, "member leaf")?,
+            since: expect_uint(&next(&mut fields, "member reference")?, "member since")?,
+        })
+    }
+}
+
+/// A member: an occupied leaf.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeafNode {
-    pub leaf_id: Digest,
-    pub generation: u64,
-    pub public_key: Vec<u8>,
+    /// ML-DSA-65 device key of the member.
+    pub device_pk: Vec<u8>,
+    /// Epoch at which this occupancy of the leaf began. With the leaf index,
+    /// it names the occupancy for good: no later occupant of the leaf can
+    /// have the same pair.
+    pub since: u64,
+    /// X-Wing key of the leaf.
+    pub encryption_key: Vec<u8>,
+    /// `H(SignedAdmission)` of the join, `ZERO32` for the group creator.
+    pub admission_hash: Digest,
 }
 
-/// Public view of the tree, shared by every member and the server.
+impl LeafNode {
+    pub(crate) fn to_value(&self) -> Value {
+        array(vec![
+            bytes(&self.device_pk),
+            uint(self.since),
+            bytes(&self.encryption_key),
+            bytes(&self.admission_hash),
+        ])
+    }
+
+    pub(crate) fn from_value(value: Value) -> CoreResult<Self> {
+        let mut fields = expect_array(value, 4, "tree leaf")?.into_iter();
+        let device_pk = expect_bytes(next(&mut fields, "tree leaf")?, "tree leaf device key")?;
+        check_device_key(&device_pk, "tree leaf device key")?;
+        let since = expect_uint(&next(&mut fields, "tree leaf")?, "tree leaf since")?;
+        let encryption_key = expect_bytes(next(&mut fields, "tree leaf")?, "tree leaf key")?;
+        validate_public_key(&encryption_key)?;
+        let admission_hash =
+            expect_bytes32(next(&mut fields, "tree leaf")?, "tree leaf admission")?;
+        Ok(Self {
+            device_pk,
+            since,
+            encryption_key,
+            admission_hash,
+        })
+    }
+}
+
+/// A non-blank parent node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParentNode {
+    pub encryption_key: Vec<u8>,
+    /// Leaves below the node that do not hold its private key, increasing.
+    pub unmerged: Vec<u32>,
+}
+
+impl ParentNode {
+    /// `node_digest := H_L("tree/parent-node", [encryption_key, unmerged])`.
+    pub fn digest(&self) -> CoreResult<Digest> {
+        h_l(
+            "tree/parent-node",
+            vec![
+                bytes(&self.encryption_key),
+                array(
+                    self.unmerged
+                        .iter()
+                        .map(|leaf| uint(u64::from(*leaf)))
+                        .collect(),
+                ),
+            ],
+        )
+    }
+
+    fn to_value(&self) -> Value {
+        array(vec![
+            bytes(&self.encryption_key),
+            array(
+                self.unmerged
+                    .iter()
+                    .map(|leaf| uint(u64::from(*leaf)))
+                    .collect(),
+            ),
+        ])
+    }
+
+    fn from_value(value: Value) -> CoreResult<Self> {
+        let mut fields = expect_array(value, 2, "tree parent")?.into_iter();
+        let encryption_key = expect_bytes(next(&mut fields, "tree parent")?, "tree parent key")?;
+        validate_public_key(&encryption_key)?;
+        let unmerged = expect_list(next(&mut fields, "tree parent")?, "tree unmerged leaves")?
+            .iter()
+            .map(|leaf| expect_u32(leaf, "tree unmerged leaf"))
+            .collect::<CoreResult<Vec<_>>>()?;
+        Ok(Self {
+            encryption_key,
+            unmerged,
+        })
+    }
+}
+
+/// Public view of the tree, shared by every member and the delivery service.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicTree {
-    n_max: u32,
+    capacity: u32,
     leaves: Vec<Option<LeafNode>>,
-    parents: Vec<Option<Vec<u8>>>,
-}
-
-/// Node index of slot `slot` in a tree of `n_max` leaves.
-#[must_use]
-pub fn leaf_node(n_max: u32, slot: u32) -> u32 {
-    n_max - 1 + slot
-}
-
-fn parent_of(node: u32) -> Option<u32> {
-    if node == 0 {
-        None
-    } else {
-        Some((node - 1) / 2)
-    }
-}
-
-fn sibling_of(node: u32) -> Option<u32> {
-    if node == 0 {
-        None
-    } else if node % 2 == 1 {
-        Some(node + 1)
-    } else {
-        Some(node - 1)
-    }
+    parents: Vec<Option<ParentNode>>,
 }
 
 impl PublicTree {
-    /// Empty tree of `n_max` leaves.
-    pub fn new(n_max: u32) -> CoreResult<Self> {
-        validate_n_max(n_max)?;
+    /// Tree of one blank leaf, for a group of at most `capacity` members.
+    pub fn new(capacity: u32) -> CoreResult<Self> {
+        validate_capacity(capacity)?;
         Ok(Self {
-            n_max,
-            leaves: vec![None; n_max as usize],
-            parents: vec![None; n_max as usize - 1],
+            capacity,
+            leaves: vec![None],
+            parents: Vec::new(),
         })
     }
 
-    /// Number of leaf slots.
+    /// Maximum number of leaves.
     #[must_use]
-    pub fn n_max(&self) -> u32 {
-        self.n_max
+    pub fn capacity(&self) -> u32 {
+        self.capacity
     }
 
-    fn is_leaf(&self, node: u32) -> bool {
-        node >= self.n_max - 1
+    /// Current number of leaves (a power of two).
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        u32::try_from(self.leaves.len()).unwrap_or(u32::MAX)
     }
 
-    fn check_slot(&self, slot: u32) -> CoreResult<()> {
-        if slot >= self.n_max {
-            return Err(CoreError::Invalid("slot index"));
+    /// Root node.
+    #[must_use]
+    pub fn root(&self) -> u32 {
+        root(self.width())
+    }
+
+    fn check_leaf(&self, leaf: u32) -> CoreResult<()> {
+        if leaf >= self.width() {
+            return Err(CoreError::Invalid("leaf index"));
         }
         Ok(())
     }
 
-    /// Occupant of `slot`.
+    /// Member in `leaf`.
     #[must_use]
-    pub fn leaf(&self, slot: u32) -> Option<&LeafNode> {
-        self.leaves.get(slot as usize).and_then(Option::as_ref)
+    pub fn leaf(&self, leaf: u32) -> Option<&LeafNode> {
+        self.leaves.get(leaf as usize).and_then(Option::as_ref)
     }
 
-    /// Place an occupant in an empty `slot`.
-    pub fn add_leaf(&mut self, slot: u32, leaf: LeafNode) -> CoreResult<()> {
-        self.check_slot(slot)?;
-        validate_public_key(&leaf.public_key)?;
-        let entry = &mut self.leaves[slot as usize];
-        if entry.is_some() {
-            return Err(CoreError::Invalid("slot already occupied"));
+    /// Members, with their leaf index, in increasing leaf order.
+    pub fn members(&self) -> impl Iterator<Item = (u32, &LeafNode)> {
+        self.leaves.iter().enumerate().filter_map(|(index, leaf)| {
+            leaf.as_ref()
+                .and_then(|leaf| u32::try_from(index).ok().map(|index| (index, leaf)))
+        })
+    }
+
+    /// Number of members.
+    #[must_use]
+    pub fn member_count(&self) -> usize {
+        self.leaves.iter().filter(|leaf| leaf.is_some()).count()
+    }
+
+    /// Member occupying `leaf` since epoch `since`.
+    #[must_use]
+    pub fn member(&self, leaf: u32, since: u64) -> Option<&LeafNode> {
+        self.leaf(leaf).filter(|member| member.since == since)
+    }
+
+    /// Occupancies of the current members, by leaf.
+    pub fn member_refs(&self) -> impl Iterator<Item = MemberRef> + '_ {
+        self.members().map(|(leaf, member)| MemberRef {
+            leaf,
+            since: member.since,
+        })
+    }
+
+    /// Record of the occupancy `member`, if current.
+    #[must_use]
+    pub fn member_by_ref(&self, member: MemberRef) -> Option<&LeafNode> {
+        self.member(member.leaf, member.since)
+    }
+
+    /// Leaf of the member whose device key is `device_pk`.
+    #[must_use]
+    pub fn find_device(&self, device_pk: &[u8]) -> Option<u32> {
+        self.members()
+            .find(|(_, member)| member.device_pk == device_pk)
+            .map(|(index, _)| index)
+    }
+
+    /// Parent node `node`, if it exists and is not blank.
+    #[must_use]
+    pub fn parent_node(&self, node: u32) -> Option<&ParentNode> {
+        if node.is_multiple_of(2) {
+            return None;
         }
-        *entry = Some(leaf);
+        self.parents
+            .get((node / 2) as usize)
+            .and_then(Option::as_ref)
+    }
+
+    /// Public key held at `node`, if the node exists and is not blank.
+    #[must_use]
+    pub fn node_public_key(&self, node: u32) -> Option<&[u8]> {
+        if node.is_multiple_of(2) {
+            self.leaf(node / 2)
+                .map(|leaf| leaf.encryption_key.as_slice())
+        } else {
+            self.parent_node(node)
+                .map(|parent| parent.encryption_key.as_slice())
+        }
+    }
+
+    /// Leaf where the next member enters: the lowest blank leaf, or the
+    /// first leaf of a doubled tree when every leaf is taken and the
+    /// capacity allows it.
+    #[must_use]
+    pub fn entry_leaf(&self) -> Option<u32> {
+        match self.leaves.iter().position(Option::is_none) {
+            Some(index) => u32::try_from(index).ok(),
+            None if self.width() < self.capacity => Some(self.width()),
+            None => None,
+        }
+    }
+
+    fn grow_to_cover(&mut self, leaf: u32) -> CoreResult<()> {
+        if leaf >= self.capacity {
+            return Err(CoreError::Invalid("the group is full"));
+        }
+        while leaf >= self.width() {
+            let width = self.leaves.len() * 2;
+            self.leaves.resize(width, None);
+            self.parents.resize(width - 1, None);
+        }
         Ok(())
     }
 
-    /// Blank `slot` and every node of its direct path.
-    pub fn remove_leaf(&mut self, slot: u32) -> CoreResult<LeafNode> {
-        self.check_slot(slot)?;
-        let removed = self.leaves[slot as usize]
+    /// Place a member in the blank `leaf`, growing the tree if needed. The
+    /// leaf becomes an unmerged leaf of every non-blank parent above it.
+    pub fn add_leaf(&mut self, leaf: u32, member: LeafNode) -> CoreResult<()> {
+        validate_public_key(&member.encryption_key)?;
+        self.grow_to_cover(leaf)?;
+        if self.leaves[leaf as usize].is_some() {
+            return Err(CoreError::Invalid("leaf already occupied"));
+        }
+        self.leaves[leaf as usize] = Some(member);
+        self.mark_unmerged(leaf)
+    }
+
+    /// Replace the member of `leaf` by a new occupancy of the same leaf (a
+    /// resync). Like any entering member, it becomes an unmerged leaf of the
+    /// parents above it until its update path re-keys them.
+    pub fn replace_leaf(&mut self, leaf: u32, member: LeafNode) -> CoreResult<()> {
+        self.check_leaf(leaf)?;
+        validate_public_key(&member.encryption_key)?;
+        let entry = &mut self.leaves[leaf as usize];
+        if entry.is_none() {
+            return Err(CoreError::Invalid("leaf is blank"));
+        }
+        *entry = Some(member);
+        self.mark_unmerged(leaf)
+    }
+
+    fn mark_unmerged(&mut self, leaf: u32) -> CoreResult<()> {
+        for node in self.direct_path(leaf)? {
+            if let Some(parent) = self.parents[(node / 2) as usize].as_mut()
+                && let Err(position) = parent.unmerged.binary_search(&leaf)
+            {
+                parent.unmerged.insert(position, leaf);
+            }
+        }
+        Ok(())
+    }
+
+    /// Change the device key of the member in `leaf` (key rotation).
+    pub fn set_device_key(&mut self, leaf: u32, device_pk: &[u8]) -> CoreResult<()> {
+        self.check_leaf(leaf)?;
+        let member = self.leaves[leaf as usize]
+            .as_mut()
+            .ok_or(CoreError::Invalid("leaf is blank"))?;
+        member.device_pk = device_pk.to_vec();
+        Ok(())
+    }
+
+    /// Blank `leaf` and every node of its direct path.
+    pub fn remove_leaf(&mut self, leaf: u32) -> CoreResult<LeafNode> {
+        self.check_leaf(leaf)?;
+        let removed = self.leaves[leaf as usize]
             .take()
-            .ok_or(CoreError::Invalid("slot is empty"))?;
-        for node in self.direct_path(slot)? {
-            self.parents[node as usize] = None;
+            .ok_or(CoreError::Invalid("leaf is blank"))?;
+        for node in self.direct_path(leaf)? {
+            self.parents[(node / 2) as usize] = None;
         }
         Ok(removed)
     }
 
-    /// First empty slot, if any.
-    #[must_use]
-    pub fn first_free_slot(&self) -> Option<u32> {
-        self.leaves
-            .iter()
-            .position(Option::is_none)
-            .and_then(|slot| u32::try_from(slot).ok())
-    }
-
-    /// Public key held at `node`, if the node is not blank.
-    #[must_use]
-    pub fn node_public_key(&self, node: u32) -> Option<&[u8]> {
-        if self.is_leaf(node) {
-            self.leaf(node - (self.n_max - 1))
-                .map(|leaf| leaf.public_key.as_slice())
-        } else {
-            self.parents
-                .get(node as usize)
-                .and_then(Option::as_ref)
-                .map(Vec::as_slice)
+    /// Halve the tree while its right half holds no member (canonical width).
+    pub fn truncate(&mut self) {
+        while self.leaves.len() > 1 {
+            let half = self.leaves.len() / 2;
+            if self.leaves[half..].iter().any(Option::is_some) {
+                break;
+            }
+            self.leaves.truncate(half);
+            self.parents.truncate(half - 1);
         }
     }
 
-    /// Parent nodes from the parent of `slot`'s leaf up to the root.
-    pub fn direct_path(&self, slot: u32) -> CoreResult<Vec<u32>> {
-        self.check_slot(slot)?;
+    /// Parent nodes from the parent of `leaf` up to the root.
+    pub fn direct_path(&self, leaf: u32) -> CoreResult<Vec<u32>> {
+        self.check_leaf(leaf)?;
+        let root = self.root();
         let mut path = Vec::new();
-        let mut node = leaf_node(self.n_max, slot);
-        while let Some(parent) = parent_of(node) {
-            path.push(parent);
-            node = parent;
+        let mut node = leaf_node(leaf);
+        while node != root {
+            node = parent(node);
+            path.push(node);
         }
         Ok(path)
     }
 
-    /// For each node of the direct path, the child that is *not* on the path.
-    pub fn copath(&self, slot: u32) -> CoreResult<Vec<u32>> {
-        self.check_slot(slot)?;
+    /// For each node of the direct path, its child that is not on the path.
+    pub fn copath(&self, leaf: u32) -> CoreResult<Vec<u32>> {
+        self.check_leaf(leaf)?;
+        let root = self.root();
         let mut copath = Vec::new();
-        let mut node = leaf_node(self.n_max, slot);
-        while let Some(sibling) = sibling_of(node) {
-            copath.push(sibling);
-            node = parent_of(node).ok_or(CoreError::Invalid("tree shape"))?;
+        let mut node = leaf_node(leaf);
+        while node != root {
+            copath.push(sibling(node));
+            node = parent(node);
         }
         Ok(copath)
     }
 
-    /// Smallest set of non-blank nodes covering the leaves below `node`.
+    /// Smallest set of nodes whose private keys cover every member below
+    /// `node`: the node and its unmerged leaves if it is not blank, else the
+    /// resolutions of its children. Increasing node order.
     #[must_use]
     pub fn resolution(&self, node: u32) -> Vec<u32> {
         let mut out = Vec::new();
@@ -215,134 +528,191 @@ impl PublicTree {
     }
 
     fn resolution_into(&self, node: u32, out: &mut Vec<u32>) {
-        if self.node_public_key(node).is_some() {
+        if node.is_multiple_of(2) {
+            if self.leaf(node / 2).is_some() {
+                out.push(node);
+            }
+        } else if let Some(parent) = self.parent_node(node) {
             out.push(node);
-        } else if !self.is_leaf(node) {
-            self.resolution_into(2 * node + 1, out);
-            self.resolution_into(2 * node + 2, out);
+            out.extend(parent.unmerged.iter().map(|leaf| leaf_node(*leaf)));
+        } else {
+            self.resolution_into(left(node), out);
+            self.resolution_into(right(node), out);
         }
     }
 
-    fn node_hash(&self, node: u32) -> CoreResult<Digest> {
-        if self.is_leaf(node) {
-            let slot = node - (self.n_max - 1);
-            let occupant = match self.leaf(slot) {
-                Some(leaf) => array(vec![
-                    bytes(&leaf.leaf_id),
-                    uint(leaf.generation),
-                    bytes(&leaf.public_key),
-                ]),
-                None => array(Vec::new()),
-            };
-            h_l(
-                "tree/leaf",
-                vec![uint(u64::from(self.n_max)), uint(u64::from(slot)), occupant],
-            )
-        } else {
-            let left = self.node_hash(2 * node + 1)?;
-            let right = self.node_hash(2 * node + 2)?;
-            let key = self.node_public_key(node).unwrap_or(&[]);
-            h_l(
-                "tree/parent",
-                vec![
-                    uint(u64::from(node)),
-                    bytes(key),
-                    bytes(&left),
-                    bytes(&right),
-                ],
-            )
+    /// Hash of every node, indexed by node (`2 * width - 1` entries).
+    pub fn node_hashes(&self) -> CoreResult<Vec<Digest>> {
+        let width = self.width();
+        let mut hashes = vec![[0u8; 32]; (2 * width - 1) as usize];
+        for leaf in 0..width {
+            hashes[leaf_node(leaf) as usize] = leaf_hash(leaf, self.leaf(leaf))?;
         }
+        let depth = width.trailing_zeros();
+        for level in 1..=depth {
+            let mut node = (1u32 << level) - 1;
+            while node < 2 * width - 1 {
+                let digest = self.parent_node(node).map(ParentNode::digest).transpose()?;
+                hashes[node as usize] = parent_hash(
+                    digest.as_ref(),
+                    &hashes[left(node) as usize],
+                    &hashes[right(node) as usize],
+                )?;
+                node += 1 << (level + 1);
+            }
+        }
+        Ok(hashes)
     }
 
     /// Commitment to the whole tree: hash of the root node.
     pub fn tree_hash(&self) -> CoreResult<Digest> {
-        self.node_hash(0)
+        Ok(self.node_hashes()?[self.root() as usize])
     }
 
-    /// Install the public keys of an accepted update path from `slot`.
-    pub fn apply_update_path(&mut self, slot: u32, path: &UpdatePath) -> CoreResult<()> {
-        let direct_path = self.direct_path(slot)?;
+    /// Merkle proof of `leaf` against the tree hash.
+    pub fn leaf_proof(&self, leaf: u32) -> CoreResult<LeafProof> {
+        let mut proofs = self.leaf_proofs([leaf])?;
+        proofs.pop().ok_or(CoreError::Invalid("leaf index"))
+    }
+
+    /// Merkle proofs of `leaves` against the tree hash (the node hashes are
+    /// computed once).
+    pub fn leaf_proofs(&self, leaves: impl IntoIterator<Item = u32>) -> CoreResult<Vec<LeafProof>> {
+        let hashes = self.node_hashes()?;
+        let root = self.root();
+        leaves
+            .into_iter()
+            .map(|leaf| {
+                self.check_leaf(leaf)?;
+                let mut path = Vec::new();
+                let mut node = leaf_node(leaf);
+                while node != root {
+                    let up = parent(node);
+                    path.push(ProofStep {
+                        parent: self.parent_node(up).map(ParentNode::digest).transpose()?,
+                        sibling: hashes[sibling(node) as usize],
+                    });
+                    node = up;
+                }
+                Ok(LeafProof {
+                    leaf,
+                    width: self.width(),
+                    node: self.leaf(leaf).cloned(),
+                    path,
+                })
+            })
+            .collect()
+    }
+
+    /// Install the public keys of an accepted update path from `leaf`: the
+    /// leaf key, and each direct-path node with an empty unmerged list.
+    pub fn apply_update_path(&mut self, leaf: u32, path: &UpdatePath) -> CoreResult<()> {
+        let direct_path = self.direct_path(leaf)?;
         if path.nodes.len() != direct_path.len() {
             return Err(CoreError::Invalid("update path length"));
         }
-        let leaf = self.leaves[slot as usize]
+        let member = self.leaves[leaf as usize]
             .as_mut()
-            .ok_or(CoreError::Invalid("update path from an empty slot"))?;
-        leaf.public_key = path.leaf_public_key.clone();
+            .ok_or(CoreError::Invalid("update path from a blank leaf"))?;
+        member.encryption_key = path.leaf_public_key.clone();
         for (entry, node) in path.nodes.iter().zip(direct_path) {
             if entry.node != node {
                 return Err(CoreError::Invalid("update path node"));
             }
-            self.parents[node as usize] = Some(entry.public_key.clone());
+            self.parents[(node / 2) as usize] = Some(ParentNode {
+                encryption_key: entry.public_key.clone(),
+                unmerged: Vec::new(),
+            });
         }
         Ok(())
     }
 
-    /// Deterministic CBOR encoding.
+    /// Deterministic CBOR encoding: `[capacity, [leaf or null, ...],
+    /// [parent or null, ...]]`.
     pub fn to_cbor(&self) -> CoreResult<Vec<u8>> {
-        let leaves = self
-            .leaves
-            .iter()
-            .map(|leaf| match leaf {
-                Some(leaf) => array(vec![
-                    bytes(&leaf.leaf_id),
-                    uint(leaf.generation),
-                    bytes(&leaf.public_key),
-                ]),
-                None => Value::Null,
-            })
-            .collect();
-        let parents = self
-            .parents
-            .iter()
-            .map(|node| match node {
-                Some(key) => bytes(key),
-                None => Value::Null,
-            })
-            .collect();
         encode(&array(vec![
-            uint(u64::from(self.n_max)),
-            array(leaves),
-            array(parents),
+            uint(u64::from(self.capacity)),
+            array(
+                self.leaves
+                    .iter()
+                    .map(|leaf| leaf.as_ref().map_or(Value::Null, LeafNode::to_value))
+                    .collect(),
+            ),
+            array(
+                self.parents
+                    .iter()
+                    .map(|node| node.as_ref().map_or(Value::Null, ParentNode::to_value))
+                    .collect(),
+            ),
         ]))
     }
 
-    /// Decode and validate a tree encoding.
+    /// Decode a tree and check that it is well formed and canonical.
     pub fn from_cbor(encoded: &[u8]) -> CoreResult<Self> {
-        let max = (2 * MAX_N_MAX as usize) * (KEM_PUBLIC_KEY_BYTES + 64) + 64;
-        let mut items = expect_array(decode(encoded, max, "tree")?, 3, "tree")?.into_iter();
-        let n_max = next(&mut items, "tree")?;
-        let n_max = expect_u32(&n_max, "tree n_max")?;
-        let mut tree = Self::new(n_max)?;
-        let leaves = expect_list(next(&mut items, "tree")?, "tree leaves")?;
-        let parents = expect_list(next(&mut items, "tree")?, "tree parents")?;
-        if leaves.len() != n_max as usize || parents.len() != n_max as usize - 1 {
+        let mut items = expect_array(decode(encoded, 64 << 20, "tree")?, 3, "tree")?.into_iter();
+        let capacity = expect_u32(&next(&mut items, "tree")?, "tree capacity")?;
+        validate_capacity(capacity)?;
+        let leaves = expect_list(next(&mut items, "tree")?, "tree leaves")?
+            .into_iter()
+            .map(|leaf| match leaf {
+                Value::Null => Ok(None),
+                value => LeafNode::from_value(value).map(Some),
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+        let parents = expect_list(next(&mut items, "tree")?, "tree parents")?
+            .into_iter()
+            .map(|node| match node {
+                Value::Null => Ok(None),
+                value => ParentNode::from_value(value).map(Some),
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+        let tree = Self {
+            capacity,
+            leaves,
+            parents,
+        };
+        tree.check_well_formed()?;
+        Ok(tree)
+    }
+
+    /// Structural invariants: a power-of-two width within the capacity, one
+    /// parent per inner node, the canonical width, at least one member,
+    /// distinct device keys, and unmerged lists that name members below
+    /// their node in increasing order.
+    pub fn check_well_formed(&self) -> CoreResult<()> {
+        let width = self.leaves.len();
+        if !width.is_power_of_two()
+            || width > self.capacity as usize
+            || self.parents.len() != width - 1
+        {
             return Err(CoreError::Malformed("tree size"));
         }
-        for (slot, leaf) in leaves.into_iter().enumerate() {
-            if leaf == Value::Null {
-                continue;
-            }
-            let mut fields = expect_array(leaf, 3, "tree leaf")?.into_iter();
-            let leaf_id = expect_bytes32(next(&mut fields, "tree leaf")?, "tree leaf id")?;
-            let generation = expect_uint(&next(&mut fields, "tree leaf")?, "tree generation")?;
-            let public_key = expect_bytes(next(&mut fields, "tree leaf")?, "tree leaf key")?;
-            validate_public_key(&public_key)?;
-            tree.leaves[slot] = Some(LeafNode {
-                leaf_id,
-                generation,
-                public_key,
-            });
+        if width > 1 && self.leaves[width / 2..].iter().all(Option::is_none) {
+            return Err(CoreError::Malformed("tree is not truncated"));
         }
-        for (node, key) in parents.into_iter().enumerate() {
-            if key == Value::Null {
-                continue;
-            }
-            let key = expect_bytes(key, "tree node key")?;
-            validate_public_key(&key)?;
-            tree.parents[node] = Some(key);
+        if self.member_count() == 0 {
+            return Err(CoreError::Malformed("tree without members"));
         }
-        Ok(tree)
+        let mut keys: Vec<&[u8]> = self
+            .members()
+            .map(|(_, member)| member.device_pk.as_slice())
+            .collect();
+        keys.sort_unstable();
+        if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(CoreError::Malformed("duplicate device key in the tree"));
+        }
+        for (index, node) in self.parents.iter().enumerate() {
+            let Some(node) = node else { continue };
+            let node_index = u32::try_from(2 * index + 1).unwrap_or(u32::MAX);
+            if node.unmerged.windows(2).any(|pair| pair[0] >= pair[1])
+                || node.unmerged.iter().any(|leaf| {
+                    !is_ancestor_or_self(node_index, leaf_node(*leaf)) || self.leaf(*leaf).is_none()
+                })
+            {
+                return Err(CoreError::Malformed("tree unmerged leaves"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -351,6 +721,163 @@ pub(crate) fn next(
     what: &'static str,
 ) -> CoreResult<Value> {
     items.next().ok_or(CoreError::Malformed(what))
+}
+
+fn leaf_hash(leaf: u32, node: Option<&LeafNode>) -> CoreResult<Digest> {
+    h_l(
+        "tree/leaf",
+        vec![
+            uint(u64::from(leaf)),
+            node.map_or(Value::Null, LeafNode::to_value),
+        ],
+    )
+}
+
+fn parent_hash(digest: Option<&Digest>, left: &Digest, right: &Digest) -> CoreResult<Digest> {
+    h_l(
+        "tree/parent",
+        vec![
+            digest.map_or(Value::Null, |digest| bytes(digest)),
+            bytes(left),
+            bytes(right),
+        ],
+    )
+}
+
+/// One level of a [`LeafProof`], from the leaf up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProofStep {
+    /// `node_digest` of the ancestor at this level, `None` if it is blank.
+    pub parent: Option<Digest>,
+    /// Hash of the sibling of the node one level below.
+    pub sibling: Digest,
+}
+
+/// Largest encoding of a [`LeafProof`].
+pub const MAX_LEAF_PROOF_BYTES: usize = 8 * 1024;
+
+/// Merkle proof that leaf `leaf` of a tree of `width` leaves holds `node`
+/// (a member, or `None` when blank):
+///
+/// ```text
+/// LeafProof := [leaf, width, leaf or null, [[node_digest or null, sibling_hash], ...]]
+/// ```
+///
+/// with one step per level, from the leaf's parent to the root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeafProof {
+    pub leaf: u32,
+    pub width: u32,
+    pub node: Option<LeafNode>,
+    pub path: Vec<ProofStep>,
+}
+
+impl LeafProof {
+    /// Recompute the root hash from the proof and compare it with
+    /// `tree_hash`.
+    pub fn verify(&self, tree_hash: &Digest) -> CoreResult<()> {
+        if !self.width.is_power_of_two()
+            || self.width > MAX_CAPACITY
+            || self.leaf >= self.width
+            || self.path.len() != self.width.trailing_zeros() as usize
+        {
+            return Err(CoreError::Invalid("leaf proof shape"));
+        }
+        let mut node = leaf_node(self.leaf);
+        let mut hash = leaf_hash(self.leaf, self.node.as_ref())?;
+        for step in &self.path {
+            let up = parent(node);
+            hash = if node < up {
+                parent_hash(step.parent.as_ref(), &hash, &step.sibling)?
+            } else {
+                parent_hash(step.parent.as_ref(), &step.sibling, &hash)?
+            };
+            node = up;
+        }
+        if !crate::hash::digest_eq(&hash, tree_hash) {
+            return Err(CoreError::Invalid(
+                "leaf proof does not match the tree hash",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The member the proof shows, as `(occupancy, record)`.
+    #[must_use]
+    pub fn member(&self) -> Option<(MemberRef, &LeafNode)> {
+        self.node.as_ref().map(|node| {
+            (
+                MemberRef {
+                    leaf: self.leaf,
+                    since: node.since,
+                },
+                node,
+            )
+        })
+    }
+
+    /// Deterministic CBOR value.
+    #[must_use]
+    pub fn to_value(&self) -> Value {
+        array(vec![
+            uint(u64::from(self.leaf)),
+            uint(u64::from(self.width)),
+            self.node.as_ref().map_or(Value::Null, LeafNode::to_value),
+            array(
+                self.path
+                    .iter()
+                    .map(|step| {
+                        array(vec![
+                            step.parent
+                                .as_ref()
+                                .map_or(Value::Null, |digest| bytes(digest)),
+                            bytes(&step.sibling),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ])
+    }
+
+    /// Decode [`LeafProof::to_value`] (structure only; see
+    /// [`LeafProof::verify`]).
+    pub fn from_value(value: Value) -> CoreResult<Self> {
+        let mut items = expect_array(value, 4, "leaf proof")?.into_iter();
+        let leaf = expect_u32(&next(&mut items, "leaf proof")?, "leaf proof leaf")?;
+        let width = expect_u32(&next(&mut items, "leaf proof")?, "leaf proof width")?;
+        let node = match next(&mut items, "leaf proof")? {
+            Value::Null => None,
+            value => Some(LeafNode::from_value(value)?),
+        };
+        let path = expect_list(next(&mut items, "leaf proof")?, "leaf proof path")?
+            .into_iter()
+            .map(|step| {
+                let mut fields = expect_array(step, 2, "leaf proof step")?.into_iter();
+                let parent = match next(&mut fields, "leaf proof step")? {
+                    Value::Null => None,
+                    value => Some(expect_bytes32(value, "leaf proof digest")?),
+                };
+                let sibling = expect_bytes32(next(&mut fields, "leaf proof step")?, "sibling")?;
+                Ok(ProofStep { parent, sibling })
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+        Ok(Self {
+            leaf,
+            width,
+            node,
+            path,
+        })
+    }
+
+    /// Deterministic CBOR encoding.
+    pub fn encode(&self) -> CoreResult<Vec<u8>> {
+        encode(&self.to_value())
+    }
+
+    /// Decode an encoded proof.
+    pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
+        Self::from_value(decode(encoded, MAX_LEAF_PROOF_BYTES, "leaf proof")?)
+    }
 }
 
 /// Path secret of one parent node, encapsulated to one resolution node.
@@ -382,7 +909,7 @@ pub struct PathContext {
     pub gid: Digest,
     /// Epoch created by the commit carrying the path.
     pub epoch: u64,
-    pub author_slot: u32,
+    pub author_leaf: u32,
 }
 
 impl PathContext {
@@ -390,7 +917,7 @@ impl PathContext {
         encode(&array(vec![
             bytes(&self.gid),
             uint(self.epoch),
-            uint(u64::from(self.author_slot)),
+            uint(u64::from(self.author_leaf)),
             uint(u64::from(node)),
             uint(u64::from(target)),
             bytes(target_pk_hash),
@@ -407,15 +934,17 @@ pub struct PrivatePath {
 }
 
 impl PrivatePath {
-    fn key_for(&self, n_max: u32, my_slot: u32, node: u32) -> Option<&KemSecret> {
-        if node == leaf_node(n_max, my_slot) {
+    /// Private key of `node`, for the member in `my_leaf`.
+    #[must_use]
+    pub fn key_for(&self, my_leaf: u32, node: u32) -> Option<&KemSecret> {
+        if node == leaf_node(my_leaf) {
             self.leaf.as_ref()
         } else {
             self.nodes.get(&node)
         }
     }
 
-    /// Forget keys of nodes that are now blank in `tree`.
+    /// Forget keys of nodes that are blank or gone in `tree`.
     pub fn retain_live(&mut self, tree: &PublicTree) {
         self.nodes
             .retain(|node, _| tree.node_public_key(*node).is_some());
@@ -429,8 +958,8 @@ pub struct PathSecrets {
     pub node_keys: BTreeMap<u32, KemSecret>,
     /// New leaf key (author only).
     pub leaf_key: Option<KemSecret>,
-    /// Path secret of the root, from which the commit secret derives.
-    pub root_secret: Zeroizing<[u8; 32]>,
+    /// `path_secret[d]`, one step past the root: the commit secret.
+    pub commit_secret: Zeroizing<[u8; 32]>,
 }
 
 fn node_key(path_secret: &[u8; 32]) -> CoreResult<KemSecret> {
@@ -453,14 +982,13 @@ pub fn new_leaf_secret(rng: &mut impl CryptoRngCore) -> Zeroizing<[u8; 32]> {
 }
 
 /// Leaf key derived from a leaf secret: `KeyGen(ExpandLabel(leaf_secret,
-/// "tree leaf key", h'', 64))`.
+/// "tree leaf key", h'', 32))`.
 pub fn leaf_key_from_secret(leaf_secret: &[u8; 32]) -> CoreResult<KemSecret> {
     KemSecret::derive(leaf_secret, "tree leaf key")
 }
 
-/// Re-key `author_slot`: fresh leaf secret, derived path secrets and node
-/// keys, each path secret encapsulated to the resolution of the copath in
-/// `tree` (the tree the commit starts from).
+/// Re-key the author's leaf with a fresh leaf secret; see
+/// [`generate_update_path_from_leaf_secret`].
 pub fn generate_update_path(
     tree: &PublicTree,
     context: &PathContext,
@@ -470,21 +998,21 @@ pub fn generate_update_path(
     generate_update_path_from_leaf_secret(tree, context, &leaf_secret, rng)
 }
 
-/// [`generate_update_path`] with a leaf secret chosen by the caller. A
-/// joiner uses it to place its leaf (with the key derived from
-/// `leaf_secret`) in the tree before generating its path.
+/// Re-key `context.author_leaf`: derive the path secrets from
+/// `leaf_secret`, and encapsulate each to the resolution of the matching
+/// copath node in `tree` (the tree the commit starts from).
 pub fn generate_update_path_from_leaf_secret(
     tree: &PublicTree,
     context: &PathContext,
     leaf_secret: &[u8; 32],
     rng: &mut impl CryptoRngCore,
 ) -> CoreResult<(UpdatePath, PathSecrets)> {
-    let slot = context.author_slot;
-    if tree.leaf(slot).is_none() {
-        return Err(CoreError::Invalid("update path from an empty slot"));
+    let leaf = context.author_leaf;
+    if tree.leaf(leaf).is_none() {
+        return Err(CoreError::Invalid("update path from a blank leaf"));
     }
-    let direct_path = tree.direct_path(slot)?;
-    let copath = tree.copath(slot)?;
+    let direct_path = tree.direct_path(leaf)?;
+    let copath = tree.copath(leaf)?;
 
     let leaf_key = leaf_key_from_secret(leaf_secret)?;
     let leaf_public_key = leaf_key.public_key();
@@ -493,9 +1021,6 @@ pub fn generate_update_path_from_leaf_secret(
     let mut nodes = Vec::with_capacity(direct_path.len());
     let mut node_keys = BTreeMap::new();
     for (index, node) in direct_path.iter().copied().enumerate() {
-        if index > 0 {
-            secret = derive_secret(&secret, "tree path")?;
-        }
         let key = node_key(&secret)?;
         let public_key = key.public_key();
         let mut targets = Vec::new();
@@ -528,8 +1053,8 @@ pub fn generate_update_path_from_leaf_secret(
             public_key,
             targets,
         });
+        secret = derive_secret(&secret, "tree path")?;
     }
-    let root_secret = secret;
     Ok((
         UpdatePath {
             leaf_public_key,
@@ -538,25 +1063,26 @@ pub fn generate_update_path_from_leaf_secret(
         PathSecrets {
             node_keys,
             leaf_key: Some(leaf_key),
-            root_secret,
+            commit_secret: secret,
         },
     ))
 }
 
-/// Check an update path from `author_slot` against `tree` (the tree the
+/// Check an update path from `author_leaf` against `tree` (the tree the
 /// commit starts from): one entry per direct-path node, valid keys, and
-/// exactly one ciphertext per resolution node of the copath. Needs no secret.
+/// exactly one ciphertext per resolution node of the copath, in order. Needs
+/// no secret.
 pub fn validate_update_path(
     tree: &PublicTree,
-    author_slot: u32,
+    author_leaf: u32,
     path: &UpdatePath,
 ) -> CoreResult<()> {
-    if tree.leaf(author_slot).is_none() {
-        return Err(CoreError::Invalid("update path from an empty slot"));
+    if tree.leaf(author_leaf).is_none() {
+        return Err(CoreError::Invalid("update path from a blank leaf"));
     }
     validate_public_key(&path.leaf_public_key)?;
-    let direct_path = tree.direct_path(author_slot)?;
-    let copath = tree.copath(author_slot)?;
+    let direct_path = tree.direct_path(author_leaf)?;
+    let copath = tree.copath(author_leaf)?;
     if path.nodes.len() != direct_path.len() {
         return Err(CoreError::Invalid("update path length"));
     }
@@ -586,44 +1112,60 @@ pub fn validate_update_path(
     Ok(())
 }
 
-/// Decrypt the path secret meant for this member and derive the keys of the
-/// shared part of the path. `tree` is the tree the commit started from.
+/// Decrypt the path secret meant for the member in `my_leaf` and derive the
+/// keys of the part of the author's path above it. `tree` is the tree the
+/// commit starts from, or the tree it produces: the two agree on every
+/// copath subtree, which is all this uses.
 pub fn decrypt_update_path(
     tree: &PublicTree,
     context: &PathContext,
     path: &UpdatePath,
-    my_slot: u32,
+    my_leaf: u32,
     private: &PrivatePath,
 ) -> CoreResult<PathSecrets> {
-    validate_update_path(tree, context.author_slot, path)?;
-    if my_slot == context.author_slot {
+    validate_update_path(tree, context.author_leaf, path)?;
+    if my_leaf == context.author_leaf {
         return Err(CoreError::Invalid("own update path"));
     }
-    let n_max = tree.n_max();
-    let author_path = tree.direct_path(context.author_slot)?;
-    let copath = tree.copath(context.author_slot)?;
-    let my_leaf = leaf_node(n_max, my_slot);
+    let copath = tree.copath(context.author_leaf)?;
+    let my_node = leaf_node(my_leaf);
     // The lowest shared ancestor is the first path node whose copath child
     // covers this member's leaf.
-    let level = copath
+    let index = copath
         .iter()
-        .position(|node| is_ancestor_or_self(*node, my_leaf))
+        .position(|node| is_ancestor_or_self(*node, my_node))
         .ok_or(CoreError::Invalid("member not covered by the update path"))?;
-    let entry = &path.nodes[level];
-    let (target, key) = entry
+    let (target, key) = path.nodes[index]
         .targets
         .iter()
         .find_map(|target| {
             private
-                .key_for(n_max, my_slot, target.target)
+                .key_for(my_leaf, target.target)
                 .map(|key| (target, key))
         })
         .ok_or(CoreError::Decrypt("no path secret for this member"))?;
-    let target_pk = tree
-        .node_public_key(target.target)
-        .ok_or(CoreError::Invalid("blank resolution node"))?;
+    decrypt_path_entry(context, path, index, target, key)
+}
+
+/// Open the path secret of entry `index` of `path` wrapped for `target`,
+/// with `key` (the member's private key of that node), and derive the keys
+/// of the author's path from that entry up to the root, checking each
+/// against the public key the author published. Needs no tree: members
+/// without the public tree use it directly.
+pub fn decrypt_path_entry(
+    context: &PathContext,
+    path: &UpdatePath,
+    index: usize,
+    target: &PathTarget,
+    key: &KemSecret,
+) -> CoreResult<PathSecrets> {
+    let entry = path
+        .nodes
+        .get(index)
+        .ok_or(CoreError::Invalid("update path length"))?;
     let shared = key.decapsulate(&target.kem_ciphertext)?;
-    let wrap_context = context.wrap_context(entry.node, target.target, &pk_hash(target_pk)?)?;
+    let wrap_context =
+        context.wrap_context(entry.node, target.target, &pk_hash(&key.public_key())?)?;
     let (key_bytes, nonce) = wrap_keys(&shared, &wrap_context)?;
     let plaintext = Zeroizing::new(
         ChaCha20Poly1305::new(Key::from_slice(key_bytes.as_slice()))
@@ -643,34 +1185,20 @@ pub fn decrypt_update_path(
     secret.copy_from_slice(&plaintext);
 
     let mut node_keys = BTreeMap::new();
-    for (index, node) in author_path.iter().copied().enumerate().skip(level) {
-        if index > level {
-            secret = derive_secret(&secret, "tree path")?;
-        }
+    for entry in &path.nodes[index..] {
         let key = node_key(&secret)?;
         // Every derivable public key must match the one the author published.
-        if key.public_key() != path.nodes[index].public_key {
+        if key.public_key() != entry.public_key {
             return Err(CoreError::Invalid("update path public key mismatch"));
         }
-        node_keys.insert(node, key);
+        node_keys.insert(entry.node, key);
+        secret = derive_secret(&secret, "tree path")?;
     }
     Ok(PathSecrets {
         node_keys,
         leaf_key: None,
-        root_secret: secret,
+        commit_secret: secret,
     })
-}
-
-fn is_ancestor_or_self(ancestor: u32, mut node: u32) -> bool {
-    loop {
-        if node == ancestor {
-            return true;
-        }
-        match parent_of(node) {
-            Some(parent) => node = parent,
-            None => return false,
-        }
-    }
 }
 
 /// Deterministic CBOR encoding of an update path.
@@ -745,220 +1273,4 @@ pub fn update_path_from_value(value: Value) -> CoreResult<UpdatePath> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use super::*;
-    use rand_chacha::ChaCha20Rng;
-    use rand_core::SeedableRng;
-
-    struct Member {
-        slot: u32,
-        private: PrivatePath,
-    }
-
-    fn add_member(tree: &mut PublicTree, slot: u32, rng: &mut ChaCha20Rng) -> Member {
-        let key = KemSecret::generate(rng);
-        tree.add_leaf(
-            slot,
-            LeafNode {
-                leaf_id: [slot as u8; 32],
-                generation: 0,
-                public_key: key.public_key(),
-            },
-        )
-        .unwrap();
-        Member {
-            slot,
-            private: PrivatePath {
-                leaf: Some(key),
-                nodes: BTreeMap::new(),
-            },
-        }
-    }
-
-    fn commit(
-        tree: &mut PublicTree,
-        members: &mut [Member],
-        author: usize,
-        epoch: u64,
-        rng: &mut ChaCha20Rng,
-    ) -> [u8; 32] {
-        let context = PathContext {
-            gid: [0x42; 32],
-            epoch,
-            author_slot: members[author].slot,
-        };
-        let (path, secrets) = generate_update_path(tree, &context, rng).unwrap();
-        validate_update_path(tree, context.author_slot, &path).unwrap();
-        let mut roots = vec![*secrets.root_secret];
-        for (index, member) in members.iter_mut().enumerate() {
-            if index == author {
-                continue;
-            }
-            let received =
-                decrypt_update_path(tree, &context, &path, member.slot, &member.private).unwrap();
-            roots.push(*received.root_secret);
-            member.private.nodes.extend(received.node_keys);
-        }
-        tree.apply_update_path(context.author_slot, &path).unwrap();
-        let author_member = &mut members[author];
-        author_member.private.leaf = secrets.leaf_key;
-        author_member.private.nodes = secrets.node_keys;
-        assert!(roots.windows(2).all(|pair| pair[0] == pair[1]));
-        roots[0]
-    }
-
-    #[test]
-    fn tree_shape_helpers() {
-        let tree = PublicTree::new(8).unwrap();
-        assert_eq!(tree.direct_path(0).unwrap(), vec![3, 1, 0]);
-        assert_eq!(tree.copath(0).unwrap(), vec![8, 4, 2]);
-        assert_eq!(tree.direct_path(7).unwrap(), vec![6, 2, 0]);
-        assert_eq!(tree.copath(5).unwrap(), vec![11, 6, 1]);
-        assert!(tree.direct_path(8).is_err());
-        assert!(tree.resolution(0).is_empty());
-        assert_eq!(tree.first_free_slot(), Some(0));
-        assert!(PublicTree::new(3).is_err());
-        assert!(PublicTree::new(1).is_err());
-        assert!(PublicTree::new(MAX_N_MAX * 2).is_err());
-        assert!(is_ancestor_or_self(0, 9) && !is_ancestor_or_self(2, 9));
-        assert!(max_update_path_bytes(1024) < 1_300_000);
-        assert!(max_update_path_bytes(2) > 2 * KEM_PUBLIC_KEY_BYTES);
-    }
-
-    #[test]
-    fn members_agree_on_root_secret_across_commits_and_removals() {
-        let mut rng = ChaCha20Rng::seed_from_u64(7);
-        let mut tree = PublicTree::new(8).unwrap();
-        let mut members: Vec<Member> = (0..5)
-            .map(|slot| add_member(&mut tree, slot, &mut rng))
-            .collect();
-        let first = commit(&mut tree, &mut members, 0, 1, &mut rng);
-        let second = commit(&mut tree, &mut members, 3, 2, &mut rng);
-        assert_ne!(first, second);
-        // The resolution now uses the re-keyed parents.
-        assert_eq!(tree.resolution(1), vec![1]);
-
-        // Remove slot 1: its path is blanked, then slot 4 commits.
-        let removed = members.remove(1);
-        tree.remove_leaf(removed.slot).unwrap();
-        for member in &mut members {
-            member.private.retain_live(&tree);
-        }
-        let hash_before = tree.tree_hash().unwrap();
-        let third = commit(&mut tree, &mut members, 3, 3, &mut rng);
-        assert_ne!(hash_before, tree.tree_hash().unwrap());
-        // The removed member cannot decrypt the new path.
-        let context = PathContext {
-            gid: [0x42; 32],
-            epoch: 4,
-            author_slot: 0,
-        };
-        let mut pre = tree.clone();
-        let (path, secrets) = generate_update_path(&pre, &context, &mut rng).unwrap();
-        pre.apply_update_path(0, &path).unwrap();
-        assert_ne!(*secrets.root_secret, third);
-        let stale = decrypt_update_path(&tree, &context, &path, removed.slot, &removed.private);
-        assert!(stale.is_err(), "a removed slot is not covered");
-    }
-
-    #[test]
-    fn tampered_paths_are_rejected() {
-        let mut rng = ChaCha20Rng::seed_from_u64(9);
-        let mut tree = PublicTree::new(4).unwrap();
-        let members: Vec<Member> = (0..3)
-            .map(|slot| add_member(&mut tree, slot, &mut rng))
-            .collect();
-        let context = PathContext {
-            gid: [1; 32],
-            epoch: 1,
-            author_slot: 0,
-        };
-        let (path, _) = generate_update_path(&tree, &context, &mut rng).unwrap();
-
-        let mut missing = path.clone();
-        missing.nodes[0].targets.clear();
-        assert_eq!(
-            validate_update_path(&tree, 0, &missing),
-            Err(CoreError::Invalid("update path targets"))
-        );
-        let mut wrong_node = path.clone();
-        wrong_node.nodes[0].node = 2;
-        assert!(validate_update_path(&tree, 0, &wrong_node).is_err());
-        let mut short = path.clone();
-        short.nodes.pop();
-        assert!(validate_update_path(&tree, 0, &short).is_err());
-        assert!(
-            validate_update_path(&tree, 3, &path).is_err(),
-            "empty author slot"
-        );
-
-        // A wrong public key is detected by the members that can derive it.
-        let mut forged = path.clone();
-        forged.nodes[1].public_key = KemSecret::generate(&mut rng).public_key();
-        let err = decrypt_update_path(&tree, &context, &forged, 1, &members[1].private);
-        assert_eq!(
-            err.err(),
-            Some(CoreError::Invalid("update path public key mismatch"))
-        );
-        // A wrong context fails authentication.
-        let other = PathContext {
-            epoch: 2,
-            ..context
-        };
-        assert!(decrypt_update_path(&tree, &other, &path, 1, &members[1].private).is_err());
-        assert!(decrypt_update_path(&tree, &context, &path, 0, &members[0].private).is_err());
-    }
-
-    #[test]
-    fn encodings_round_trip() {
-        let mut rng = ChaCha20Rng::seed_from_u64(11);
-        let mut tree = PublicTree::new(4).unwrap();
-        let _members: Vec<Member> = (0..2)
-            .map(|slot| add_member(&mut tree, slot, &mut rng))
-            .collect();
-        let decoded = PublicTree::from_cbor(&tree.to_cbor().unwrap()).unwrap();
-        assert_eq!(decoded, tree);
-        assert_eq!(decoded.tree_hash().unwrap(), tree.tree_hash().unwrap());
-        let context = PathContext {
-            gid: [2; 32],
-            epoch: 1,
-            author_slot: 1,
-        };
-        let (path, _) = generate_update_path(&tree, &context, &mut rng).unwrap();
-        let value = update_path_to_value(&path);
-        assert_eq!(update_path_from_value(value).unwrap(), path);
-        assert!(update_path_from_value(uint(1)).is_err());
-        assert!(PublicTree::from_cbor(&[0x80]).is_err());
-        assert!(tree.add_leaf(0, tree.leaf(0).unwrap().clone()).is_err());
-        assert!(tree.remove_leaf(3).is_err());
-    }
-
-    #[test]
-    fn worst_case_update_paths_fit_the_bound() {
-        // A full tree without parent keys maximizes the copath resolutions:
-        // the author encrypts to every other leaf.
-        let mut rng = ChaCha20Rng::seed_from_u64(13);
-        for n_max in [2u32, 4, 16, 64] {
-            let mut tree = PublicTree::new(n_max).unwrap();
-            for slot in 0..n_max {
-                add_member(&mut tree, slot, &mut rng);
-            }
-            let context = PathContext {
-                gid: [3; 32],
-                epoch: 1,
-                author_slot: n_max - 1,
-            };
-            let (path, _) = generate_update_path(&tree, &context, &mut rng).unwrap();
-            validate_update_path(&tree, context.author_slot, &path).unwrap();
-            let targets: usize = path.nodes.iter().map(|node| node.targets.len()).sum();
-            assert_eq!(targets, n_max as usize - 1);
-            let encoded = encode(&update_path_to_value(&path)).unwrap();
-            assert!(
-                encoded.len() <= max_update_path_bytes(n_max),
-                "n_max {n_max}: {} > {}",
-                encoded.len(),
-                max_update_path_bytes(n_max)
-            );
-        }
-    }
-}
+mod tests;

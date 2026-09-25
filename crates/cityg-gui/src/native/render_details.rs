@@ -133,8 +133,8 @@ impl AppModel {
         cx: &mut ViewContext<Self>,
     ) -> Div {
         self.render_fingerprint_row(
-            "Roster hash",
-            format_regular_fingerprint(Some(&session.view.roster_hash)),
+            "Registry hash",
+            format_regular_fingerprint(Some(&session.view.registry_hash)),
             true,
             Self::on_copy_fs_fingerprint,
             cx,

@@ -27,12 +27,12 @@ impl AppModel {
     pub(super) fn render_message_list(&self) -> impl IntoElement {
         let mut sender_labels = AHashMap::new();
         for member in &self.members {
-            sender_labels.insert(member.leaf_id, format_member_label(member));
+            sender_labels.insert(member.member, format_member_label(member));
         }
-        for (leaf, alias) in &self.leaf_alias_index {
+        for (member, alias) in &self.member_alias_index {
             sender_labels
-                .entry(*leaf)
-                .or_insert_with(|| format_alias_display(alias, leaf));
+                .entry(*member)
+                .or_insert_with(|| format_alias_display(alias, *member));
         }
 
         let mut list = div()
@@ -62,12 +62,12 @@ impl AppModel {
         for message in &self.messages {
             let timestamp = format_timestamp(message.timestamp_ms);
             let sender = message
-                .sender_leaf
-                .and_then(|leaf| sender_labels.get(&leaf).cloned())
+                .sender
+                .and_then(|member| sender_labels.get(&member).cloned())
                 .unwrap_or_else(|| message.fallback_label.clone());
             let is_self = local_session
                 .map(|session| {
-                    message.sender_leaf == Some(session.leaf_id)
+                    message.sender == Some(session.me())
                         || sender.eq_ignore_ascii_case(session.alias.as_str())
                 })
                 .unwrap_or(false);

@@ -1,4 +1,4 @@
-//! Configuration of the City-G v0.2 server, clients and GUI.
+//! Configuration of the City-G v0.3 server, clients and GUI.
 //!
 //! Sources, highest priority first:
 //! 1. environment variables (`CITYG_<SECTION>_<KEY>`),
@@ -8,7 +8,7 @@
 //! 3. the defaults.
 //!
 //! Unknown keys are ignored, so a v0.1.4 file with a `[protocol]` section
-//! still loads; its protocol settings have no v0.2 equivalent.
+//! still loads; its protocol settings have no v0.3 equivalent.
 //!
 //! # Example
 //! ```no_run
@@ -40,8 +40,8 @@ use std::{
 };
 use thiserror::Error;
 
-/// Largest group size of the v0.2 profile (`MAX_N_MAX`).
-pub const PROFILE_MAX_GROUP_SIZE: u32 = 1024;
+/// Largest group capacity of the v0.3 profile (`MAX_CAPACITY`).
+pub const PROFILE_MAX_GROUP_SIZE: u32 = 8192;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -91,7 +91,7 @@ pub struct ServerConfig {
     /// Capacity of the log-head notification channel.
     pub websocket_capacity: usize,
 
-    /// Largest `n_max` a new group may declare (at most
+    /// Largest capacity a new group may declare (at most
     /// [`PROFILE_MAX_GROUP_SIZE`]).
     pub max_group_size: u32,
 
@@ -154,7 +154,7 @@ impl Default for ServerConfig {
             address: "0.0.0.0:8080".to_string(),
             state_path: None,
             websocket_capacity: 1000,
-            max_group_size: 256,
+            max_group_size: 1024,
             message_retention_secs: 7 * 24 * 3600,
             commit_retention_secs: 30 * 24 * 3600,
             max_log_entries: 50_000,
@@ -458,7 +458,7 @@ mod tests {
         let config = CityGConfig::default();
         config.validate().unwrap();
         assert_eq!(config.server.address, "0.0.0.0:8080");
-        assert_eq!(config.server.max_group_size, 256);
+        assert_eq!(config.server.max_group_size, 1024);
         assert!(config.client.default_server_url.is_empty());
         assert_eq!(
             config.server.message_retention(),

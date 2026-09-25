@@ -1,4 +1,4 @@
-//! HTTP client of the v0.2 delivery-service API.
+//! HTTP client of the v0.3 delivery-service API.
 
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use cityg_proto::{ApiError, ErrorCode, Route, bearer_value};
 use prost::Message;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 
-/// Error of a v2 client operation.
+/// Error of a client operation.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     /// The delivery service refused the request.
@@ -98,7 +98,7 @@ impl DsClient {
             self.base_url.clone()
         };
         format!(
-            "{base}/v2/ws?gid={}&token={}",
+            "{base}/v3/ws?gid={}&token={}",
             hex::encode(gid),
             hex::encode(token)
         )
@@ -164,12 +164,14 @@ impl DsClient {
         .await
     }
 
-    /// Publish a commit and the GroupInfo of the epoch it creates.
+    /// Publish a commit, the GroupInfo of the epoch it creates and one
+    /// welcome per join request it includes.
     pub async fn publish_commit(
         &self,
         gid: &[u8; 32],
         commit: &[u8],
         group_info: &[u8],
+        welcomes: &[Vec<u8>],
     ) -> Result<pb::PublishCommitResponse, ClientError> {
         self.call(
             Route::PublishCommit,
@@ -177,18 +179,21 @@ impl DsClient {
                 gid: gid_bytes(gid),
                 commit: commit.to_vec(),
                 group_info: group_info.to_vec(),
+                welcomes: welcomes.to_vec(),
             },
             None,
         )
         .await
     }
 
-    /// Log entries after `after_seq`.
+    /// Log entries after `after_seq`; commits carry their light-member
+    /// proofs when `light` is set.
     pub async fn fetch_log(
         &self,
         gid: &[u8; 32],
         after_seq: u64,
         limit: u32,
+        light: bool,
         token: &[u8; 32],
     ) -> Result<pb::FetchLogResponse, ClientError> {
         self.call(
@@ -197,8 +202,26 @@ impl DsClient {
                 gid: gid_bytes(gid),
                 after_seq,
                 limit,
+                light,
             },
             Some(token),
+        )
+        .await
+    }
+
+    /// Merkle proofs of `leaves` against the current tree hash.
+    pub async fn leaf_proofs(
+        &self,
+        gid: &[u8; 32],
+        leaves: &[u32],
+    ) -> Result<pb::LeafProofsResponse, ClientError> {
+        self.call(
+            Route::LeafProofs,
+            &pb::LeafProofsRequest {
+                gid: gid_bytes(gid),
+                leaves: leaves.to_vec(),
+            },
+            None,
         )
         .await
     }
@@ -214,6 +237,60 @@ impl DsClient {
             &pb::SubmitRemoveProposalRequest {
                 gid: gid_bytes(gid),
                 proposal: proposal.to_vec(),
+            },
+            None,
+        )
+        .await
+    }
+
+    /// Record a signed join request.
+    pub async fn submit_join_request(
+        &self,
+        gid: &[u8; 32],
+        request: &[u8],
+    ) -> Result<pb::SubmitJoinRequestResponse, ClientError> {
+        self.call(
+            Route::SubmitJoinRequest,
+            &pb::SubmitJoinRequestRequest {
+                gid: gid_bytes(gid),
+                request: request.to_vec(),
+            },
+            None,
+        )
+        .await
+    }
+
+    /// Where a join request stands; with `light`, the light-join data of
+    /// the commit's epoch while it is current.
+    pub async fn join_status(
+        &self,
+        gid: &[u8; 32],
+        request_ref: &[u8; 32],
+        light: bool,
+    ) -> Result<pb::JoinStatusResponse, ClientError> {
+        self.call(
+            Route::JoinStatus,
+            &pb::JoinStatusRequest {
+                gid: gid_bytes(gid),
+                request_ref: request_ref.to_vec(),
+                light,
+            },
+            None,
+        )
+        .await
+    }
+
+    /// Revoke an invite with an admin-signed revocation.
+    pub async fn revoke_invite(
+        &self,
+        gid: &[u8; 32],
+        revocation: &[u8],
+    ) -> Result<pb::RevokeInviteResponse, ClientError> {
+        self.call(
+            Route::RevokeInvite,
+            &pb::RevokeInviteRequest {
+                gid: gid_bytes(gid),
+                revocation: revocation.to_vec(),
             },
             None,
         )

@@ -16,7 +16,7 @@ pub fn metric_path(path: &str) -> &str {
         "/health/ready",
         "/health/detailed",
         "/metrics",
-        "/v2/ws",
+        "/v3/ws",
     ];
     if FIXED.contains(&path) || cityg_proto::Route::from_path(path).is_some() {
         path
@@ -97,10 +97,10 @@ mod tests {
 
     #[test]
     fn metric_paths_are_bounded() {
-        assert_eq!(metric_path("/v2/groups/commit"), "/v2/groups/commit");
-        assert_eq!(metric_path("/v2/ws"), "/v2/ws");
+        assert_eq!(metric_path("/v3/groups/commit"), "/v3/groups/commit");
+        assert_eq!(metric_path("/v3/ws"), "/v3/ws");
         assert_eq!(metric_path("/health/ready"), "/health/ready");
-        assert_eq!(metric_path("/v2/groups/unknown"), "unmatched");
+        assert_eq!(metric_path("/v3/groups/unknown"), "unmatched");
         assert_eq!(metric_path("/random/0123456789"), "unmatched");
     }
 }

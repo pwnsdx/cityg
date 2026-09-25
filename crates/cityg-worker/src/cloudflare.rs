@@ -1,5 +1,5 @@
 //! Cloudflare glue: the Worker entrypoint forwards room requests to the
-//! Durable Object `v2-<gid hex>`, which serves them with
+//! Durable Object `v3-<gid hex>`, which serves them with
 //! [`WorkerRoomHost`] over its SQLite storage and notifies the room's
 //! WebSockets of new log heads.
 
@@ -20,7 +20,7 @@ use crate::policy::{
 use crate::{DurableObjectStorage, ROOM_NAMESPACE_BINDING, WORKER_CONFIG_JSON_ENV, WorkerRoomHost};
 
 const ROOM_STATE_TABLE: &str = "cityg_room_state";
-const WEBSOCKET_TAG: &str = "v2";
+const WEBSOCKET_TAG: &str = "v3";
 const PING_REQUEST: &str = "ping";
 const PING_RESPONSE: &str = "pong";
 
@@ -72,7 +72,7 @@ pub async fn fetch(req: Request, env: Env) -> Result<Response> {
     if is_legacy_path(&path) {
         return error_response(&ApiError::new(
             ErrorCode::Gone,
-            "the v0.1.4 API was removed; use a City-G v0.2 client",
+            "this API version was removed; use a City-G v0.3 client",
         ));
     }
     error_response(&ApiError::new(ErrorCode::NotFound, "unknown route"))

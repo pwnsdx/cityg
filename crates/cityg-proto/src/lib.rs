@@ -1,20 +1,20 @@
 #![forbid(unsafe_code)]
-//! Protobuf wire schema of the City-G v0.2 delivery-service API.
+//! Protobuf wire schema of the City-G v0.3 delivery-service API.
 //!
-//! The schema lives in `proto/cityg_v2.proto`. This crate adds the route
+//! The schema lives in `proto/cityg_v3.proto`. This crate adds the route
 //! table shared by the native server, the Cloudflare Worker and the clients,
 //! and the error codes of the API.
 
-/// Generated protobuf messages (`package cityg.v2`).
+/// Generated protobuf messages (`package cityg.v3`).
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
 pub mod pb {
-    include!(concat!(env!("OUT_DIR"), "/cityg.v2.rs"));
+    include!(concat!(env!("OUT_DIR"), "/cityg.v3.rs"));
 }
 
 use prost::Message;
 
 /// Profile served by this API.
-pub const API_PROFILE_VERSION: &str = "v0.2";
+pub const API_PROFILE_VERSION: &str = "v0.3";
 /// Largest request body the API accepts (a commit of the largest tree).
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 /// Default and largest number of log entries per page.
@@ -26,7 +26,7 @@ pub const AUTHORIZATION_HEADER: &str = "authorization";
 /// Prefix of the bearer token in the authorization header.
 pub const BEARER_PREFIX: &str = "Bearer ";
 
-/// Routes of the v2 API.
+/// Routes of the v3 API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Route {
     CreateGroup,
@@ -34,51 +34,63 @@ pub enum Route {
     PublishCommit,
     FetchLog,
     SubmitRemoveProposal,
+    SubmitJoinRequest,
+    JoinStatus,
     PublishInvite,
     GetInvite,
+    RevokeInvite,
     SendMessage,
     CoverFailure,
     CoverFailures,
     OpenSession,
     BindAlias,
     Aliases,
+    LeafProofs,
 }
 
 impl Route {
     /// Every route, in a stable order.
-    pub const ALL: [Route; 13] = [
+    pub const ALL: [Route; 17] = [
         Route::CreateGroup,
         Route::GroupInfo,
         Route::PublishCommit,
         Route::FetchLog,
         Route::SubmitRemoveProposal,
+        Route::SubmitJoinRequest,
+        Route::JoinStatus,
         Route::PublishInvite,
         Route::GetInvite,
+        Route::RevokeInvite,
         Route::SendMessage,
         Route::CoverFailure,
         Route::CoverFailures,
         Route::OpenSession,
         Route::BindAlias,
         Route::Aliases,
+        Route::LeafProofs,
     ];
 
     /// HTTP path of the route.
     #[must_use]
     pub const fn path(self) -> &'static str {
         match self {
-            Route::CreateGroup => "/v2/groups/create",
-            Route::GroupInfo => "/v2/groups/info",
-            Route::PublishCommit => "/v2/groups/commit",
-            Route::FetchLog => "/v2/groups/log",
-            Route::SubmitRemoveProposal => "/v2/groups/remove_proposal",
-            Route::PublishInvite => "/v2/groups/invite",
-            Route::GetInvite => "/v2/groups/invite/get",
-            Route::SendMessage => "/v2/groups/send",
-            Route::CoverFailure => "/v2/groups/cover_failure",
-            Route::CoverFailures => "/v2/groups/cover_failures",
-            Route::OpenSession => "/v2/groups/session",
-            Route::BindAlias => "/v2/groups/alias",
-            Route::Aliases => "/v2/groups/aliases",
+            Route::CreateGroup => "/v3/groups/create",
+            Route::GroupInfo => "/v3/groups/info",
+            Route::PublishCommit => "/v3/groups/commit",
+            Route::FetchLog => "/v3/groups/log",
+            Route::SubmitRemoveProposal => "/v3/groups/remove_proposal",
+            Route::SubmitJoinRequest => "/v3/groups/join_request",
+            Route::JoinStatus => "/v3/groups/join_status",
+            Route::PublishInvite => "/v3/groups/invite",
+            Route::GetInvite => "/v3/groups/invite/get",
+            Route::RevokeInvite => "/v3/groups/invite/revoke",
+            Route::SendMessage => "/v3/groups/send",
+            Route::CoverFailure => "/v3/groups/cover_failure",
+            Route::CoverFailures => "/v3/groups/cover_failures",
+            Route::OpenSession => "/v3/groups/session",
+            Route::BindAlias => "/v3/groups/alias",
+            Route::Aliases => "/v3/groups/aliases",
+            Route::LeafProofs => "/v3/groups/leaf_proofs",
         }
     }
 
@@ -262,6 +274,8 @@ mod tests {
             assert_eq!(Route::from_path(route.path()), Some(route));
         }
         assert_eq!(Route::from_path("/v1/members"), None);
+        assert_eq!(Route::from_path("/v2/groups/info"), None);
+        assert!(!Route::JoinStatus.requires_token());
         assert!(Route::SendMessage.requires_token());
         assert!(!Route::PublishCommit.requires_token());
     }

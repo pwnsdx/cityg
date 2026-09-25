@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Request handlers of the City-G v0.2 delivery service.
+//! Request handlers of the City-G v0.3 delivery service.
 //!
 //! The native API (axum) and the Cloudflare Worker are thin transports over
 //! these handlers: they route the HTTP path to a [`Route`], pass the body,

@@ -5,8 +5,8 @@ use cityg_core::binding::AliasBinding;
 use cityg_core::cover::CoverFailureReason;
 use cityg_core::hash::Digest;
 use cityg_core::identity::DeviceIdentity;
-use cityg_core::ledger::ProposalStatus;
-use cityg_core::session::{GroupSession, PublishedCommit};
+use cityg_core::ledger::{JoinStatus, ProposalStatus};
+use cityg_core::session::{CommitOptions, GroupSession, PublishedCommit};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
@@ -46,12 +46,13 @@ fn fixture(config: RoomConfig) -> Fixture {
     let invite_seed = [9; 32];
     let invite = alice
         .session
-        .create_invite(&alice.identity, &invite_seed, 100_000, &mut rng)
+        .create_invite(&alice.identity, &invite_seed, 100_000, 4, &mut rng)
         .unwrap();
     let (_, record) = room.publish_invite(invite.encoded(), 1_000).unwrap();
     journal.push(record);
     let admission = SignedAdmission::with_invite(
-        &bob_identity.leaf_id(&gid_of(&alice)).unwrap(),
+        &bob_identity.device_id(&gid_of(&alice)).unwrap(),
+        100,
         &invite,
         &invite_seed,
         &mut rng,
@@ -59,9 +60,10 @@ fn fixture(config: RoomConfig) -> Fixture {
     .unwrap();
     let info = room.info().unwrap();
     let (pending, join) =
-        GroupSession::join(&bob_identity, &info.snapshot, &[], admission, &mut rng).unwrap();
-    let (_, record) = room
-        .publish_commit(&join.commit, &join.group_info, 1_000)
+        GroupSession::join_external(&bob_identity, &info.snapshot, admission, &[], &[], &mut rng)
+            .unwrap();
+    let (_, _, record) = room
+        .publish_commit(&join.commit, &join.group_info, &join.welcomes, 1_000)
         .unwrap();
     journal.push(record);
     let bob = Member {
@@ -83,7 +85,9 @@ fn fixture(config: RoomConfig) -> Fixture {
 fn sync(room: &Room, member: &mut Member) {
     let page = room.log_after(0, usize::MAX);
     for entry in page.entries {
-        if let LogBody::Commit { commit, group_info } = entry.body
+        if let LogBody::Commit {
+            commit, group_info, ..
+        } = entry.body
             && entry.epoch == member.session.epoch() + 1
         {
             member
@@ -105,8 +109,10 @@ impl Fixture {
             .session
             .encrypt(&member.identity, 1, b"", text, self.now, &mut self.rng)
             .unwrap();
-        let leaf = *member.session.my_leaf_id();
-        let (entry, record) = self.room.send(&envelope, &leaf, self.now).unwrap();
+        let (entry, record) = self
+            .room
+            .send(&envelope, member.identity.public_key(), self.now)
+            .unwrap();
         self.journal.push(record);
         entry
     }
@@ -117,14 +123,28 @@ impl Fixture {
         } else {
             &mut self.bob
         };
-        let pending_removals: Vec<_> = self.room.ledger().pending_removals().cloned().collect();
+        let removals: Vec<_> = self.room.ledger().pending_removals().cloned().collect();
+        let joins: Vec<_> = self.room.ledger().pending_joins().cloned().collect();
         let (pending, published) = member
             .session
-            .commit(&member.identity, &pending_removals, &[], &mut self.rng)
+            .commit(
+                &member.identity,
+                CommitOptions {
+                    removals: &removals,
+                    joins: &joins,
+                    ..CommitOptions::default()
+                },
+                &mut self.rng,
+            )
             .unwrap();
-        let (_, record) = self
+        let (_, _, record) = self
             .room
-            .publish_commit(&published.commit, &published.group_info, self.now)
+            .publish_commit(
+                &published.commit,
+                &published.group_info,
+                &published.welcomes,
+                self.now,
+            )
             .unwrap();
         self.journal.push(record);
         member.session.apply_own_commit(pending).unwrap();
@@ -150,9 +170,8 @@ fn rooms_order_commits_and_messages() {
         .session
         .encrypt(&f.alice.identity, 1, b"", b"x", f.now, &mut f.rng)
         .unwrap();
-    let bob_leaf = *f.bob.session.my_leaf_id();
     assert!(matches!(
-        f.room.send(&forged, &bob_leaf, f.now),
+        f.room.send(&forged, f.bob.identity.public_key(), f.now),
         Err(RoomError::Forbidden(_))
     ));
 
@@ -165,7 +184,11 @@ fn rooms_order_commits_and_messages() {
     assert!(matches!(page.entries[0].body, LogBody::Commit { .. }));
     assert_eq!(f.room.log_after(0, 2).entries.len(), 2);
     assert_eq!(f.room.info().unwrap().epoch, 2);
-    assert!(f.room.is_member(&bob_leaf));
+    assert_eq!(
+        f.room.member(f.bob.identity.public_key()),
+        Some(f.bob.session.me())
+    );
+    assert!(!f.room.has_pending_removal(f.bob.identity.public_key()));
     assert_eq!(f.room.gid(), f.alice.session.gid());
 }
 
@@ -202,19 +225,47 @@ fn journal_replay_and_snapshots_rebuild_the_same_room() {
         .session
         .propose_leave(&f.bob.identity, &mut f.rng)
         .unwrap();
-    let (status, vacant, record) = f
+    let (status, record) = f
         .room
         .submit_remove_proposal(leave.encoded(), f.now)
         .unwrap();
     assert_eq!(status, ProposalStatus::Recorded);
-    assert!(!vacant);
     f.journal.push(record.unwrap());
-    let (status, _, record) = f
+    assert!(f.room.has_pending_removal(f.bob.identity.public_key()));
+    let (status, record) = f
         .room
         .submit_remove_proposal(leave.encoded(), f.now)
         .unwrap();
     assert_eq!(status, ProposalStatus::AlreadyRecorded);
     assert!(record.is_none());
+    // A join request and an invite revocation are journaled too.
+    let carol = DeviceIdentity::from_seed(&[3; 32]);
+    let admission = f
+        .alice
+        .session
+        .admit(&f.alice.identity, carol.public_key(), 100, &mut f.rng)
+        .unwrap();
+    let (request, _) = GroupSession::request_join(&carol, &admission, &mut f.rng).unwrap();
+    let (_, status, record) = f
+        .room
+        .submit_join_request(request.encoded(), f.now)
+        .unwrap();
+    assert_eq!(status, ProposalStatus::Recorded);
+    f.journal.push(record.unwrap());
+    let (_, status, record) = f
+        .room
+        .submit_join_request(request.encoded(), f.now)
+        .unwrap();
+    assert_eq!(status, ProposalStatus::AlreadyRecorded);
+    assert!(record.is_none());
+    let revocation = f
+        .alice
+        .session
+        .revoke_invite(&f.alice.identity, &[5; 32], &mut f.rng)
+        .unwrap();
+    let (dropped, record) = f.room.revoke_invite(revocation.encoded()).unwrap();
+    assert!(dropped.is_empty());
+    f.journal.push(record);
 
     let replayed = Room::replay(&f.journal, RoomConfig::default()).unwrap();
     assert_eq!(
@@ -230,6 +281,7 @@ fn journal_replay_and_snapshots_rebuild_the_same_room() {
     assert_eq!(restored.aliases(), vec![binding.encoded().to_vec()]);
     assert_eq!(restored.cover_failures().len(), 1);
     assert_eq!(restored.info().unwrap().pending_removals.len(), 1);
+    assert_eq!(restored.info().unwrap().pending_joins.len(), 1);
 
     // Records survive their encoding.
     let encoded: Vec<Vec<u8>> = f.journal.iter().map(|r| r.encode().unwrap()).collect();
@@ -281,7 +333,7 @@ fn aliases_invites_and_limits() {
     let invite = f
         .alice
         .session
-        .create_invite(&f.alice.identity, &[4; 32], 5_000, &mut f.rng)
+        .create_invite(&f.alice.identity, &[4; 32], 5_000, 1, &mut f.rng)
         .unwrap();
     let (id, _) = f.room.publish_invite(invite.encoded(), f.now).unwrap();
     assert_eq!(f.room.invite(&id, f.now), Some(invite.encoded().to_vec()));
@@ -297,17 +349,24 @@ fn aliases_invites_and_limits() {
     let (pending, published) = f
         .alice
         .session
-        .commit(&f.alice.identity, &[removal], &[], &mut f.rng)
+        .commit(
+            &f.alice.identity,
+            CommitOptions {
+                removals: &[removal],
+                ..CommitOptions::default()
+            },
+            &mut f.rng,
+        )
         .unwrap();
     f.room
-        .publish_commit(&published.commit, &published.group_info, f.now)
+        .publish_commit(&published.commit, &published.group_info, &[], f.now)
         .unwrap();
     f.alice.session.apply_own_commit(pending).unwrap();
     assert!(f.room.aliases().is_empty());
 
     // Groups larger than the deployment allows are refused.
     let small = RoomConfig {
-        max_n_max: 4,
+        max_capacity: 4,
         ..RoomConfig::default()
     };
     let (_, genesis) = GroupSession::create(&stranger, 8, &mut f.rng).unwrap();
@@ -410,6 +469,97 @@ fn the_log_cap_never_drops_the_entry_it_appends() {
     );
 }
 
+#[test]
+fn join_requests_are_logged_and_their_welcomes_served() {
+    let mut f = fixture(RoomConfig::default());
+    let carol_identity = DeviceIdentity::from_seed(&[3; 32]);
+    let admission = f
+        .alice
+        .session
+        .admit(
+            &f.alice.identity,
+            carol_identity.public_key(),
+            100,
+            &mut f.rng,
+        )
+        .unwrap();
+    let (request, secrets) =
+        GroupSession::request_join(&carol_identity, &admission, &mut f.rng).unwrap();
+    let (reference, _, record) = f
+        .room
+        .submit_join_request(request.encoded(), f.now)
+        .unwrap();
+    f.journal.push(record.unwrap());
+    let last = f.room.log_after(0, usize::MAX).entries.pop().unwrap();
+    assert!(matches!(last.body, LogBody::JoinRequest { .. }));
+    let progress = f.room.join_progress(&reference);
+    assert_eq!(progress.status, JoinStatus::Pending);
+    assert!(progress.commit.is_none());
+
+    f.commit(true);
+    sync(&f.room, &mut f.bob);
+    let progress = f.room.join_progress(&reference);
+    let JoinStatus::Committed { epoch, welcome } = progress.status else {
+        panic!("carol's request is committed")
+    };
+    assert_eq!(epoch, progress.current_epoch);
+    let (commit, _) = progress.commit.unwrap();
+    let carol = GroupSession::join_with_welcome(
+        &carol_identity,
+        &secrets,
+        &f.room.info().unwrap().snapshot,
+        &commit,
+        &welcome,
+    )
+    .unwrap();
+    assert_eq!(carol.epoch(), f.alice.session.epoch());
+    assert_eq!(f.room.member(carol_identity.public_key()), Some(carol.me()));
+
+    // A light joiner gets its leaf proof, the registry and the occupancies
+    // while the commit's epoch is current; commits carry light proofs.
+    let light =
+        cityg_core::light::LightJoin::decode(&f.room.light_join(&reference).unwrap().unwrap())
+            .unwrap();
+    assert_eq!(light.joiner_proof.leaf, carol.me().leaf);
+    light
+        .joiner_proof
+        .verify(&carol.group_context().tree_hash)
+        .unwrap();
+    assert_eq!(f.room.light_join(&[0; 32]).unwrap(), None);
+    let page = f.room.log_after(0, usize::MAX);
+    for entry in &page.entries {
+        if let LogBody::Commit { light, .. } = &entry.body {
+            if entry.epoch == 0 {
+                assert!(light.is_empty());
+            } else {
+                cityg_core::light::LightCommit::decode(light).unwrap();
+            }
+        }
+    }
+    let (epoch, proofs) = f.room.leaf_proofs(&[0, carol.me().leaf]).unwrap();
+    assert_eq!(epoch, carol.epoch());
+    for proof in &proofs {
+        cityg_core::tree::LeafProof::decode(proof)
+            .unwrap()
+            .verify(&carol.group_context().tree_hash)
+            .unwrap();
+    }
+    assert!(f.room.leaf_proofs(&[1_000]).is_err());
+    assert!(
+        f.room
+            .leaf_proofs(&[0; crate::MAX_LEAF_PROOFS_PER_REQUEST + 1])
+            .is_err()
+    );
+
+    // An unknown reference has no progress.
+    assert_eq!(f.room.join_progress(&[0; 32]).status, JoinStatus::Unknown);
+    let replayed = Room::replay(&f.journal, RoomConfig::default()).unwrap();
+    assert_eq!(
+        replayed.to_snapshot().unwrap(),
+        f.room.to_snapshot().unwrap()
+    );
+}
+
 fn store_round_trip<S: RoomStore>(store: &mut S, f: &Fixture) {
     let gid = gid_of(&f.alice);
     assert!(store.load(&gid).unwrap().is_none());
@@ -468,7 +618,7 @@ fn file_store_round_trips_and_survives_torn_writes() {
     assert!(reopened.load(&gid).unwrap().is_some());
 
     // A torn final frame (crash during append) is ignored.
-    let room_dir = dir.path().join("rooms-v2").join(
+    let room_dir = dir.path().join("rooms-v3").join(
         gid.iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>(),

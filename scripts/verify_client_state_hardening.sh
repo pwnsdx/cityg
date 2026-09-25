@@ -12,10 +12,12 @@ source "$(pwd)/scripts/cargo_repo_env.sh"
 cargo test --locked -p cityg-core -- \
   a_member_that_lost_its_state_resyncs \
   sessions_persist_and_resume \
-  identities_and_pending_states_are_checked
+  identities_and_pending_states_are_checked \
+  a_light_joiner_enters_talks_and_becomes_full_to_commit
 cargo test --locked -p cityg-api --test integration -- \
   the_state_sink_makes_spent_generations_durable \
   concurrent_commits_retry_and_lost_state_resyncs \
   a_member_that_missed_pruned_commits_resyncs \
+  a_light_member_that_missed_pruned_commits_resyncs \
   members_wrap_only_their_own_sessions
 cargo test --locked -p cityg-gui --features native-app -- native::tests::persistence

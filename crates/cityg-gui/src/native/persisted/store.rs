@@ -9,8 +9,9 @@ pub(in crate::native) struct PersistedAliasStore {
 #[derive(Serialize, Deserialize, Default)]
 pub(in crate::native) struct PersistedAliasBinding {
     pub(in crate::native) pop_public_key_hex: String,
+    /// Occupancy (`leaf.since`) the alias was last seen on; empty if unknown.
     #[serde(default)]
-    pub(in crate::native) leaf_id_hex: String,
+    pub(in crate::native) member: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]

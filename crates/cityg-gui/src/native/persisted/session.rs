@@ -39,8 +39,9 @@ pub(in crate::native) struct PersistedHistory {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub(in crate::native) struct PersistedChatMessage {
+    /// Sender occupancy (`leaf.since`); empty if unknown.
     #[serde(default)]
-    pub(in crate::native) sender_leaf_hex: String,
+    pub(in crate::native) sender: String,
     pub(in crate::native) label: String,
     pub(in crate::native) text: String,
     pub(in crate::native) timestamp_ms: u64,
@@ -50,7 +51,7 @@ pub(in crate::native) struct PersistedChatMessage {
 impl PersistedChatMessage {
     pub(in crate::native) fn from_entry(entry: &ChatMessageEntry) -> Self {
         Self {
-            sender_leaf_hex: entry.sender_leaf.map(hex_encode).unwrap_or_default(),
+            sender: entry.sender.map(member_ref_text).unwrap_or_default(),
             label: entry.fallback_label.clone(),
             text: entry.plaintext.clone(),
             timestamp_ms: entry.timestamp_ms,
@@ -60,7 +61,7 @@ impl PersistedChatMessage {
 
     pub(in crate::native) fn into_entry(self) -> ChatMessageEntry {
         ChatMessageEntry {
-            sender_leaf: decode_hex32("sender_leaf", &self.sender_leaf_hex).ok(),
+            sender: parse_member_ref(&self.sender),
             fallback_label: self.label,
             plaintext: self.text,
             ciphertext_hex: self.key,

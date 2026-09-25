@@ -1,4 +1,4 @@
-# Docker Compose stack for the City-G v0.2 delivery service
+# Docker Compose stack for the City-G v0.3 delivery service
 #
 # This setup includes:
 # - City-G API server
@@ -42,7 +42,7 @@ services:
       - cityg-network
     labels:
       - "com.cityg.service=api"
-      - "com.cityg.version=0.2.0"
+      - "com.cityg.version=0.3.0"
 
   # Prometheus for metrics collection
   prometheus:

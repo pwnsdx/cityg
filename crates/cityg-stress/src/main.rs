@@ -41,6 +41,8 @@ use ui::{AppState, draw};
 
 const DEFAULT_SERVER_BIND: &str = "127.0.0.1:18080";
 /// Lifetime of the invite a worker hands to its rounds.
+/// Joins the invite of a reused room admits over a whole run.
+const REUSED_ROOM_INVITE_USES: u64 = 1 << 20;
 const REUSED_ROOM_INVITE_TTL_MS: u64 = 24 * 3_600_000;
 /// Largest group the managed server accepts, and the size of the rooms a
 /// worker reuses across rounds.
@@ -658,18 +660,22 @@ struct ReusedRoom {
     invite: String,
 }
 
-async fn create_reused_room(server_url: &str, n_max: u32) -> Result<ReusedRoom> {
+async fn create_reused_room(server_url: &str, capacity: u32) -> Result<ReusedRoom> {
     let mut seed = [0u8; 32];
     rng().fill(&mut seed);
     let mut owner = Member::create(
         DsClient::new(server_url)?,
         DeviceIdentity::from_seed(&seed),
-        n_max,
+        capacity,
     )
     .await
     .context("create the worker's reused room")?;
     let invite = owner
-        .create_invite_link(server_url, REUSED_ROOM_INVITE_TTL_MS)
+        .create_invite_link(
+            server_url,
+            REUSED_ROOM_INVITE_TTL_MS,
+            REUSED_ROOM_INVITE_USES,
+        )
         .await
         .context("invite into the worker's reused room")?;
     Ok(ReusedRoom {

@@ -7,7 +7,7 @@ use super::*;
 
 fn history_entry(text: &str, key: &str, delivery: MessageDelivery) -> ChatMessageEntry {
     ChatMessageEntry {
-        sender_leaf: Some([0x21; 32]),
+        sender: Some(mref(0x21)),
         fallback_label: "peer".to_string(),
         plaintext: text.to_string(),
         ciphertext_hex: key.to_string(),
@@ -22,7 +22,7 @@ fn sessions_are_saved_encrypted_and_restored() {
     let _config = ConfigDir::new();
     let member = offline_member(40);
     let gid = member.gid();
-    let leaf = *member.session().my_leaf_id();
+    let me = member.session().me();
     let session = open_session(OFFLINE_URL, "alice", member, Some(1234)).expect("open");
     assert_eq!(session.room_id, hex_encode(gid));
     assert_eq!(session.last_self_update_ms(), 1234);
@@ -47,7 +47,7 @@ fn sessions_are_saved_encrypted_and_restored() {
         .expect("pointer present");
     assert_eq!(pointer.room_id, session.room_id);
     let restored = load_last_session().expect("load").expect("restored");
-    assert_eq!(restored.leaf_id, leaf);
+    assert_eq!(restored.me(), me);
     assert_eq!(restored.alias, "alice");
     assert_eq!(restored.last_self_update_ms(), 1234);
     assert_eq!(restored.view.epoch, session.view.epoch);
@@ -248,20 +248,20 @@ fn chat_history_keeps_the_newest_sent_messages() {
     );
     assert!(loaded.iter().any(|message| message.plaintext == "m502"));
     assert!(!loaded.iter().any(|message| message.plaintext == "m0"));
-    assert_eq!(loaded[0].sender_leaf, Some([0x21; 32]));
+    assert_eq!(loaded[0].sender, Some(mref(0x21)));
 
     // Entries without a sender round-trip; other versions are refused.
     persist_history(
         OFFLINE_URL,
         &room,
         &[ChatMessageEntry {
-            sender_leaf: None,
+            sender: None,
             ..history_entry("anon", "k", MessageDelivery::Sent)
         }],
     )
     .expect("persist");
     assert_eq!(
-        load_history(OFFLINE_URL, &room).expect("load")[0].sender_leaf,
+        load_history(OFFLINE_URL, &room).expect("load")[0].sender,
         None
     );
     let path = history_file_path(OFFLINE_URL, &room).expect("path");
@@ -292,7 +292,7 @@ fn alias_bindings_and_security_logs_round_trip() {
         "bob".to_string(),
         AliasBindingRecord {
             pop_public_key: vec![1, 2, 3],
-            leaf_id: [0x55; 32],
+            member: Some(mref(0x55)),
         },
     );
     persist_alias_bindings(OFFLINE_URL, &room, &bindings).expect("persist");
@@ -304,14 +304,14 @@ fn alias_bindings_and_security_logs_round_trip() {
     fs::write(&path, br#"{"carol":"0a0b","dave":"zz","eve":""}"#).expect("write");
     let legacy = load_alias_bindings(OFFLINE_URL, &room).expect("legacy");
     assert_eq!(legacy.len(), 1);
-    assert_eq!(legacy["carol"].leaf_id, [0; 32]);
+    assert_eq!(legacy["carol"].member, None);
     fs::write(
         &path,
-        br#"{"version":2,"bindings":{"frank":{"pop_public_key_hex":"0a","leaf_id_hex":"zz"}}}"#,
+        br#"{"version":3,"bindings":{"frank":{"pop_public_key_hex":"0a","member":"zz"}}}"#,
     )
     .expect("write");
-    let damaged = load_alias_bindings(OFFLINE_URL, &room).expect("damaged leaf");
-    assert_eq!(damaged["frank"].leaf_id, [0; 32]);
+    let damaged = load_alias_bindings(OFFLINE_URL, &room).expect("damaged member");
+    assert_eq!(damaged["frank"].member, None);
     fs::write(&path, b"[]").expect("write");
     assert!(load_alias_bindings(OFFLINE_URL, &room).is_err());
     persist_alias_bindings(OFFLINE_URL, &room, &AHashMap::new()).expect("clear");
@@ -358,11 +358,7 @@ fn file_helpers() {
     assert!(write_file_atomic(std::path::Path::new("/"), b"x").is_err());
     assert!(write_file_atomic(&config.dir.path().join("missing").join("file"), b"x").is_err());
 
-    assert_eq!(
-        decode_hex32("x", &"ab".repeat(32)).expect("hex32"),
-        [0xAB; 32]
-    );
-    assert!(decode_hex32("x", "abcd").is_err());
+    assert_eq!(decode_hex_vec("x", "abcd").expect("hex"), vec![0xAB, 0xCD]);
     assert!(decode_hex_vec("x", "zz").is_err());
     assert!(session_dir().is_ok());
 }

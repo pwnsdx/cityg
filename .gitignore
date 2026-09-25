@@ -38,3 +38,6 @@ docs/whitepaper/*.toc
 docs/whitepaper/*.fdb_latexmk
 docs/whitepaper/*.fls
 docs/whitepaper/*.synctex.gz
+
+# Python bytecode of the vector verifiers
+__pycache__/

@@ -43,7 +43,7 @@ Notable events:
 | `http_responses_total` | counter | `method`, `path`, `status` |
 | `http_request_duration_seconds` | histogram | `method`, `path`, `status` |
 
-`path` is one of the API routes (`/v2/groups/commit`, ...), `/v2/ws`, a
+`path` is one of the API routes (`/v3/groups/commit`, ...), `/v3/ws`, a
 health path, `/metrics`, or `unmatched` for anything else, so that arbitrary
 request paths cannot grow the metric registry.
 
@@ -55,10 +55,10 @@ sum(rate(http_requests_total[5m]))
 sum(rate(http_responses_total{status=~"5.."}[5m]))
 
 # Latency of commits (p95); commits of large groups carry large update paths
-histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{path="/v2/groups/commit"}[5m])) by (le))
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{path="/v3/groups/commit"}[5m])) by (le))
 
 # Commits that lost the race for their epoch (clients rebuild and retry)
-sum(rate(http_responses_total{path="/v2/groups/commit",status="409"}[5m]))
+sum(rate(http_responses_total{path="/v3/groups/commit",status="409"}[5m]))
 
 # Protocol objects failing verification (buggy or malicious clients)
 sum(rate(http_responses_total{status="422"}[5m])) by (path)
@@ -69,13 +69,20 @@ sum(rate(http_responses_total{status=~"401|403"}[5m])) by (path)
 
 How to read them:
 
-* A steady share of `409` on `/v2/groups/commit` is normal when several
+* A steady share of `409` on `/v3/groups/commit` is normal when several
   members commit at once; a high share means members commit too often (the
   maintenance interval) or a client retries in a loop.
-* `409` on `/v2/groups/send` means replayed or stale envelopes; `422` there
+* `409` on `/v3/groups/send` means replayed or stale envelopes; `422` there
   means envelopes of an inactive epoch.
-* `403` on `/v2/groups/log` follows removals: removed members learn their
-  removal that way.
+* `403` on `/v3/groups/log` follows removals and key rotations: removed
+  members learn their removal that way, and a member that rotated its key
+  opens a new session.
+* `409` on `/v3/groups/join_request` means a device retried while its
+  request was pending; many `/v3/groups/join_status` requests are joiners
+  waiting for a commit (1 to 2 seconds each) before they commit their own
+  entry.
+* `/v3/groups/leaf_proofs` is the traffic of light members proving the
+  senders of the messages they read.
 * `413` means objects or groups over the configured limits
   (`max_group_size`, request size).
 

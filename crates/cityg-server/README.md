@@ -1,18 +1,23 @@
 # cityg-server
 
-Rooms of the City-G v0.2 delivery service: their ordered log, journal and
+Rooms of the City-G v0.3 delivery service: their ordered log, journal and
 storage.
 
 A room is identified by its group identifier `gid`. It runs
 `cityg_core::ledger::GroupLedger`, which checks every commit against the
-public group state (signatures, admission, removal authorization, update
-paths, tree and roster hashes) and orders commits by epoch. The room holds
-no group secret: it relays message envelopes it cannot read and only checks
-their sender, epoch and replay window.
+public group state (signatures, admissions, removal authorization, join
+requests and their welcomes, update paths, tree and registry hashes) and
+orders commits by epoch. The room holds no group secret: it relays message
+envelopes it cannot read and only checks their sender, epoch and replay
+window.
 
-- **Log**: commits (with their signed group info), message envelopes and
-  removal proposals, numbered by `seq`; members page through it with
-  `log_after(seq)`.
+- **Log**: commits (with their signed group info and their LightCommit),
+  message envelopes, removal proposals and join requests, numbered by
+  `seq`; members page through it with `log_after(seq)`.
+- **Joins and light members**: the welcomes of committed join requests and
+  their status (`join_status`), the LightJoin of a committed request while
+  its epoch is current (`light_join`), and leaf proofs against the current
+  tree (`leaf_proofs`).
 - **Retention**: messages and commits expire after their retention period
   and the log keeps at most `max_log_entries` entries; the latest commit
   always stays, so a member can always resync.

@@ -562,7 +562,9 @@ Modéliser le calendrier de clés, la barrière, le retrait et l'admission dans 
 
 Mis à jour le 2026-09-25 sur la branche `claude/nifty-lamport-s7sm1a`. Les correctifs P0 ont d'abord été appliqués au profil v0.1.4, puis ce profil a été remplacé par le profil `city-g/v0.2`, qui met en œuvre les propositions P-1 à P-8 : spécification normative [`docs/specs.md`](../specs.md), cœur protocolaire [`crates/cityg-core`](../../crates/cityg-core), service de distribution `/v2`, clients portés, retrait du code v0.1.4. Les deux profils n'interopèrent pas.
 
-La colonne « Exigences » renvoie aux identifiants du manifeste [`kat/kat-v0.2-conformance-manifest.json`](../../kat/kat-v0.2-conformance-manifest.json), qui relie chaque exigence à ses sections de spec, à ses vecteurs et à ses tests ; le test `conformance_manifest` de `cityg-core` en vérifie la cohérence en CI.
+La colonne « Exigences » renvoie aux identifiants du manifeste v0.2 [`kat/legacy/v0.2/kat-v0.2-conformance-manifest.json`](../../kat/legacy/v0.2/kat-v0.2-conformance-manifest.json), qui reliait chaque exigence à ses sections de spec, à ses vecteurs et à ses tests.
+
+Le profil `city-g/v0.3` a depuis remplacé le profil v0.2 pour les grands groupes (joins groupés, arbre extensible, membres légers, rotation des clés d'appareil, X-Wing et ML-DSA-65 ; voir la [note de conception](../design-v0.3.md)). Il conserve chacun des correctifs ci-dessous ; son manifeste [`kat/kat-v0.3-conformance-manifest.json`](../../kat/kat-v0.3-conformance-manifest.json) cite, pour chaque exigence, les constats et propositions de cet audit dont elle provient. Deux évolutions touchent les constats : les admissions retirées remplacent les appareils retirés, avec un plancher qui empêche le retour d'un membre retiré même après plus de 4096 retraits (H-01, P-4), et la taille des mises à jour dépend du groupe réel, jusqu'à 8192 membres (H-08).
 
 ### 6.1 Constats
 

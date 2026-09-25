@@ -1,4 +1,4 @@
-# City-G development configuration (profile v0.2).
+# City-G development configuration (profile v0.3).
 
 [server]
 # Bind address of the native delivery service.
@@ -7,7 +7,7 @@ address = "127.0.0.1:8080"
 # state_path = "./cityg-state"
 # Capacity of the log-head notification channel.
 websocket_capacity = 1000
-# Largest n_max a new group may declare (the profile allows up to 1024).
+# Largest capacity a new group may declare (the profile allows up to 8192).
 max_group_size = 256
 # How long message envelopes stay in a room log (7 days).
 message_retention_secs = 604800

@@ -1,0 +1,15 @@
+(* Join secrecy (section 2.2): a joiner learns nothing of the epochs before
+   its join. J2's whole state after it entered leaks: its init key, leaf
+   and root private keys, the joiner secret and the epoch secret.
+   Run: proverif -lib cityg.pvl join_secrecy.pv *)
+
+(* The epoch before the join stays secret. *)
+query es: key; event(PreviousEpoch(es)) && attacker(es) ==> false.
+
+(* Sanity check, expected to be false: the epoch J2 entered is exposed. *)
+query gc: bitstring, es: key;
+  event(Accepted(spk(skJ1), N2, gc, es)) && attacker(es) ==> false.
+
+process
+  out(c, (spk(skA), spk(skB), spk(skJ1), spk(skJ2)));
+  (JN_Setup | JN_A2 | JN_B2 | JN_J(skJ1, true, false) | JN_J(skJ2, true, true))

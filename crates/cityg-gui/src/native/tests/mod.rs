@@ -1,4 +1,4 @@
-//! GUI tests: offline sessions for the UI and handlers, an in-process v2
+//! GUI tests: offline sessions for the UI and handlers, an in-process v3
 //! delivery service for the end-to-end flows.
 
 use std::future::Future;
@@ -30,6 +30,14 @@ impl ConfigDir {
         let dir = TempDir::new().expect("create temp dir");
         let guard = set_config_dir_override_for_tests(Some(dir.path().join("cityg").join("gui")));
         Self { _guard: guard, dir }
+    }
+}
+
+/// The occupancy of leaf `leaf` since epoch 0.
+fn mref(leaf: u8) -> MemberRef {
+    MemberRef {
+        leaf: u32::from(leaf),
+        since: 0,
     }
 }
 
@@ -113,7 +121,7 @@ fn wait_for(
     panic!("timed out waiting for {what}");
 }
 
-/// An in-process v2 delivery service on its own Tokio runtime.
+/// An in-process v3 delivery service on its own Tokio runtime.
 struct TestServer {
     runtime: tokio::runtime::Runtime,
     url: String,
@@ -126,7 +134,7 @@ impl TestServer {
             .enable_all()
             .build()
             .expect("server runtime");
-        let url = runtime.block_on(engine::tests::spawn_v2_server());
+        let url = runtime.block_on(engine::tests::spawn_server());
         Self { runtime, url }
     }
 

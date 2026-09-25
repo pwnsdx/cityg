@@ -1,11 +1,11 @@
-# Kubernetes manifest for the City-G v0.2 delivery service (cityg-api).
+# Kubernetes manifest for the City-G v0.3 delivery service (cityg-api).
 #
 # A room has a single writer: the process that journals it orders its
 # commits. This manifest therefore runs one replica with a ReadWriteOnce
 # volume and the Recreate strategy, so that two pods never serve the same
 # state path. To scale out, run several such deployments and route each
 # request by group identifier (field 1 of every protobuf request body,
-# `gid` query parameter of /v2/ws), or use the Cloudflare Worker, where each
+# `gid` query parameter of /v3/ws), or use the Cloudflare Worker, where each
 # room is one Durable Object (crates/cityg-worker).
 #
 # Usage:
@@ -62,7 +62,7 @@ metadata:
   namespace: cityg
   labels:
     app: cityg-api
-    version: v0.2.0
+    version: v0.3.0
 spec:
   replicas: 1
   strategy:
@@ -75,7 +75,7 @@ spec:
     metadata:
       labels:
         app: cityg-api
-        version: v0.2.0
+        version: v0.3.0
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
@@ -87,7 +87,7 @@ spec:
         fsGroup: 10001
       containers:
       - name: cityg-api
-        image: cityg-api:0.2.0
+        image: cityg-api:0.3.0
         imagePullPolicy: IfNotPresent
         ports:
         - name: http

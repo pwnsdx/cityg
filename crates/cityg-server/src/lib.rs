@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! City-G v0.2 delivery service: rooms, their journal and their storage.
+//! City-G v0.3 delivery service: rooms, their journal and their storage.
 //!
 //! A room is identified by its group identifier `gid`. The delivery service
 //! holds no group secret: it runs [`cityg_core::ledger::GroupLedger`] on
@@ -11,7 +11,10 @@ mod room;
 mod store;
 
 pub use record::{MAX_RECORD_BYTES, RoomRecord};
-pub use room::{LogBody, LogEntry, LogPage, Room, RoomConfig, RoomError, RoomInfo};
+pub use room::{
+    JoinProgress, LogBody, LogEntry, LogPage, MAX_LEAF_PROOFS_PER_REQUEST, Room, RoomConfig,
+    RoomError, RoomInfo,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{FileRoomStore, FileRoomStoreError};
 pub use store::{MemoryRoomStore, RoomStore, StoredRoom, restore_room};

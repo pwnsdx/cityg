@@ -34,7 +34,8 @@ pub(super) struct AppModel {
     /// A background commit (pending removals or key refresh) is running.
     pub(super) removal_commit_in_flight: bool,
     pub(super) alias_bindings: AHashMap<String, AliasBindingRecord>,
-    pub(super) leaf_alias_index: AHashMap<[u8; 32], String>,
+    /// Aliases by occupancy, from the bindings and the latest views.
+    pub(super) member_alias_index: AHashMap<MemberRef, String>,
     pub(super) room_admins: Vec<Vec<u8>>,
     pub(super) room_admins_loaded: bool,
     pub(super) room_admin_status: RoomAdminStatus,

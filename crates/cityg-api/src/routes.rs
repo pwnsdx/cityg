@@ -1,9 +1,9 @@
-//! Delivery-service routes of the City-G v0.2 profile (`/v2/groups/*` and
-//! the `/v2/ws` log-head notifications).
+//! Delivery-service routes of the City-G v0.3 profile (`/v3/groups/*` and
+//! the `/v3/ws` log-head notifications).
 //!
 //! Requests are protobuf bodies (see `cityg-proto`). Each room is locked on
 //! its own; the handler runs on the blocking pool because verifying a
-//! commit (ML-DSA-87 signature, update path, tree hashes) is CPU work. The
+//! commit (ML-DSA-65 signature, update path, tree hashes) is CPU work. The
 //! journal record of a request is written before the reply; if that fails
 //! the in-memory room is dropped and reloaded from storage on next use.
 
@@ -20,7 +20,7 @@ use axum::{
     },
     http::{HeaderMap, HeaderValue, StatusCode, Uri, header::CONTENT_TYPE},
     response::Response,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use cityg_core::hash::Digest;
 use cityg_proto::{
@@ -216,6 +216,14 @@ async fn handle(
     }
 }
 
+/// Routes of the removed API versions (profiles v0.1.4 and v0.2).
+async fn gone() -> Response {
+    error_response(&ApiError::new(
+        ErrorCode::Gone,
+        "this API version was removed; use a City-G v0.3 client",
+    ))
+}
+
 #[derive(Deserialize)]
 struct SubscriptionQuery {
     gid: String,
@@ -312,7 +320,9 @@ pub fn router(state: ServiceState) -> Router {
         router = router.route(route.path(), post(handle));
     }
     router
-        .route("/v2/ws", get(websocket))
+        .route("/v3/ws", get(websocket))
+        .route("/v1/{*rest}", any(gone))
+        .route("/v2/{*rest}", any(gone))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state)
 }

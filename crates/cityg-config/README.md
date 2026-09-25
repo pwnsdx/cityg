@@ -1,6 +1,6 @@
 # cityg-config
 
-Configuration of the City-G v0.2 server, clients and GUI: TOML/JSON files, environment variables and validation.
+Configuration of the City-G v0.3 server, clients and GUI: TOML/JSON files, environment variables and validation.
 
 ## Features
 
@@ -41,8 +41,8 @@ config.save("backup.json")?;
   reconnect intervals.
 - **`[gui]`** - window size and maintenance interval.
 
-Unknown keys are ignored: a v0.1.4 file with a `[protocol]` section loads,
-but its protocol settings have no v0.2 equivalent.
+Unknown keys are ignored: a file of an earlier profile with a `[protocol]`
+section loads, but its protocol settings have no v0.3 equivalent.
 
 ## Example
 

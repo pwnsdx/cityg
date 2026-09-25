@@ -6,13 +6,15 @@
 //! function of the record, the ledger clock included.
 //!
 //! ```text
-//! RoomRecord := [0, commit, group_info, at_ms]   ; genesis
-//!             | [1, commit, group_info, at_ms]   ; commit
-//!             | [2, envelope, at_ms]             ; message
-//!             | [3, proposal, at_ms]             ; removal proposal
-//!             | [4, invite, at_ms]               ; invite
-//!             | [5, binding]                     ; alias binding
-//!             | [6, report]                      ; cover-failure report
+//! RoomRecord := [0, commit, group_info, at_ms]               ; genesis
+//!             | [1, commit, group_info, [welcome], at_ms]    ; commit
+//!             | [2, envelope, at_ms]                         ; message
+//!             | [3, proposal, at_ms]                         ; removal proposal
+//!             | [4, invite, at_ms]                           ; invite
+//!             | [5, binding]                                 ; alias binding
+//!             | [6, report]                                  ; cover-failure report
+//!             | [7, request, at_ms]                          ; join request
+//!             | [8, revocation]                              ; invite revocation
 //! ```
 
 use ciborium::value::Value;
@@ -35,6 +37,7 @@ pub enum RoomRecord {
     Commit {
         commit: Vec<u8>,
         group_info: Vec<u8>,
+        welcomes: Vec<Vec<u8>>,
         at_ms: u64,
     },
     Message {
@@ -55,6 +58,13 @@ pub enum RoomRecord {
     CoverFailure {
         report: Vec<u8>,
     },
+    JoinRequest {
+        request: Vec<u8>,
+        at_ms: u64,
+    },
+    InviteRevocation {
+        revocation: Vec<u8>,
+    },
 }
 
 impl RoomRecord {
@@ -74,11 +84,13 @@ impl RoomRecord {
             RoomRecord::Commit {
                 commit,
                 group_info,
+                welcomes,
                 at_ms,
             } => array(vec![
                 uint(1),
                 bytes(commit),
                 bytes(group_info),
+                array(welcomes.iter().map(|welcome| bytes(welcome)).collect()),
                 uint(*at_ms),
             ]),
             RoomRecord::Message { envelope, at_ms } => {
@@ -92,6 +104,10 @@ impl RoomRecord {
             }
             RoomRecord::Alias { binding } => array(vec![uint(5), bytes(binding)]),
             RoomRecord::CoverFailure { report } => array(vec![uint(6), bytes(report)]),
+            RoomRecord::JoinRequest { request, at_ms } => {
+                array(vec![uint(7), bytes(request), uint(*at_ms)])
+            }
+            RoomRecord::InviteRevocation { revocation } => array(vec![uint(8), bytes(revocation)]),
         };
         encode(&value)
     }
@@ -107,24 +123,20 @@ impl RoomRecord {
         let tag = expect_uint(&next()?, "room record tag")?;
         let blob = |value: Value| expect_bytes(value, "room record field");
         let record = match tag {
-            0 | 1 => {
-                let commit = blob(next()?)?;
-                let group_info = blob(next()?)?;
-                let at_ms = expect_uint(&next()?, "room record time")?;
-                if tag == 0 {
-                    RoomRecord::Genesis {
-                        commit,
-                        group_info,
-                        at_ms,
-                    }
-                } else {
-                    RoomRecord::Commit {
-                        commit,
-                        group_info,
-                        at_ms,
-                    }
-                }
-            }
+            0 => RoomRecord::Genesis {
+                commit: blob(next()?)?,
+                group_info: blob(next()?)?,
+                at_ms: expect_uint(&next()?, "room record time")?,
+            },
+            1 => RoomRecord::Commit {
+                commit: blob(next()?)?,
+                group_info: blob(next()?)?,
+                welcomes: expect_list(next()?, "room record welcomes")?
+                    .into_iter()
+                    .map(blob)
+                    .collect::<CoreResult<Vec<_>>>()?,
+                at_ms: expect_uint(&next()?, "room record time")?,
+            },
             2 => RoomRecord::Message {
                 envelope: blob(next()?)?,
                 at_ms: expect_uint(&next()?, "room record time")?,
@@ -142,6 +154,13 @@ impl RoomRecord {
             },
             6 => RoomRecord::CoverFailure {
                 report: blob(next()?)?,
+            },
+            7 => RoomRecord::JoinRequest {
+                request: blob(next()?)?,
+                at_ms: expect_uint(&next()?, "room record time")?,
+            },
+            8 => RoomRecord::InviteRevocation {
+                revocation: blob(next()?)?,
             },
             _ => return Err(CoreError::Malformed("room record tag")),
         };
@@ -168,6 +187,7 @@ mod tests {
             RoomRecord::Commit {
                 commit: vec![4],
                 group_info: vec![5],
+                welcomes: vec![vec![6], vec![7]],
                 at_ms: 6,
             },
             RoomRecord::Message {
@@ -184,6 +204,13 @@ mod tests {
             },
             RoomRecord::Alias { binding: vec![12] },
             RoomRecord::CoverFailure { report: vec![13] },
+            RoomRecord::JoinRequest {
+                request: vec![14],
+                at_ms: 15,
+            },
+            RoomRecord::InviteRevocation {
+                revocation: vec![16],
+            },
         ];
         for record in records {
             assert_eq!(
@@ -191,7 +218,7 @@ mod tests {
                 record
             );
         }
-        let unknown = encode(&array(vec![uint(9), bytes(&[1])])).unwrap();
+        let unknown = encode(&array(vec![uint(19), bytes(&[1])])).unwrap();
         assert!(RoomRecord::decode(&unknown).is_err());
         let long = encode(&array(vec![uint(5), bytes(&[1]), uint(2)])).unwrap();
         assert!(RoomRecord::decode(&long).is_err());

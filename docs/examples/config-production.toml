@@ -1,4 +1,4 @@
-# City-G production configuration (profile v0.2).
+# City-G production configuration (profile v0.3).
 #
 # Copy to cityg.toml in the working directory of cityg-api, or to
 # <config dir>/cityg/config.toml. CITYG_<SECTION>_<KEY> environment
@@ -12,8 +12,8 @@ address = "0.0.0.0:8080"
 state_path = "/var/lib/cityg/rooms"
 # Capacity of the log-head notification channel (WebSocket fan-out).
 websocket_capacity = 5000
-# Largest n_max a new group may declare (the profile allows 1024). An
-# update of a group of n slots is about 1.2 KB * n.
+# Largest capacity a new group may declare (the profile allows 8192). The
+# largest update of a full group of c members is about 1.2 KB * c.
 max_group_size = 1024
 # Message envelopes stay 7 days, commits 30 days (the latest always stays).
 message_retention_secs = 604800
@@ -46,7 +46,7 @@ maintenance_interval_secs = 30
 # - Durability: keep state_path on SSD storage and back it up; a room is
 #   rebuilt from its latest snapshot and journal.
 # - Scaling: route requests by gid (field 1 of every request body, `gid`
-#   query parameter of /v2/ws) so that a room always reaches the same
+#   query parameter of /v3/ws) so that a room always reaches the same
 #   instance, or deploy the Cloudflare Worker (one Durable Object per room).
 # - Server blindness: ./scripts/verify_no_secrets.sh checks that the
 #   service code never touches group secrets.

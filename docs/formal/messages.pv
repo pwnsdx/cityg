@@ -1,4 +1,4 @@
-(* Message plane v3 (section 11): sender authentication against a member of
+(* Message plane v4 (section 11): sender authentication against a member of
    the group, and confidentiality against non-members.
    Run: proverif -lib cityg.pvl messages.pv *)
 

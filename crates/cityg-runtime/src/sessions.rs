@@ -1,9 +1,10 @@
 //! Member sessions: bearer tokens issued against a signed [`SessionAuth`].
 //!
-//! A token binds one member leaf of one group until it expires. It is
+//! A token binds one member device key of one group until it expires. It is
 //! checked on every request that reads or writes group traffic, together
-//! with the leaf's current membership, so a removed member's tokens stop
-//! working as soon as the commit removing it is accepted.
+//! with the key's current membership, so a removed member's tokens stop
+//! working as soon as the commit removing it is accepted, and the tokens of
+//! a rotated key as soon as the rotation is.
 
 use std::collections::HashMap;
 
@@ -16,10 +17,10 @@ use rand_core::CryptoRngCore;
 use super::handlers::core_error;
 
 /// What a token grants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grant {
     pub gid: Digest,
-    pub leaf_id: Digest,
+    pub device_pk: Vec<u8>,
     pub expires_at_ms: u64,
 }
 
@@ -57,8 +58,7 @@ impl SessionRegistry {
             ));
         }
         auth.check_fresh(now_ms, max_skew_ms).map_err(core_error)?;
-        let leaf_id = auth.leaf_id().map_err(core_error)?;
-        if !room.is_member(&leaf_id) {
+        if room.member(&auth.device_pk).is_none() {
             return Err(ApiError::new(ErrorCode::Forbidden, "not a member"));
         }
         self.prune(now_ms);
@@ -78,24 +78,26 @@ impl SessionRegistry {
             token,
             Grant {
                 gid: *room.gid(),
-                leaf_id,
+                device_pk: auth.device_pk.clone(),
                 expires_at_ms,
             },
         );
         Ok((token, expires_at_ms))
     }
 
-    /// Check `token` for a request on `room`; returns the member leaf.
+    /// Check `token` for a request on `room`; returns the member's device
+    /// key.
     pub fn check(
         &mut self,
         token: Option<&[u8; 32]>,
         room: &Room,
         now_ms: u64,
-    ) -> Result<Digest, ApiError> {
+    ) -> Result<Vec<u8>, ApiError> {
         let token = token.ok_or_else(|| ApiError::new(ErrorCode::Unauthorized, "missing token"))?;
-        let grant = *self
+        let grant = self
             .grants
             .get(token)
+            .cloned()
             .ok_or_else(|| ApiError::new(ErrorCode::Unauthorized, "unknown token"))?;
         if grant.expires_at_ms < now_ms {
             self.grants.remove(token);
@@ -107,11 +109,11 @@ impl SessionRegistry {
                 "token for another group",
             ));
         }
-        if !room.is_member(&grant.leaf_id) {
+        if room.member(&grant.device_pk).is_none() {
             self.grants.remove(token);
             return Err(ApiError::new(ErrorCode::Forbidden, "not a member"));
         }
-        Ok(grant.leaf_id)
+        Ok(grant.device_pk)
     }
 
     /// Drop expired tokens.

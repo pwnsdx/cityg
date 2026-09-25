@@ -40,7 +40,7 @@ impl AppModel {
 
         let member = session.member.clone();
         let expected_room = session.room_id.clone();
-        let expected_leaf = session.leaf_id;
+        let expected_device = session.pop_public_key.clone();
 
         let task = cx.spawn(async move |this, cx| {
             let sync = match Tokio::spawn_result(cx, async move {
@@ -66,7 +66,7 @@ impl AppModel {
             let _ = this.update(cx, |model, cx| {
                 model.fetch_task = None;
                 model.fetch_in_flight = false;
-                model.handle_sync_result(outcome, &expected_room, expected_leaf, cx);
+                model.handle_sync_result(outcome, &expected_room, &expected_device, cx);
                 cx.notify();
             });
         });
@@ -78,11 +78,11 @@ impl AppModel {
         &mut self,
         outcome: anyhow::Result<engine::SyncOutcome>,
         expected_room: &str,
-        expected_leaf: [u8; 32],
+        expected_device: &[u8],
         cx: &mut ViewContext<Self>,
     ) {
         let matches_session = self.session.as_ref().is_some_and(|session| {
-            session.room_id == expected_room && session.leaf_id == expected_leaf
+            session.room_id == expected_room && session.pop_public_key == expected_device
         });
         if !matches_session {
             self.fetch_status = FetchStatus::Idle;
@@ -151,23 +151,26 @@ impl AppModel {
         if resynced {
             self.record_security_event(
                 "this device",
-                "This device could not follow a commit and re-entered its slot (resync).",
+                "This device could not follow a commit and re-entered the room with a new occupancy (resync).",
                 cx,
             );
         }
         for change in &changes {
             let summary = match change {
-                engine::RosterChange::Joined(leaf) => {
-                    format!("Joined: {}", self.label_for(leaf, &aliases))
+                engine::RosterChange::Joined(member) => {
+                    format!("Joined: {}", self.label_for(*member, &aliases))
                 }
-                engine::RosterChange::Removed(leaf) => {
-                    format!("Removed: {}", self.label_for(leaf, &aliases))
+                engine::RosterChange::Removed(member) => {
+                    format!("Removed: {}", self.label_for(*member, &aliases))
                 }
-                engine::RosterChange::Resynced(leaf) => {
-                    format!("Resynced: {}", self.label_for(leaf, &aliases))
+                engine::RosterChange::Resynced(member) => {
+                    format!("Resynced: {}", self.label_for(*member, &aliases))
                 }
-                engine::RosterChange::LeaveRequested(leaf) => {
-                    format!("Leave requested: {}", self.label_for(leaf, &aliases))
+                engine::RosterChange::LeaveRequested(member) => {
+                    format!("Leave requested: {}", self.label_for(*member, &aliases))
+                }
+                engine::RosterChange::KeyRotated(member) => {
+                    format!("Device key rotated: {}", self.label_for(*member, &aliases))
                 }
                 engine::RosterChange::AdminsChanged => "Room admins changed".to_string(),
             };
@@ -198,8 +201,8 @@ impl AppModel {
             let entries: Vec<ChatMessageEntry> = messages
                 .into_iter()
                 .map(|message| ChatMessageEntry {
-                    sender_leaf: Some(message.sender_leaf),
-                    fallback_label: format!("{}✓", hex_encode(&message.sender_leaf[..4])),
+                    sender: Some(message.sender),
+                    fallback_label: format!("{}✓", short_member_display(message.sender)),
                     plaintext: message.text.clone(),
                     ciphertext_hex: message.key(),
                     timestamp_ms: message.signed_timestamp_ms,
@@ -220,12 +223,12 @@ impl AppModel {
         }
     }
 
-    fn label_for(&self, leaf: &[u8; 32], aliases: &BTreeMap<[u8; 32], String>) -> String {
+    fn label_for(&self, member: MemberRef, aliases: &BTreeMap<MemberRef, String>) -> String {
         aliases
-            .get(leaf)
-            .map(|alias| format_alias_display(alias, leaf))
-            .or_else(|| self.member_label_for_leaf(leaf))
-            .unwrap_or_else(|| short_leaf_display(leaf))
+            .get(&member)
+            .map(|alias| format_alias_display(alias, member))
+            .or_else(|| self.member_label_for(member))
+            .unwrap_or_else(|| short_member_display(member))
     }
 
     /// The last sync showed this device was removed.

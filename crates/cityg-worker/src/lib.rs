@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 
-//! Cloudflare Worker transport of the City-G v0.2 delivery service.
+//! Cloudflare Worker transport of the City-G v0.3 delivery service.
 //!
-//! The Worker routes each `/v2/groups/*` request and each `/v2/ws`
-//! subscription to the Durable Object of its room, named `v2-<gid hex>`.
+//! The Worker routes each `/v3/groups/*` request and each `/v3/ws`
+//! subscription to the Durable Object of its room, named `v3-<gid hex>`.
 //! The object serves the request with [`WorkerRoomHost`] (the handlers of
 //! the native server, over the object's SQLite storage) and pushes log-head
 //! notices to the room's hibernatable WebSockets. Health checks and the

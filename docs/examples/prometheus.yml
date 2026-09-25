@@ -63,7 +63,7 @@ scrape_configs:
 #
 #       - alert: CommitConflictsRising
 #         # Concurrent commits for the same epoch: clients rebuild and retry.
-#         expr: sum(rate(http_responses_total{path="/v2/groups/commit",status="409"}[5m])) > 1
+#         expr: sum(rate(http_responses_total{path="/v3/groups/commit",status="409"}[5m])) > 1
 #         for: 10m
 #         labels:
 #           severity: warning

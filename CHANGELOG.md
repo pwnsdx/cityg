@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-25
+
+Profile `city-g/v0.3` replaces profile v0.2 to serve groups of thousands of
+members with concurrent joins and departures; the
+[design note](docs/design-v0.3.md) gives the reasons (decisions D-1 to D-9).
+The two profiles do not interoperate; v0.2 groups are not migrated.
+
+### Added
+- Batched joins (D-1): joiners record signed join requests with the delivery
+  service; the next commit, by any member, places every waiting request and
+  seals one welcome per joiner with the epoch's joiner secret. A joiner that
+  nobody commits within 1 to 2 seconds commits its own entry and brings the
+  other waiting requests. Overdue removals and joins must be included by every
+  commit, up to 256 removals and 64 joins.
+- A ratchet tree in the RFC 9420 array layout that holds the members, doubles
+  up to the capacity chosen at genesis (at most 8192) and halves when its right
+  half empties (D-2); members are named by their occupancy `[leaf, since]`.
+- Light members (D-7): leaf proofs, LightCommit and LightJoin objects,
+  `LightSession` in `cityg-core`, the `LightMember` driver in
+  `cityg-api-client`, the `/v3/groups/leaf_proofs` route and `light` flags on
+  the log and join-status routes. Light members check commits with Merkle
+  proofs and become full for the commits they author.
+- Device-key rotation (D-5): a Member commit signed by the old key and by the
+  new one; the occupancy, admission and admin rights stay.
+- Invites count their uses and can be revoked (D-4,
+  `/v3/groups/invite/revoke`).
+- Conformance material for v0.3: `kat/v0.3/vectors.json` (with the X-Wing
+  draft vector, ML-DSA-65 signatures, a sample tree with leaf proofs, a
+  welcome and light-member objects), an independent verifier that takes
+  ML-KEM-768 and ML-DSA-65 from libraries sharing no code with the Rust
+  implementation, and `kat/kat-v0.3-conformance-manifest.json`, whose
+  requirements cite the audit findings or the design decisions they come from.
+- ProVerif scenarios for batched joins and welcomes, join secrecy, key
+  rotation and Resync, with sanity scenarios for the author rule, retired
+  admissions and a joiner's forked view; the v0.2 model is archived under
+  `docs/legacy/v0.2/formal/`.
+
+### Changed
+- KEM: X-Wing (ML-KEM-768 with X25519) instead of ML-KEM-768 alone; signatures:
+  ML-DSA-65 instead of ML-DSA-87 (D-6).
+- Key schedule: a joiner-secret step and a commit secret one derivation past the
+  root path secret (D-9).
+- Admissions name their last epoch; the registry retires the admissions of
+  removed members while they are valid, instead of remembering removed device
+  ids (D-3).
+- Messages (plane v4) name their sender by occupancy; late messages are read
+  for four previous epochs during the grace window instead of one (D-8).
+- Delivery-service API `/v3`; `/v1` and `/v2` answer 410. Invite links use
+  version 5. The GUI names members by occupancy and bumps its persisted
+  formats (session 3, history 2, aliases 3).
+
+### Removed
+- Profile v0.2: the barrier tree, the roster and the `/v2` API. The v0.2
+  specification, vectors, verifier and manifest are archived under
+  `docs/legacy/v0.2/` and `kat/legacy/v0.2/`.
+
+### Fixed
+- A joiner whose request was committed by someone else while it prepared its
+  own entry now reads its welcome instead of failing as already a member.
+- The native delivery service answered `404` instead of `410` to the routes
+  of removed API versions, so old clients could not tell why they failed.
+
+### Security
+- A removed member cannot come back with an admission it kept, however many
+  members leave: when the list of retired admissions overflows, a retired
+  floor refuses every admission that could have been dropped. In v0.2, a
+  device whose id fell off the list of 4096 retired ids could come back.
+- Light members' trust in the delivery service is stated in the threat model:
+  membership agreement holds for them only up to the tree hash against a
+  delivery service colluding with a member.
+- The threat model now states that a joiner, or a member that resyncs,
+  cannot check the history before the epoch it enters, so a delivery
+  service can show it a forked view with a member the service controls;
+  comparing security codes with a known member detects it. This held for
+  v0.2 too, whose symbolic model assumed the joiner knew the GroupInfo
+  signer.
+
 ## [0.2.0] - 2026-09-25
 
 Profile `city-g/v0.2` replaces profile v0.1.4 after the

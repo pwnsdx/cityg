@@ -25,7 +25,7 @@ pub(super) fn load_alias_bindings(
                             alias,
                             PersistedAliasBinding {
                                 pop_public_key_hex: pop,
-                                leaf_id_hex: String::new(),
+                                member: String::new(),
                             },
                         )
                     })
@@ -50,26 +50,21 @@ pub(super) fn load_alias_bindings(
             }
         };
 
-        let leaf_id = if entry.leaf_id_hex.is_empty() {
-            [0u8; 32]
+        let member = if entry.member.is_empty() {
+            None
         } else {
-            match decode_hex32("alias_leaf", &entry.leaf_id_hex) {
-                Ok(arr) => arr,
-                Err(err) => {
-                    warn!(
-                        "alias '{}' has invalid leaf id '{}': {err}",
-                        alias, entry.leaf_id_hex
-                    );
-                    [0u8; 32]
-                }
+            let parsed = parse_member_ref(&entry.member);
+            if parsed.is_none() {
+                warn!("alias '{}' has an invalid member '{}'", alias, entry.member);
             }
+            parsed
         };
 
         map.insert(
             alias,
             AliasBindingRecord {
                 pop_public_key: pop_key,
-                leaf_id,
+                member,
             },
         );
     }
@@ -104,7 +99,7 @@ pub(super) fn persist_alias_bindings(
                     alias.clone(),
                     PersistedAliasBinding {
                         pop_public_key_hex: hex_encode(&record.pop_public_key),
-                        leaf_id_hex: hex_encode(record.leaf_id),
+                        member: record.member.map(member_ref_text).unwrap_or_default(),
                     },
                 )
             })

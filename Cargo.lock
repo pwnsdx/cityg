@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "cityg-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "cityg-api-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cityg-core",
  "cityg-proto",
@@ -1165,12 +1165,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "zeroize",
 ]
 
 [[package]]
 name = "cityg-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -1182,25 +1183,25 @@ dependencies = [
 
 [[package]]
 name = "cityg-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
  "ciborium",
  "cityg-pqc",
  "hex",
- "ml-kem",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "x-wing",
  "zeroize",
 ]
 
 [[package]]
 name = "cityg-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1237,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "cityg-pqc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "fips204",
@@ -1248,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "cityg-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -1258,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "cityg-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cityg-config",
  "cityg-core",
@@ -1272,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "cityg-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ciborium",
  "cityg-core",
@@ -1284,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "cityg-stress"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cityg-api-client",
@@ -1303,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "cityg-worker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cityg-config",
  "cityg-core",
@@ -1381,6 +1382,12 @@ checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "cmov"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cocoa"
@@ -1876,6 +1883,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2931af7e13dc045d8e9d26afccc6fa115d64e115c9c84b1166288b46f6782c2"
 
 [[package]]
+name = "ctutils"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+dependencies = [
+ "cmov",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "curve25519-dalek-derive",
+ "fiat-crypto",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2367,6 +2409,12 @@ checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
 ]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "filedescriptor"
@@ -3322,8 +3370,9 @@ version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8655f91cd07f2b9d0c24137bd650fe69617773435ee5ec83022377777ce65ef1"
 dependencies = [
- "subtle",
+ "ctutils",
  "typenum",
+ "zeroize",
 ]
 
 [[package]]
@@ -3795,9 +3844,9 @@ dependencies = [
 
 [[package]]
 name = "kem"
-version = "0.3.0-rc.6"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ae2c3347ff4a7af4f679a9e397c2c7e6034a00b773dd2dd3c001d7f40897c9"
+checksum = "01737161ba802849cfd486b5bd209d38ba4943494c249a8126005170c7621edd"
 dependencies = [
  "crypto-common 0.2.1",
  "rand_core 0.10.0",
@@ -4282,27 +4331,28 @@ dependencies = [
 
 [[package]]
 name = "ml-kem"
-version = "0.3.0-rc.0"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc807923f3029ad8676c21a667e1dc941e323538190a6d46cde130e7d55beef"
+checksum = "5e15f3e5b957493873e396a66914e83e616b6afe335cdef7efe5c6e1216aba66"
 dependencies = [
  "hybrid-array",
  "kem",
  "module-lattice",
  "rand_core 0.10.0",
- "sha3 0.11.0-rc.9",
- "subtle",
+ "sha3 0.11.0",
+ "zeroize",
 ]
 
 [[package]]
 name = "module-lattice"
-version = "0.1.0"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dfecc750073acc09af2f8899b2342d520d570392ba1c3aed53eeb0d84ca4103"
+checksum = "0c61b87c9683ab7cb1c6871d261ad5479b6b10ceb52c4352aaca3b5d35a8febe"
 dependencies = [
+ "ctutils",
  "hybrid-array",
  "num-traits",
- "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -6446,12 +6496,34 @@ dependencies = [
 
 [[package]]
 name = "sha3"
-version = "0.11.0-rc.9"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b233a7d59d7bfc027208506a33ffc9532b2acb24ddc61fe7e758dc2250db431"
+checksum = "be176f1a57ce4e3d31c1a166222d9768de5954f811601fb7ca06fc8203905ce1"
 dependencies = [
  "digest 0.11.2",
  "keccak 0.2.0",
+]
+
+[[package]]
+name = "sha3"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc9bad02c26382724b2d2692c6f179285e4b54eeecd7968f52a50059c3c11759"
+dependencies = [
+ "digest 0.11.2",
+ "keccak 0.2.0",
+ "sponge-cursor",
+]
+
+[[package]]
+name = "shake"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09057cb2149ad4cbd2da1e26b351f9a4c354219421229c69c3063e6f61947c4a"
+dependencies = [
+ "digest 0.11.2",
+ "keccak 0.2.0",
+ "sponge-cursor",
 ]
 
 [[package]]
@@ -6617,6 +6689,12 @@ checksum = "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844"
 dependencies = [
  "bitflags 2.11.0",
 ]
+
+[[package]]
+name = "sponge-cursor"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 
 [[package]]
 name = "stable_deref_trait"
@@ -8997,6 +9075,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
+name = "x-wing"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b51507b887016c3925c84591108dadb8c099f776eb04fec6a60ae3519fee856f"
+dependencies = [
+ "kem",
+ "ml-kem",
+ "sha3 0.12.0",
+ "shake",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "x11"
 version = "2.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9035,6 +9127,17 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "x25519-dalek"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e8131a03190127fb2263afc72b322ecadae46b6ff8c6f399ff5d02f5559af6"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.10.0",
+ "zeroize",
+]
 
 [[package]]
 name = "xattr"

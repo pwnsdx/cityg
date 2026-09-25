@@ -192,11 +192,12 @@ run_host_checks() {
   log_step "./scripts/verify_no_secrets.sh"
   ./scripts/verify_no_secrets.sh
 
-  if command -v python3 >/dev/null 2>&1 && python3 -c 'import blake3' >/dev/null 2>&1; then
-    log_step "python3 kat/v0.2/verify_vectors.py"
-    python3 kat/v0.2/verify_vectors.py
+  if command -v python3 >/dev/null 2>&1 \
+    && python3 -c 'import blake3, kyber_py, dilithium_py' >/dev/null 2>&1; then
+    log_step "python3 kat/v0.3/verify_vectors.py"
+    python3 kat/v0.3/verify_vectors.py
   else
-    echo "Skipping the independent vector check (needs python3 and 'pip install blake3')"
+    echo "Skipping the independent vector check (needs python3 and 'pip install blake3 kyber-py dilithium-py')"
   fi
 
   log_step "cargo check -p cityg-worker --features cloudflare --target wasm32-unknown-unknown"

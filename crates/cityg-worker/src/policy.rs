@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 /// Path of the route policy manifest.
 pub const POLICY_ROUTE: &str = "/__cloudflare/policy";
 /// Path of the log-head WebSocket.
-pub const WEBSOCKET_PATH: &str = "/v2/ws";
+pub const WEBSOCKET_PATH: &str = "/v3/ws";
 /// Health paths answered by the Worker itself.
 pub const HEALTH_ROUTES: [&str; 5] = [
     "/healthz",
@@ -26,16 +26,16 @@ pub fn is_room_path(path: &str) -> bool {
     path == WEBSOCKET_PATH || Route::from_path(path).is_some()
 }
 
-/// Whether `path` belongs to the removed v0.1.4 API.
+/// Whether `path` belongs to a removed API (v0.1.4 or v0.2).
 #[must_use]
 pub fn is_legacy_path(path: &str) -> bool {
-    path.starts_with("/v1/") || path.starts_with("/v2/barrier/")
+    path.starts_with("/v1/") || path.starts_with("/v2/")
 }
 
 /// Name of the Durable Object serving the room `gid`.
 #[must_use]
 pub fn durable_object_name(gid: &[u8; 32]) -> String {
-    format!("v2-{}", hex::encode(gid))
+    format!("v3-{}", hex::encode(gid))
 }
 
 /// Reply of a health path.
@@ -123,16 +123,19 @@ mod tests {
 
     #[test]
     fn room_paths_and_legacy_paths() {
-        assert!(is_room_path("/v2/ws"));
-        assert!(is_room_path("/v2/groups/commit"));
-        assert!(!is_room_path("/v2/groups/nope"));
+        assert!(is_room_path("/v3/ws"));
+        assert!(is_room_path("/v3/groups/commit"));
+        assert!(is_room_path("/v3/groups/join_request"));
+        assert!(!is_room_path("/v3/groups/nope"));
+        assert!(!is_room_path("/v2/groups/commit"));
         assert!(!is_room_path("/health"));
         assert!(is_legacy_path("/v1/accept_epoch"));
         assert!(is_legacy_path("/v2/barrier/resolve_join_occupancies_since"));
-        assert!(!is_legacy_path("/v2/groups/commit"));
+        assert!(is_legacy_path("/v2/groups/commit"));
+        assert!(!is_legacy_path("/v3/groups/commit"));
         assert_eq!(
             durable_object_name(&[0xAB; 32]),
-            format!("v2-{}", "ab".repeat(32))
+            format!("v3-{}", "ab".repeat(32))
         );
     }
 
@@ -177,7 +180,7 @@ mod tests {
         config.server.max_group_size = 16;
         let json = serde_json::to_string(&config).unwrap_or_default();
         let service = service_config_from_json(Some(&json));
-        assert_eq!(service.map(|service| service.room.max_n_max), Ok(16));
+        assert_eq!(service.map(|service| service.room.max_capacity), Ok(16));
         assert!(service_config_from_json(Some("{")).is_err());
         config.server.max_group_size = 0;
         let json = serde_json::to_string(&config).unwrap_or_default();

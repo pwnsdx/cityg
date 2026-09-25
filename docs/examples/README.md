@@ -1,7 +1,7 @@
 # City-G Deployment Examples
 
 This directory contains runnable deployment examples for `cityg-api`, the
-native delivery service of profile v0.2. A room has a single writer: run one
+native delivery service of profile v0.3. A room has a single writer: run one
 instance per state path, and shard by group identifier to scale out (see
 [`docs/deployment.md`](../deployment.md)). The Cloudflare Worker deployment
 is described in [`crates/cityg-worker/README.md`](../../crates/cityg-worker/README.md).

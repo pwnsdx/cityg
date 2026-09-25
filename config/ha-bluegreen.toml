@@ -1,4 +1,4 @@
-# City-G blue/green configuration (profile v0.2).
+# City-G blue/green configuration (profile v0.3).
 #
 # A room has exactly one writer: the process that journals it orders its
 # commits. Two native instances must therefore never serve the same room

@@ -2,8 +2,8 @@
 
 use std::time::Instant;
 
-const COMMIT_PATH: &str = "path=\"/v2/groups/commit\"";
-const SEND_PATH: &str = "path=\"/v2/groups/send\"";
+const COMMIT_PATH: &str = "path=\"/v3/groups/commit\"";
+const SEND_PATH: &str = "path=\"/v3/groups/send\"";
 
 #[derive(Debug, Clone, Default)]
 pub struct MetricsSnapshot {
@@ -83,13 +83,13 @@ mod tests {
     fn parse_metrics_extracts_counts_and_quantiles() {
         let text = r#"
 # TYPE http_responses_total counter
-http_responses_total{method="POST",path="/v2/groups/commit",status="200"} 123
-http_responses_total{method="POST",path="/v2/groups/commit",status="409"} 7
-http_responses_total{method="POST",path="/v2/groups/send",status="200"} 40
-http_request_duration_seconds{method="POST",path="/v2/groups/commit",status="200",quantile="0.5"} 0.041
-http_request_duration_seconds{method="POST",path="/v2/groups/commit",status="200",quantile="0.95"} 0.067
-http_request_duration_seconds{method="POST",path="/v2/groups/commit",status="200",quantile="0.99"} 0.089
-http_request_duration_seconds{method="POST",path="/v2/groups/commit",status="200",quantile="0.999"} not-a-number
+http_responses_total{method="POST",path="/v3/groups/commit",status="200"} 123
+http_responses_total{method="POST",path="/v3/groups/commit",status="409"} 7
+http_responses_total{method="POST",path="/v3/groups/send",status="200"} 40
+http_request_duration_seconds{method="POST",path="/v3/groups/commit",status="200",quantile="0.5"} 0.041
+http_request_duration_seconds{method="POST",path="/v3/groups/commit",status="200",quantile="0.95"} 0.067
+http_request_duration_seconds{method="POST",path="/v3/groups/commit",status="200",quantile="0.99"} 0.089
+http_request_duration_seconds{method="POST",path="/v3/groups/commit",status="200",quantile="0.999"} not-a-number
 "#;
         let snapshot = parse_metrics_snapshot(text, Instant::now());
         assert_eq!(snapshot.commits_ok, 123);

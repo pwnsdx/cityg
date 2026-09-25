@@ -1,7 +1,7 @@
 //! Invite links.
 //!
 //! ```text
-//! cityg-invite:{"version":4,"server_url":"...","room_id":"<gid hex>",
+//! cityg-invite:{"version":5,"server_url":"...","room_id":"<gid hex>",
 //!               "invite_seed":"<32-byte seed hex>"}
 //! ```
 //!
@@ -16,8 +16,8 @@ use super::client::ClientError;
 
 /// Prefix of an invite link.
 pub const INVITE_PREFIX: &str = "cityg-invite:";
-/// Version of the invite links of profile v0.2.
-pub const INVITE_VERSION: u8 = 4;
+/// Version of the invite links of profile v0.3.
+pub const INVITE_VERSION: u8 = 5;
 
 /// A parsed invite link.
 #[derive(Clone, PartialEq, Eq)]
@@ -75,7 +75,7 @@ impl InviteLink {
             .map_err(|_| ClientError::InvalidInvite("malformed payload"))?;
         if payload.version != INVITE_VERSION {
             return Err(ClientError::InvalidInvite(
-                "unsupported invite version (v0.2 links are version 4)",
+                "unsupported invite version (v0.3 links are version 5)",
             ));
         }
         if payload.server_url.trim().is_empty() {
@@ -111,13 +111,19 @@ mod tests {
         assert_eq!(InviteLink::parse("hello").unwrap(), None);
         let v3 = r#"cityg-invite:{"version":3,"server_url":"x","room_id":"00"}"#;
         assert!(InviteLink::parse(v3).is_err());
+        let v4 = format!(
+            r#"cityg-invite:{{"version":4,"server_url":"x","room_id":"{}","invite_seed":"{}"}}"#,
+            "00".repeat(32),
+            "00".repeat(32)
+        );
+        assert!(InviteLink::parse(&v4).is_err(), "v0.2 links are refused");
         let bad_seed = format!(
-            r#"cityg-invite:{{"version":4,"server_url":"x","room_id":"{}","invite_seed":"zz"}}"#,
+            r#"cityg-invite:{{"version":5,"server_url":"x","room_id":"{}","invite_seed":"zz"}}"#,
             "00".repeat(32)
         );
         assert!(InviteLink::parse(&bad_seed).is_err());
         let no_server = format!(
-            r#"cityg-invite:{{"version":4,"server_url":" ","room_id":"{}","invite_seed":"{}"}}"#,
+            r#"cityg-invite:{{"version":5,"server_url":" ","room_id":"{}","invite_seed":"{}"}}"#,
             "00".repeat(32),
             "00".repeat(32)
         );

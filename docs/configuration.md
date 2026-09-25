@@ -17,8 +17,8 @@ Highest priority first:
    `~/Library/Application Support/cityg/` on macOS);
 3. the defaults below.
 
-Unknown keys are ignored: a v0.1.4 file with a `[protocol]` section still
-loads, and its protocol settings have no effect. `cityg-api` validates the
+Unknown keys are ignored: a file of an earlier profile with a `[protocol]`
+section still loads, and its protocol settings have no effect. `cityg-api` validates the
 result at startup and refuses to start on an invalid value. Sample files are
 in [`config/`](../config) and [`docs/examples/`](examples/).
 
@@ -29,7 +29,7 @@ in [`config/`](../config) and [`docs/examples/`](examples/).
 | `address` | `CITYG_SERVER_ADDRESS` | `0.0.0.0:8080` | Bind address. |
 | `state_path` | `CITYG_SERVER_STATE_PATH` | none | Directory of room journals and snapshots. Without it, rooms live in memory and are lost on restart. |
 | `websocket_capacity` | `CITYG_SERVER_WEBSOCKET_CAPACITY` | `1000` | Capacity of the log-head notification channel; a subscriber that falls behind gets a `resync` notice. |
-| `max_group_size` | `CITYG_SERVER_MAX_GROUP_SIZE` | `256` | Largest `n_max` a new group may declare, from 1 to 1024 (`MAX_N_MAX`). A commit of a group of `n` slots is about 1.2 KB × `n`. |
+| `max_group_size` | `CITYG_SERVER_MAX_GROUP_SIZE` | `1024` | Largest capacity a new group may declare, from 1 to 8192 (`MAX_CAPACITY`). The largest update of a full group of `c` members is about 1.2 KB × `c`, and its tree about 4 KB × `c`. |
 | `message_retention_secs` | `CITYG_SERVER_MESSAGE_RETENTION_SECS` | `604800` (7 days) | How long envelopes stay in a room log. |
 | `commit_retention_secs` | `CITYG_SERVER_COMMIT_RETENTION_SECS` | `2592000` (30 days) | How long commits stay; the latest commit always stays. |
 | `max_log_entries` | `CITYG_SERVER_MAX_LOG_ENTRIES` | `50000` | Most entries of a room log: messages and proposals go first, then the oldest commits. |
@@ -59,7 +59,7 @@ offline without resyncing.
 | --- | --- | --- | --- |
 | `default_window_width` | `CITYG_GUI_DEFAULT_WINDOW_WIDTH` | `1160.0` | Initial window width. |
 | `default_window_height` | `CITYG_GUI_DEFAULT_WINDOW_HEIGHT` | `760.0` | Initial window height. |
-| `maintenance_interval_secs` | `CITYG_GUI_MAINTENANCE_INTERVAL_SECS` | `30` | Maintenance tick: commit other members' recorded removals, re-key this device's leaf every 24 hours (`FS_WINDOW`), erase previous-epoch message keys after the 10-minute grace window. |
+| `maintenance_interval_secs` | `CITYG_GUI_MAINTENANCE_INTERVAL_SECS` | `30` | Maintenance tick: commit other members' recorded removals and join requests, re-key this device's leaf every 24 hours (`FS_WINDOW`), erase the message keys of earlier epochs after the 10-minute grace window. |
 
 ## Other environment variables
 
@@ -80,11 +80,11 @@ Development, rooms in memory:
 cargo run -p cityg-api
 ```
 
-Durable rooms, larger groups:
+Durable rooms, the largest groups:
 
 ```bash
 CITYG_SERVER_STATE_PATH=/var/lib/cityg/rooms \
-CITYG_SERVER_MAX_GROUP_SIZE=1024 \
+CITYG_SERVER_MAX_GROUP_SIZE=8192 \
 cargo run --release -p cityg-api
 ```
 
@@ -105,7 +105,9 @@ The same in JSON (`cityg.json`):
 
 ## What is not configurable
 
-The protocol parameters are fixed by the profile (specs.md, section 15):
-`MAX_N_MAX` (1024), `MAX_ADMINS` (64), the 10-minute grace window, the
-message-ratchet bounds, the object size bounds, the replay window and the
-label and context registries. Changing any of them is a new profile.
+The protocol parameters are fixed by the profile (specs.md, section 16):
+`MAX_CAPACITY` (8192), `MAX_ADMINS` (64), the grace window (10 minutes, four
+previous epochs), the caps on removals and joins per commit, the validity of
+admissions, the message-ratchet bounds, the object size bounds, the replay
+window and the label and context registries. Changing any of them is a new
+profile.

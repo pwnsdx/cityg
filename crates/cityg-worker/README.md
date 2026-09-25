@@ -1,16 +1,16 @@
 # cityg-worker
 
-Cloudflare Worker transport of the City-G v0.2 delivery service.
+Cloudflare Worker transport of the City-G v0.3 delivery service.
 
 ## Topology
 
 - The Worker entrypoint answers health checks (`/healthz`, `/health`,
   `/health/live`, `/health/ready`, `/health/detailed`) and the route policy
   manifest (`GET /__cloudflare/policy`).
-- Every delivery-service request (`POST /v2/groups/*`) carries the group
+- Every delivery-service request (`POST /v3/groups/*`) carries the group
   identifier `gid` as field 1 of its protobuf body; the Worker forwards it to
-  the Durable Object named `v2-<gid hex>`. WebSocket subscriptions
-  (`GET /v2/ws?gid=<hex>&token=<hex>`) go to the same object.
+  the Durable Object named `v3-<gid hex>`. WebSocket subscriptions
+  (`GET /v3/ws?gid=<hex>&token=<hex>`) go to the same object.
 - The Durable Object runs `WorkerRoomHost`: the request handlers of
   `cityg-runtime` (the same ones as the native `cityg-api` server) over the
   object's SQLite storage. It is the single writer of its room, so commits
@@ -19,8 +19,8 @@ Cloudflare Worker transport of the City-G v0.2 delivery service.
   `{"type":"head","gid":…,"head_seq":…}` notice to the room's hibernatable
   WebSockets. A client that receives a notice fetches the log with its
   session token. A text `ping` is answered `pong` without waking the object.
-- Paths of the removed v0.1.4 API (`/v1/*`, `/v2/barrier/*`) answer
-  `410 Gone`.
+- Paths of the removed APIs of profiles v0.1.4 and v0.2 (`/v1/*`, `/v2/*`)
+  answer `410 Gone`.
 
 The Worker, like the native server, only orders and relays protocol objects;
 it never holds a group secret.
@@ -30,9 +30,9 @@ it never holds a group secret.
 One table, `cityg_room_state (key TEXT PRIMARY KEY, value BLOB)`:
 
 ```text
-v2/<gid hex>/generation              current generation g (u64 big-endian)
-v2/<gid hex>/snapshot/<g>            room snapshot of generation g
-v2/<gid hex>/journal/<g>/<index>     records appended since that snapshot
+v3/<gid hex>/generation              current generation g (u64 big-endian)
+v3/<gid hex>/snapshot/<g>            room snapshot of generation g
+v3/<gid hex>/journal/<g>/<index>     records appended since that snapshot
 ```
 
 Compaction writes snapshot `g + 1` and the new generation before it deletes
@@ -80,7 +80,9 @@ deleted_classes = [
 ]
 ```
 
-v0.1.4 rooms are not migrated: members create or join v0.2 rooms.
+Rooms of earlier profiles are not migrated: members create or join v0.3
+rooms. v0.2 rooms live in Durable Objects named `v2-<gid hex>`, which the
+v0.3 Worker never addresses; their storage can be deleted.
 
 ## Checks
 

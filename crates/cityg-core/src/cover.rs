@@ -1,9 +1,9 @@
 //! Cover-failure reports (audit P-3.h).
 //!
 //! ```text
-//! CoverFailureReport := ["city-g/cover-failure/v1", gid, epoch,
-//!                        reporter_leaf_id, reason]
-//! Signed := [CoverFailureReport..., signature]  ctx "city-g/cover-failure/v1"
+//! CoverFailureReport := ["city-g/cover-failure/v2", gid, epoch,
+//!                        reporter_device_pk, reason]
+//! Signed := [CoverFailureReport..., signature]  ctx "city-g/cover-failure/v2"
 //! ```
 //!
 //! A member that cannot process the commit of epoch `epoch` (no decryptable
@@ -17,15 +17,15 @@
 use cityg_pqc::SignatureContext;
 use rand_core::CryptoRngCore;
 
-use crate::cbor::{bytes, expect_bytes32, expect_uint, text, uint};
+use crate::cbor::{bytes, expect_bytes, expect_bytes32, expect_uint, text, uint};
 use crate::error::{CoreError, CoreResult};
 use crate::hash::Digest;
-use crate::identity::DeviceIdentity;
-use crate::roster::Roster;
+use crate::identity::{DeviceIdentity, check_device_key};
 use crate::signed::{open_signed, sign_fields};
+use crate::tree::PublicTree;
 
 /// Label of a cover-failure report.
-pub const COVER_FAILURE_LABEL: &str = "city-g/cover-failure/v1";
+pub const COVER_FAILURE_LABEL: &str = "city-g/cover-failure/v2";
 /// Upper bound on an encoded report.
 pub const MAX_COVER_FAILURE_BYTES: usize = 8 * 1024;
 
@@ -68,10 +68,8 @@ impl CoverFailureReason {
 pub struct CoverFailureReport {
     pub gid: Digest,
     pub epoch: u64,
-    pub reporter_leaf_id: Digest,
+    pub reporter_device_pk: Vec<u8>,
     pub reason: CoverFailureReason,
-    tbs: Vec<u8>,
-    signature: Vec<u8>,
     encoded: Vec<u8>,
 }
 
@@ -89,7 +87,7 @@ impl CoverFailureReport {
                 text(COVER_FAILURE_LABEL),
                 bytes(gid),
                 uint(epoch),
-                bytes(&reporter.leaf_id(gid)?),
+                bytes(reporter.public_key()),
                 uint(reason.code()),
             ],
             reporter,
@@ -99,7 +97,7 @@ impl CoverFailureReport {
         Self::decode(&encoded)
     }
 
-    /// Decode a report (its signature is checked by [`Self::verify`]).
+    /// Decode a report and verify its signature.
     pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
         let opened = open_signed(
             encoded,
@@ -112,15 +110,19 @@ impl CoverFailureReport {
         let mut next = || fields.next().ok_or(CoreError::Malformed("cover failure"));
         let gid = expect_bytes32(next()?, "cover failure gid")?;
         let epoch = expect_uint(&next()?, "cover failure epoch")?;
-        let reporter_leaf_id = expect_bytes32(next()?, "cover failure reporter")?;
+        let reporter_device_pk = expect_bytes(next()?, "cover failure reporter")?;
+        check_device_key(&reporter_device_pk, "cover failure reporter")?;
         let reason = CoverFailureReason::from_code(expect_uint(&next()?, "cover failure reason")?)?;
+        opened.verify(
+            &reporter_device_pk,
+            SignatureContext::COVER_FAILURE,
+            "cover failure",
+        )?;
         Ok(Self {
             gid,
             epoch,
-            reporter_leaf_id,
+            reporter_device_pk,
             reason,
-            tbs: opened.tbs,
-            signature: opened.signature,
             encoded: encoded.to_vec(),
         })
     }
@@ -131,25 +133,16 @@ impl CoverFailureReport {
         &self.encoded
     }
 
-    /// Check the report against `roster`: same group, reporter is a member
-    /// and signed it.
-    pub fn verify(&self, gid: &Digest, roster: &Roster) -> CoreResult<()> {
+    /// Check the report against the tree of `gid`: the reporter is a
+    /// member. Returns its leaf.
+    pub fn verify(&self, gid: &Digest, tree: &PublicTree) -> CoreResult<u32> {
         if &self.gid != gid {
             return Err(CoreError::Invalid("cover failure for another group"));
         }
-        let reporter =
-            roster
-                .member_by_leaf(&self.reporter_leaf_id)
-                .ok_or(CoreError::Unauthorized(
-                    "cover failure reporter is not a member",
-                ))?;
-        crate::identity::verify_signature(
-            &reporter.device_pk,
-            SignatureContext::COVER_FAILURE,
-            &self.tbs,
-            &self.signature,
-            "cover failure",
-        )
+        tree.find_device(&self.reporter_device_pk)
+            .ok_or(CoreError::Unauthorized(
+                "cover failure reporter is not a member",
+            ))
     }
 }
 
@@ -161,12 +154,22 @@ mod tests {
     use rand_core::SeedableRng;
 
     #[test]
-    fn reports_verify_against_the_roster() {
+    fn reports_verify_against_the_tree() {
         let mut rng = ChaCha20Rng::seed_from_u64(1);
         let alice = DeviceIdentity::from_seed(&[1; 32]);
         let bob = DeviceIdentity::from_seed(&[2; 32]);
         let gid = [3; 32];
-        let roster = Roster::genesis(&gid, alice.public_key()).unwrap();
+        let mut tree = PublicTree::new(4).unwrap();
+        tree.add_leaf(
+            0,
+            crate::tree::LeafNode {
+                device_pk: alice.public_key().to_vec(),
+                since: 0,
+                encryption_key: crate::kem::KemSecret::generate(&mut rng).public_key(),
+                admission_hash: [0; 32],
+            },
+        )
+        .unwrap();
         for reason in [
             CoverFailureReason::NotCovered,
             CoverFailureReason::PathKeyMismatch,
@@ -174,7 +177,7 @@ mod tests {
             CoverFailureReason::StateLost,
         ] {
             let report = CoverFailureReport::sign(&gid, 4, reason, &alice, &mut rng).unwrap();
-            report.verify(&gid, &roster).unwrap();
+            assert_eq!(report.verify(&gid, &tree).unwrap(), 0);
             let decoded = CoverFailureReport::decode(report.encoded()).unwrap();
             assert_eq!(decoded, report);
             assert_eq!(decoded.reason, reason);
@@ -182,11 +185,15 @@ mod tests {
         let outsider =
             CoverFailureReport::sign(&gid, 4, CoverFailureReason::NotCovered, &bob, &mut rng)
                 .unwrap();
-        assert!(outsider.verify(&gid, &roster).is_err());
+        assert!(outsider.verify(&gid, &tree).is_err());
         let report =
             CoverFailureReport::sign(&gid, 4, CoverFailureReason::NotCovered, &alice, &mut rng)
                 .unwrap();
-        assert!(report.verify(&[9; 32], &roster).is_err());
+        assert!(report.verify(&[9; 32], &tree).is_err());
+        let mut tampered = report.encoded().to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(CoverFailureReport::decode(&tampered).is_err());
         assert!(CoverFailureReason::from_code(9).is_err());
         assert!(CoverFailureReport::decode(&[0x80]).is_err());
     }

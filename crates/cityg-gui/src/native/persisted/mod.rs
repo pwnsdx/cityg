@@ -6,12 +6,13 @@ mod store;
 pub(super) use session::*;
 pub(super) use store::*;
 
-/// Version of the persisted session format (profile v0.2).
-pub(super) const SESSION_FORMAT_VERSION: u32 = 2;
-pub(super) const HISTORY_VERSION: u32 = 1;
+/// Version of the persisted session format (profile v0.3).
+pub(super) const SESSION_FORMAT_VERSION: u32 = 3;
+/// Version of the chat history format (senders named by occupancy).
+pub(super) const HISTORY_VERSION: u32 = 2;
 /// Chat messages kept on disk per room.
 pub(super) const MAX_PERSISTED_MESSAGES: usize = 500;
-pub(super) const ALIAS_STORE_VERSION: u32 = 2;
+pub(super) const ALIAS_STORE_VERSION: u32 = 3;
 pub(super) const SECURITY_LOG_VERSION: u32 = 1;
 pub(super) const MAX_SECURITY_EVENTS: usize = 128;
 pub(super) const MAX_ACTIVITY_EVENTS: usize = 256;

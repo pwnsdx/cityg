@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-//! Native HTTP server of the City-G v0.2 delivery service.
+//! Native HTTP server of the City-G v0.3 delivery service.
 //!
-//! It serves the delivery-service API (`/v2/groups/*` and the `/v2/ws`
+//! It serves the delivery-service API (`/v3/groups/*` and the `/v3/ws`
 //! log-head notifications, see [`routes`]), health checks and Prometheus
 //! metrics. The server relays and orders protocol objects; it never holds a
 //! group secret.
@@ -152,11 +152,15 @@ mod tests {
         assert!(body.contains("\"status\":\"healthy\""));
         assert_eq!(get_status(&app, "/metrics").await.0, StatusCode::OK);
         assert_eq!(get_status(&app, "/nope").await.0, StatusCode::NOT_FOUND);
+        // Removed API versions answer 410, so old clients can say why.
+        for path in ["/v1/accept_epoch", "/v2/groups/info"] {
+            assert_eq!(get_status(&app, path).await.0, StatusCode::GONE, "{path}");
+        }
         // The API is POST-only; a malformed body is a 400.
         let response = app
             .clone()
             .oneshot(
-                Request::post("/v2/groups/info")
+                Request::post("/v3/groups/info")
                     .body(Body::from(vec![0xFF, 0xFF]))
                     .unwrap(),
             )

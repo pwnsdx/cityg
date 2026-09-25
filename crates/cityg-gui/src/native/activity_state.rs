@@ -1,3 +1,5 @@
+use super::MemberRef;
+
 #[derive(Clone, Default)]
 pub(super) enum MembersMode {
     #[default]
@@ -33,7 +35,7 @@ pub(super) struct ActivityEvent {
 
 #[derive(Clone)]
 pub(super) struct ChatMessageEntry {
-    pub(super) sender_leaf: Option<[u8; 32]>,
+    pub(super) sender: Option<MemberRef>,
     pub(super) fallback_label: String,
     pub(super) plaintext: String,
     pub(super) ciphertext_hex: String,
@@ -52,15 +54,14 @@ pub(super) enum MessageDelivery {
 #[derive(Hash, Eq, PartialEq, Clone)]
 pub(super) struct MessageKey {
     pub(super) ciphertext_hex: String,
-    pub(super) sender_leaf: Option<[u8; 32]>,
+    pub(super) sender: Option<MemberRef>,
 }
 
 #[derive(Clone)]
 pub(super) struct MemberEntry {
-    pub(super) leaf_id: [u8; 32],
+    pub(super) member: MemberRef,
     pub(super) alias: Option<String>,
     pub(super) pop_public_key: Option<Vec<u8>>,
-    pub(super) slot: u32,
     pub(super) admin: bool,
     pub(super) pending_removal: bool,
 }
@@ -68,5 +69,6 @@ pub(super) struct MemberEntry {
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct AliasBindingRecord {
     pub(super) pop_public_key: Vec<u8>,
-    pub(super) leaf_id: [u8; 32],
+    /// Occupancy the alias was last seen on, if known.
+    pub(super) member: Option<MemberRef>,
 }

@@ -1,5 +1,5 @@
 //! Final capacity check: after a stress run, run the protocol test that fills
-//! a group to `n_max` and checks that the next joiner is refused while every
+//! a group to its capacity and checks that the next joiner is refused while every
 //! member still agrees on the group state.
 
 /// Full path of the capacity test in the `cityg-core` library tests.

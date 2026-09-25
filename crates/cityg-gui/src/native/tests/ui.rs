@@ -12,10 +12,9 @@ use crate::native::app_actions::{
 
 fn sample_member(leaf: u8, alias: &str, admin: bool, pending_removal: bool) -> MemberEntry {
     MemberEntry {
-        leaf_id: [leaf; 32],
+        member: mref(leaf),
         alias: Some(alias.to_string()),
-        pop_public_key: Some(vec![leaf; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES]),
-        slot: u32::from(leaf),
+        pop_public_key: Some(vec![leaf; cityg_pqc::PUBLIC_KEY_BYTES]),
         admin,
         pending_removal,
     }
@@ -43,7 +42,7 @@ fn sample_activity() -> Vec<ActivityEvent> {
 /// Fill `model` with content for every panel.
 fn populate(model: &mut AppModel, session: &AppSession) {
     model.messages.push(ChatMessageEntry {
-        sender_leaf: Some(session.leaf_id),
+        sender: Some(session.me()),
         fallback_label: session.alias.clone(),
         plaintext: "mine".to_string(),
         ciphertext_hex: "k1".to_string(),
@@ -56,7 +55,7 @@ fn populate(model: &mut AppModel, session: &AppSession) {
         .enumerate()
     {
         model.messages.push(ChatMessageEntry {
-            sender_leaf: Some([0x33; 32]),
+            sender: Some(mref(0x33)),
             fallback_label: "peer".to_string(),
             plaintext: format!("peer {index}"),
             ciphertext_hex: format!("k{}", index + 2),
@@ -169,10 +168,10 @@ fn gpui_render_every_panel_state(cx: &mut TestAppContext) {
             let _ = model.render_message_composer(cx);
 
             // This device's removal is pending: sending is disabled.
-            let leaf = session.leaf_id;
+            let me = session.me();
             let session = model.session.as_mut().expect("session");
             for entry in &mut session.view.roster {
-                if entry.leaf_id == leaf {
+                if entry.member == me {
                     entry.pending_removal = true;
                 }
             }
@@ -201,11 +200,10 @@ fn gpui_render_every_panel_state(cx: &mut TestAppContext) {
             // Room-admin panel: staged revoke, loading, error, locked.
             let session = model.session.clone().expect("session");
             model.room_admin_target.focus();
-            model.room_admin_target.set_value(hex_encode(
-                vec![0xAA; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES],
-            ));
-            model.room_admin_revoke_confirmation =
-                Some(vec![0xAA; cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES]);
+            model
+                .room_admin_target
+                .set_value(hex_encode(vec![0xAA; cityg_pqc::PUBLIC_KEY_BYTES]));
+            model.room_admin_revoke_confirmation = Some(vec![0xAA; cityg_pqc::PUBLIC_KEY_BYTES]);
             let _ = model.render_room_admin_panel(window, &session, cx);
             model.room_admin_status = RoomAdminStatus::Loading("granting".to_string());
             let _ = model.render_room_admin_panel(window, &session, cx);
@@ -269,7 +267,7 @@ fn gpui_callbacks_copy_toggle_and_reset(cx: &mut TestAppContext) {
     let session = offline_session(22, "clicks");
     let expected_room = session.room_id.clone();
     let expected_code = hex_encode(session.view.transcript_fingerprint);
-    let expected_roster = hex_encode(session.view.roster_hash);
+    let expected_registry = hex_encode(session.view.registry_hash);
     let expected_identity = hex_encode(&session.pop_public_key);
     let (view, cx) = open_window(cx, Some(session));
 
@@ -294,7 +292,7 @@ fn gpui_callbacks_copy_toggle_and_reset(cx: &mut TestAppContext) {
             model.on_copy_fs_fingerprint(&event, window, cx);
             assert_eq!(
                 cx.read_from_clipboard().and_then(|item| item.text()),
-                Some(expected_roster.clone())
+                Some(expected_registry.clone())
             );
 
             model.set_error(
@@ -687,7 +685,7 @@ fn gpui_clipboard_shortcuts_edit_the_focused_field(cx: &mut TestAppContext) {
     let _config = ConfigDir::new();
     let session = offline_session(28, "clip");
     let invite = format!(
-        "{INVITE_PREFIX}{{\"version\":4,\"server_url\":\"https://edge.example\",\"room_id\":\"{}\",\"invite_seed\":\"{}\"}}",
+        "{INVITE_PREFIX}{{\"version\":5,\"server_url\":\"https://edge.example\",\"room_id\":\"{}\",\"invite_seed\":\"{}\"}}",
         "ab".repeat(32),
         "cd".repeat(32)
     );
@@ -824,7 +822,7 @@ fn gpui_clipboard_shortcuts_edit_the_focused_field(cx: &mut TestAppContext) {
 fn gpui_members_search_filters_the_roster(cx: &mut TestAppContext) {
     let _config = ConfigDir::new();
     let session = offline_session(29, "alice");
-    let leaf_prefix = hex_encode(&session.leaf_id[..2]);
+    let member_query = format!("#{}", member_ref_text(session.me()));
     let (view, cx) = open_window(cx, Some(session));
     view.update(cx, |model, cx| {
         assert_eq!(model.members.len(), 1);
@@ -834,7 +832,7 @@ fn gpui_members_search_filters_the_roster(cx: &mut TestAppContext) {
         model.members_search.set_query("zzz".to_string());
         model.submit_members_search(cx);
         assert!(model.members.is_empty());
-        model.members_search.set_query(leaf_prefix.clone());
+        model.members_search.set_query(member_query.clone());
         model.submit_members_search(cx);
         assert_eq!(model.members.len(), 1);
         model.clear_members_search(cx);
@@ -844,13 +842,11 @@ fn gpui_members_search_filters_the_roster(cx: &mut TestAppContext) {
         model.submit_members_search(cx);
         assert!(matches!(model.members_mode, MembersMode::Full));
         assert_eq!(
-            model
-                .member_label_for_leaf(&model.members[0].leaf_id)
-                .as_deref(),
+            model.member_label_for(model.members[0].member).as_deref(),
             model.members[0]
                 .alias
                 .as_deref()
-                .map(|alias| format_alias_display(alias, &model.members[0].leaf_id))
+                .map(|alias| format_alias_display(alias, model.members[0].member))
                 .as_deref()
         );
     });
@@ -875,7 +871,7 @@ fn message_list_bookkeeping() {
     model.session = Some(session.clone());
 
     let peer = ChatMessageEntry {
-        sender_leaf: Some([0x44; 32]),
+        sender: Some(mref(0x44)),
         fallback_label: "peer".to_string(),
         plaintext: "later".to_string(),
         ciphertext_hex: "k2".to_string(),
@@ -921,8 +917,8 @@ fn message_list_bookkeeping() {
 
     assert_eq!(model.resolve_sender_label(&peer), "peer");
     model
-        .leaf_alias_index
-        .insert([0x44; 32], "dora".to_string());
+        .member_alias_index
+        .insert(mref(0x44), "dora".to_string());
     assert!(model.resolve_sender_label(&peer).starts_with("dora ("));
 
     // Activity and security logs are bounded.
@@ -935,11 +931,11 @@ fn message_list_bookkeeping() {
         "ghost".to_string(),
         AliasBindingRecord {
             pop_public_key: vec![1],
-            leaf_id: [0; 32],
+            member: None,
         },
     );
-    model.refresh_leaf_alias_index();
-    assert!(model.leaf_alias_index.is_empty());
+    model.refresh_member_alias_index();
+    assert!(model.member_alias_index.is_empty());
     model.persist_history();
 }
 
@@ -977,7 +973,7 @@ fn toasts_and_errors() {
 #[test]
 fn join_form_requests_and_keystrokes() {
     let invite = format!(
-        "{INVITE_PREFIX}{{\"version\":4,\"server_url\":\"https://edge.example\",\"room_id\":\"{}\",\"invite_seed\":\"{}\"}}",
+        "{INVITE_PREFIX}{{\"version\":5,\"server_url\":\"https://edge.example\",\"room_id\":\"{}\",\"invite_seed\":\"{}\"}}",
         "ab".repeat(32),
         "cd".repeat(32)
     );
@@ -1235,29 +1231,28 @@ fn layout_width_rules() {
 
 #[test]
 fn display_helpers() {
-    let leaf = [0xAB; 32];
-    assert_eq!(short_leaf_display(&leaf), "abababab…");
-    assert!(format_alias_display("bob", &leaf).starts_with("bob ("));
-    let member = sample_member(0x11, "", false, false);
-    assert_eq!(format_member_label(&member), hex_encode([0x11; 32]));
+    let member = MemberRef { leaf: 3, since: 7 };
+    assert_eq!(short_member_display(member), "#3.7");
+    assert_eq!(format_alias_display("bob", member), "bob (#3.7)");
+    let entry = sample_member(0x11, "", false, false);
+    assert_eq!(format_member_label(&entry), "#17.0");
+    let digest = [0xAB; 32];
     assert_eq!(format_regular_fingerprint(None), "Not available");
-    assert!(format_regular_fingerprint(Some(&leaf)).starts_with("abab-abab"));
-    assert_eq!(fingerprint_full_hex(&leaf).len(), 64);
+    assert!(format_regular_fingerprint(Some(&digest)).starts_with("abab-abab"));
+    assert_eq!(fingerprint_full_hex(&digest).len(), 64);
     assert!(!format_timestamp(1_700_000_000_000).is_empty());
     assert!(current_unix_timestamp_ms() > 0);
     assert!(room_admin_identity_preview(&[1, 2, 3]).contains("0102"));
     assert!(decode_room_admin_target_hex("").is_err());
     assert!(decode_room_admin_target_hex("zz").is_err());
     assert!(decode_room_admin_target_hex("0102").is_err());
-    let key_hex = "ab".repeat(cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES);
+    let key_hex = "ab".repeat(cityg_pqc::PUBLIC_KEY_BYTES);
     assert_eq!(
         decode_room_admin_target_hex(&format!(" {key_hex} "))
             .expect("valid key")
             .len(),
-        cityg_pqc::ML_DSA_87_PUBLIC_KEY_BYTES
+        cityg_pqc::PUBLIC_KEY_BYTES
     );
-    assert_eq!(hex_encode_prefix(&leaf, 4), "abab…");
-    assert_eq!(hex_encode_prefix(&leaf, 64), hex_encode(leaf));
 }
 
 #[test]

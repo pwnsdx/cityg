@@ -1,33 +1,37 @@
-//! A room: one group as served by the v0.2 delivery service.
+//! A room: one group as served by the v0.3 delivery service.
 //!
 //! A room wraps the group's [`GroupLedger`] with the ordered log members
-//! fetch (commits and message envelopes, numbered by `seq`), the alias
-//! bindings of members and retention. Every public mutation returns the
-//! [`RoomRecord`] to journal; [`Room::apply_record`] replays records.
+//! fetch (commits, recorded proposals and message envelopes, numbered by
+//! `seq`), the alias bindings of members and retention. Every public
+//! mutation returns the [`RoomRecord`] to journal; [`Room::apply_record`]
+//! replays records.
 
 use std::collections::{BTreeMap, VecDeque};
 
 use ciborium::value::Value;
 use cityg_core::binding::AliasBinding;
 use cityg_core::cbor::{
-    array, bytes, decode, encode, expect_array, expect_bytes, expect_bytes32, expect_label,
-    expect_list, expect_uint, text, uint,
+    array, bytes, decode, encode, expect_array, expect_bytes, expect_label, expect_list,
+    expect_uint, text, uint,
 };
 use cityg_core::hash::Digest;
-use cityg_core::ledger::{GroupLedger, ProposalStatus};
+use cityg_core::ledger::{AcceptedCommit, GroupLedger, JoinStatus, ProposalStatus};
 use cityg_core::message::Envelope;
 use cityg_core::session::GroupSnapshot;
+use cityg_core::tree::MemberRef;
 use cityg_core::{CoreError, CoreResult};
 
 use super::record::RoomRecord;
 
-const ROOM_SNAPSHOT_LABEL: &str = "city-g/room/v1";
+const ROOM_SNAPSHOT_LABEL: &str = "city-g/room/v3";
+/// Most leaf proofs one request may ask for.
+pub const MAX_LEAF_PROOFS_PER_REQUEST: usize = 64;
 
 /// Deployment limits and retention of rooms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoomConfig {
-    /// Largest `n_max` a new group may declare.
-    pub max_n_max: u32,
+    /// Largest capacity a new group may declare.
+    pub max_capacity: u32,
     /// How long message envelopes stay in the log.
     pub message_retention_ms: u64,
     /// How long commits stay in the log (the latest commit always stays).
@@ -39,7 +43,7 @@ pub struct RoomConfig {
 impl Default for RoomConfig {
     fn default() -> Self {
         Self {
-            max_n_max: 256,
+            max_capacity: 1024,
             message_retention_ms: 7 * 24 * 3_600_000,
             commit_retention_ms: 30 * 24 * 3_600_000,
             max_log_entries: 50_000,
@@ -70,14 +74,19 @@ pub enum LogBody {
     Commit {
         commit: Vec<u8>,
         group_info: Vec<u8>,
+        /// The encoded `LightCommit` light members verify the commit with
+        /// (empty for the genesis).
+        light: Vec<u8>,
     },
     Message {
-        sender_leaf_id: Digest,
+        sender: MemberRef,
         envelope: Vec<u8>,
     },
     /// A recorded removal proposal: receivers reject the target's messages
     /// from this point of the log on.
     Proposal { proposal: Vec<u8> },
+    /// A recorded join request, waiting for a commit.
+    JoinRequest { request: Vec<u8> },
 }
 
 /// One entry of the ordered room log.
@@ -96,14 +105,21 @@ impl LogEntry {
 
     fn to_value(&self) -> Value {
         let body = match &self.body {
-            LogBody::Commit { commit, group_info } => {
-                array(vec![uint(0), bytes(commit), bytes(group_info)])
+            LogBody::Commit {
+                commit,
+                group_info,
+                light,
+            } => array(vec![
+                uint(0),
+                bytes(commit),
+                bytes(group_info),
+                bytes(light),
+            ]),
+            LogBody::Message { sender, envelope } => {
+                array(vec![uint(1), sender.to_value(), bytes(envelope)])
             }
-            LogBody::Message {
-                sender_leaf_id,
-                envelope,
-            } => array(vec![uint(1), bytes(sender_leaf_id), bytes(envelope)]),
             LogBody::Proposal { proposal } => array(vec![uint(2), bytes(proposal)]),
+            LogBody::JoinRequest { request } => array(vec![uint(3), bytes(request)]),
         };
         array(vec![
             uint(self.seq),
@@ -125,13 +141,17 @@ impl LogEntry {
             0 => LogBody::Commit {
                 commit: expect_bytes(field()?, "log commit")?,
                 group_info: expect_bytes(field()?, "log group info")?,
+                light: expect_bytes(field()?, "log light proofs")?,
             },
             1 => LogBody::Message {
-                sender_leaf_id: expect_bytes32(field()?, "log sender")?,
+                sender: MemberRef::from_value(field()?)?,
                 envelope: expect_bytes(field()?, "log envelope")?,
             },
             2 => LogBody::Proposal {
                 proposal: expect_bytes(field()?, "log proposal")?,
+            },
+            3 => LogBody::JoinRequest {
+                request: expect_bytes(field()?, "log join request")?,
             },
             _ => return Err(CoreError::Malformed("log body tag")),
         };
@@ -147,14 +167,28 @@ impl LogEntry {
     }
 }
 
-/// Public state a joiner or resyncing member fetches.
+/// Public state a joiner, a resyncing member or a committer fetches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomInfo {
     pub epoch: u64,
     pub snapshot: GroupSnapshot,
+    /// Recorded removal proposals, in recording order.
     pub pending_removals: Vec<Vec<u8>>,
+    /// Recorded join requests, in recording order.
+    pub pending_joins: Vec<Vec<u8>>,
     pub head_seq: u64,
-    pub vacant: bool,
+}
+
+/// Where a join request stands, with what its joiner needs to enter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinProgress {
+    pub status: JoinStatus,
+    /// The commit that included the request and its GroupInfo, while the
+    /// log still holds it.
+    pub commit: Option<(Vec<u8>, Vec<u8>)>,
+    /// Epoch of the room now: the welcome opens against the current
+    /// snapshot only when it is the commit's epoch.
+    pub current_epoch: u64,
 }
 
 /// A page of the log.
@@ -171,7 +205,8 @@ pub struct Room {
     ledger: GroupLedger,
     log: VecDeque<LogEntry>,
     next_seq: u64,
-    aliases: BTreeMap<Digest, AliasBinding>,
+    /// Alias bindings by device key.
+    aliases: BTreeMap<Vec<u8>, AliasBinding>,
     config: RoomConfig,
 }
 
@@ -184,8 +219,8 @@ impl Room {
         config: RoomConfig,
     ) -> Result<(Self, RoomRecord), RoomError> {
         let (ledger, _) = GroupLedger::create(commit, group_info, now_ms)?;
-        if ledger.state().n_max() > config.max_n_max {
-            return Err(RoomError::Limit("n_max above the deployment limit"));
+        if ledger.state().capacity() > config.max_capacity {
+            return Err(RoomError::Limit("capacity above the deployment limit"));
         }
         let mut room = Self {
             ledger,
@@ -200,6 +235,7 @@ impl Room {
             LogBody::Commit {
                 commit: commit.to_vec(),
                 group_info: group_info.to_vec(),
+                light: Vec::new(),
             },
         );
         Ok((
@@ -247,31 +283,37 @@ impl Room {
         }
     }
 
-    /// Accept the next commit.
+    /// Accept the next commit with its GroupInfo and welcomes.
     pub fn publish_commit(
         &mut self,
         commit: &[u8],
         group_info: &[u8],
+        welcomes: &[Vec<u8>],
         now_ms: u64,
-    ) -> Result<(LogEntry, RoomRecord), RoomError> {
-        let accepted = self.ledger.apply_commit(commit, group_info, now_ms)?;
-        for member in &accepted.removed {
-            self.aliases.remove(&member.leaf_id);
-        }
+    ) -> Result<(LogEntry, AcceptedCommit, RoomRecord), RoomError> {
+        let accepted = self
+            .ledger
+            .apply_commit(commit, group_info, welcomes, now_ms)?;
+        let tree = &self.ledger.state().tree;
+        self.aliases
+            .retain(|device_pk, _| tree.find_device(device_pk).is_some());
         let seq = self.push(
             accepted.epoch,
             now_ms,
             LogBody::Commit {
                 commit: commit.to_vec(),
                 group_info: group_info.to_vec(),
+                light: accepted.light.clone(),
             },
         );
         let entry = self.entry(seq).ok_or(RoomError::NotFound("log entry"))?;
         Ok((
             entry,
+            accepted,
             RoomRecord::Commit {
                 commit: commit.to_vec(),
                 group_info: group_info.to_vec(),
+                welcomes: welcomes.to_vec(),
                 at_ms: now_ms,
             },
         ))
@@ -285,16 +327,16 @@ impl Room {
             .cloned()
     }
 
-    /// Relay an envelope sent by the member `sender` (the leaf the request
-    /// authenticated as).
+    /// Relay an envelope sent by the member whose device key is `sender`
+    /// (the key the request authenticated with).
     pub fn send(
         &mut self,
         envelope: &[u8],
-        sender: &Digest,
+        sender: &[u8],
         now_ms: u64,
     ) -> Result<(LogEntry, RoomRecord), RoomError> {
         let decoded = Envelope::decode(envelope)?;
-        if &decoded.header.sender_leaf_id != sender {
+        if self.member(sender) != Some(decoded.header.sender) {
             return Err(RoomError::Forbidden(
                 "envelope sender is not the session member",
             ));
@@ -315,20 +357,20 @@ impl Room {
             accepted.epoch,
             now_ms,
             LogBody::Message {
-                sender_leaf_id: accepted.sender_leaf_id,
+                sender: accepted.sender,
                 envelope: envelope.to_vec(),
             },
         );
         self.entry(seq).ok_or(RoomError::NotFound("log entry"))
     }
 
-    /// Record a removal proposal. Returns its status, whether the room is
-    /// now vacant, and the record to journal when it was new.
+    /// Record a removal proposal. Returns its status and the record to
+    /// journal when it was new.
     pub fn submit_remove_proposal(
         &mut self,
         proposal: &[u8],
         now_ms: u64,
-    ) -> Result<(ProposalStatus, bool, Option<RoomRecord>), RoomError> {
+    ) -> Result<(ProposalStatus, Option<RoomRecord>), RoomError> {
         let status = self.ledger.submit_remove_proposal(proposal)?;
         let record = (status == ProposalStatus::Recorded).then(|| {
             self.push(
@@ -343,7 +385,78 @@ impl Room {
                 at_ms: now_ms,
             }
         });
-        Ok((status, self.ledger.is_vacant(), record))
+        Ok((status, record))
+    }
+
+    /// Record a join request. Returns its reference, its status and the
+    /// record to journal when it was new.
+    pub fn submit_join_request(
+        &mut self,
+        request: &[u8],
+        now_ms: u64,
+    ) -> Result<(Digest, ProposalStatus, Option<RoomRecord>), RoomError> {
+        let (reference, status) = self.ledger.submit_join_request(request, now_ms)?;
+        let record = (status == ProposalStatus::Recorded).then(|| {
+            self.push(
+                self.ledger.epoch(),
+                now_ms,
+                LogBody::JoinRequest {
+                    request: request.to_vec(),
+                },
+            );
+            RoomRecord::JoinRequest {
+                request: request.to_vec(),
+                at_ms: now_ms,
+            }
+        });
+        Ok((reference, status, record))
+    }
+
+    /// Where the join request `reference` stands.
+    #[must_use]
+    pub fn join_progress(&self, reference: &Digest) -> JoinProgress {
+        let status = self.ledger.join_status(reference);
+        let commit = match &status {
+            JoinStatus::Committed { epoch, .. } => {
+                self.log.iter().find_map(|entry| match &entry.body {
+                    LogBody::Commit {
+                        commit, group_info, ..
+                    } if entry.epoch == *epoch => Some((commit.clone(), group_info.clone())),
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        JoinProgress {
+            status,
+            commit,
+            current_epoch: self.ledger.epoch(),
+        }
+    }
+
+    /// The encoded light-join data of the join request `reference`, while
+    /// the commit that included it created the current epoch.
+    pub fn light_join(&self, reference: &Digest) -> Result<Option<Vec<u8>>, RoomError> {
+        Ok(self.ledger.light_join(reference)?)
+    }
+
+    /// Merkle proofs of `leaves` against the current tree hash, with the
+    /// current epoch (at most [`MAX_LEAF_PROOFS_PER_REQUEST`] leaves, each
+    /// within the tree).
+    pub fn leaf_proofs(&self, leaves: &[u32]) -> Result<(u64, Vec<Vec<u8>>), RoomError> {
+        if leaves.len() > MAX_LEAF_PROOFS_PER_REQUEST {
+            return Err(RoomError::Limit("too many leaf proofs"));
+        }
+        let tree = &self.ledger.state().tree;
+        if leaves.iter().any(|leaf| *leaf >= tree.width()) {
+            return Err(RoomError::Protocol(CoreError::Invalid("leaf index")));
+        }
+        let proofs = tree
+            .leaf_proofs(leaves.iter().copied())?
+            .iter()
+            .map(|proof| proof.encode())
+            .collect::<CoreResult<Vec<_>>>()?;
+        Ok((self.ledger.epoch(), proofs))
     }
 
     /// Store an admin-signed invite.
@@ -358,6 +471,21 @@ impl Room {
             RoomRecord::Invite {
                 invite: invite.to_vec(),
                 at_ms: now_ms,
+            },
+        ))
+    }
+
+    /// Revoke an invite on an admin's signed request. Returns the join
+    /// requests it dropped.
+    pub fn revoke_invite(
+        &mut self,
+        revocation: &[u8],
+    ) -> Result<(Vec<Digest>, RoomRecord), RoomError> {
+        let dropped = self.ledger.revoke_invite(revocation)?;
+        Ok((
+            dropped,
+            RoomRecord::InviteRevocation {
+                revocation: revocation.to_vec(),
             },
         ))
     }
@@ -385,11 +513,10 @@ impl Room {
                 "alias binding for another group",
             )));
         }
-        let leaf = binding.leaf_id()?;
-        if self.ledger.roster().member_by_leaf(&leaf).is_none() {
+        if self.member(&binding.device_pk).is_none() {
             return Err(RoomError::Forbidden("alias binding of a non-member"));
         }
-        self.aliases.insert(leaf, binding);
+        self.aliases.insert(binding.device_pk.clone(), binding);
         Ok(())
     }
 
@@ -398,7 +525,7 @@ impl Room {
     pub fn aliases(&self) -> Vec<Vec<u8>> {
         self.aliases
             .iter()
-            .filter(|(leaf, _)| self.ledger.roster().member_by_leaf(leaf).is_some())
+            .filter(|(device_pk, _)| self.member(device_pk).is_some())
             .map(|(_, binding)| binding.encoded().to_vec())
             .collect()
     }
@@ -421,7 +548,7 @@ impl Room {
             .collect()
     }
 
-    /// Public state for joiners.
+    /// Public state for joiners, resyncing members and committers.
     pub fn info(&self) -> Result<RoomInfo, RoomError> {
         Ok(RoomInfo {
             epoch: self.ledger.epoch(),
@@ -431,8 +558,12 @@ impl Room {
                 .pending_removals()
                 .map(|proposal| proposal.encoded().to_vec())
                 .collect(),
+            pending_joins: self
+                .ledger
+                .pending_joins()
+                .map(|request| request.encoded().to_vec())
+                .collect(),
             head_seq: self.head_seq(),
-            vacant: self.ledger.is_vacant(),
         })
     }
 
@@ -491,10 +622,27 @@ impl Room {
         self.ledger.gid()
     }
 
-    /// Whether `leaf` is a current member.
+    /// Occupancy of the current member whose device key is `device_pk`.
     #[must_use]
-    pub fn is_member(&self, leaf: &Digest) -> bool {
-        self.ledger.roster().member_by_leaf(leaf).is_some()
+    pub fn member(&self, device_pk: &[u8]) -> Option<MemberRef> {
+        let tree = &self.ledger.state().tree;
+        let leaf = tree.find_device(device_pk)?;
+        tree.leaf(leaf).map(|member| MemberRef {
+            leaf,
+            since: member.since,
+        })
+    }
+
+    /// Whether the member with device key `device_pk` has a recorded
+    /// removal.
+    #[must_use]
+    pub fn has_pending_removal(&self, device_pk: &[u8]) -> bool {
+        self.member(device_pk).is_some_and(|member| {
+            self.ledger.pending_removals().any(|proposal| {
+                proposal.proposal().target_leaf == member.leaf
+                    && proposal.proposal().target_since == member.since
+            })
+        })
     }
 
     /// Re-apply a journaled record (replay after a restart).
@@ -508,9 +656,10 @@ impl Room {
             RoomRecord::Commit {
                 commit,
                 group_info,
+                welcomes,
                 at_ms,
             } => {
-                self.publish_commit(commit, group_info, *at_ms)?;
+                self.publish_commit(commit, group_info, welcomes, *at_ms)?;
             }
             RoomRecord::Message { envelope, at_ms } => {
                 self.apply_message(envelope, *at_ms)?;
@@ -518,8 +667,14 @@ impl Room {
             RoomRecord::RemoveProposal { proposal, at_ms } => {
                 self.submit_remove_proposal(proposal, *at_ms)?;
             }
+            RoomRecord::JoinRequest { request, at_ms } => {
+                self.submit_join_request(request, *at_ms)?;
+            }
             RoomRecord::Invite { invite, at_ms } => {
                 self.publish_invite(invite, *at_ms)?;
+            }
+            RoomRecord::InviteRevocation { revocation } => {
+                self.revoke_invite(revocation)?;
             }
             RoomRecord::Alias { binding } => self.apply_alias(binding)?,
             RoomRecord::CoverFailure { report } => {
@@ -594,7 +749,7 @@ impl Room {
         let mut aliases = BTreeMap::new();
         for binding in expect_list(next()?, "room aliases")? {
             let binding = AliasBinding::decode(&expect_bytes(binding, "room alias")?)?;
-            aliases.insert(binding.leaf_id()?, binding);
+            aliases.insert(binding.device_pk.clone(), binding);
         }
         Ok(Self {
             ledger,

@@ -186,9 +186,9 @@ impl AppModel {
         cx: &mut ViewContext<Self>,
     ) {
         if let Some(session) = &self.session {
-            let text = fingerprint_full_hex(&session.view.roster_hash);
+            let text = fingerprint_full_hex(&session.view.registry_hash);
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.show_success("Roster hash copied", cx);
+            self.show_success("Registry hash copied", cx);
         } else {
             self.show_error_toast("No active session", cx);
         }

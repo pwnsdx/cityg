@@ -1,14 +1,14 @@
-//! Hashing and key derivation for the v0.2 profile.
+//! Hashing and key derivation for the v0.3 profile.
 //!
 //! * `H(x) := BLAKE3-256(x)`.
-//! * `H_L(label, args) := H(CBOR_det(["city-g/v0.2", label, args]))`, where
+//! * `H_L(label, args) := H(CBOR_det(["city-g/v0.3", label, args]))`, where
 //!   `args` is a CBOR array. Every labelled hash of the profile uses this one
 //!   array encoding (audit H-06).
 //! * `Extract(salt, ikm) := BLAKE3-keyed(key = salt, ikm)`.
 //! * `ExpandLabel(secret, label, context, L) := BLAKE3-keyed-XOF(key = secret,
-//!   CBOR_det(["city-g/v0.2 expand", label, context, L]))[0..L]`.
+//!   CBOR_det(["city-g/v0.3 expand", label, context, L]))[0..L]`.
 //! * `DeriveSecret(secret, label) := ExpandLabel(secret, label, h'', 32)`.
-//! * `MAC(key, data) := BLAKE3-keyed(key, CBOR_det(["city-g/v0.2 mac", data]))`.
+//! * `MAC(key, data) := BLAKE3-keyed(key, CBOR_det(["city-g/v0.3 mac", data]))`.
 //!
 //! BLAKE3 in keyed mode is a PRF, and its XOF output is a PRF output of any
 //! length, so Extract/Expand follow the HKDF structure with BLAKE3 in place of
@@ -21,9 +21,9 @@ use crate::cbor::{array, bytes, encode, text, uint};
 use crate::error::{CoreError, CoreResult};
 
 /// Profile tag bound into every labelled hash.
-pub const PROFILE_TAG: &str = "city-g/v0.2";
-const EXPAND_TAG: &str = "city-g/v0.2 expand";
-const MAC_TAG: &str = "city-g/v0.2 mac";
+pub const PROFILE_TAG: &str = "city-g/v0.3";
+const EXPAND_TAG: &str = "city-g/v0.3 expand";
+const MAC_TAG: &str = "city-g/v0.3 mac";
 
 /// A 32-byte digest.
 pub type Digest = [u8; 32];

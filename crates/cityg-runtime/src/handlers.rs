@@ -1,6 +1,7 @@
 //! Protobuf request handlers over [`Room`].
 
 use cityg_core::CoreError;
+use cityg_core::ledger::{JoinStatus, ProposalStatus};
 use cityg_proto::pb;
 use cityg_proto::{ApiError, DEFAULT_LOG_PAGE, ErrorCode, MAX_LOG_PAGE, Route};
 use cityg_server::{LogBody, LogEntry, Room, RoomConfig, RoomError, RoomRecord, RoomStore};
@@ -9,7 +10,7 @@ use rand_core::CryptoRngCore;
 
 use super::sessions::SessionRegistry;
 
-/// Deployment settings of the v2 service.
+/// Deployment settings of the v3 service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServiceConfig {
     pub room: RoomConfig,
@@ -28,7 +29,7 @@ impl ServiceConfig {
         let server = &config.server;
         Self {
             room: RoomConfig {
-                max_n_max: server.max_group_size,
+                max_capacity: server.max_group_size,
                 message_retention_ms: server.message_retention_secs.saturating_mul(1000),
                 commit_retention_ms: server.commit_retention_secs.saturating_mul(1000),
                 max_log_entries: server.max_log_entries,
@@ -80,7 +81,8 @@ pub fn core_error(error: CoreError) -> ApiError {
         CoreError::EpochMismatch { .. } | CoreError::TranscriptMismatch | CoreError::Replay => {
             ErrorCode::Conflict
         }
-        CoreError::Invalid("pending removal proposals must be committed") => ErrorCode::Conflict,
+        CoreError::Invalid("overdue proposals must be committed")
+        | CoreError::Invalid("a request of this device is pending") => ErrorCode::Conflict,
         CoreError::Unauthorized(_) => ErrorCode::Forbidden,
         CoreError::TooLarge(_) => ErrorCode::PayloadTooLarge,
         CoreError::BadSignature(_)
@@ -106,23 +108,39 @@ fn decode<M: Message + Default>(body: &[u8]) -> Result<M, ApiError> {
     M::decode(body).map_err(|_| ApiError::new(ErrorCode::BadRequest, "malformed request"))
 }
 
+fn status_name(status: ProposalStatus) -> &'static str {
+    match status {
+        ProposalStatus::Recorded => "recorded",
+        ProposalStatus::AlreadyRecorded => "already_recorded",
+    }
+}
+
 fn digest(bytes: &[u8], what: &'static str) -> Result<[u8; 32], ApiError> {
     bytes
         .try_into()
         .map_err(|_| ApiError::new(ErrorCode::BadRequest, what))
 }
 
-fn log_entry(entry: LogEntry) -> pb::LogEntry {
+/// The protobuf form of a log entry; commits carry their light-member
+/// proofs when `light` is set.
+fn log_entry(entry: LogEntry, light: bool) -> pb::LogEntry {
     pb::LogEntry {
         seq: entry.seq,
         epoch: entry.epoch,
         accepted_at_ms: entry.accepted_at_ms,
         body: Some(match entry.body {
-            LogBody::Commit { commit, group_info } => {
-                pb::log_entry::Body::Commit(pb::CommitEntry { commit, group_info })
-            }
+            LogBody::Commit {
+                commit,
+                group_info,
+                light: proofs,
+            } => pb::log_entry::Body::Commit(pb::CommitEntry {
+                commit,
+                group_info,
+                light: if light { proofs } else { Vec::new() },
+            }),
             LogBody::Message { envelope, .. } => pb::log_entry::Body::Envelope(envelope),
             LogBody::Proposal { proposal } => pb::log_entry::Body::Proposal(proposal),
+            LogBody::JoinRequest { request } => pb::log_entry::Body::JoinRequest(request),
         }),
     }
 }
@@ -183,16 +201,21 @@ pub fn handle_room_request(
                 epoch: info.epoch,
                 group_info: info.snapshot.group_info,
                 tree: info.snapshot.tree,
-                roster: info.snapshot.roster,
+                registry: info.snapshot.registry,
                 pending_removals: info.pending_removals,
+                pending_joins: info.pending_joins,
                 head_seq: info.head_seq,
-                vacant: info.vacant,
             }))
         }
         Route::PublishCommit => {
             let request: pb::PublishCommitRequest = decode(body)?;
-            let (entry, record) = room
-                .publish_commit(&request.commit, &request.group_info, now_ms)
+            let (entry, _, record) = room
+                .publish_commit(
+                    &request.commit,
+                    &request.group_info,
+                    &request.welcomes,
+                    now_ms,
+                )
                 .map_err(room_error)?;
             room.prune(now_ms);
             Ok(Handled {
@@ -213,30 +236,74 @@ pub fn handle_room_request(
             };
             let page = room.log_after(request.after_seq, limit as usize);
             Ok(Handled::reply(&pb::FetchLogResponse {
-                entries: page.entries.into_iter().map(log_entry).collect(),
+                entries: page
+                    .entries
+                    .into_iter()
+                    .map(|entry| log_entry(entry, request.light))
+                    .collect(),
                 head_seq: page.head_seq,
                 first_seq: page.first_seq,
             }))
         }
         Route::SubmitRemoveProposal => {
             let request: pb::SubmitRemoveProposalRequest = decode(body)?;
-            let (status, vacant, record) = room
+            let (status, record) = room
                 .submit_remove_proposal(&request.proposal, now_ms)
                 .map_err(room_error)?;
             let new_head = record.as_ref().map(|_| room.head_seq());
-            let status = match status {
-                cityg_core::ledger::ProposalStatus::Recorded => "recorded",
-                cityg_core::ledger::ProposalStatus::AlreadyRecorded => "already_recorded",
-            };
             Ok(Handled {
                 body: pb::SubmitRemoveProposalResponse {
-                    status: status.to_string(),
-                    vacant,
+                    status: status_name(status).to_string(),
                 }
                 .encode_to_vec(),
                 record,
                 new_head,
             })
+        }
+        Route::SubmitJoinRequest => {
+            let request: pb::SubmitJoinRequestRequest = decode(body)?;
+            let (reference, status, record) = room
+                .submit_join_request(&request.request, now_ms)
+                .map_err(room_error)?;
+            let new_head = record.as_ref().map(|_| room.head_seq());
+            Ok(Handled {
+                body: pb::SubmitJoinRequestResponse {
+                    request_ref: reference.to_vec(),
+                    status: status_name(status).to_string(),
+                }
+                .encode_to_vec(),
+                record,
+                new_head,
+            })
+        }
+        Route::JoinStatus => {
+            let request: pb::JoinStatusRequest = decode(body)?;
+            let reference = digest(&request.request_ref, "request ref must be 32 bytes")?;
+            let progress = room.join_progress(&reference);
+            let (status, epoch, welcome) = match progress.status {
+                JoinStatus::Pending => ("pending", 0, Vec::new()),
+                JoinStatus::Committed { epoch, welcome } => ("committed", epoch, welcome),
+                JoinStatus::Unknown => ("unknown", 0, Vec::new()),
+            };
+            let light_join = if request.light {
+                room.light_join(&reference)
+                    .map_err(room_error)?
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            Ok(Handled::reply(&pb::JoinStatusResponse {
+                status: status.to_string(),
+                epoch,
+                welcome,
+                commit: progress.commit.map(|(commit, group_info)| pb::CommitEntry {
+                    commit,
+                    group_info,
+                    light: Vec::new(),
+                }),
+                current_epoch: progress.current_epoch,
+                light_join,
+            }))
         }
         Route::PublishInvite => {
             let request: pb::PublishInviteRequest = decode(body)?;
@@ -246,6 +313,20 @@ pub fn handle_room_request(
             Ok(Handled {
                 body: pb::PublishInviteResponse {
                     invite_id: id.to_vec(),
+                }
+                .encode_to_vec(),
+                record: Some(record),
+                new_head: None,
+            })
+        }
+        Route::RevokeInvite => {
+            let request: pb::RevokeInviteRequest = decode(body)?;
+            let (dropped, record) = room
+                .revoke_invite(&request.revocation)
+                .map_err(room_error)?;
+            Ok(Handled {
+                body: pb::RevokeInviteResponse {
+                    dropped: dropped.iter().map(|reference| reference.to_vec()).collect(),
                 }
                 .encode_to_vec(),
                 record: Some(record),
@@ -327,6 +408,11 @@ pub fn handle_room_request(
         Route::Aliases => Ok(Handled::reply(&pb::AliasesResponse {
             bindings: room.aliases(),
         })),
+        Route::LeafProofs => {
+            let request: pb::LeafProofsRequest = decode(body)?;
+            let (epoch, proofs) = room.leaf_proofs(&request.leaves).map_err(room_error)?;
+            Ok(Handled::reply(&pb::LeafProofsResponse { epoch, proofs }))
+        }
     }
 }
 

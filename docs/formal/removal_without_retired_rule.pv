@@ -1,4 +1,4 @@
-(* Sanity check: without retired devices (section 7), the removed member
+(* Sanity check: without retired admissions (section 7), the removed member
    joins again with the admission it kept and learns the secret of the next
    epoch. Expected result: false.
    Run: proverif -lib cityg.pvl removal_without_retired_rule.pv *)

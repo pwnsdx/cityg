@@ -38,15 +38,15 @@ impl AppModel {
             Self::on_copy_room_identity,
             cx,
         ))
-        .child(self.session_row("Profile", "City-G v0.2 (ML-KEM-768, ML-DSA-87)"))
+        .child(self.session_row("Profile", "City-G v0.3 (X-Wing, ML-DSA-65)"))
         .child(self.session_row(
             "Epoch",
             &format!(
-                "{} · slot {} of {} · {} member(s)",
+                "{} · leaf {} · {} of {} member(s)",
                 session.view.epoch,
-                session.view.slot,
-                session.view.n_max,
-                session.view.roster.len()
+                session.view.me.leaf,
+                session.view.roster.len(),
+                session.view.capacity
             ),
         ))
         .child(self.session_row(

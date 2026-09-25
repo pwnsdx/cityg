@@ -1,14 +1,14 @@
-//! Message plane v3 (audit P-6; fixes M-01, M-02, M-03 and H-10).
+//! Message plane v4 (audit P-6; fixes M-01, M-02, M-03 and H-10).
 //!
 //! ```text
-//! FramedContent   := ["city-g/msg/v3", gid, epoch, sender_leaf_id, generation,
-//!                     content_type, authenticated_data, signed_timestamp_ms,
-//!                     plaintext]
-//! signature       := ML-DSA-87.Sign(sender_sk, CBOR_det(FramedContent),
-//!                                   ctx = "city-g/msg/v3")
+//! FramedContent   := ["city-g/msg/v4", gid, epoch, sender_leaf, sender_since,
+//!                     generation, content_type, authenticated_data,
+//!                     signed_timestamp_ms, plaintext]
+//! signature       := ML-DSA-65.Sign(sender_sk, CBOR_det(FramedContent),
+//!                                   ctx = "city-g/msg/v4")
 //! epoch_ref       := H_L("msg/epoch-ref", [gid, epoch])
-//! EnvelopeHeader  := ["city-g-msg-v3", epoch_ref, sender_leaf_id, generation,
-//!                     key_commitment]
+//! EnvelopeHeader  := ["city-g-msg-v4", epoch_ref, sender_leaf, sender_since,
+//!                     generation, key_commitment]
 //! Envelope        := [EnvelopeHeader..., ciphertext]
 //! ciphertext      := ChaCha20-Poly1305(key_g, nonce_g,
 //!                        aad = CBOR_det(EnvelopeHeader),
@@ -16,10 +16,11 @@
 //! ```
 //!
 //! **Per-sender ratchet.** When an epoch becomes active, every member derives
-//! one chain per roster member and erases `msg_secret`:
+//! one chain per member of the epoch and erases `msg_secret`:
 //!
 //! ```text
-//! sender_secret_0 := ExpandLabel(msg_secret_n, "msg sender", sender_leaf_id, 32)
+//! sender_secret_0 := ExpandLabel(msg_secret_n, "msg sender",
+//!                                CBOR_det([sender_leaf, sender_since]), 32)
 //! sender_secret_{g+1} := DeriveSecret(sender_secret_g, "msg next")
 //! key_g   := ExpandLabel(sender_secret_g, "msg key", h'', 32)
 //! nonce_g := ExpandLabel(sender_secret_g, "msg nonce", h'', 12)
@@ -33,11 +34,12 @@
 //! skipped generations and accept at most [`MAX_FORWARD_GENERATIONS`] ahead;
 //! a key is deleted once used, so a replayed or too-old generation has no key
 //! and is rejected (M-01). The key commitment makes the ciphertext commit to
-//! the key. Receivers check that the sender is in the roster of the epoch
-//! and verify its signature before releasing the plaintext, and applications
-//! display `signed_timestamp_ms` (H-10).
+//! the key. Receivers check that the sender is a member of the epoch (it has
+//! a chain) and verify its signature under the device key it held in that
+//! epoch before releasing the plaintext, and applications display
+//! `signed_timestamp_ms` (H-10).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -53,13 +55,12 @@ use crate::cbor::{
 use crate::error::{CoreError, CoreResult};
 use crate::hash::{Digest, derive_secret, digest_eq, expand_label_into, h_l};
 use crate::identity::{DeviceIdentity, verify_signature};
-use crate::roster::Roster;
-use crate::tree::next;
+use crate::tree::{MemberRef, next};
 
 /// Label of framed message content.
-pub const MESSAGE_LABEL: &str = "city-g/msg/v3";
+pub const MESSAGE_LABEL: &str = "city-g/msg/v4";
 /// Label of a message envelope.
-pub const ENVELOPE_LABEL: &str = "city-g-msg-v3";
+pub const ENVELOPE_LABEL: &str = "city-g-msg-v4";
 /// Largest plaintext of one message.
 pub const MAX_PLAINTEXT_BYTES: usize = 256 * 1024;
 /// Largest authenticated data of one message.
@@ -71,8 +72,12 @@ pub const MAX_ENVELOPE_BYTES: usize =
 pub const MAX_FORWARD_GENERATIONS: u32 = 1024;
 /// Keys of skipped generations kept per sender.
 pub const MAX_SKIPPED_KEYS: usize = 256;
-/// How long the previous epoch's keys are kept to decrypt late messages.
+/// How long the keys of an epoch are kept, after the next epoch became
+/// active, to decrypt late messages.
 pub const GRACE_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// Number of previous epochs whose messages are still accepted during the
+/// grace window.
+pub const MAX_GRACE_EPOCHS: usize = 4;
 
 /// `epoch_ref := H_L("msg/epoch-ref", [gid, epoch])`.
 pub fn epoch_ref(gid: &Digest, epoch: u64) -> CoreResult<Digest> {
@@ -83,7 +88,7 @@ pub fn epoch_ref(gid: &Digest, epoch: u64) -> CoreResult<Digest> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnvelopeHeader {
     pub epoch_ref: Digest,
-    pub sender_leaf_id: Digest,
+    pub sender: MemberRef,
     pub generation: u32,
     pub key_commitment: Digest,
 }
@@ -93,7 +98,8 @@ impl EnvelopeHeader {
         vec![
             text(ENVELOPE_LABEL),
             bytes(&self.epoch_ref),
-            bytes(&self.sender_leaf_id),
+            uint(u64::from(self.sender.leaf)),
+            uint(self.sender.since),
             uint(u64::from(self.generation)),
             bytes(&self.key_commitment),
         ]
@@ -124,14 +130,17 @@ impl Envelope {
     pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
         let mut items = expect_array(
             decode(encoded, MAX_ENVELOPE_BYTES, "envelope")?,
-            6,
+            7,
             "envelope",
         )?
         .into_iter();
         expect_label(&next(&mut items, "envelope")?, ENVELOPE_LABEL, "envelope")?;
         let header = EnvelopeHeader {
             epoch_ref: expect_bytes32(next(&mut items, "envelope")?, "envelope epoch")?,
-            sender_leaf_id: expect_bytes32(next(&mut items, "envelope")?, "envelope sender")?,
+            sender: MemberRef {
+                leaf: expect_u32(&next(&mut items, "envelope")?, "envelope sender")?,
+                since: expect_uint(&next(&mut items, "envelope")?, "envelope sender")?,
+            },
             generation: expect_u32(&next(&mut items, "envelope")?, "envelope generation")?,
             key_commitment: expect_bytes32(next(&mut items, "envelope")?, "envelope commitment")?,
         };
@@ -145,7 +154,7 @@ impl Envelope {
 pub struct FramedContent {
     pub gid: Digest,
     pub epoch: u64,
-    pub sender_leaf_id: Digest,
+    pub sender: MemberRef,
     pub generation: u32,
     pub content_type: u64,
     pub authenticated_data: Vec<u8>,
@@ -159,7 +168,8 @@ impl FramedContent {
             text(MESSAGE_LABEL),
             bytes(&self.gid),
             uint(self.epoch),
-            bytes(&self.sender_leaf_id),
+            uint(u64::from(self.sender.leaf)),
+            uint(self.sender.since),
             uint(u64::from(self.generation)),
             uint(self.content_type),
             bytes(&self.authenticated_data),
@@ -171,7 +181,7 @@ impl FramedContent {
     fn decode(encoded: &[u8]) -> CoreResult<Self> {
         let mut items = expect_array(
             decode(encoded, MAX_ENVELOPE_BYTES, "framed content")?,
-            9,
+            10,
             "framed content",
         )?
         .into_iter();
@@ -183,7 +193,10 @@ impl FramedContent {
         Ok(Self {
             gid: expect_bytes32(next(&mut items, "framed content")?, "framed content gid")?,
             epoch: expect_uint(&next(&mut items, "framed content")?, "framed content epoch")?,
-            sender_leaf_id: expect_bytes32(next(&mut items, "framed content")?, "framed sender")?,
+            sender: MemberRef {
+                leaf: expect_u32(&next(&mut items, "framed content")?, "framed sender")?,
+                since: expect_uint(&next(&mut items, "framed content")?, "framed sender")?,
+            },
             generation: expect_u32(&next(&mut items, "framed content")?, "framed generation")?,
             content_type: expect_uint(&next(&mut items, "framed content")?, "content type")?,
             authenticated_data: expect_bytes(next(&mut items, "framed content")?, "framed aad")?,
@@ -197,9 +210,9 @@ impl FramedContent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceivedMessage {
     pub epoch: u64,
-    pub sender_leaf_id: Digest,
+    pub sender: MemberRef,
+    /// Device key the sender signed with (its key in the message's epoch).
     pub sender_device_pk: Vec<u8>,
-    pub sender_slot: u32,
     pub generation: u32,
     pub content_type: u64,
     pub authenticated_data: Vec<u8>,
@@ -262,9 +275,14 @@ struct ChainStep {
 }
 
 impl SenderChain {
-    fn new(msg_secret: &[u8; 32], sender_leaf_id: &Digest) -> CoreResult<Self> {
+    fn new(msg_secret: &[u8; 32], sender: MemberRef) -> CoreResult<Self> {
         let mut secret = [0u8; 32];
-        expand_label_into(msg_secret, "msg sender", sender_leaf_id, &mut secret)?;
+        expand_label_into(
+            msg_secret,
+            "msg sender",
+            &encode(&sender.to_value())?,
+            &mut secret,
+        )?;
         Ok(Self {
             next_generation: 0,
             secret,
@@ -379,8 +397,8 @@ pub struct EpochMessages {
     gid: Digest,
     epoch: u64,
     epoch_ref: Digest,
-    own_leaf_id: Digest,
-    chains: BTreeMap<Digest, SenderChain>,
+    own: MemberRef,
+    chains: BTreeMap<MemberRef, SenderChain>,
 }
 
 impl core::fmt::Debug for EpochMessages {
@@ -393,32 +411,27 @@ impl core::fmt::Debug for EpochMessages {
 }
 
 impl EpochMessages {
-    /// Derive one chain per member of `roster` from `msg_secret`. The caller
-    /// erases `msg_secret` afterwards.
+    /// Derive one chain per member of the epoch from `msg_secret`. The
+    /// caller erases `msg_secret` afterwards.
     pub fn new(
         gid: &Digest,
         epoch: u64,
         msg_secret: &[u8; 32],
-        roster: &Roster,
-        own_leaf_id: &Digest,
+        members: impl IntoIterator<Item = MemberRef>,
+        own: MemberRef,
     ) -> CoreResult<Self> {
-        let chains = roster
-            .members()
-            .map(|member| {
-                Ok((
-                    member.leaf_id,
-                    SenderChain::new(msg_secret, &member.leaf_id)?,
-                ))
-            })
+        let chains = members
+            .into_iter()
+            .map(|member| Ok((member, SenderChain::new(msg_secret, member)?)))
             .collect::<CoreResult<BTreeMap<_, _>>>()?;
-        if !chains.contains_key(own_leaf_id) {
-            return Err(CoreError::Invalid("own leaf is not in the roster"));
+        if !chains.contains_key(&own) {
+            return Err(CoreError::Invalid("own leaf is not a member of the epoch"));
         }
         Ok(Self {
             gid: *gid,
             epoch,
             epoch_ref: epoch_ref(gid, epoch)?,
-            own_leaf_id: *own_leaf_id,
+            own,
             chains,
         })
     }
@@ -439,11 +452,23 @@ impl EpochMessages {
     #[must_use]
     pub fn next_own_generation(&self) -> u32 {
         self.chains
-            .get(&self.own_leaf_id)
+            .get(&self.own)
             .map_or(0, |chain| chain.next_generation)
     }
 
-    /// Encrypt and sign a message from this member.
+    /// Whether `member` was a member of the epoch (it has a chain).
+    #[must_use]
+    pub fn has_sender(&self, member: MemberRef) -> bool {
+        self.chains.contains_key(&member)
+    }
+
+    /// Occupancies of the members of the epoch.
+    pub fn senders(&self) -> impl Iterator<Item = MemberRef> + '_ {
+        self.chains.keys().copied()
+    }
+
+    /// Encrypt and sign a message from this member. `identity` holds the
+    /// member's device key; the session checks it owns the leaf.
     #[allow(clippy::too_many_arguments)]
     pub fn encrypt(
         &mut self,
@@ -460,12 +485,9 @@ impl EpochMessages {
         if authenticated_data.len() > MAX_AUTHENTICATED_DATA_BYTES {
             return Err(CoreError::TooLarge("message authenticated data"));
         }
-        if identity.leaf_id(&self.gid)? != self.own_leaf_id {
-            return Err(CoreError::Invalid("identity does not own this session"));
-        }
-        let sender = self.own_leaf_id;
+        let sender = self.own;
         self.seal(
-            &sender,
+            sender,
             identity,
             content_type,
             authenticated_data,
@@ -479,7 +501,7 @@ impl EpochMessages {
     #[allow(clippy::too_many_arguments)]
     fn seal(
         &mut self,
-        sender: &Digest,
+        sender: MemberRef,
         identity: &DeviceIdentity,
         content_type: u64,
         authenticated_data: &[u8],
@@ -489,14 +511,14 @@ impl EpochMessages {
     ) -> CoreResult<Vec<u8>> {
         let chain = self
             .chains
-            .get(sender)
-            .ok_or(CoreError::Invalid("own leaf is not in the roster"))?;
+            .get(&sender)
+            .ok_or(CoreError::Invalid("own leaf is not a member of the epoch"))?;
         let step = chain.lookup(chain.next_generation)?;
         let generation = step.generation;
         let framed = FramedContent {
             gid: self.gid,
             epoch: self.epoch,
-            sender_leaf_id: *sender,
+            sender,
             generation,
             content_type,
             authenticated_data: authenticated_data.to_vec(),
@@ -504,11 +526,11 @@ impl EpochMessages {
             plaintext: plaintext.to_vec(),
         }
         .encode()?;
-        let signature = identity.sign(SignatureContext::MESSAGE_V3, &framed, rng)?;
+        let signature = identity.sign(SignatureContext::MESSAGE, &framed, rng)?;
         let inner = Zeroizing::new(encode(&array(vec![bytes(&framed), bytes(&signature)]))?);
         let header = EnvelopeHeader {
             epoch_ref: self.epoch_ref,
-            sender_leaf_id: *sender,
+            sender,
             generation,
             key_commitment: step.key.commitment()?,
         };
@@ -525,7 +547,7 @@ impl EpochMessages {
             )
             .map_err(|_| CoreError::Crypto("message encryption"))?;
         let envelope = Envelope { header, ciphertext }.encode()?;
-        if let Some(chain) = self.chains.get_mut(sender) {
+        if let Some(chain) = self.chains.get_mut(&sender) {
             chain.apply(step);
             // A sender never keeps keys of its own past generations.
             chain.skipped.clear();
@@ -533,34 +555,25 @@ impl EpochMessages {
         Ok(envelope)
     }
 
-    /// Decrypt and authenticate an envelope of this epoch. `roster` is the
-    /// roster of the epoch; `blocked` lists leaves with a recorded removal
-    /// proposal, whose messages are rejected.
+    /// Decrypt and authenticate an envelope of this epoch. The caller checks
+    /// that the sender may still send (a member of the current epoch without
+    /// a recorded removal) and passes `sender_device_pk`, the device key the
+    /// sender held in this epoch.
     pub fn decrypt(
         &mut self,
         envelope: &Envelope,
-        roster: &Roster,
-        blocked: &BTreeSet<Digest>,
+        sender_device_pk: &[u8],
     ) -> CoreResult<ReceivedMessage> {
         let header = &envelope.header;
         if !digest_eq(&header.epoch_ref, &self.epoch_ref) {
             return Err(CoreError::Invalid("message for another epoch"));
         }
-        if header.sender_leaf_id == self.own_leaf_id {
+        if header.sender == self.own {
             return Err(CoreError::Invalid("message sent by this member"));
-        }
-        let sender =
-            roster
-                .member_by_leaf(&header.sender_leaf_id)
-                .ok_or(CoreError::Unauthorized(
-                    "sender is not a member of the epoch",
-                ))?;
-        if blocked.contains(&header.sender_leaf_id) {
-            return Err(CoreError::Unauthorized("sender has a pending removal"));
         }
         let chain = self
             .chains
-            .get(&header.sender_leaf_id)
+            .get(&header.sender)
             .ok_or(CoreError::Unauthorized(
                 "sender is not a member of the epoch",
             ))?;
@@ -592,7 +605,7 @@ impl EpochMessages {
         let framed = FramedContent::decode(&framed_bytes)?;
         if framed.gid != self.gid
             || framed.epoch != self.epoch
-            || framed.sender_leaf_id != header.sender_leaf_id
+            || framed.sender != header.sender
             || framed.generation != header.generation
         {
             return Err(CoreError::Invalid(
@@ -600,24 +613,23 @@ impl EpochMessages {
             ));
         }
         verify_signature(
-            &sender.device_pk,
-            SignatureContext::MESSAGE_V3,
+            sender_device_pk,
+            SignatureContext::MESSAGE,
             &framed_bytes,
             &signature,
             "message",
         )?;
         let received = ReceivedMessage {
             epoch: self.epoch,
-            sender_leaf_id: framed.sender_leaf_id,
-            sender_device_pk: sender.device_pk.clone(),
-            sender_slot: sender.slot,
+            sender: framed.sender,
+            sender_device_pk: sender_device_pk.to_vec(),
             generation: framed.generation,
             content_type: framed.content_type,
             authenticated_data: framed.authenticated_data,
             signed_timestamp_ms: framed.signed_timestamp_ms,
             plaintext: framed.plaintext,
         };
-        if let Some(chain) = self.chains.get_mut(&header.sender_leaf_id) {
+        if let Some(chain) = self.chains.get_mut(&header.sender) {
             chain.apply(step);
         }
         Ok(received)
@@ -628,11 +640,11 @@ impl EpochMessages {
         array(vec![
             bytes(&self.gid),
             uint(self.epoch),
-            bytes(&self.own_leaf_id),
+            self.own.to_value(),
             array(
                 self.chains
                     .iter()
-                    .map(|(leaf, chain)| array(vec![bytes(leaf), chain.to_value()]))
+                    .map(|(member, chain)| array(vec![member.to_value(), chain.to_value()]))
                     .collect(),
             ),
         ])
@@ -643,24 +655,24 @@ impl EpochMessages {
         let mut items = expect_array(value, 4, "epoch messages")?.into_iter();
         let gid = expect_bytes32(next(&mut items, "epoch messages")?, "messages gid")?;
         let epoch = expect_uint(&next(&mut items, "epoch messages")?, "messages epoch")?;
-        let own_leaf_id = expect_bytes32(next(&mut items, "epoch messages")?, "messages leaf")?;
+        let own = MemberRef::from_value(next(&mut items, "epoch messages")?)?;
         let mut chains = BTreeMap::new();
         for entry in expect_list(next(&mut items, "epoch messages")?, "sender chains")? {
             let mut fields = expect_array(entry, 2, "sender chain entry")?.into_iter();
-            let leaf = expect_bytes32(next(&mut fields, "sender chain entry")?, "chain leaf")?;
+            let member = MemberRef::from_value(next(&mut fields, "sender chain entry")?)?;
             let chain = SenderChain::from_value(next(&mut fields, "sender chain entry")?)?;
-            if chains.insert(leaf, chain).is_some() {
+            if chains.insert(member, chain).is_some() {
                 return Err(CoreError::Malformed("duplicate sender chain"));
             }
         }
-        if !chains.contains_key(&own_leaf_id) {
+        if !chains.contains_key(&own) {
             return Err(CoreError::Malformed("own sender chain"));
         }
         Ok(Self {
             gid,
             epoch,
             epoch_ref: epoch_ref(&gid, epoch)?,
-            own_leaf_id,
+            own,
             chains,
         })
     }
@@ -735,145 +747,88 @@ impl ReplayWindow {
     }
 }
 
-/// Sender set helper: leaf ids of `roster` members.
-#[must_use]
-pub fn roster_leaves(roster: &Roster) -> BTreeSet<Digest> {
-    roster.members().map(|member| member.leaf_id).collect()
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::identity::leaf_id;
-    use crate::roster::MemberRecord;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    const ALICE: MemberRef = MemberRef { leaf: 0, since: 0 };
+    const BOB: MemberRef = MemberRef { leaf: 1, since: 2 };
+    const CAROL: MemberRef = MemberRef { leaf: 2, since: 3 };
 
     struct Fixture {
         gid: Digest,
         alice: DeviceIdentity,
         bob: DeviceIdentity,
-        roster: Roster,
     }
 
     fn fixture() -> Fixture {
-        let alice = DeviceIdentity::from_seed(&[1; 32]);
-        let bob = DeviceIdentity::from_seed(&[2; 32]);
-        let gid = [5; 32];
-        let mut roster = Roster::genesis(&gid, alice.public_key()).unwrap();
-        roster
-            .add_member(MemberRecord {
-                leaf_id: leaf_id(&gid, bob.public_key()).unwrap(),
-                device_pk: bob.public_key().to_vec(),
-                slot: 1,
-                generation: 1,
-                admission_hash: [0; 32],
-            })
-            .unwrap();
         Fixture {
-            gid,
-            alice,
-            bob,
-            roster,
+            gid: [5; 32],
+            alice: DeviceIdentity::from_seed(&[1; 32]),
+            bob: DeviceIdentity::from_seed(&[2; 32]),
         }
     }
 
-    fn pair(f: &Fixture, epoch: u64) -> (EpochMessages, EpochMessages) {
-        let secret = [9u8; 32];
-        let a = EpochMessages::new(
-            &f.gid,
-            epoch,
-            &secret,
-            &f.roster,
-            &f.alice.leaf_id(&f.gid).unwrap(),
-        )
-        .unwrap();
-        let b = EpochMessages::new(
-            &f.gid,
-            epoch,
-            &secret,
-            &f.roster,
-            &f.bob.leaf_id(&f.gid).unwrap(),
-        )
-        .unwrap();
-        (a, b)
+    fn view(f: &Fixture, epoch: u64, own: MemberRef) -> EpochMessages {
+        EpochMessages::new(&f.gid, epoch, &[9u8; 32], [ALICE, BOB, CAROL], own).unwrap()
     }
 
     #[test]
     fn messages_round_trip_with_sender_authentication() {
         let mut rng = ChaCha20Rng::seed_from_u64(1);
         let f = fixture();
-        let (mut alice, mut bob) = pair(&f, 3);
-        let blocked = BTreeSet::new();
+        let (mut alice, mut bob) = (view(&f, 3, ALICE), view(&f, 3, BOB));
         let sealed = alice
             .encrypt(&f.alice, 1, b"ad", b"hello", 1234, &mut rng)
             .unwrap();
         assert_eq!(alice.next_own_generation(), 1);
         let envelope = Envelope::decode(&sealed).unwrap();
         assert_eq!(envelope.encode().unwrap(), sealed);
-        let received = bob.decrypt(&envelope, &f.roster, &blocked).unwrap();
+        assert_eq!(envelope.header.sender, ALICE);
+        let received = bob.decrypt(&envelope, f.alice.public_key()).unwrap();
         assert_eq!(received.plaintext, b"hello");
         assert_eq!(received.authenticated_data, b"ad");
         assert_eq!(received.signed_timestamp_ms, 1234);
         assert_eq!(received.sender_device_pk, f.alice.public_key());
-        assert_eq!(received.sender_slot, 0);
+        assert_eq!(received.sender, ALICE);
         assert_eq!(received.epoch, 3);
         // Replays have no key any more.
         assert_eq!(
-            bob.decrypt(&envelope, &f.roster, &blocked),
+            bob.decrypt(&envelope, f.alice.public_key()),
             Err(CoreError::Replay)
         );
         // Own messages are not decrypted.
-        assert!(alice.decrypt(&envelope, &f.roster, &blocked).is_err());
+        assert!(alice.decrypt(&envelope, f.alice.public_key()).is_err());
+        assert!(bob.has_sender(CAROL) && !bob.has_sender(MemberRef { leaf: 2, since: 4 }));
+        assert_eq!(bob.senders().count(), 3);
     }
 
     #[test]
     fn out_of_order_delivery_and_window_bounds() {
         let mut rng = ChaCha20Rng::seed_from_u64(2);
         let f = fixture();
-        let (mut alice, mut bob) = pair(&f, 1);
-        let blocked = BTreeSet::new();
+        let (mut alice, mut bob) = (view(&f, 1, ALICE), view(&f, 1, BOB));
+        let key = f.alice.public_key();
         let sealed: Vec<Envelope> = (0..4)
             .map(|i| {
                 Envelope::decode(&alice.encrypt(&f.alice, 1, b"", &[i], 0, &mut rng).unwrap())
                     .unwrap()
             })
             .collect();
-        assert_eq!(
-            bob.decrypt(&sealed[3], &f.roster, &blocked)
-                .unwrap()
-                .plaintext,
-            [3]
-        );
-        assert_eq!(
-            bob.decrypt(&sealed[1], &f.roster, &blocked)
-                .unwrap()
-                .plaintext,
-            [1]
-        );
-        assert_eq!(
-            bob.decrypt(&sealed[1], &f.roster, &blocked),
-            Err(CoreError::Replay)
-        );
-        assert_eq!(
-            bob.decrypt(&sealed[0], &f.roster, &blocked)
-                .unwrap()
-                .plaintext,
-            [0]
-        );
-        assert_eq!(
-            bob.decrypt(&sealed[2], &f.roster, &blocked)
-                .unwrap()
-                .plaintext,
-            [2]
-        );
+        assert_eq!(bob.decrypt(&sealed[3], key).unwrap().plaintext, [3]);
+        assert_eq!(bob.decrypt(&sealed[1], key).unwrap().plaintext, [1]);
+        assert_eq!(bob.decrypt(&sealed[1], key), Err(CoreError::Replay));
+        assert_eq!(bob.decrypt(&sealed[0], key).unwrap().plaintext, [0]);
+        assert_eq!(bob.decrypt(&sealed[2], key).unwrap().plaintext, [2]);
 
         // A generation too far ahead is refused without advancing the chain.
         let mut far = sealed[0].clone();
         far.header.generation = 4 + MAX_FORWARD_GENERATIONS + 1;
         assert_eq!(
-            bob.decrypt(&far, &f.roster, &blocked),
+            bob.decrypt(&far, key),
             Err(CoreError::TooLarge("message generation gap"))
         );
         // A forged commitment or ciphertext does not burn the key.
@@ -882,51 +837,42 @@ mod tests {
         let mut forged = next.clone();
         forged.header.key_commitment = [0; 32];
         assert_eq!(
-            bob.decrypt(&forged, &f.roster, &blocked),
+            bob.decrypt(&forged, key),
             Err(CoreError::Decrypt("key commitment"))
         );
         let mut flipped = next.clone();
         flipped.ciphertext[0] ^= 1;
         assert_eq!(
-            bob.decrypt(&flipped, &f.roster, &blocked),
+            bob.decrypt(&flipped, key),
             Err(CoreError::Decrypt("message"))
         );
-        assert_eq!(
-            bob.decrypt(&next, &f.roster, &blocked).unwrap().plaintext,
-            b"x"
-        );
+        assert_eq!(bob.decrypt(&next, key).unwrap().plaintext, b"x");
     }
 
     #[test]
-    fn membership_and_blocking_are_enforced() {
+    fn membership_epochs_and_sizes_are_enforced() {
         let mut rng = ChaCha20Rng::seed_from_u64(3);
         let f = fixture();
-        let (mut alice, mut bob) = pair(&f, 1);
+        let mut alice = view(&f, 1, ALICE);
         let sealed =
             Envelope::decode(&alice.encrypt(&f.alice, 1, b"", b"hi", 0, &mut rng).unwrap())
                 .unwrap();
-        let mut blocked = BTreeSet::new();
-        blocked.insert(f.alice.leaf_id(&f.gid).unwrap());
+        // An epoch in which alice was not a member has no chain for her.
+        let mut without_alice =
+            EpochMessages::new(&f.gid, 1, &[9u8; 32], [BOB, CAROL], BOB).unwrap();
         assert!(matches!(
-            bob.decrypt(&sealed, &f.roster, &blocked),
-            Err(CoreError::Unauthorized(_))
-        ));
-        let mut without_alice = f.roster.clone();
-        without_alice.grant_admin(f.bob.public_key()).unwrap();
-        without_alice.remove_member(0, 1).unwrap();
-        assert!(matches!(
-            bob.decrypt(&sealed, &without_alice, &BTreeSet::new()),
+            without_alice.decrypt(&sealed, f.alice.public_key()),
             Err(CoreError::Unauthorized(_))
         ));
         // Another epoch's keys do not apply.
-        let (_, mut other_epoch) = pair(&f, 2);
-        assert!(
-            other_epoch
-                .decrypt(&sealed, &f.roster, &BTreeSet::new())
-                .is_err()
+        let mut other_epoch = view(&f, 2, BOB);
+        assert!(other_epoch.decrypt(&sealed, f.alice.public_key()).is_err());
+        // A key other than the sender's does not verify.
+        let mut bob = view(&f, 1, BOB);
+        assert_eq!(
+            bob.decrypt(&sealed, f.bob.public_key()),
+            Err(CoreError::BadSignature("message"))
         );
-        // The wrong identity cannot send on alice's chain.
-        assert!(alice.encrypt(&f.bob, 1, b"", b"x", 0, &mut rng).is_err());
         assert!(
             alice
                 .encrypt(
@@ -951,82 +897,54 @@ mod tests {
                 )
                 .is_err()
         );
+        assert!(EpochMessages::new(&f.gid, 1, &[0; 32], [BOB], ALICE).is_err());
     }
 
     #[test]
     fn a_member_cannot_speak_for_another() {
         let mut rng = ChaCha20Rng::seed_from_u64(4);
         let f = fixture();
-        let carol = DeviceIdentity::from_seed(&[3; 32]);
-        let mut roster = f.roster.clone();
-        roster
-            .add_member(MemberRecord {
-                leaf_id: leaf_id(&f.gid, carol.public_key()).unwrap(),
-                device_pk: carol.public_key().to_vec(),
-                slot: 2,
-                generation: 1,
-                admission_hash: [0; 32],
-            })
-            .unwrap();
-        let secret = [9u8; 32];
-        let alice_leaf = f.alice.leaf_id(&f.gid).unwrap();
-        let bob_leaf = f.bob.leaf_id(&f.gid).unwrap();
-        let mut alice = EpochMessages::new(&f.gid, 1, &secret, &roster, &alice_leaf).unwrap();
-        let mut carol_view =
-            EpochMessages::new(&f.gid, 1, &secret, &roster, &carol.leaf_id(&f.gid).unwrap())
-                .unwrap();
+        let mut alice = view(&f, 1, ALICE);
+        let mut carol_view = view(&f, 1, CAROL);
         // Every member can derive bob's chain keys, but not bob's signature.
         let forged = alice
-            .seal(&bob_leaf, &f.alice, 1, b"", b"spoof", 0, &mut rng)
+            .seal(BOB, &f.alice, 1, b"", b"spoof", 0, &mut rng)
             .unwrap();
         assert_eq!(
-            carol_view.decrypt(
-                &Envelope::decode(&forged).unwrap(),
-                &roster,
-                &BTreeSet::new()
-            ),
+            carol_view.decrypt(&Envelope::decode(&forged).unwrap(), f.bob.public_key()),
             Err(CoreError::BadSignature("message"))
         );
         // The rejected forgery did not consume bob's key: his real message
         // at the same generation still decrypts.
-        let mut bob = EpochMessages::new(&f.gid, 1, &secret, &roster, &bob_leaf).unwrap();
+        let mut bob = view(&f, 1, BOB);
         let genuine = bob.encrypt(&f.bob, 1, b"", b"real", 0, &mut rng).unwrap();
         let received = carol_view
-            .decrypt(
-                &Envelope::decode(&genuine).unwrap(),
-                &roster,
-                &BTreeSet::new(),
-            )
+            .decrypt(&Envelope::decode(&genuine).unwrap(), f.bob.public_key())
             .unwrap();
         assert_eq!(received.plaintext, b"real");
-        assert!(alice.encrypt(&f.bob, 1, b"", b"x", 0, &mut rng).is_err());
+        // The framed sender must match the envelope.
+        let mut moved = Envelope::decode(&genuine).unwrap();
+        moved.header.sender = CAROL;
+        assert!(carol_view.decrypt(&moved, f.bob.public_key()).is_err());
     }
 
     #[test]
     fn state_persists_across_encoding() {
         let mut rng = ChaCha20Rng::seed_from_u64(5);
         let f = fixture();
-        let (mut alice, mut bob) = pair(&f, 1);
+        let (mut alice, mut bob) = (view(&f, 1, ALICE), view(&f, 1, BOB));
+        let key = f.alice.public_key();
         let first =
             Envelope::decode(&alice.encrypt(&f.alice, 1, b"", b"1", 0, &mut rng).unwrap()).unwrap();
         let second =
             Envelope::decode(&alice.encrypt(&f.alice, 1, b"", b"2", 0, &mut rng).unwrap()).unwrap();
-        bob.decrypt(&second, &f.roster, &BTreeSet::new()).unwrap();
+        bob.decrypt(&second, key).unwrap();
         let mut restored = EpochMessages::from_value(bob.to_value()).unwrap();
         assert_eq!(restored.epoch(), 1);
         assert_eq!(restored.epoch_ref(), bob.epoch_ref());
         assert!(format!("{restored:?}").contains("EpochMessages"));
-        assert_eq!(
-            restored
-                .decrypt(&first, &f.roster, &BTreeSet::new())
-                .unwrap()
-                .plaintext,
-            b"1"
-        );
-        assert_eq!(
-            restored.decrypt(&second, &f.roster, &BTreeSet::new()),
-            Err(CoreError::Replay)
-        );
+        assert_eq!(restored.decrypt(&first, key).unwrap().plaintext, b"1");
+        assert_eq!(restored.decrypt(&second, key), Err(CoreError::Replay));
         let alice_restored = EpochMessages::from_value(alice.to_value()).unwrap();
         assert_eq!(alice_restored.next_own_generation(), 2);
         assert!(EpochMessages::from_value(uint(1)).is_err());
@@ -1055,11 +973,10 @@ mod tests {
     }
 
     #[test]
-    fn epoch_refs_and_leaves() {
+    fn epoch_refs_differ() {
         let f = fixture();
         assert_ne!(epoch_ref(&f.gid, 1).unwrap(), epoch_ref(&f.gid, 2).unwrap());
-        assert_eq!(roster_leaves(&f.roster).len(), 2);
-        let missing = EpochMessages::new(&f.gid, 1, &[0; 32], &f.roster, &[7; 32]);
-        assert!(missing.is_err());
+        assert_eq!(MemberRef::from_value(BOB.to_value()).unwrap(), BOB);
+        assert!(MemberRef::from_value(uint(1)).is_err());
     }
 }

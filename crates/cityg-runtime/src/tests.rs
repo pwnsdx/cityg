@@ -3,8 +3,9 @@
 use cityg_core::admission::{SignedAdmission, SignedInvite, invite_id};
 use cityg_core::binding::{AliasBinding, SessionAuth};
 use cityg_core::identity::DeviceIdentity;
+use cityg_core::join::SignedJoinRequest;
 use cityg_core::proposal::SignedRemoveProposal;
-use cityg_core::session::{GroupSession, GroupSnapshot};
+use cityg_core::session::{CommitOptions, GroupSession, GroupSnapshot, PublishedCommit};
 use cityg_proto::pb;
 use cityg_server::{MemoryRoomStore, Room, RoomStore, restore_room};
 use prost::Message;
@@ -122,6 +123,7 @@ impl Client {
                     gid: self.gid(),
                     after_seq: self.seq,
                     limit: 0,
+                    light: false,
                 },
                 self.token.as_ref(),
             )
@@ -147,6 +149,9 @@ impl Client {
                 pb::log_entry::Body::Proposal(proposal) => {
                     session.add_pending_removal(&SignedRemoveProposal::decode(&proposal).unwrap());
                 }
+                pb::log_entry::Body::JoinRequest(request) => {
+                    SignedJoinRequest::decode(&request).unwrap();
+                }
             }
         }
         plaintexts
@@ -170,22 +175,72 @@ impl Client {
     }
 
     fn info(&self, host: &mut Host) -> pb::GroupInfoResponse {
-        let response = host
-            .call(
-                Route::GroupInfo,
-                &pb::GroupInfoRequest { gid: self.gid() },
-                None,
+        info(host, self.gid())
+    }
+
+    /// Commit every recorded proposal and publish the commit.
+    fn commit(&mut self, host: &mut Host) -> Result<PublishedCommit, ApiError> {
+        let info = self.info(host);
+        let removals: Vec<SignedRemoveProposal> = info
+            .pending_removals
+            .iter()
+            .map(|bytes| SignedRemoveProposal::decode(bytes).unwrap())
+            .collect();
+        let joins: Vec<SignedJoinRequest> = info
+            .pending_joins
+            .iter()
+            .map(|bytes| SignedJoinRequest::decode(bytes).unwrap())
+            .collect();
+        let (pending, published) = self
+            .session
+            .as_ref()
+            .unwrap()
+            .commit(
+                &self.identity,
+                CommitOptions {
+                    removals: &removals,
+                    joins: &joins,
+                    ..CommitOptions::default()
+                },
+                &mut self.rng,
             )
             .unwrap();
-        pb::GroupInfoResponse::decode(response.as_slice()).unwrap()
+        publish(host, self.gid(), &published)?;
+        self.session
+            .as_mut()
+            .unwrap()
+            .apply_own_commit(pending)
+            .unwrap();
+        Ok(published)
     }
+}
+
+fn info(host: &mut Host, gid: Vec<u8>) -> pb::GroupInfoResponse {
+    let response = host
+        .call(Route::GroupInfo, &pb::GroupInfoRequest { gid }, None)
+        .unwrap();
+    pb::GroupInfoResponse::decode(response.as_slice()).unwrap()
+}
+
+fn publish(host: &mut Host, gid: Vec<u8>, published: &PublishedCommit) -> Result<(), ApiError> {
+    host.call(
+        Route::PublishCommit,
+        &pb::PublishCommitRequest {
+            gid,
+            commit: published.commit.clone(),
+            group_info: published.group_info.clone(),
+            welcomes: published.welcomes.clone(),
+        },
+        None,
+    )
+    .map(|_| ())
 }
 
 fn snapshot(info: &pb::GroupInfoResponse) -> GroupSnapshot {
     GroupSnapshot {
         group_info: info.group_info.clone(),
         tree: info.tree.clone(),
-        roster: info.roster.clone(),
+        registry: info.registry.clone(),
     }
 }
 
@@ -254,6 +309,7 @@ fn a_group_lives_through_the_service() {
             &alice.identity,
             &invite_seed,
             host.now + 60_000,
+            2,
             &mut alice.rng,
         )
         .unwrap();
@@ -299,19 +355,21 @@ fn a_group_lives_through_the_service() {
     );
     let admission = SignedAdmission::with_invite(
         &bob.identity
-            .leaf_id(&gid.clone().try_into().unwrap())
+            .device_id(&gid.clone().try_into().unwrap())
             .unwrap(),
+        100,
         &fetched,
         &invite_seed,
         &mut bob.rng,
     )
     .unwrap();
     let info = alice.info(&mut host);
-    let (pending, join) = GroupSession::join(
+    let (pending, join) = GroupSession::join_external(
         &bob.identity,
         &snapshot(&info),
-        &[],
         admission,
+        &[],
+        &[],
         &mut bob.rng,
     )
     .unwrap();
@@ -322,6 +380,7 @@ fn a_group_lives_through_the_service() {
                 gid: gid.clone(),
                 commit: join.commit.clone(),
                 group_info: join.group_info.clone(),
+                welcomes: Vec::new(),
             },
             None,
         )
@@ -338,6 +397,7 @@ fn a_group_lives_through_the_service() {
                 gid: gid.clone(),
                 commit: join.commit,
                 group_info: join.group_info,
+                welcomes: Vec::new(),
             },
             None,
         )
@@ -388,6 +448,136 @@ fn a_group_lives_through_the_service() {
         vec![binding.encoded().to_vec()]
     );
 
+    // Carol asks to join with the same invite; Alice commits her request
+    // together with the next commit, and Carol opens her welcome.
+    let mut carol = Client::new(3);
+    let admission = SignedAdmission::with_invite(
+        &carol
+            .identity
+            .device_id(&gid.clone().try_into().unwrap())
+            .unwrap(),
+        100,
+        &fetched,
+        &invite_seed,
+        &mut carol.rng,
+    )
+    .unwrap();
+    let (request, secrets) =
+        GroupSession::request_join(&carol.identity, &admission, &mut carol.rng).unwrap();
+    let response = host
+        .call(
+            Route::SubmitJoinRequest,
+            &pb::SubmitJoinRequestRequest {
+                gid: gid.clone(),
+                request: request.encoded().to_vec(),
+            },
+            None,
+        )
+        .unwrap();
+    let response = pb::SubmitJoinRequestResponse::decode(response.as_slice()).unwrap();
+    assert_eq!(response.status, "recorded");
+    let join_status = |host: &mut Host| {
+        let response = host
+            .call(
+                Route::JoinStatus,
+                &pb::JoinStatusRequest {
+                    gid: gid.clone(),
+                    request_ref: response.request_ref.clone(),
+                    light: true,
+                },
+                None,
+            )
+            .unwrap();
+        pb::JoinStatusResponse::decode(response.as_slice()).unwrap()
+    };
+    assert_eq!(join_status(&mut host).status, "pending");
+    // The invite had two uses: a third joiner is refused.
+    let dave = DeviceIdentity::from_seed(&[4; 32]);
+    let spent = SignedAdmission::with_invite(
+        &dave.device_id(&gid.clone().try_into().unwrap()).unwrap(),
+        100,
+        &fetched,
+        &invite_seed,
+        &mut carol.rng,
+    )
+    .unwrap();
+    let (spent, _) = GroupSession::request_join(&dave, &spent, &mut carol.rng).unwrap();
+    assert_eq!(
+        host.call(
+            Route::SubmitJoinRequest,
+            &pb::SubmitJoinRequestRequest {
+                gid: gid.clone(),
+                request: spent.encoded().to_vec(),
+            },
+            None,
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Forbidden
+    );
+    alice.commit(&mut host).unwrap();
+    let status = join_status(&mut host);
+    assert_eq!(status.status, "committed");
+    assert_eq!(status.epoch, status.current_epoch);
+    // A light joiner gets its leaf proof, the registry and the occupancies.
+    let light_join = cityg_core::light::LightJoin::decode(&status.light_join).unwrap();
+    let commit = status.commit.unwrap();
+    assert!(light_join.joiner_proof.node.is_some());
+    assert_eq!(light_join.members.len(), 3);
+    carol.session = Some(
+        GroupSession::join_with_welcome(
+            &carol.identity,
+            &secrets,
+            &snapshot(&alice.info(&mut host)),
+            &commit.commit,
+            &status.welcome,
+        )
+        .unwrap(),
+    );
+    carol.seq = host.room.as_ref().unwrap().head_seq();
+    bob.sync(&mut host);
+    carol.open_session(&mut host);
+    alice.send(&mut host, b"hello carol").unwrap();
+    assert_eq!(carol.sync(&mut host), vec![b"hello carol".to_vec()]);
+    assert_eq!(
+        host.call(
+            Route::JoinStatus,
+            &pb::JoinStatusRequest {
+                gid: gid.clone(),
+                request_ref: vec![1; 3],
+                light: false,
+            },
+            None,
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::BadRequest
+    );
+
+    // Alice revokes the invite.
+    let revocation = alice
+        .session
+        .as_ref()
+        .unwrap()
+        .revoke_invite(&alice.identity, &id, &mut alice.rng)
+        .unwrap();
+    let revoked = host
+        .call(
+            Route::RevokeInvite,
+            &pb::RevokeInviteRequest {
+                gid: gid.clone(),
+                revocation: revocation.encoded().to_vec(),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        pb::RevokeInviteResponse::decode(revoked.as_slice())
+            .unwrap()
+            .dropped
+            .is_empty()
+    );
+
     // Bob leaves; Alice commits the recorded proposal.
     let leave = bob
         .session
@@ -407,61 +597,36 @@ fn a_group_lives_through_the_service() {
         .unwrap();
     let response = pb::SubmitRemoveProposalResponse::decode(response.as_slice()).unwrap();
     assert_eq!(response.status, "recorded");
-    assert!(!response.vacant);
     assert_eq!(
         bob.send(&mut host, b"leaving").unwrap_err().code,
         ErrorCode::Forbidden
     );
-    let info = alice.info(&mut host);
-    let pending_removals: Vec<SignedRemoveProposal> = info
-        .pending_removals
-        .iter()
-        .map(|bytes| SignedRemoveProposal::decode(bytes).unwrap())
-        .collect();
-    assert_eq!(pending_removals.len(), 1);
-    // A commit without the recorded proposal conflicts.
-    let (_, without) = alice
-        .session
-        .as_ref()
-        .unwrap()
-        .commit(&alice.identity, &[], &[], &mut alice.rng)
-        .unwrap();
-    assert_eq!(
-        host.call(
-            Route::PublishCommit,
-            &pb::PublishCommitRequest {
-                gid: gid.clone(),
-                commit: without.commit,
-                group_info: without.group_info,
-            },
-            None,
-        )
-        .unwrap_err()
-        .code,
-        ErrorCode::Conflict
-    );
-    let (pending, commit) = alice
-        .session
-        .as_ref()
-        .unwrap()
-        .commit(&alice.identity, &pending_removals, &[], &mut alice.rng)
-        .unwrap();
-    host.call(
-        Route::PublishCommit,
-        &pb::PublishCommitRequest {
-            gid: gid.clone(),
-            commit: commit.commit,
-            group_info: commit.group_info,
-        },
-        None,
-    )
-    .unwrap();
+    assert_eq!(alice.info(&mut host).pending_removals.len(), 1);
+    // Recorded during this epoch, the proposal may wait one commit; after
+    // that, a commit without it conflicts.
+    let empty = |alice: &mut Client| {
+        let (pending, published) = alice
+            .session
+            .as_ref()
+            .unwrap()
+            .commit(&alice.identity, CommitOptions::default(), &mut alice.rng)
+            .unwrap();
+        (pending, published)
+    };
+    let (pending, first) = empty(&mut alice);
+    publish(&mut host, gid.clone(), &first).unwrap();
     alice
         .session
         .as_mut()
         .unwrap()
         .apply_own_commit(pending)
         .unwrap();
+    let (_, second) = empty(&mut alice);
+    assert_eq!(
+        publish(&mut host, gid.clone(), &second).unwrap_err().code,
+        ErrorCode::Conflict
+    );
+    alice.commit(&mut host).unwrap();
     // Bob's token died with his membership.
     let error = host
         .call(
@@ -470,6 +635,7 @@ fn a_group_lives_through_the_service() {
                 gid: gid.clone(),
                 after_seq: 0,
                 limit: 10,
+                light: true,
             },
             bob.token.as_ref(),
         )
@@ -616,6 +782,52 @@ fn sessions_are_checked() {
 }
 
 #[test]
+fn leaf_proofs_are_served_against_the_current_tree() {
+    let mut host = Host::new();
+    let mut alice = Client::new(5);
+    let (pending, genesis) = GroupSession::create(&alice.identity, 4, &mut alice.rng).unwrap();
+    let gid = pending.gid().to_vec();
+    host.call(
+        Route::CreateGroup,
+        &pb::CreateGroupRequest {
+            gid: gid.clone(),
+            commit: genesis.commit,
+            group_info: genesis.group_info,
+        },
+        None,
+    )
+    .unwrap();
+    let session = pending.into_session().unwrap();
+    let proofs = |host: &mut Host, leaves: Vec<u32>| {
+        host.call(
+            Route::LeafProofs,
+            &pb::LeafProofsRequest {
+                gid: gid.clone(),
+                leaves,
+            },
+            None,
+        )
+    };
+    let response =
+        pb::LeafProofsResponse::decode(proofs(&mut host, vec![0]).unwrap().as_slice()).unwrap();
+    assert_eq!(response.epoch, 0);
+    let proof = cityg_core::tree::LeafProof::decode(&response.proofs[0]).unwrap();
+    proof.verify(&session.group_context().tree_hash).unwrap();
+    assert_eq!(
+        proof.node.map(|node| node.device_pk),
+        Some(alice.identity.public_key().to_vec())
+    );
+    assert_eq!(
+        proofs(&mut host, vec![1]).unwrap_err().code,
+        ErrorCode::Unprocessable
+    );
+    assert_eq!(
+        proofs(&mut host, vec![0; 65]).unwrap_err().code,
+        ErrorCode::PayloadTooLarge
+    );
+}
+
+#[test]
 fn errors_map_to_codes() {
     use cityg_core::CoreError;
     use cityg_server::RoomError;
@@ -632,7 +844,11 @@ fn errors_map_to_codes() {
         (CoreError::TranscriptMismatch, ErrorCode::Conflict),
         (CoreError::Replay, ErrorCode::Conflict),
         (
-            CoreError::Invalid("pending removal proposals must be committed"),
+            CoreError::Invalid("overdue proposals must be committed"),
+            ErrorCode::Conflict,
+        ),
+        (
+            CoreError::Invalid("a request of this device is pending"),
             ErrorCode::Conflict,
         ),
         (CoreError::Unauthorized("x"), ErrorCode::Forbidden),
@@ -670,7 +886,7 @@ fn service_limits_follow_the_configuration() {
     config.server.auth_skew_secs = 7;
     config.server.compact_every = 3;
     let service = ServiceConfig::from_config(&config);
-    assert_eq!(service.room.max_n_max, 32);
+    assert_eq!(service.room.max_capacity, 32);
     assert_eq!(service.room.message_retention_ms, 60_000);
     assert_eq!(service.room.commit_retention_ms, 120_000);
     assert_eq!(service.room.max_log_entries, 10);

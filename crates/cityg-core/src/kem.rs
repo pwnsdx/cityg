@@ -1,40 +1,44 @@
-//! ML-KEM-768 (FIPS 203) wrappers.
+//! X-Wing hybrid KEM (ML-KEM-768 and X25519, draft-connolly-cfrg-xwing-kem).
 //!
-//! Private keys are kept as their 64-byte FIPS 203 seed `(d, z)`; the
-//! decapsulation key is re-derived with `KeyGen_internal` when needed.
-//! Encapsulation takes its 32-byte message `m` from the caller's RNG so
-//! that every random input of the protocol comes from one injectable source.
+//! A private key is its 32-byte X-Wing decapsulation key (a seed that
+//! SHAKE256 expands into the ML-KEM-768 seed and the X25519 scalar); the
+//! expanded keys are re-derived when needed. Encapsulation takes its 64 bytes
+//! of randomness (32 for ML-KEM, 32 for the X25519 ephemeral key) from the
+//! caller's generator, so that every random input of the protocol comes from
+//! one injectable source.
 
-use ml_kem::kem::{Decapsulate, KeyExport, TryKeyInit};
-use ml_kem::{B32, Seed, ml_kem_768};
 use rand_core::CryptoRngCore;
+use x_wing::{
+    Ciphertext, Decapsulate, DecapsulationKey, Decapsulator, EncapsulationKey, KeyExport,
+    TryKeyInit,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::cbor::bytes;
 use crate::error::{CoreError, CoreResult};
 use crate::hash::{Digest, expand_label_into, h_l};
 
-/// Encoded ML-KEM-768 encapsulation key size.
-pub const KEM_PUBLIC_KEY_BYTES: usize = 1184;
-/// ML-KEM-768 ciphertext size.
-pub const KEM_CIPHERTEXT_BYTES: usize = 1088;
-/// ML-KEM-768 seed size (`d || z`).
-pub const KEM_SEED_BYTES: usize = 64;
+/// Encoded X-Wing encapsulation key size (ML-KEM-768 key, then X25519 key).
+pub const KEM_PUBLIC_KEY_BYTES: usize = x_wing::ENCAPSULATION_KEY_SIZE;
+/// X-Wing ciphertext size (ML-KEM-768 ciphertext, then X25519 ephemeral key).
+pub const KEM_CIPHERTEXT_BYTES: usize = x_wing::CIPHERTEXT_SIZE;
+/// X-Wing decapsulation key (seed) size.
+pub const KEM_SEED_BYTES: usize = x_wing::DECAPSULATION_KEY_SIZE;
 
-/// Private ML-KEM-768 key held as its FIPS 203 seed.
+/// Private X-Wing key held as its 32-byte decapsulation key.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct KemSecret {
     seed: [u8; KEM_SEED_BYTES],
 }
 
 impl KemSecret {
-    /// Wrap a 64-byte seed.
+    /// Wrap a 32-byte decapsulation key.
     #[must_use]
     pub fn from_seed(seed: [u8; KEM_SEED_BYTES]) -> Self {
         Self { seed }
     }
 
-    /// Derive a key seed from a 32-byte secret: `ExpandLabel(secret, label, h'', 64)`.
+    /// Derive a key from a 32-byte secret: `ExpandLabel(secret, label, h'', 32)`.
     pub fn derive(secret: &[u8; 32], label: &str) -> CoreResult<Self> {
         let mut seed = [0u8; KEM_SEED_BYTES];
         expand_label_into(secret, label, &[], &mut seed)?;
@@ -43,7 +47,7 @@ impl KemSecret {
         Ok(key)
     }
 
-    /// Sample a fresh key seed.
+    /// Sample a fresh key.
     pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
         let mut seed = [0u8; KEM_SEED_BYTES];
         rng.fill_bytes(&mut seed);
@@ -58,8 +62,8 @@ impl KemSecret {
         &self.seed
     }
 
-    fn decapsulation_key(&self) -> ml_kem_768::DecapsulationKey {
-        ml_kem_768::DecapsulationKey::from_seed(Seed::from(self.seed))
+    fn decapsulation_key(&self) -> DecapsulationKey {
+        DecapsulationKey::from(self.seed)
     }
 
     /// Encoded encapsulation (public) key.
@@ -74,13 +78,9 @@ impl KemSecret {
 
     /// Recover the shared secret of `ciphertext`.
     pub fn decapsulate(&self, ciphertext: &[u8]) -> CoreResult<Zeroizing<[u8; 32]>> {
-        if ciphertext.len() != KEM_CIPHERTEXT_BYTES {
-            return Err(CoreError::Malformed("ML-KEM ciphertext"));
-        }
-        let shared = self
-            .decapsulation_key()
-            .decapsulate_slice(ciphertext)
-            .map_err(|_| CoreError::Malformed("ML-KEM ciphertext"))?;
+        let ciphertext = Ciphertext::try_from(ciphertext)
+            .map_err(|_| CoreError::Malformed("X-Wing ciphertext"))?;
+        let shared = self.decapsulation_key().decapsulate(&ciphertext);
         let mut out = Zeroizing::new([0u8; 32]);
         out.copy_from_slice(shared.as_slice());
         Ok(out)
@@ -93,33 +93,32 @@ impl core::fmt::Debug for KemSecret {
     }
 }
 
+fn encapsulation_key(public_key: &[u8]) -> CoreResult<EncapsulationKey> {
+    if public_key.len() != KEM_PUBLIC_KEY_BYTES {
+        return Err(CoreError::Malformed("X-Wing public key"));
+    }
+    EncapsulationKey::new_from_slice(public_key)
+        .map_err(|_| CoreError::Malformed("X-Wing public key"))
+}
+
 /// Encapsulate to `public_key`: returns `(ciphertext, shared_secret)`.
 pub fn encapsulate(
     public_key: &[u8],
     rng: &mut impl CryptoRngCore,
 ) -> CoreResult<(Vec<u8>, Zeroizing<[u8; 32]>)> {
-    if public_key.len() != KEM_PUBLIC_KEY_BYTES {
-        return Err(CoreError::Malformed("ML-KEM public key"));
-    }
-    let ek = ml_kem_768::EncapsulationKey::new_from_slice(public_key)
-        .map_err(|_| CoreError::Malformed("ML-KEM public key"))?;
-    let mut m = [0u8; 32];
-    rng.fill_bytes(&mut m);
-    let (ciphertext, shared) = ek.encapsulate_deterministic(&B32::from(m));
-    m.zeroize();
+    let key = encapsulation_key(public_key)?;
+    let mut randomness = Zeroizing::new([0u8; x_wing::ENCAPSULATION_RANDOMNESS_SIZE]);
+    rng.fill_bytes(randomness.as_mut());
+    let (ciphertext, shared) = key.encapsulate_deterministic(&(*randomness).into());
     let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(shared.as_slice());
     Ok((ciphertext.as_slice().to_vec(), out))
 }
 
-/// Check that `public_key` is a valid ML-KEM-768 encapsulation key.
+/// Check that `public_key` is a valid X-Wing encapsulation key (its ML-KEM
+/// half passes the FIPS 203 modulus check).
 pub fn validate_public_key(public_key: &[u8]) -> CoreResult<()> {
-    if public_key.len() != KEM_PUBLIC_KEY_BYTES {
-        return Err(CoreError::Malformed("ML-KEM public key"));
-    }
-    ml_kem_768::EncapsulationKey::new_from_slice(public_key)
-        .map(|_| ())
-        .map_err(|_| CoreError::Malformed("ML-KEM public key"))
+    encapsulation_key(public_key).map(|_| ())
 }
 
 /// `H_pk(pk) := H_L("kem-pk", [pk])`.
@@ -154,7 +153,7 @@ mod tests {
         assert_ne!(
             *KemSecret::generate(&mut rng).decapsulate(&ct).unwrap(),
             *ss,
-            "implicit rejection yields an unrelated secret"
+            "another key yields an unrelated secret"
         );
     }
 
@@ -163,6 +162,9 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(2);
         assert!(encapsulate(&[0u8; 10], &mut rng).is_err());
         assert!(validate_public_key(&[0u8; 10]).is_err());
+        // An ML-KEM half whose coefficients exceed the modulus fails the
+        // FIPS 203 input check.
+        assert!(validate_public_key(&[0xffu8; KEM_PUBLIC_KEY_BYTES]).is_err());
         let key = KemSecret::generate(&mut rng);
         assert!(key.decapsulate(&[0u8; 10]).is_err());
         assert_eq!(format!("{key:?}"), "KemSecret(..)");
@@ -171,5 +173,71 @@ mod tests {
             key.public_key()
         );
         assert_ne!(pk_hash(&key.public_key()).unwrap(), [0u8; 32]);
+    }
+
+    /// Randomness source that hands out fixed bytes, in order.
+    struct Fixed(Vec<u8>);
+
+    impl rand_core::RngCore for Fixed {
+        fn next_u32(&mut self) -> u32 {
+            let mut word = [0u8; 4];
+            self.fill_bytes(&mut word);
+            u32::from_le_bytes(word)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut word = [0u8; 8];
+            self.fill_bytes(&mut word);
+            u64::from_le_bytes(word)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            let rest = self.0.split_off(dest.len());
+            dest.copy_from_slice(&self.0);
+            self.0 = rest;
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl rand_core::CryptoRng for Fixed {}
+
+    /// Test vector 1 of the X-Wing draft (shipped with the `x-wing` crate):
+    /// seed, encapsulation randomness, and the expected public key and
+    /// ciphertext (through BLAKE3 digests) and shared secret.
+    #[test]
+    fn x_wing_draft_vector() {
+        let seed: [u8; 32] =
+            hex::decode("7f9c2ba4e88f827d616045507605853ed73b8093f6efbc88eb1a6eacfa66ef26")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let key = KemSecret::from_seed(seed);
+        let public_key = key.public_key();
+        assert_eq!(
+            hex::encode(blake3::hash(&public_key).as_bytes()),
+            "feef93be794a93e4e5e9ea6b57c0cb74477e7624a4a5cc269372392b8cb49ca2"
+        );
+        let mut eseed = Fixed(
+            hex::decode(
+                "3cb1eea988004b93103cfb0aeefd2a686e01fa4a58e8a3639ca8a1e3f9ae57e2\
+                 35b8cc873c23dc62b8d260169afa2f75ab916a58d974918835d25e6a435085b2",
+            )
+            .unwrap(),
+        );
+        let (ciphertext, shared) = encapsulate(&public_key, &mut eseed).unwrap();
+        assert_eq!(
+            hex::encode(blake3::hash(&ciphertext).as_bytes()),
+            "ad7464c3f36f257dfe3369a82fef9f60f84fd14fffc232ec50568de4511e0ff3"
+        );
+        let expected = "d2df0522128f09dd8e2c92b1e905c793d8f57a54c3da25861f10bf4ca613e384";
+        assert_eq!(hex::encode(*shared), expected);
+        assert_eq!(
+            hex::encode(*key.decapsulate(&ciphertext).unwrap()),
+            expected
+        );
     }
 }

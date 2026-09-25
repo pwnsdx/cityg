@@ -1,11 +1,11 @@
 [package]
 name = "cityg-proto"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
 build = "build.rs"
-description = "Protobuf wire schema of the City-G v0.2 delivery-service API"
+description = "Protobuf wire schema of the City-G v0.3 delivery-service API"
 
 [dependencies]
 prost = "0.14"
