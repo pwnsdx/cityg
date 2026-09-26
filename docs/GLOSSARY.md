@@ -1,204 +1,161 @@
-# Glossary (profile v0.3)
+# Glossary
 
 Section numbers refer to the [specification](specs.md).
 
-**Admin.** A member whose leaf is in the registry's admin list. Admins sign
-invites and admissions, revoke invites, remove members and change the
-admins. A group has at most 64 admins; if a commit leaves none, its author
-becomes one. Admin rights belong to the occupancy: they survive a resync and
-a key rotation and end with a removal (sections 7, 9.4).
+**Admin.** A member whose occupancy and device key are in the registry's
+admin list. Admins sign admissions, invites, checkpoints and group
+policies, and may remove any member. If a window leaves no admin, its
+sealer becomes one (the promotion rule, section 8).
 
-**Admission (`SignedAdmission`).** The signed statement that lets a device
-join: signed by an admin for a known device (kind 0), or by the joiner
-itself with an invite key whose invite an admin signed (kind 1). It names
-the device (`device_id`) and its last epoch (`not_after_epoch`); its hash is
-recorded in the joiner's leaf (section 10.2).
+**Admission.** A signed permission for one device to join once, by an admin
+(kind 0) or by the holder of an invite key (kind 1). It names the device
+(`device_id`) and its last epoch. Its hash is recorded in the admission map
+when it is used (sections 6 and 8).
 
-**Alias (`AliasBinding`).** A display name a member publishes for itself,
-signed by its device key. Self-asserted and outside the group protocol;
-clients pin the occupancy first seen for an alias (section 15.1).
+**Anchor.** The epoch a joiner or a returning member checks the chain of
+seals from: an admin checkpoint, or the last epoch a member followed
+(section 12.9).
 
-**Capacity.** The largest number of leaves of a group, a power of two
-between 2 and 8192 fixed at creation (section 6.1).
+**Audit record.** One entry of a window with the proofs an auditor needs to
+check it against the previous epoch's header (section 15).
 
-**Commit.** The signed object that moves a group from epoch `n - 1` to `n`.
-Kinds: Genesis, Member, ExternalJoin, Resync. A CBOR map with a closed key
-registry, one ML-DSA-65 signature by its author (two when it rotates the
-author's key) and a confirmation tag (section 9).
+**Blank.** A leaf without a member, or a parent node without a key. A parent
+node is blank exactly when its subtree holds no member (section 5.2).
+
+**Catch-up (jump).** A returning member's signed request for a welcome into
+the next window; it recovers its path from the last step of each of its
+nodes and skips the epochs in between (section 12.10).
+
+**Change.** `[kind, leaf, request_ref]`: a removal, eviction, join, update
+or re-entry that a district commit applies to one leaf (section 10.1).
+
+**Checkpoint.** An admin's signed statement of an epoch: interim transcript
+hash, tree hash, registry hash, shape and external key hash. Joiners anchor
+on it (sections 6 and 12.9).
+
+**City.** The levels of the tree above the districts, re-keyed by the
+sealer (section 5.1).
+
+**Closed group.** A group whose joins need an admission; every group
+without a policy that opens it (section 6.1).
+
+**Committer.** The member (or entrant) that re-keys one district of a window
+and signs its district commit. It need not belong to the district
+(sections 10.3 and 12.4).
 
 **Confirmation tag.** `MAC(confirm_key_n, confirmed_transcript_hash_n)`:
-proves that the commit's author derived the same epoch secrets as the
-verifier (section 8).
+proves that whoever computed it derived the same epoch secrets, which bind
+the tree, the registry and the transcript (section 9).
 
-**Cover failure (`CoverFailureReport`).** A signed report by a member that
-could not process a commit (not covered, wrong path key, wrong confirmation
-tag, lost state). The member then resyncs (section 10.5).
+**Delivery service (DS).** The server: it records and checks requests,
+closes windows, assigns roles, checks commits and seals, and serves packets,
+seal links and entries. It never draws a group secret and never signs a
+group object (section 14).
 
-**Delivery service (DS).** The server: it verifies commits against public
-state, orders them, relays envelopes, stores invites, proposals, join
-requests, welcomes, reports, light-member proofs and aliases, and never holds
-a group secret (section 12).
+**Device key.** The ML-DSA-65 key a device signs with in one group; its
+hash with the group identifier is the `device_id` (section 4).
 
-**Device key, `device_id`.** The ML-DSA-65 key pair of a device in a group.
-It signs the device's commits, messages and other objects, and can be
-replaced by a rotation. `device_id := H_L("device-id", [gid, device_pk])`
-names the device in an admission, before it has a leaf (sections 5, 9.3).
+**District.** A subtree of `2^L` leaves, re-keyed by its own committer in
+parallel with the others (section 5.1).
 
-**Entry leaf.** Where a member enters: the lowest blank leaf, or, when every
-leaf is occupied, the first leaf of the doubled tree (section 6.1).
+**Entrant.** With no member online, the joiner or returning member that
+takes every role of a window: it commits every district, seals with an
+external init and welcomes the others (section 12.7).
 
-**Epoch.** The state of a group between two commits. Epoch `n` has its
-GroupContext, epoch secrets and message chains.
+**Entry.** What a joiner or a returning member downloads to enter an epoch:
+the chain of seals, its welcome, the steps of its path, its leaf proof and
+its path's parent nodes (section 13.4).
 
-**Epoch secrets.** `joiner_secret_n`, then `epoch_secret_n` and what derives
-from it: `init_secret` (chains to the next epoch), `msg_secret` (message
-chains), `confirm_key` (confirmation tag) and `external_secret` (external key
-pair) (section 8).
+**Epoch.** The state a window creates. Epoch `n` has a tree, a registry, a
+transcript and its secrets (section 9).
 
-**External commit, external init.** A commit whose author cannot use
-`init_secret_{n-1}`: a joiner (ExternalJoin) or a member that lost its state
-(Resync). It encapsulates to the epoch's external X-Wing key, published in
-the GroupInfo, and uses the external init secret instead (section 8.1).
+**Eviction.** A removal the DS writes, under an admin-signed policy, for a
+member whose leaf key has not changed for too long (sections 6 and 14.7).
 
-**Forward secrecy (FS).** Compromising a device does not reveal content of
-epochs whose keys it erased. Members re-key their leaf at least every 24
-hours (`FS_WINDOW`) and erase old keys (sections 2.2, 13.4).
+**External init.** The init secret an entrant encapsulates to the external
+key of the previous epoch, in place of that epoch's init secret, which it
+does not know (section 9).
 
-**`gid`.** The group identifier, `H_L("group-id", [creator_device_pk,
-group_nonce])`. It binds the creator, who is the first admin (section 5).
+**Forced node.** A node a window must re-key besides the paths of its
+changed leaves: the taints of the members it removes, evicts, updates or
+re-enters, and the nodes above the old root when the tree grows (section
+10.2).
 
-**Grace window.** For 10 minutes after an epoch ends, members and the DS
-still accept its messages from senders that are still members, for up to
-four previous epochs (sections 11.3, 12.1).
+**Fraud proof.** A signed district commit, an audit record of an invalid
+entry and the committer's leaf proof: anyone can check that the committer
+placed that entry (section 15).
 
-**GroupContext.** `["city-g/group-context/v3", gid, epoch, tree_hash,
-registry_hash, "city-g/v0.3", confirmed_transcript_hash]`. Every epoch secret
-derives from its hash, so members with different views derive different keys
-(section 8).
+**Group policy.** An admin-signed object stating whether the group is open
+and after how many epochs an idle member may be evicted (section 6).
 
-**GroupInfo.** The public description of an epoch (GroupContext,
-confirmation tag, external public key, signer leaf), signed by the author of
-its commit. Joiners and resyncing members start from it (section 10.4).
+**Init key.** A one-time X-Wing key of a join, re-entry or catch-up
+request, to which a welcome is sealed (section 11).
 
-**`H_L`.** The labelled hash `BLAKE3(CBOR_det(["city-g/v0.3", label,
-args]))` (section 4.2).
+**Leaf proof.** A leaf and, for each level, the content of its ancestor and
+the hash of the sibling subtree: it recomputes the tree hash (section 5.3).
 
-**Invite, invite seed, invite link.** An admin-signed invite names an invite
-public key, an expiry and a number of uses. The key pair derives from a
-32-byte invite seed, shared out of band in an invite link
-`cityg-invite:{"version":5,"server_url":…,"room_id":…,"invite_seed":…}`.
-Anyone holding the link can join until the invite expires, is revoked or has
-admitted its number of devices (sections 10.2, 15.3).
+**Occupancy.** `[leaf, since]`: a member, named by its leaf and the epoch it
+entered it. It is never reused (section 1).
 
-**Join request (`SignedJoinRequest`).** A joiner's signed request, carrying
-its device key, the key of its future leaf, a one-time init key and its
-admission. The DS records it; the next commit places it and seals a welcome
-for it. `request_ref` names it (section 10.3).
+**Open group.** A group whose policy lets any device join with its own
+signed request and no admission; every join stays visible (section 6.1).
 
-**Joiner secret.** The secret a welcome carries: the epoch's secrets derive
-from it, and nothing of the previous epoch does (section 8).
+**Packet.** What a member downloads for one window: the seal header, the
+tag, the registry update and the steps of its path (section 13.1).
 
-**Leaf proof.** A Merkle proof that a leaf of a tree holds a given member (or
-is blank): the leaf, the width, the leaf node and 32 bytes per level,
-checked against a tree hash (section 6.7).
+**Path.** A member's leaf and its ancestors up to the root; a member holds
+the secret of each (section 7.4).
 
-**Light member.** A member that keeps the occupancies, the registry, its
-own path and the device keys it verified instead of the tree, and checks
-commits with the proofs of a LightCommit. It becomes full for the commits it
-authors and relies on the DS for the new tree hash (section 14).
+**Plan.** The public structure of a re-key: which nodes, which become blank,
+where each secret is chained from and which children it is wrapped to. Any
+verifier recomputes it (section 7.3).
 
-**LightCommit, LightJoin.** The data a light member needs for a commit (leaf
-proofs, against the previous tree, of the members the commit's authorization
-refers to) and for a join (registry, occupancies and its own leaf proof). The
-DS computes and serves them (sections 14.3, 14.4).
+**Re-entry.** A returning member's signed request to re-enter its own leaf
+with a new leaf key (section 12.10).
 
-**Log.** The ordered list of accepted commits, envelopes and recorded
-proposals and join requests of a group, numbered by `seq` (section 12.2).
+**Registry.** The admins, the device map, the admission map and the group
+policy's hash and mode; members keep its header (section 8).
 
-**Membership agreement.** Full members that accept the same commit agree on
-the tree, the registry and the whole transcript (section 2.2).
+**Removal, recorded and applied.** A removal is recorded when the DS accepts
+its proposal, and applied by the next window, which re-keys everything the
+member knew (sections 14.2 and 14.6).
 
-**Member reference, occupancy.** `[leaf, since]`: the leaf a member occupies
-and the epoch it entered. It names a member in messages, removal proposals
-and admin changes, and is never reused; a resync starts a new occupancy of
-the same leaf, a key rotation does not (sections 1, 5).
+**Seal.** The object that creates an epoch: the header (hashes, sealer,
+external init of an entrant), the body (district commit hashes, the city's
+re-key, a group policy) and one signature over the header, the tag and the
+next external key (section 10.4).
 
-**Message chain (per-sender ratchet).** Each member derives, from
-`msg_secret_n`, one chain per member of the epoch, keyed by its occupancy; a
-sender uses its own chain with increasing generations, and keys are erased
-once used (section 11.2).
+**Seal link.** One step of a chain of seals: the seal proof, the evidence
+that its signer was a member or an admitted entrant, and the registry header
+(section 13.3).
 
-**Overdue proposal.** A removal proposal or join request recorded before the
-current epoch started. Every commit must include the oldest overdue ones, up
-to 256 removals and 64 joins (section 12.1).
+**Sealer.** The member (or entrant) that checks the district commits of a
+window, re-keys the city and signs the seal (section 12.5).
 
-**Post-compromise security (PCS).** After a device whose state was
-compromised re-keys its leaf from a fresh secret, the attacker loses access
-to later epochs (section 2.2). It does not cover a stolen device key, which
-lets the attacker act as the device until it is removed.
+**Sparse Merkle map.** A map from 32-byte keys to occupancies whose root
+depends only on its entries, with proofs of values and of absences (section
+8).
 
-**Post-removal secrecy (PRS).** A removed member derives no secret of the
-epochs after its removal. A member never commits its own removal (sections
-2.2, 9.4).
+**Step.** How a member gets the new secret of a re-keyed ancestor: `Wrap`
+(opened with the key of the child toward it) or `Chain` (derived from the
+child's new secret) (section 7.4).
 
-**Profile.** `city-g/v0.3`: the set of encodings, labels, algorithms and
-parameters of this specification. Any change to them is a new profile.
+**Taint.** The occupancy of the committer that drew a node's current secret,
+public and hashed with the tree. Removing or updating a member re-keys every
+node it taints (sections 5.2 and 10.2).
 
-**Ratchet tree.** The tree of a group in the RFC 9420 array layout: leaves
-hold the members (device key, entry epoch, X-Wing leaf key, admission hash),
-parents hold an X-Wing key and their unmerged leaves. It doubles when a
-member enters a full tree and halves when its right half empties. Each
-commit re-keys its author's leaf and direct path (section 6).
+**Token.** What the admission map records for a join so that it enters
+once: the admission's hash, or the request's hash without admission (section
+6).
 
-**Registry.** The group-wide state beside the tree: capacity, admin leaves,
-retired admissions and the retired floor; `registry_hash` commits to it
-(section 7).
+**Volunteer.** An online member the window does not affect, to which the DS
+may give a role (section 14.4).
 
-**Removal proposal (`SignedRemoveProposal`).** A signed request to end one
-occupancy `[target_leaf, target_since]`, by its target (leave) or by an
-admin. The DS records it, and a later commit, by another member or a joiner,
-includes it (section 10.1).
+**Welcome.** The joiner secret of a window sealed to a one-time init key, for
+a joiner, a re-entering member or a member that asked to jump (section 11).
 
-**Resolution.** The smallest set of nodes whose private keys cover every
-member below a node; path secrets are encrypted to the resolutions of the
-copath (section 6.4).
+**Window.** The requests the DS collects before one epoch; it closes after
+`WINDOW_MAX`, or `WINDOW_REMOVAL` when a removal waits (section 14.2).
 
-**Resync.** Re-entering one's own leaf as a new occupancy with an external
-commit, after losing state or failing to process a commit (section 9.3).
-
-**Retired admission, retired floor.** The admission of a removed member,
-kept in the registry while it could still be used so that it cannot be used
-again. When more than 4096 are kept, the oldest goes and the retired floor
-rises to its expiry: admissions whose last epoch is not above the floor are
-refused (section 7).
-
-**Rotation.** Replacing a device key with a Member commit signed by the old
-key and by the new one; the occupancy, admission and admin rights stay
-(section 9.3).
-
-**Security code.** The transcript fingerprint the GUI shows (the interim
-transcript hash): two members with equal codes have the same history
-(see [fingerprints.md](fingerprints.md)).
-
-**Session token.** A 32-byte bearer token the DS issues for a signed
-`SessionAuth`; needed to read the log, send, and list aliases and reports.
-It stops working when the member's occupancy ends or its key is rotated
-(section 15.1).
-
-**Transcript hashes.** The confirmed and interim transcript hashes chain
-every commit of the group's history into the next GroupContext (section 8).
-
-**Unmerged leaf.** A leaf that entered below a parent node after the node's
-key was set, and so does not hold its private key; encryptors add it to the
-node's resolution until a commit re-keys the node (section 6.2).
-
-**Welcome.** The object that lets a joiner placed by someone else's commit
-enter: the joiner secret of the epoch, encrypted to the joiner's one-time
-init key. It is not signed; the joiner checks it against the commit's
-confirmation tag and the GroupInfo (section 10.3).
-
-**Width.** The number of leaves of the tree: the smallest power of two
-covering the rightmost member (section 6.1).
-
-**X-Wing.** The hybrid KEM of the profile, ML-KEM-768 combined with X25519:
-it keeps confidentiality if either holds (section 3).
+**Wrap.** A node's new secret for the holder of a child's key: an X-Wing
+encapsulation and the secret under ChaCha20-Poly1305 (section 7.2).

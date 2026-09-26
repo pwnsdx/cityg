@@ -1,95 +1,99 @@
-# City-G protocol specification — profile v0.3
+# City-G protocol specification
 
 | | |
 | --- | --- |
-| Profile | `city-g/v0.3` |
-| Status | Normative. Supersedes profile v0.2 ([archived](legacy/v0.2/specs.md)); the two profiles do not interoperate. |
-| Reference implementation | [`crates/cityg-core`](../crates/cityg-core) (protocol core, no I/O), [`crates/cityg-server`](../crates/cityg-server) and [`crates/cityg-runtime`](../crates/cityg-runtime) (delivery service), [`crates/cityg-api-client`](../crates/cityg-api-client) (member drivers, full and light) |
-| Conformance | [`kat/v0.3/vectors.json`](../kat/v0.3/vectors.json), checked by the reference implementation and by the independent verifier [`kat/v0.3/verify_vectors.py`](../kat/v0.3/verify_vectors.py); requirement map [`kat/kat-v0.3-conformance-manifest.json`](../kat/kat-v0.3-conformance-manifest.json) |
-| Formal model | [`docs/formal/`](formal/) |
-| Origin | Design for large groups with concurrent joins and departures: batched joins, a growable tree holding the members, light members, device-key rotation, X-Wing and ML-DSA-65 (section 20); rationale in [design-v0.3.md](design-v0.3.md) |
+| Profile | `city-g/v0.4` |
+| Status | Initial version. The key schedule, the tree, windows, welcomes, joins and the delivery-service rules are specified and implemented; the items of section 19 are not yet. |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core): protocol core and an in-memory delivery service, no I/O |
+| Design | [design.md](design.md) (decisions E-1 to E-14) |
+| Formal model | [`formal/`](formal/README.md) (ProVerif) |
+| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py) |
+| Conformance | None yet: no test vectors (section 19) |
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
 interpreted as in RFC 2119 and RFC 8174 when they appear in capitals.
 
-City-G is an end-to-end encrypted group messaging protocol with
-post-quantum primitives. Its group key agreement follows MLS (RFC 9420): an
-epoch-chained key schedule, a TreeKEM ratchet tree in the RFC 9420 array
-layout, commits that move a group from one epoch to the next, external
-commits, welcomes for members added by someone else's commit, and a
-per-sender message ratchet. A delivery service orders commits and relays
-encrypted messages without holding any group secret.
+City-G is an end-to-end encrypted group protocol with post-quantum
+primitives, built for groups of millions of members, bursts of hundreds of
+thousands of joins and departures, and groups where no member may be online
+for long periods. Its group key agreement follows the structure of MLS
+(RFC 9420): a ratchet tree whose root secret feeds an epoch-chained key
+schedule, transcript hashes and confirmation tags, welcomes for members
+added by someone else, and an external init for a device that is not yet a
+member (section 20). It changes how the group is re-keyed:
 
-Profile v0.3 is built for groups of thousands of members where people join
-and leave all the time: any number of joins wait in the delivery service and
-enter with one commit; the tree grows and shrinks with the group; a member
-that does not want to hold the whole tree can follow the group as a *light
-member*; and a device can replace its signature key without leaving.
+* the group changes by *windows*: the delivery service collects requests
+  for up to a minute, and one epoch seals them all;
+* the tree is split into *districts* under a *city*; each district that
+  changes is re-keyed by its own committer, in parallel, and a *sealer*
+  re-keys the city and creates the epoch;
+* any member can commit any district or seal a window; when no member is
+  online, a joiner or a returning member seals the window itself;
+* a group can be *open*: any device joins without an admin's signature, and
+  every join stays visible (section 6.1);
+* a member downloads one small packet per window and keeps O(log N) state.
+
+A delivery service (DS) orders and checks everything without holding any
+group secret.
 
 ## Contents
 
 1. [Architecture](#1-architecture)
-2. [Security goals and threat model](#2-security-goals)
-3. [Cryptographic suite](#3-cryptographic-suite)
-4. [Encodings and derivation functions](#4-encodings)
-5. [Identifiers](#5-identifiers)
-6. [Ratchet tree](#6-ratchet-tree)
-7. [Registry](#7-registry)
-8. [Key schedule](#8-key-schedule)
-9. [Commits](#9-commits)
-10. [Signed objects](#10-signed-objects)
-11. [Message plane v4](#11-message-plane)
-12. [Delivery service](#12-delivery-service)
-13. [Member behavior](#13-member-behavior)
-14. [Light members](#14-light-members)
-15. [Deployment binding and HTTP API](#15-deployment-binding)
+2. [Security goals and threat model](#2-security)
+3. [Cryptographic suite and encodings](#3-suite)
+4. [Identifiers](#4-identifiers)
+5. [Tree](#5-tree)
+6. [Signed requests](#6-requests)
+7. [Re-key](#7-rekey)
+8. [Registry](#8-registry)
+9. [Key schedule](#9-key-schedule)
+10. [Windows: district commits and seals](#10-windows)
+11. [Welcomes](#11-welcomes)
+12. [Members](#12-members)
+13. [Packets, seal links and entries](#13-packets)
+14. [Delivery service](#14-delivery-service)
+15. [Audits and fraud proofs](#15-audits)
 16. [Parameters](#16-parameters)
-17. [Label registry](#17-label-registry)
-18. [Conformance](#18-conformance)
-19. [Security considerations](#19-security-considerations)
-20. [Changes from profile v0.2](#20-changes)
+17. [Label registry](#17-labels)
+18. [Security considerations](#18-security-considerations)
+19. [Open items](#19-open-items)
+20. [Relation to MLS](#20-mls)
 
 <a id="1-architecture"></a>
 ## 1. Architecture
 
-* **Device.** A member device holds an ML-DSA-65 signing key pair, its
-  *device key*, per group membership. It may replace it by a new one without
-  leaving the group (section 9.3).
-* **Group.** A group is identified by `gid` (section 5). Its state at epoch
-  `n` consists of a public part (the ratchet tree, which also lists the
-  members, the registry, and the transcript hashes) that every full member
-  and the delivery service share, and a secret part (private tree keys,
-  epoch secrets, message ratchets) that only members hold.
-* **Occupancy.** A member occupies one leaf of the tree from the epoch it
-  entered, `since`. The pair `[leaf, since]`, a *member reference*, names
-  the occupancy for good: messages, removal proposals and admin changes name
-  members by it. A resync starts a new occupancy of the same leaf; a
-  device-key rotation does not.
-* **Commit.** A commit moves a group from epoch `n - 1` to epoch `n`. It is
-  authored by a single device, signed by it, re-keys the author's leaf and
-  direct path, and carries membership changes: removals, joins, admin
-  changes, the author's own entry (an external join or a resync) and the
-  rotation of the author's device key.
-* **Joins.** A joiner records a signed *join request* with the delivery
-  service. The next commit, by any member, or by a joiner through an external
-  commit, places every waiting request in the tree at once; each joiner then
-  receives a *welcome* holding the new epoch's joiner secret.
-* **Delivery service (DS).** The DS stores, for each group, an ordered log
-  of commits, message envelopes, removal proposals and join requests. It
-  runs the public part of every commit transition, so it relays only commits
-  full members accept, and it enforces the rules that need a global order, a
-  count or a clock (section 12). It never holds a group secret.
-* **Light members.** A member MAY keep only a small part of the public state
-  and verify commits with Merkle proofs that the DS computes (section 14).
-* **Deployment binding.** Display names (aliases) and the authentication of
-  requests to the DS are signed objects outside the group protocol
-  (section 15). They change no group state and no key.
+* **Device and occupancy.** A member device holds an ML-DSA-65 device key
+  per group, and occupies one leaf from the epoch it entered, `since`. The
+  pair `[leaf, since]`, its *occupancy*, names the member for good: it is
+  never reused, even when the leaf is.
+* **Tree.** A binary tree of `2^height` leaves, split into districts of
+  `2^L` leaves (section 5). Members hold X-Wing leaf keys; every non-blank
+  parent node holds an X-Wing key and its *taint*, the occupancy of the
+  committer that drew its secret.
+* **Window.** The delivery service (DS) collects requests: joins, removals,
+  evictions, key updates, re-entries and catch-ups (section 6). It closes a
+  window after at most `WINDOW_MAX`, or `WINDOW_REMOVAL` when a removal is
+  pending (section 14.2). A window is sealed in three phases:
+  1. one *district commit* per district the window changes (section 10.3);
+  2. one *seal*, which re-keys the city and creates the epoch (section
+     10.4);
+  3. the *welcomes* of the window's joiners and returning members
+     (section 11).
+* **Roles.** The DS assigns the committers and the sealer of a window among
+  online members. With no member online, the window's *entrant* (a joiner
+  or a member re-entering its leaf) takes every role and seals with an
+  external init (section 12.7). With no member online and no entrant, the
+  window stays open and recorded removals are enforced at delivery
+  (section 14.6).
+* **Members.** A member keeps its leaf key, the secrets of its path, the
+  secrets of its epoch and the epoch's header (section 12.1). It follows the
+  group from one *packet* per window (section 13.1).
+* **Delivery service.** The DS holds the public state, checks every request
+  and every commit, stores the windows, and serves packets, chains of seals
+  and entries. It never draws a group secret and never signs a group
+  object.
 
-The protocol core is specified without I/O: every random input comes from a
-caller-provided cryptographically secure generator, which makes runs and
-test vectors reproducible.
-
-<a id="2-security-goals"></a>
+<a id="2-security"></a>
 ## 2. Security goals and threat model
 
 ### 2.1 Adversaries
@@ -97,142 +101,163 @@ test vectors reproducible.
 | ID | Adversary | Capabilities |
 | --- | --- | --- |
 | A1 | Passive DS | Reads everything the DS stores and relays. |
-| A2 | Active DS | A1, and drops, delays, reorders or replays traffic, answers requests arbitrarily, and creates its own device keys. |
-| A3 | Malicious member | Holds the secrets of its own membership; deviates arbitrarily from the protocol. |
-| A4 | Removed or departed member | A3 for the epochs it belonged to; after its removal it has no further secret. |
-| A5 | Temporarily compromised device state | Learns the group state of one device (tree private keys, epoch secrets, message chains, pending join secrets) at one point in time, then loses access. The device key stays secret, for instance in a hardware keystore. |
+| A2 | Active DS | A1, and drops, delays, reorders or replays traffic, answers requests arbitrarily, decides which requests enter which window, and creates its own device keys. |
+| A3 | Malicious member | Holds the secrets of its own membership; deviates arbitrarily from the protocol, including as a committer, sealer, welcomer or entrant. |
+| A4 | Removed member | A3 for the epochs it belonged to, keeping whatever it learned then, including the secrets it drew as a committer. |
+| A5 | Temporarily compromised device state | Learns the group state of one device (leaf key, path secrets, epoch secrets, pending keys) at one point in time, then loses access. The device key stays secret, for instance in a hardware keystore. |
 | A6 | Compromised device key | Learns the ML-DSA-65 device key of one member device. |
 
-The network is controlled by A2. Admins are trusted to admit members: an
-admin that admits the adversary gives it membership.
+The network is controlled by A2. In a closed group, admins are trusted to
+admit members: an admin that admits the adversary gives it membership.
+Anyone can join an open group (section 6.1).
 
 ### 2.2 Properties
 
 "Guaranteed" means: under the assumptions of section 2.3, the property holds
-against that adversary, for full members. Section 14.6 states what changes
-for light members. A deployment MUST NOT advertise a property that this
-table does not list as guaranteed for the stated adversary.
+against that adversary for members that follow the group (section 12.2), and
+for joiners and returning members from the epoch they enter (sections 12.9
+and 12.10). *Epoch secrets* are the secrets of section 9; the message plane
+encrypts under `msg_secret_n` (section 19), so the confidentiality of what it
+carries rests on theirs. A deployment MUST NOT advertise a property that
+this table does not list as guaranteed for the stated adversary.
 
 | Property | A1 | A2 | A3 | A4 | A5 | A6 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Confidentiality of message content | guaranteed | guaranteed | no (insider) | guaranteed for epochs after its removal | guaranteed outside the FS and PCS windows | no, until the device is removed |
-| Sender authentication | guaranteed | guaranteed | guaranteed (cannot impersonate another member) | guaranteed | guaranteed | guaranteed for the other members |
+| Confidentiality of epoch secrets | guaranteed | guaranteed in a closed group; none in an open group, which the DS can join | no (insider) | guaranteed from the window that applies its removal | guaranteed outside the FS and PCS windows | no, until the device is removed |
 | Membership agreement | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed |
-| Admission control (no member added without an admin's signature) | guaranteed | guaranteed | n/a | guaranteed | guaranteed | guaranteed unless the device is an admin |
-| Post-removal secrecy (PRS) | guaranteed | guaranteed | n/a | guaranteed, including when it authored a commit before its removal | n/a | guaranteed once the device, and any device it admitted, is removed |
-| Forward secrecy (FS) | guaranteed | guaranteed | n/a | n/a | window `FS_WINDOW` | guaranteed |
-| Post-compromise security (PCS) | n/a | n/a | n/a | n/a | after the next self-update of the compromised device | no, until the device is removed |
-| Join secrecy (a joiner learns nothing of epochs before its join) | guaranteed | guaranteed | guaranteed | n/a | guaranteed | guaranteed |
+| Authenticity of requests, commits and seals | guaranteed | guaranteed | guaranteed (cannot act as another member) | guaranteed | guaranteed | guaranteed for the other members |
+| Admission control, in a closed group | guaranteed | guaranteed | detected: an entry it places without a valid admission is caught by sampled audits and leaves a fraud proof (section 15) | guaranteed | guaranteed | as A3; none if the device is an admin |
+| Post-removal secrecy (PRS) | n/a | n/a | n/a | guaranteed from the window that applies the removal, including for the nodes it drew as a committer | n/a | guaranteed once the device is removed |
+| Forward secrecy (FS) | guaranteed | guaranteed | n/a | n/a | guaranteed for epochs whose secrets the device erased | guaranteed |
+| Post-compromise security (PCS) | n/a | n/a | n/a | n/a | after the device's next update | no, until the device is removed |
+| Join secrecy | guaranteed | guaranteed | guaranteed | n/a | guaranteed | guaranteed |
+| Visibility of joins | guaranteed | guaranteed (the DS can refuse to show a window's joins, not misrepresent them) | guaranteed | n/a | guaranteed | guaranteed |
 | Liveness, availability | no | no | no | no | no | no |
-| Metadata privacy (who talks when, group size, members) | no | no | no | no | no | no |
+| Metadata privacy (who is a member, who sends when, group size) | no | no | no | no | no | no |
 
 Definitions (normative):
 
-* **Membership agreement.** Two full members that accept the commit of
-  epoch `n` agree on the tree (members, their keys and occupancies), the
-  registry (capacity, admins, retired admissions) and the transcript of
-  epochs `0..n`: these are bound into `GroupContext_n` (section 8), from
-  which every secret of the epoch derives, and verified by the confirmation
-  tag.
-* **PRS.** A member whose occupancy is ended by the commit of epoch `n` MUST
-  NOT be able to derive any secret of an epoch `>= n`, unless an admin admits
-  it again with a new admission. A member never authors the commit that
-  removes it (section 9.4), the removed leaf and its direct path are blanked
-  in the tree the removing commit encrypts to, and its admission is retired:
-  it cannot come back with it (section 7).
-* **FS.** Compromise of a device at time `T` MUST NOT reveal message content
-  of epochs whose keys the device erased before `T`. Members erase epoch
-  secrets when the next epoch becomes active, erase each message key once
-  used, keep previous-epoch message keys for at most `GRACE_WINDOW_MS`, and
-  re-key their own leaf at least every `FS_WINDOW` (section 13.4).
-* **PCS.** After a device whose state was compromised completes a
-  self-update (a commit re-keying its leaf from a fresh leaf secret), the
-  attacker MUST NOT derive secrets of later epochs, unless it compromises a
-  member again.
+* **Membership agreement.** Two members that accept epoch `n` with the same
+  interim transcript hash agree on the tree hash, the registry and the
+  transcript of epochs `0..n`: they are bound into `GroupContext_n`, from
+  which every secret of the epoch derives, and the confirmation tag proves
+  it (section 9). For a window sealed by an entrant the tag alone proves
+  nothing against the DS, which knows the external public key; members also
+  check the entrant's admission and signature (section 12.2).
+* **Admission control.** In a closed group no device becomes a member
+  without an admission signed by an admin of the previous epoch, directly
+  or through an invite, and an admission admits once. The DS checks every
+  request, each committer the entries of its districts, the sealer the
+  structure of every district commit, and members audit random entries
+  (section 15): an invalid entry placed by a malicious committer escapes
+  every auditor with probability about `e^-AUDIT_K`, and a fraud proof then
+  names the committer.
+* **PRS.** A member whose occupancy a window ends MUST NOT be able to
+  derive any secret of an epoch `>= n`, where `n` is the epoch that window
+  creates. The window re-keys the member's path and every node it taints,
+  so what it drew as a committer is useless to it (section 10.2; model
+  `taint.pv`); the external init of a window sealed by an entrant does not
+  help it either (model `entrant_removal.pv`). A removal is recorded when
+  the DS accepts its proposal and applied by the next window (section
+  14.2): until then the DS refuses the removed member's requests and stops
+  delivering to it (section 14.6), which is not cryptographic, and members
+  do not send while a removal recorded more than `WINDOW_REMOVAL` ago waits
+  (section 12.8).
+* **FS.** Compromise of a device at time `T` MUST NOT reveal the secrets of
+  epochs the device erased before `T`. Members erase the secrets of an epoch
+  when the next one is active; the init chain makes a leaked leaf key
+  useless for past epochs (model `forward_secrecy.pv`).
+* **PCS.** After a device whose state was compromised completes an update
+  (section 12.6), which re-keys its path and every node it taints, the
+  attacker MUST NOT derive the secrets of later epochs, unless it
+  compromises a member again (model `post_compromise.pv`). Members SHOULD
+  update at least every `UPDATE_INTERVAL`.
 * **Join secrecy.** A joiner that enters with a welcome receives only
-  `joiner_secret_n` (section 8), from which nothing of epoch `n - 1` or
-  before derives. Its `init_key` is used for one welcome and erased.
+  `joiner_secret_n` and the secrets of its path (section 9), from which
+  nothing of epoch `n - 1` or before derives. Its init key is used for one
+  welcome.
 * **Device keys.** Whoever holds a device key can sign as the device:
-  commits (including a Resync that re-enters the device's leaf with keys of
-  its choice), messages, proposals, a rotation of the key, and admissions if
-  the device is an admin. A device that rotates its key (section 9.3) stops
-  signing with the old one; this does not undo a compromise the adversary
-  already used, and an adversary holding the key can rotate it first. The
-  reliable repair is to remove the device, together with any device it
-  admitted, and to admit a new one. The device itself notices a commit
-  authored in its name that it did not produce: it cannot process it and
-  resyncs, or finds it was removed.
+  requests, including a re-entry that gives the member a leaf key of its
+  choice, district commits and seals if it is given the role, and
+  admissions if the device is an admin. The repair is to remove the device,
+  together with any device it admitted, and to admit a new one.
+* **Visibility of joins.** Every join is a change of a district commit that
+  the seal lists; a member that holds the seal of an epoch it accepted can
+  list the devices that window let in (section 12.11). Nobody can take a
+  member's place: a request claiming a member's device key fails its
+  signature, and a device already a member cannot join again.
 
 ### 2.3 Assumptions and limits
 
 * X-Wing is IND-CCA2 if either ML-KEM-768 or X25519 is; ML-DSA-65 is
   EUF-CMA (and strongly unforgeable); BLAKE3 in keyed mode is a PRF;
   ChaCha20-Poly1305 is an AEAD. Random numbers come from a CSPRNG.
-* The DS can always deny service: drop commits, messages, join requests or
-  whole groups. Members detect some of it (gaps in the log, a commit they
-  cannot process, section 10.5) but cannot prevent it.
-* The DS sees the members (device keys, leaves, occupancies, admins), who
-  sends when, the size of messages and the aliases members publish. Aliases
-  are self-asserted (section 15.1).
-* A member can send a message that other members cannot decrypt (a forged
-  ciphertext on its own chain) and can author a commit whose path secret some
-  members cannot decrypt; the latter is detected and reported (section 10.5)
-  and the affected members resync.
-* `signed_timestamp_ms` of a message is the sender's clock, authenticated by
-  its signature, not a trusted time.
+* The DS decides which requests enter which window, can delay any window
+  indefinitely, and can deny service. It cannot make a member accept an
+  epoch it forged.
+* The DS sees the members (device keys, leaves, occupancies, admins), every
+  request, the timing and size of windows, and who downloads what.
+* A committer learns the secrets of the nodes it re-keys, including off its
+  own path. An honest committer erases them once its commit is sent (section
+  12.4); taints bound the damage of one that does not.
+* An entrant learns every secret of the window it seals. It is a member of
+  the new epoch: admitted by an admin, a device of an open group, or already
+  a member.
+* In a window sealed by an entrant, the external init secret is known to
+  every member of the previous epoch, including those the window removes.
+  The new epoch's secrecy against them rests on the root secret, which the
+  window re-keys away from them.
+* A committer can wrap a secret that some members cannot open. They reject
+  the window (the confirmation tag does not check) and are cut off until
+  they re-enter; reports that would expose such a committer are an open
+  item (section 19).
 * Group encryption is not end-to-end between subsets of a group: every
-  member of an epoch can read every message of that epoch.
-* **Forks.** The DS decides which commits each member sees. It can show
-  different members different valid histories (a fork) and keep each branch
-  going; members on one branch reject the commits of the other. Comparing
-  the security code (the interim transcript hash of an epoch, section 8)
-  out of band detects a fork.
-* **Entering a group.** A joiner, and a member that resyncs, cannot check
-  the history before the epoch it enters: it checks the commit, GroupInfo,
-  tree and registry of that epoch against each other, but they come from
-  the DS. A DS can therefore fabricate an epoch whose committer and
-  GroupInfo signer is a device it controls, and make a joiner enter this
-  forked view, where the DS reads the joiner's messages. The properties of
-  section 2.2 hold for a member from the first epoch it shares with members
-  that followed the history; a joiner SHOULD compare its security code out
-  of band with a member it knows, such as the one who invited it.
+  member of an epoch holds its secrets.
+* **Forks.** The DS decides what each member sees. It can show different
+  members different valid histories (a fork) and keep each branch going;
+  members on one branch reject the windows of the other. Members that
+  follow the group check tags, not the history, and would not notice a
+  fork: comparing the interim transcript hash of an epoch out of band
+  detects it. A joiner checks the chain of seals from an admin checkpoint
+  (section 12.9), so the DS cannot lead it into an epoch it forged.
+* `time_ms` of a seal is the sealer's clock, not a trusted time.
 
-<a id="3-cryptographic-suite"></a>
-## 3. Cryptographic suite
+<a id="3-suite"></a>
+## 3. Cryptographic suite and encodings
+
+### 3.1 Suite
 
 | Function | Primitive | Use |
 | --- | --- | --- |
-| KEM | X-Wing (ML-KEM-768 and X25519), draft-connolly-cfrg-xwing-kem-06 | tree node and leaf keys, welcome init keys, external init |
-| Signature | ML-DSA-65 (FIPS 204), hedged, with context strings | commits and every signed object |
+| KEM | X-Wing (ML-KEM-768 and X25519), draft-connolly-cfrg-xwing-kem-06 | leaf and node keys, the init keys of welcomes, external keys |
+| Signature | ML-DSA-65 (FIPS 204), hedged, with context strings | requests, district commits, seals, checkpoints, policies |
 | Hash `H` | BLAKE3, 256-bit output | labelled hashes, digests |
 | PRF / KDF | BLAKE3 keyed mode and its XOF | Extract, ExpandLabel, MAC |
-| AEAD | ChaCha20-Poly1305 (RFC 8439) | path secret and welcome wrapping, messages |
+| AEAD | ChaCha20-Poly1305 (RFC 8439) | wraps and welcomes |
 
-* **X-Wing.** A private key is held as its 32-byte decapsulation key (a seed
-  from which X-Wing derives the ML-KEM-768 and X25519 keys). Encapsulation
-  draws its 64 random bytes (32 for ML-KEM, 32 for the X25519 ephemeral key)
-  from the caller's generator. Encapsulation keys are 1216 bytes (the
-  ML-KEM-768 key, then the X25519 key), ciphertexts 1120 bytes, shared
-  secrets 32 bytes. An encapsulation key MUST pass the FIPS 203 input check
-  of its ML-KEM part before use. The hybrid keeps confidentiality if either
-  component holds, against an adversary that records traffic today to
-  decrypt it with a quantum computer later.
+* **X-Wing.** A private key is held as its 32-byte decapsulation key (a
+  seed from which X-Wing derives the ML-KEM-768 and X25519 keys).
+  Encapsulation draws its 64 random bytes (32 for ML-KEM, 32 for the X25519
+  ephemeral key) from the caller's generator. Encapsulation keys are 1216
+  bytes (the ML-KEM-768 key, then the X25519 key), ciphertexts 1120 bytes,
+  shared secrets 32 bytes. An encapsulation key MUST pass the FIPS 203
+  input check of its ML-KEM part before use. The hybrid keeps
+  confidentiality if either component holds, against an adversary that
+  records traffic today to decrypt it with a quantum computer later.
 * **ML-DSA-65.** Key pairs derive from a 32-byte seed `xi`
   (`ML-DSA.KeyGen_internal`). Signing is hedged: the 32-byte `rnd` input is
-  drawn from the caller's generator. Public keys are 1952 bytes, secret keys
-  4032 bytes, signatures 3309 bytes. Every signature uses a FIPS 204 context
-  string (`ctx`) naming its usage (section 17.3); a signature produced under
-  one context MUST NOT verify under another.
-* **Randomness.** Every random value of the protocol (seeds, nonces, leaf
+  drawn from the caller's generator. Public keys are 1952 bytes, secret
+  keys 4032 bytes, signatures 3309 bytes. Every signature uses a FIPS 204
+  context string (`ctx`) naming its usage (section 17.3); a signature
+  produced under one context MUST NOT verify under another.
+* **Randomness.** Every random value of the protocol (seeds, nonces, node
   secrets, KEM randomness, signing randomness, invite seeds) MUST come from
   a CSPRNG.
 
-<a id="4-encodings"></a>
-## 4. Encodings and derivation functions
+### 3.2 Deterministic CBOR
 
-### 4.1 Deterministic CBOR
-
-`CBOR_det(x)` is the core deterministic encoding of RFC 8949, section 4.2.1:
+`CBOR_det(x)` is the core deterministic encoding of RFC 8949, section
+4.2.1:
 
 * integers and lengths use the shortest head;
 * only definite lengths;
@@ -242,1154 +267,1191 @@ Definitions (normative):
   `null` are allowed.
 
 A decoder MUST re-encode every decoded object and reject it unless the
-result is byte-identical to its input. Every object of this profile is
-exchanged as the exact bytes of its deterministic encoding; an
-implementation MUST NOT re-encode an object it relays or hashes.
+result is byte-identical to its input. Every object is exchanged as the
+exact bytes of its deterministic encoding; an implementation MUST NOT
+re-encode an object it relays or hashes. `h''` denotes the empty byte
+string and `ZERO32` 32 zero bytes. Integers are unsigned.
 
-`h''` denotes the empty byte string and `ZERO32` 32 zero bytes. Integers are
-unsigned unless stated.
-
-<a id="4-2-labelled-hash"></a>
-### 4.2 Labelled hash
+### 3.3 Hashing and key derivation
 
 ```text
-H(x)             := BLAKE3-256(x)
-H_L(label, args) := H(CBOR_det(["city-g/v0.3", label, args]))
-```
-
-`label` is a text string, `args` a CBOR array. A map MUST NOT appear as the
-argument list. The labels are listed in section 17.1.
-
-<a id="4-3-kdf"></a>
-### 4.3 Key derivation
-
-```text
-Extract(salt, ikm)                 := BLAKE3-keyed(key = salt, ikm)                 (32 bytes)
+H(x)                               := BLAKE3-256(x)
+H_L(label, args)                   := H(CBOR_det(["city-g/v0.4", label, args]))
+Extract(salt, ikm)                 := BLAKE3-keyed(key = salt, ikm)                (32 bytes)
 ExpandLabel(secret, label, ctx, L) := BLAKE3-keyed-XOF(key = secret,
-                                        CBOR_det(["city-g/v0.3 expand", label, ctx, L]))[0..L]
+                                        CBOR_det(["city-g/v0.4 expand", label, ctx, L]))[0..L]
 DeriveSecret(secret, label)        := ExpandLabel(secret, label, h'', 32)
-MAC(key, data)                     := BLAKE3-keyed(key = key, CBOR_det(["city-g/v0.3 mac", data]))
-KeyGen(secret, label)              := the X-Wing key whose decapsulation key is
+MAC(key, data)                     := BLAKE3-keyed(key, CBOR_det(["city-g/v0.4 mac", data]))
+KemKey(secret, label)              := the X-Wing key whose decapsulation key is
                                       ExpandLabel(secret, label, h'', 32)
+kem_pk_hash(pk)                    := H_L("kem-pk", [pk])
 ```
 
-`salt`, `secret` and `key` are 32 bytes; `ctx` is a byte string; `L` is an
-unsigned integer. MAC tags are compared in constant time.
+`label` is a text string and `args` a CBOR array; a map MUST NOT appear as
+the argument list (the labels are listed in section 17.1). `salt`, `secret`
+and `key` are 32 bytes, `ctx` is a byte string and `L` an unsigned integer.
+BLAKE3 in keyed mode is a PRF and its XOF output a PRF output of any length,
+so `Extract` and `ExpandLabel` follow the HKDF structure with BLAKE3 in
+place of HMAC. MAC tags MUST be compared in constant time.
 
-<a id="4-4-signed-arrays"></a>
-### 4.4 Signed arrays
+### 3.4 Signed arrays
 
-Every signed object except the commit (section 9) is a signed array:
+Every signed object except the seal is a signed array:
 
 ```text
-TBS       := CBOR_det([field_1, ..., field_k])
-Signed    := CBOR_det([field_1, ..., field_k, signature])
+TBS       := CBOR_det([label, field_2, ..., field_k])
+Signed    := CBOR_det([label, field_2, ..., field_k, signature])
 signature := ML-DSA-65.Sign(sk, TBS, ctx)
 ```
 
-`field_1` is the text label naming the object and its version (section
-17.2). A verifier checks the label and the number of fields before
+The label names the object and its version; every label of this profile
+ends in `/v4`, and the signature context of each signed array is its label
+(section 17). A verifier checks the label and the number of fields before
 verifying the signature over `TBS`, which it rebuilds from the received
-fields.
+fields. Seals are signed differently (section 10.4).
 
-<a id="5-identifiers"></a>
-## 5. Identifiers
+**Occupancies and node addresses** are encoded `[leaf, since]` and
+`[level, index]`.
 
-```text
-gid          := H_L("group-id",  [creator_device_pk, group_nonce])     group_nonce: 32 random bytes
-device_id    := H_L("device-id", [gid, device_pk])
-MemberRef    := [leaf, since]
-invite_id    := H_L("invite-id", [invite_pk])
-proposal_ref := H_L("proposal-ref", [signed proposal or join request bytes])
-epoch_ref    := H_L("msg/epoch-ref", [gid, epoch])
-H_pk(pk)     := H_L("kem-pk", [pk])                                    pk: X-Wing encapsulation key
-```
-
-* Binding the creator's device key into `gid` makes the creator the
-  verifiable first admin of the group.
-* `device_id` names a device in an admission, before it has a leaf.
-* A member reference `[leaf, since]` names one occupancy: no later occupant
-  of the leaf can enter at the same epoch, so the pair is never reused, even
-  when the tree shrinks and grows again.
-
-<a id="6-ratchet-tree"></a>
-## 6. Ratchet tree
-
-<a id="6-1-layout"></a>
-### 6.1 Layout
-
-The tree follows the array layout of RFC 9420: with `width` leaves (a power
-of two), leaf `i` is node `2i`, parent nodes have odd indices, the level of
-node `x` is the number of trailing one bits of `x`, and the root is node
-`width - 1`. Node indices do not depend on the width: when the tree doubles,
-the old root becomes the left child of the new root; when it halves, the
-right half is dropped.
-
-* `capacity`, a power of two with `2 <= capacity <= MAX_CAPACITY` (8192),
-  is fixed at genesis; `width <= capacity`.
-* **Canonical width.** `width` is the smallest power of two covering the
-  rightmost occupied leaf (1 for a tree whose only member is in leaf 0).
-  Every accepted tree is canonical: after its membership changes, a commit
-  halves the tree while the right half holds no member.
-* **Entry leaf.** A member enters the lowest blank leaf; when every leaf is
-  occupied and `width < capacity`, the tree doubles and the member takes
-  leaf `width`. A group whose `capacity` leaves are all occupied is full.
-* The *direct path* of a leaf lists the parent nodes from its parent up to
-  the root; its *copath* lists, for each node of the direct path, the child
-  that is not on the path. `ancestor(leaf, l) := ((leaf >> l) << (l + 1)) +
-  2^l - 1` is the ancestor of `leaf` at level `l`, and two distinct leaves
-  `a` and `b` have their lowest common ancestor at level `bitlen(a XOR b)`.
-
-<a id="6-2-nodes"></a>
-### 6.2 Nodes
+<a id="4-identifiers"></a>
+## 4. Identifiers
 
 ```text
-LeafNode   := [device_pk, since, encryption_key, admission_hash]
-ParentNode := [encryption_key, [unmerged leaf, ... increasing]]
+gid       := H_L("group-id",  [creator_device_pk, group_nonce])     group_nonce: 32 random bytes
+device_id := H_L("device-id", [gid, device_pk])
+invite_id := H_L("invite-id", [invite_pk])
+request_ref := H(encoded request)
 ```
 
-* A leaf is blank (`null`) or holds a member: its ML-DSA-65 device key, the
-  epoch its occupancy began, the X-Wing key of the leaf, and
-  `admission_hash := H(SignedAdmission)` of its join (`ZERO32` for the
-  creator).
-* A parent is blank (`null`) or holds an X-Wing key and its *unmerged
-  leaves*: the leaves below it that entered after its key was set and hence
-  do not hold its private key.
-* **Entering.** A member that enters without re-keying (a join request, or
-  the author of an external commit before its own update path is applied)
-  is added to the unmerged list of every non-blank node of its direct path.
-* **Removing.** A removal blanks the leaf and every node of its direct path.
-* Device keys are distinct across the tree; unmerged leaves name occupied
-  leaves below their node.
-* The tree of a snapshot is encoded as `[capacity, [leaf or null, ...],
-  [parent or null, ...]]`, parents indexed by `node / 2`. A decoder MUST
-  check the invariants of this section and reject a non-canonical width.
+<a id="5-tree"></a>
+## 5. Tree
 
-<a id="6-3-tree-hash"></a>
-### 6.3 Tree hash
+### 5.1 Shape and addresses
+
+A tree has `2^height` leaves, `1 <= height <= MAX_HEIGHT`. Node
+`(k, i)` is the ancestor at level `k` of leaves `i·2^k .. (i+1)·2^k`;
+leaves are level 0. With `L = district_bits` (fixed at genesis,
+`1 <= L <= MAX_HEIGHT`):
+
+* the *district level* is `min(L, height)`;
+* if `height > L`, there are `2^(height - L)` districts; district `d` is
+  the subtree under node `(L, d)`, and the *city* is the set of levels
+  `L + 1 .. height`;
+* otherwise there is one district, whose root is the tree's root, and no
+  city.
+
+The district of a leaf `i` is `i >> L` when `height > L`, else 0.
+
+### 5.2 Nodes
 
 ```text
-leaf_hash(i)     := H_L("tree/leaf",   [i, LeafNode or null])
-node_digest(x)   := H_L("tree/parent-node", [encryption_key, [unmerged leaf, ...]])
-parent_hash(x)   := H_L("tree/parent", [node_digest(x) or null, hash(left(x)), hash(right(x))])
-tree_hash        := hash(root)
+LeafNode   := [device_pk, since, encryption_key, admission_hash, updated]
+ParentNode := [encryption_key, taint]            taint: an occupancy
 ```
 
-A parent's content is hashed first so that a Merkle proof of a leaf carries
-32 bytes per level (section 6.7).
+* `encryption_key` of a leaf is chosen by the member; `admission_hash` is
+  the hash of the admission it entered with (`ZERO32` for the creator);
+  `updated` is the epoch its leaf key last changed.
+* A parent node is **blank exactly when its subtree holds no member**.
+  Every other parent node holds the key derived from its secret and its
+  taint. There are no unmerged leaves.
 
-<a id="6-4-resolution"></a>
-### 6.4 Resolution
-
-The *resolution* of a node is the smallest set of nodes whose private keys
-cover every member below it:
-
-* a non-blank parent: the node, then its unmerged leaves;
-* a blank parent: the resolution of its left child, then of its right child;
-* an occupied leaf: the leaf; a blank leaf: nothing.
-
-Resolutions are listed in increasing node order.
-
-<a id="6-5-update-path"></a>
-### 6.5 Update path
-
-A commit re-keys its author's leaf and direct path:
+### 5.3 Hashes
 
 ```text
-leaf_secret        : 32 fresh random bytes
-leaf key           := KeyGen(leaf_secret, "tree leaf key")
-path_secret[0]     := DeriveSecret(leaf_secret, "tree path")
-path_secret[i + 1] := DeriveSecret(path_secret[i], "tree path")
-node key of path[i] := KeyGen(path_secret[i], "tree node key")        0 <= i < d
-commit_secret      := path_secret[d]                                  d = |direct path| = log2(width)
+leaf_hash(i)   := H_L("tree/leaf", [LeafNode or null])
+content(n)     := H_L("tree/node", [encryption_key, taint])
+node_hash(n)   := H_L("tree/parent", [content(n) or null, node_hash(left), node_hash(right)])
+tree_hash      := node_hash(root)
+district_hash  := node_hash(district root)
 ```
 
-`commit_secret` is one step past the root, so a tree of one leaf (`d = 0`)
-still yields a fresh commit secret. For each node `path[i]`, the author
-encrypts `path_secret[i]` to every node of the resolution of `copath[i]` in
-the *staged tree*: the tree after every membership change of the commit
-(steps 1 to 7 of section 9.4):
+Positions are not hashed: they follow from the structure. The hash of an
+empty subtree at level `k` is fixed, and equals the generic formula.
+
+**Leaf proofs.** A leaf proof of leaf `i` is the leaf (or `null`) and, for
+each level `1..height` from the bottom, `content` of the ancestor (or
+`null`) and the hash of the sibling subtree. It recomputes `tree_hash`. It
+MUST be rejected if `i >= 2^height` for the height it claims. A proof of a
+member's path parents checks each against the `content` of its level.
+
+### 5.4 Growth
+
+The tree grows by raising `height`. Addresses are unchanged: the old root
+becomes node `(old_height, 0)`. The nodes `(k, 0)` for
+`old_height < k <= height` hold the old tree, so a window that grows a
+non-empty tree re-keys them (section 10.2). The height of a window is the
+smallest height, not below the current one, whose width holds every
+changed leaf. This version never shrinks the tree (section 19).
+
+<a id="6-requests"></a>
+## 6. Signed requests
+
+Every request is a signed array (section 3.4), except the eviction, which
+the DS writes under an admin-signed policy. Members are named by
+occupancy. Sizes are bounded by the parameters of section 16.
 
 ```text
-(kem_ciphertext, shared) := X-Wing.Encaps(pk_target)
-wrap_context   := CBOR_det([gid, epoch, author_leaf, node, target, H_pk(pk_target)])
-wrap_key       := ExpandLabel(shared, "tree path wrap key",   wrap_context, 32)
-wrap_nonce     := ExpandLabel(shared, "tree path wrap nonce", wrap_context, 12)
-wrapped_secret := ChaCha20-Poly1305(wrap_key, wrap_nonce, aad = wrap_context, pt = path_secret[i])
+Invite         := ["city-g/invite/v4", gid, invite_pk, expires_at_ms, max_uses,
+                   inviter, inviter_pk, signature]
+Admission      := ["city-g/admission/v4", gid, device_id, not_after_epoch, kind,
+                   admin or null, authorizer_pk, invite or null, signature]
+JoinRequest    := ["city-g/join-request/v4", gid, device_pk, encryption_key,
+                   init_key, not_after_epoch, admission or null, signature]
+RemoveProposal := ["city-g/remove/v4", gid, target, proposer, signature]
+Eviction       := ["city-g/eviction/v4", gid, target, policy_hash]
+GroupPolicy    := ["city-g/group-policy/v4", gid, admission_mode,
+                   max_idle_epochs or null, admin, signature]   admission_mode: 0 closed, 1 open
+UpdateRequest  := ["city-g/update/v4", gid, member, replaces, encryption_key, signature]
+CatchUpRequest := ["city-g/catch-up/v4", gid, member, prev_interim, init_key, signature]
+ReEntryRequest := ["city-g/re-entry/v4", gid, member, replaces, encryption_key,
+                   init_key, signature]
+Checkpoint     := ["city-g/checkpoint/v4", gid, epoch, interim, tree_hash,
+                   registry_hash, height, district_bits, external_pk_hash,
+                   time_ms, admin, signature]
 ```
 
-`epoch` is the epoch the commit creates and `author_leaf` the author's leaf
-in it. Members that entered with the same commit are unmerged leaves of the
-copath nodes above them, so they receive the path secrets under their own
-leaf keys. The update path is encoded as
+* **Invite.** Signed by the inviter, an admin (`inviter` its occupancy,
+  `inviter_pk` its device key). The invite key pair derives from a 32-byte
+  seed shared out of band, for instance in an invite link. It is valid for a
+  window if the
+  inviter is an admin of the previous epoch with that key. Expiry and the
+  number of uses are enforced by the DS.
+* **Admission.** Kind 0: signed by the admin `admin`, whose key is
+  `authorizer_pk`, `invite = null`. Kind 1: `admin = null`, signed by the
+  invite key `authorizer_pk` of the enclosed invite, which MUST name the
+  same group and key. `admission_hash := H(Admission)`. For a join creating
+  epoch `n`, an admission is valid if it names the device
+  (`device_id`), `n <= not_after_epoch <= n + MAX_ADMISSION_EPOCHS`, its
+  signer is an admin of epoch `n - 1` (directly or through a valid invite),
+  and it was never used (section 8): **an admission is good for one join.**
+  Its *anchor key*, which the joiner trusts, is the admin's key (kind 0) or
+  the inviter's key (kind 1).
+* **JoinRequest.** Signed by the joining device. `encryption_key` and
+  `init_key` are distinct X-Wing keys that MUST pass the input check; the
+  init key is used for one welcome. For a join creating epoch `n`,
+  `n <= not_after_epoch <= n + MAX_ADMISSION_EPOCHS`. In a closed group the
+  request MUST carry an admission; in an open group it MAY carry none. Its
+  *token*, which the admission map records so that it enters once, is
+  `admission_hash`, or `H(JoinRequest)` without admission; the joiner's
+  leaf holds the token as its `admission_hash`.
+* **RemoveProposal.** Signed by an admin of the previous epoch, or by the
+  target itself (`proposer = target`).
+* **Eviction.** Written by the DS. Valid in a window creating epoch `n` if
+  the registry holds `policy_hash`, the policy object hashes to it, sets
+  `max_idle_epochs`, and the target's leaf key has not changed for more
+  than that: `n - updated > max_idle_epochs`.
+* **GroupPolicy.** Signed by an admin of the previous epoch, or by the
+  creator at genesis. It says whether the group is open and after how long
+  an idle member may be evicted. A group without policy is closed and
+  evicts nobody.
+* **UpdateRequest** and **ReEntryRequest.** Signed with the member's device
+  key. `replaces := kem_pk_hash(current leaf key)`: the request is valid
+  only while that key is the member's leaf key, so it applies once and
+  cannot be replayed after the key changed. A re-entry adds a one-time init
+  key.
+* **CatchUpRequest.** Signed with the member's device key. `prev_interim`
+  is the interim transcript hash of the epoch the next window builds on:
+  the request is valid for that window only, so it cannot be replayed to
+  obtain a later epoch under an old init key.
+* **Checkpoint.** Signed by an admin; states an epoch, its interim
+  transcript hash, tree hash, registry hash, shape and
+  `external_pk_hash := kem_pk_hash(external_pk)`. Admins SHOULD sign one
+  every `CHECKPOINT_INTERVAL`.
+
+Decoding checks encodings and key lengths only; signatures are checked by
+whoever the rules of sections 10, 14 and 15 name.
+
+### 6.1 Open and closed groups
+
+A group is *closed* unless the group policy in force opens it. The registry
+binds the policy's hash and the admission mode (section 8), so every member
+knows the mode, and the mode changes only by a new policy signed by an admin
+(section 12.2). In an open group:
+
+* a device joins with its own signed request and no admission; nothing
+  else about joining changes (placement, welcomes, anchoring);
+* when no member is online, any new device can be the entrant of a window,
+  including one the DS controls (section 12.7);
+* the checks of sections 10 and 15 skip the admission of a join that has
+  none, and keep all others: signatures, the device not already a member,
+  the token unused, the request not expired.
+
+The joiner of an open group trusts an admin key from the group's public
+link to check checkpoints (section 12.9). Nothing in an open group is signed
+per join by an admin.
+
+<a id="7-rekey"></a>
+## 7. Re-key
+
+### 7.1 Node secrets and keys
 
 ```text
-UpdatePath := [leaf_public_key, [PathNode, ...]]
-PathNode   := [node, public_key, [[target, kem_ciphertext, wrapped_secret], ...]]
+node key pair        := KemKey(secret, "tree node key")
+chain(child_secret)  := DeriveSecret(child_secret, "tree path")
+fresh(hedge)         := DeriveSecret(Extract(hedge, r), "fresh node")      r: 32 random bytes
 ```
 
-with one `PathNode` per direct-path node in order, and one target per
-resolution node in increasing node order. `wrapped_secret` is 48 bytes.
+`hedge` is the committer's `init_secret` of the previous epoch, or the
+external init secret for an entrant (`ZERO32` at genesis): a weak
+generator alone does not expose a fresh secret to an outsider.
 
-**Validation** (needs no secret; run by the DS and by every full member,
-against the staged tree): the author's leaf is occupied; every public key is
-a valid X-Wing key; the path has one entry per direct-path node with the
-right node index; the targets of entry `i` are exactly the resolution of
-`copath[i]`, in order; ciphertexts are 1120 bytes and wrapped secrets 48
-bytes.
+### 7.2 Wraps
 
-**Decryption** by the member in leaf `m != author_leaf`: take the entry of
-the lowest common ancestor, index `bitlen(author_leaf XOR m) - 1`; among its
-targets, take the node the member holds a private key for (its leaf, or a
-node of its direct path of which it is not an unmerged leaf); decapsulate,
-open the wrapped secret (with `H_pk` of that node's public key); derive the
-path secrets above; and check that every derived node public key equals the
-published one. Any failure is a cover failure (section 10.5).
-
-**Application.** The new tree is the staged tree with the author's leaf key
-replaced by `leaf_public_key` and each direct-path node set to its new
-public key with an empty unmerged list. Members keep the private keys of the
-nodes they learnt and drop keys of nodes that are blank or gone.
-
-<a id="6-6-update-bound"></a>
-### 6.6 Bound on update size
+A *wrap* gives the new secret of node `v` to the holder of the key of its
+child `t`:
 
 ```text
-max_update_path_bytes(c) := 64 + (1216 + 8)(d + 1) + 16 d + (1120 + 48 + 16)(c - 1),   d = log2(c)
+context := CBOR_det([gid, epoch, v.level, v.index, t.level, t.index, kem_pk_hash(t_pk)])
+(ct, ss) := X-Wing.Encaps(t_pk)
+sealed  := ChaCha20-Poly1305(key   = ExpandLabel(ss, "wrap key", context, 32),
+                             nonce = ExpandLabel(ss, "wrap nonce", context, 12),
+                             aad   = context, plaintext = secret)            (48 bytes)
+Wrap    := [v.level, v.index, t.level, t.index, ct, sealed]
 ```
 
-The copath resolutions cover every other member once (an unmerged leaf is
-listed below one node only), so they hold at most `c - 1` targets overall:
-an update of an 8192-leaf tree stays under 10 MB.
+`epoch` is the epoch the window creates.
 
-<a id="6-7-leaf-proof"></a>
-### 6.7 Leaf proofs
+### 7.3 Plans
+
+The *plan* of a re-key is its public structure: which nodes, blank or not,
+the chain source and the wrap targets of each. It depends only on public
+data, so the DS and every verifier recompute it.
+
+**Re-key set.** For district `d`: every ancestor, at levels
+`1..district_level`, of a changed leaf of `d`, and every forced node of
+`d` (section 10.2) with its ancestors up to the district root. For the
+city: every ancestor, at levels `L + 1..height`, of the root of each
+district of the window, and every forced city node with its ancestors up
+to the root.
+
+**Order.** Nodes are processed by level, then index.
+
+**Each node `v`.** A child `c` of `v` is *live* if: `c` is in the re-key set
+and not blank after it; `c` is a leaf occupied after the window; `c` is a
+district root whose new state the city plan is given; otherwise `c` is not
+blank in the tree before the window. Then:
+
+* if no child is live, `v` becomes blank;
+* otherwise, unless `v`'s level is a *boundary*, the secret of `v` is
+  `chain(secret of c)` for the first live child `c`, left first, that is in
+  the re-key set and not blank; if there is none, or at a boundary, it is
+  `fresh(hedge)`;
+* the secret is wrapped to every live child except the one it was chained
+  from.
+
+The boundaries are level 1 in a district (the children are members'
+leaves) and level `L + 1` in the city (the children are district roots
+re-keyed by other committers).
+
+**Keys of wrap targets.** The new key of a node this commit re-keyed; the
+new leaf key of a changed leaf; in the city plan, the new key of a
+district root from its district commit; otherwise the key in the tree
+before the window.
+
+**Following a plan.** A commit lists one node update per planned node, in
+plan order: the new public key, or `null` exactly for the nodes the plan
+blanks. Its wraps follow the plan: for each node, one wrap per target, in
+target order. A verifier recomputes the plan and checks the list of nodes,
+the keys (X-Wing input check), the wrap addresses and sizes. It cannot
+check the ciphertexts; a member that cannot open its wrap rejects the
+window (the tag check fails).
+
+### 7.4 Member paths
+
+A member holds the secret of each of its ancestors, by level. The *steps*
+of a window along its path are, for each ancestor `v` at level `k` that
+the window re-keys: `Wrap` if the window wrapped `v`'s secret to `v`'s
+child toward the member, `Chain` otherwise. Bottom-up:
+
+* `Wrap`: open it with the key of the child toward the member: its leaf key
+  at level 1, else `KemKey(secret at level k - 1, "tree node key")`;
+* `Chain`: `chain(secret at level k - 1)`, valid only if level `k - 1` was
+  re-keyed by the same window (never at level 1);
+* a level the window does not re-key keeps its secret;
+* a re-keyed ancestor that becomes blank means the member was removed.
+
+**Recovery.** A joiner, a member re-entering its leaf and a member jumping
+to the present recover their whole path from the last step of each level,
+each tagged with the epoch of the window that last re-keyed the node. A
+`Chain` step is valid only if the child's step has the same epoch. The
+member checks every recovered secret against the public key of its node in
+the tree it enters (section 12.9). This works because a window that
+re-keys a node re-keys all its ancestors: the last re-key of a node
+happened at or after the last re-key of its child toward the member, and
+either chained from that child (re-keyed in the same window) or wrapped to
+the child's key of that time, which is still its key.
+
+<a id="8-registry"></a>
+## 8. Registry
 
 ```text
-LeafProof := [leaf, width, LeafNode or null, [[node_digest or null, sibling_hash], ...]]
+RegistryHeader := [admins, devices_root, admissions_root, policy_hash or null, open]
+registry_hash  := H_L("registry", [[[admin, admin_pk], ...], devices_root,
+                                   admissions_root, policy_hash or null, open])
 ```
 
-A leaf proof shows that leaf `leaf` of a tree of `width` leaves holds a
-member (or is blank). Its steps go from the leaf's parent up to the root:
-step `k` gives the `node_digest` of the ancestor at level `k + 1` (`null` if
-blank) and the hash of the sibling of the node at level `k`. A verifier
-checks that `width` is a power of two at most `MAX_CAPACITY`, `leaf <
-width` and there are `log2(width)` steps, recomputes the root hash with
-section 6.3 and compares it with the expected tree hash. A proof is at most
-8 KiB.
+* `admins`: occupancies of the admins with their device keys, in
+  occupancy order;
+* `devices`: a sparse Merkle map from the `device_id` of every member to
+  its occupancy;
+* `admissions`: a sparse Merkle map from the token of every join ever
+  made (its admission's hash, or its request's hash without admission) to
+  the occupancy it admitted. Entries are never removed;
+* `policy_hash`: hash of the group policy in force, if any;
+* `open`: 1 if the policy in force opens the group, else 0 (a group without
+  policy is closed).
 
-<a id="7-registry"></a>
-## 7. Registry
+Members keep the header; the DS and committers keep the maps.
+
+**Sparse Merkle maps.** Keys are 32-byte digests, read most significant
+bit first; values are occupancies. The map is a binary trie in which a
+subtree holding one entry is that entry:
 
 ```text
-Registry      := [capacity, [admin leaf, ... increasing],
-                  [[admission_hash, expires_epoch], ... oldest first], retired_floor]
-registry_hash := H_L("registry", Registry)
+subtree(prefix) := ZERO32                                   no entry under prefix
+                 | H_L("smm/leaf", [key, value])             one entry
+                 | H_L("smm/node", [subtree(prefix‖0), subtree(prefix‖1)])
+root            := subtree(empty prefix)
 ```
 
-* **Admins** are named by their leaf: admin rights belong to an occupancy,
-  end with it (a removal), and survive a resync of the same leaf and a
-  rotation of the device key. At most `MAX_ADMINS` (64). If a commit leaves
-  no admin, its author becomes one (section 9.4). The genesis registry has
-  the creator's leaf 0 as sole admin.
-* **Retired admissions.** When an occupancy that began at epoch `since` ends
-  by a removal in epoch `n`, its `admission_hash` is appended with
-  `expires_epoch := since + MAX_ADMISSION_EPOCHS`, unless it is `ZERO32`
-  (the creator), already retired, or `expires_epoch < n`. Entries whose
-  `expires_epoch < n` are dropped at the start of every commit for epoch
-  `n`, and at most `MAX_RETIRED` (4096) entries are kept, the oldest going
-  first. An admission is valid for at most `MAX_ADMISSION_EPOCHS` epochs
-  (section 10.2), so a retired admission cannot be used again while it is
-  valid: a removed member cannot come back with an admission it kept.
-* **Retired floor.** When the list overflows, the entry dropped may not have
-  expired yet: `retired_floor := max(retired_floor, its expires_epoch)`, and
-  an admission whose `not_after_epoch` is not above `retired_floor` is
-  refused (section 10.2). The dropped admission is among them, since its
-  `not_after_epoch` is at most its entry's `expires_epoch`. The floor starts
-  at 0 and never decreases; clients give their admissions a last epoch above
-  it (section 13.1).
+The root depends only on the set of entries. A proof for key `k` lists the
+sibling hashes along `k`'s branch, from the root down to the first subtree
+holding at most one entry, and that entry if any. It shows `k`'s value (the
+entry's key is `k`) or `k`'s absence (no entry, or an entry with another
+key that shares the prefix). A proof whose entry does not share the prefix
+MUST be rejected.
 
-<a id="8-key-schedule"></a>
-## 8. Key schedule
+**Changes of a window** creating epoch `n`, applied in this order:
+
+1. every removed or evicted member leaves `devices`, and `admins` if it
+   was an admin;
+2. every join adds `device_id -> [leaf, n]` to `devices` and
+   `token -> [leaf, n]` to `admissions`. The device MUST NOT be in
+   `devices` before the window, and neither the device nor the token MAY
+   appear twice in the window or be in the maps already;
+3. a group policy in the seal body, signed by an admin of epoch `n - 1`,
+   sets `policy_hash` and `open`;
+4. if no admin is left, the sealer becomes admin, with its device key (the
+   promotion rule).
+
+<a id="9-key-schedule"></a>
+## 9. Key schedule
+
+One epoch per window. The window's root secret, which every member of the
+new epoch derives from its path (section 7.4), feeds the schedule:
 
 ```text
-GroupContext_n := CBOR_det(["city-g/group-context/v3", gid, n, tree_hash_n,
-                            registry_hash_n, "city-g/v0.3", confirmed_transcript_hash_n])
-
-joiner_secret_n   := ExpandLabel(Extract(init_secret_{n-1}, commit_secret_n),
-                                 "joiner", H(GroupContext_n), 32)
-epoch_secret_n    := DeriveSecret(joiner_secret_n, "epoch")
-init_secret_n     := DeriveSecret(epoch_secret_n, "init")
-msg_secret_n      := DeriveSecret(epoch_secret_n, "msg")
-confirm_key_n     := DeriveSecret(epoch_secret_n, "confirm")
-external_secret_n := DeriveSecret(epoch_secret_n, "external")
-
-confirmed_transcript_hash_n := H_L("confirmed-transcript",
-    [interim_transcript_hash_{n-1}, anchor_tbs_n, signature_n, rotation_signature_n or h''])
-confirmation_tag_n          := MAC(confirm_key_n, confirmed_transcript_hash_n)
-interim_transcript_hash_n   := H_L("interim-transcript",
-                                   [confirmed_transcript_hash_n, confirmation_tag_n])
+GroupContext_n := CBOR_det(["city-g/group-context/v4", gid, n, tree_hash_n,
+                            registry_hash_n, height_n, district_bits,
+                            "city-g/v0.4", confirmed_transcript_hash_n])
+commit_secret_n := DeriveSecret(root_secret_n, "commit")
+joiner_secret_n := ExpandLabel(Extract(init_n-1, commit_secret_n), "joiner", H(GroupContext_n), 32)
+epoch_secret_n  := DeriveSecret(joiner_secret_n, "epoch")
+init_n, msg_secret_n, confirm_key_n, external_secret_n
+                := DeriveSecret(epoch_secret_n, "init" | "msg" | "confirm" | "external")
+external key pair_n := KemKey(external_secret_n, "external kem")
+confirmed_transcript_hash_n := H_L("confirmed-transcript", [interim_transcript_hash_n-1, seal_hash_n])
+confirmation_tag_n := MAC(confirm_key_n, confirmed_transcript_hash_n)
+interim_transcript_hash_n := H_L("interim-transcript", [confirmed_transcript_hash_n, confirmation_tag_n])
 ```
 
-* `init_secret_{-1}` and `interim_transcript_hash_{-1}` are `ZERO32`.
-* The GroupContext binds the tree, the registry and the whole transcript
-  into every epoch secret: members with diverging views derive different
-  keys and fail the confirmation tag.
-* **Joiners** receive `joiner_secret_n` in a welcome (section 10.3) and
-  derive the rest; they never learn `init_secret_{n-1}`.
-* **Erasure.** When epoch `n` becomes active, a member erases
-  `init_secret_{n-1}`, `external_secret_{n-1}`, `joiner_secret_n`,
-  `epoch_secret_n`, `confirm_key_n` and `msg_secret_n` (after deriving the
-  message chains, section 11.2). It keeps `init_secret_n` and
-  `external_secret_n` until epoch `n + 1` becomes active.
+* `init_-1` and `interim_transcript_hash_-1` are `ZERO32`.
+* `seal_hash_n := H(SealHeader_n)` (section 10.4).
+* **External init.** In a window sealed by an entrant, `init_n-1` is
+  replaced by the external init secret:
 
-<a id="8-1-external-init"></a>
-### 8.1 External init
+  ```text
+  (kem_output, ss) := X-Wing.Encaps(external_pk_n-1)
+  external_init    := ExpandLabel(Extract(ZERO32, ss), "external init", H(kem_output), 32)
+  ```
 
-From `external_secret_n` every member of epoch `n` derives the X-Wing
-*external key pair* of the epoch, `external_n := KeyGen(external_secret_n,
-"external kem")`. Its public key is published in the signed GroupInfo of
-epoch `n` (section 10.4). The author of an external commit (a join or a
-resync) encapsulates to it and uses the *external init secret* in place of
-`init_secret_n` for epoch `n + 1`:
+  Every member of epoch `n - 1` recovers it with its external key.
+* A window that re-keys nothing (catch-ups or a policy only) keeps the root
+  secret; its epoch is still fresh through the init chain.
+* Members keep the secrets of epoch `n` while it is active, including
+  `joiner_secret_n`, with which the window's welcomers seal their welcomes
+  (section 11), and erase them when the next epoch is active.
+* `msg_secret_n` is the root of the message plane of epoch `n`, which this
+  version does not specify yet (section 19).
+
+**Genesis.** The creator draws a nonce and computes `gid`. The tree has
+height 1: the creator at leaf 0 (`since = 0`, `admission_hash = ZERO32`)
+and the root `(1, 0)`, keyed from a fresh secret with the creator's
+taint. The registry has the creator as admin and its device in `devices`,
+and the group policy the creator chose, if any (an open group has one from
+genesis). `init_-1 = ZERO32`. The genesis seal (kind 0, section 10.4)
+carries in its body `[nonce, creator_pk, encryption_key, root_pk]` and that
+policy, signed by the creator as admin `[0, 0]`; the DS rebuilds the state
+from it and checks the hashes, `gid`, the policy's signature and the seal's
+signature.
+
+<a id="10-windows"></a>
+## 10. Windows: district commits and seals
+
+### 10.1 Changes
 
 ```text
-(kem_output, shared) := X-Wing.Encaps(external_pk_n)
-external_init_secret := ExpandLabel(Extract(ZERO32, shared), "external init", H(kem_output), 32)
+Change := [kind, leaf, request_ref]
+kind   := 0 removal | 1 eviction | 2 join | 3 update | 4 re-entry
 ```
 
-Members recover `shared` by decapsulation. No member needs to be online for
-an external commit.
+A window creating epoch `n` lists changes sorted by `(leaf, kind,
+request_ref)`. The changes of one leaf MUST be one of:
 
-<a id="9-commits"></a>
-## 9. Commits
-
-<a id="9-1-registry"></a>
-### 9.1 Key registry
-
-A commit is a CBOR map with a closed key registry. An unknown key, a key
-absent where it is required or present where it is forbidden makes the
-commit malformed (R required, O optional, - forbidden).
-
-| Key | Name | Type | Genesis | Member | ExternalJoin | Resync |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | profile | tstr `"city-g/v0.3"` | R | R | R | R |
-| 2 | gid | bstr .size 32 | R | R | R | R |
-| 3 | epoch | uint (the epoch `n` it creates) | R (0) | R | R | R |
-| 4 | kind | uint: 0 Genesis, 1 Member, 2 ExternalJoin, 3 Resync | R | R | R | R |
-| 5 | prev_interim_transcript_hash | bstr .size 32 | R (`ZERO32`) | R | R | R |
-| 6 | author_leaf | uint (the author's leaf in epoch `n`) | R (0) | R | R | R |
-| 7 | tree_hash (epoch `n`) | bstr .size 32 | R | R | R | R |
-| 8 | registry_hash (epoch `n`) | bstr .size 32 | R | R | R | R |
-| 9 | update_path | UpdatePath (section 6.5) | R | R | R | R |
-| 10 | removals | array of bstr (SignedRemoveProposal), at most 256 | - | R | R | R |
-| 11 | joins | array of bstr (SignedJoinRequest), at most 64 | - | R | R | R |
-| 12 | admin_changes | array of `[op, leaf, since]`, op 0 grant, 1 revoke | - | R | - | - |
-| 13 | admission | bstr (SignedAdmission of the author) | - | - | R | - |
-| 14 | external_init | bstr (X-Wing ciphertext) | - | - | R | R |
-| 15 | group_nonce | bstr .size 32 | R | - | - | - |
-| 16 | capacity | uint | R | - | - | - |
-| 17 | new_device_pk | bstr (ML-DSA-65 public key) | - | O | - | - |
-| 108 | author_device_pk | bstr (ML-DSA-65 public key) | R | R | R | R |
-| 109 | signature | bstr | R | R | R | R |
-| 110 | confirmation_tag | bstr .size 32 | R | R | R | R |
-| 111 | rotation_signature | bstr | - | R iff 17 | - | - |
-
-The encoded commit is at most `max_commit_bytes(capacity) :=
-max_update_path_bytes(capacity) + 256 × 8 KiB + 64 × 32 KiB + 16 KiB + 64
-KiB`.
-
-<a id="9-2-signature"></a>
-### 9.2 Signatures and confirmation tag
-
-```text
-anchor_tbs         := CBOR_det(commit map without keys 109, 110 and 111)
-signature          := ML-DSA-65.Sign(author_sk, anchor_tbs, ctx = "city-g/anchor/v3")
-rotation_signature := ML-DSA-65.Sign(new_sk,    anchor_tbs, ctx = "city-g/key-rotation/v1")
-confirmation_tag   := MAC(confirm_key_n, confirmed_transcript_hash_n)
-```
-
-A commit carries one signature by its author (key 108), and a second one by
-the author's new device key when it rotates it: the old key authorizes the
-rotation and the new key proves possession. The confirmation tag cannot be
-signed: it authenticates the confirmed transcript hash, which covers the
-signatures.
-
-<a id="9-3-kinds"></a>
-### 9.3 Kinds
-
-* **Genesis** (epoch 0): the first commit of a group, by its creator. It
-  carries `group_nonce` and `capacity`; `gid` MUST equal `H_L("group-id",
-  [author_device_pk, group_nonce])`. The staged tree holds the creator's
-  leaf in leaf 0 (`since` 0, key `leaf_public_key`, admission hash
-  `ZERO32`); the registry is the genesis registry; the key schedule starts
-  from `init_secret_{-1} = ZERO32`.
-* **Member**: by a current member. May remove members, place join requests,
-  change admins (if the author is an admin) and rotate the author's device
-  key (key 17). A Member commit with no change is a *self-update*.
-* **ExternalJoin**: by a joiner holding a valid admission (key 13). It uses
-  the external init of the previous epoch and may carry the other waiting
-  removals and join requests.
-* **Resync**: by a current member that lost its state or could not process a
-  commit. It re-enters its own leaf as a new occupancy (`since = n`), keeping
-  its device key, admission hash and admin rights, and uses the external
-  init.
-
-<a id="9-4-transition"></a>
-### 9.4 Transition rules
-
-A commit for epoch `n` applies to the public state of epoch `n - 1` in this
-order:
-
-1. **Pruning.** Retired admissions with `expires_epoch < n` are dropped.
-2. **Removals.** Each removal proposal is authorized against epoch `n - 1`
-   (section 10.1). A removal MUST NOT target the author of a Member or
-   Resync commit, and a leaf MUST NOT be removed twice. Each removal ends
-   its target's occupancy: the leaf and its direct path are blanked, the
-   member loses its admin rights and its admission is retired (section 7).
-3. **Admin changes** (Member commits only): the author MUST be an admin of
-   epoch `n - 1`; each target `[leaf, since]` MUST be a current occupancy
-   after step 2; grants (at most `MAX_ADMINS` admins) and revokes (the
-   target MUST be an admin) apply in order.
-4. **Entries**, each into the entry leaf (section 6.1) with `since = n`,
-   added to the unmerged lists of its non-blank ancestors: first the author
-   of an ExternalJoin (the entry leaf MUST equal `author_leaf`; its leaf key
-   is the update path's `leaf_public_key`), then each join request in order
-   (its leaf key is the request's `encryption_key`). For each entrant, its
-   device MUST NOT be a member, and its admission MUST be authorized for
-   `device_id := H_L("device-id", [gid, device_pk])` at epoch `n` against
-   the admins and retired admissions at that point (section 10.2); its
-   `admission_hash` goes into its leaf. The author of a Resync re-enters its
-   own leaf instead: `since := n`, leaf key `leaf_public_key`, same device
-   key and admission hash, unmerged at its ancestors.
-5. **Rotation** (Member commits with key 17): the new device key MUST NOT be
-   a member's; it replaces the author's device key.
-6. **Promotion.** If no admin remains, the author becomes admin.
-7. **Truncation** to the canonical width.
-8. **Update path.** The author's update path is validated against the staged
-   tree of steps 1 to 7 (section 6.5), then applied.
-
-The resulting tree hash and registry hash MUST equal keys 7 and 8. The author
-of a Member or Resync commit MUST be the member of `author_leaf` in epoch
-`n - 1`, with device key `author_device_pk`; the author of an ExternalJoin
-MUST NOT be a member.
-
-<a id="9-5-verification"></a>
-### 9.5 Verification
-
-A verifier (the DS or a full member) checks, for a commit on state `n - 1`:
-its encoding and key registry (section 9.1), the signatures (section 9.2),
-`gid`, `epoch = n`, `prev_interim_transcript_hash =
-interim_transcript_hash_{n-1}`, and the transition (section 9.4). A member
-then runs the secret part: it decrypts the path (section 6.5; for its own
-commit it uses the path secrets it generated), derives the epoch secrets
-(section 8, from `init_secret_{n-1}` or the external init secret), and
-checks the confirmation tag in constant time. A member MUST NOT use any
-secret of epoch `n` before the confirmation tag verified.
-
-<a id="10-signed-objects"></a>
-## 10. Signed objects
-
-<a id="10-1-removal"></a>
-### 10.1 Removal proposals
-
-```text
-RemoveProposal := ["city-g/remove/v3", gid, target_leaf, target_since, proposer_device_pk]
-signed with ctx "city-g/remove/v3" by proposer_device_pk
-```
-
-A proposal is authorized against an epoch when the occupancy `[target_leaf,
-target_since]` is current and the proposer is the target itself (a
-voluntary leave) or an admin. A member never commits its own removal:
-removals are committed by another member, or by a joiner. A proposal is
-single use: once the occupancy ends it no longer matches.
-
-<a id="10-2-admission"></a>
-### 10.2 Invites, admissions and revocations
-
-```text
-Invite           := ["city-g/invite/v2", gid, invite_pk, expires_at_ms, max_uses, inviter_device_pk]
-                    signed with ctx "city-g/invite/v2" by inviter_device_pk (an admin)
-Admission        := ["city-g/admission/v2", gid, device_id, not_after_epoch,
-                     authorizer_kind, authorizer_pk, invite]
-                    signed with ctx "city-g/admission/v2" by authorizer_pk
-    authorizer_kind 0: authorizer_pk is an admin device key, invite = null
-    authorizer_kind 1: authorizer_pk = invite_pk of the embedded SignedInvite (bstr)
-InviteRevocation := ["city-g/invite-revocation/v1", gid, invite_id, revoker_device_pk]
-                    signed with ctx "city-g/invite-revocation/v1" by an admin
-admission_hash   := H(SignedAdmission)
-```
-
-An admin either signs an admission for a known device, or signs an invite
-whose key pair derives from a 32-byte *invite seed* shared out of band
-(`invite key := ML-DSA.KeyGen_internal(invite_seed)`); the joiner then signs
-its own admission with the invite key. An admission is authorized for a
-join of `device_id` entering epoch `n` against a membership when:
-
-* its `gid` and `device_id` match;
-* `n <= not_after_epoch <= n + MAX_ADMISSION_EPOCHS`;
-* its hash is not retired, and `not_after_epoch > retired_floor` (section 7);
-* its signer is the device key of an admin (kind 0), or the embedded invite
-  is for `gid`, its signature verifies and its inviter is an admin (kind 1).
-
-The tree records each member's `admission_hash`, so a DS cannot add a
-member on its own. Invite expiry (a time), use count (`max_uses`) and
-revocation need a clock or a global count and are enforced by the DS
-(section 12).
-
-<a id="10-3-join"></a>
-### 10.3 Join requests and welcomes
-
-```text
-JoinRequest := ["city-g/join-request/v1", gid, device_pk, encryption_key, init_key, SignedAdmission]
-               signed with ctx "city-g/join-request/v1" by device_pk
-request_ref := H_L("proposal-ref", [SignedJoinRequest])
-
-Welcome := ["city-g/welcome/v1", gid, epoch, request_ref, kem_ciphertext, wrapped]
-    (kem_ciphertext, shared) := X-Wing.Encaps(init_key)
-    context := CBOR_det([gid, epoch, request_ref, H_pk(init_key)])
-    wrapped := ChaCha20-Poly1305(ExpandLabel(shared, "welcome key", context, 32),
-                                 ExpandLabel(shared, "welcome nonce", context, 12),
-                                 aad = context, pt = joiner_secret_epoch)
-```
-
-A joiner publishes a signed request: its device key, the X-Wing key of its
-future leaf (`encryption_key`), a one-time X-Wing key for its welcome
-(`init_key`) and its admission. A request is authorized for epoch `n` when
-the device is not a member and its admission is authorized for epoch `n`.
-The author of the commit that includes it seals one welcome per request, in
-the order of key 11. A welcome is not signed: the joiner checks the secret
-it carries against the confirmation tag of the commit and the GroupInfo its
-author signed.
-
-**Entering with a welcome.** The joiner obtains the commit of epoch `n`,
-the GroupInfo, tree and registry of epoch `n` (or, as a light member, the
-data of section 14.4) and its welcome. It checks that the commit includes
-its request unchanged and creates epoch `n`; opens the welcome with
-`init_key`; derives the epoch secrets from `joiner_secret_n`; checks the
-confirmation tag and the GroupInfo (its external public key MUST derive from
-the epoch); finds its leaf (`since = n`, its `encryption_key`); decrypts the
-commit's update path with its leaf key (section 6.5); and erases `init_key`.
-A welcome is usable only while the joiner can obtain the state of epoch `n`;
-afterwards the joiner resyncs (section 13.1). The joiner cannot check the
-history before epoch `n` (section 2.3).
-
-<a id="10-4-group-info"></a>
-### 10.4 GroupInfo
-
-```text
-GroupInfo := ["city-g/group-info/v3", GroupContext_n (bstr), confirmation_tag_n,
-              external_pk_n, signer_leaf]
-             signed with ctx "city-g/group-info/v3" by the device key of signer_leaf
-```
-
-The author of epoch `n` signs the GroupInfo of that epoch (with its new key
-after a rotation) and publishes it with its commit; `signer_leaf` is its
-leaf. A joiner or resyncing member verifies it against the tree and registry
-the DS provides: their hashes MUST match those in `GroupContext_n` and the
-signature MUST verify under the device key of `signer_leaf` in that tree.
-The interim transcript hash it derives (`H_L("interim-transcript",
-[confirmed_transcript_hash_n, confirmation_tag_n])`) becomes the
-`prev_interim_transcript_hash` of its external commit.
-
-<a id="10-5-cover-failure"></a>
-### 10.5 Cover-failure reports
-
-```text
-CoverFailureReport := ["city-g/cover-failure/v2", gid, epoch, reporter_device_pk, reason]
-                      signed with ctx "city-g/cover-failure/v2" by the reporter
-reason: 1 not covered, 2 path key mismatch, 3 confirmation tag mismatch, 4 state lost
-```
-
-A member that cannot process the commit of epoch `epoch` signs a report
-naming it; the DS records reports of current members about the current
-epoch, so the failure and the author of the faulty commit are visible to
-every member. The reporter then re-enters the group with a Resync commit:
-with a chained key schedule, a member that missed an epoch can only come
-back through the external init.
-
-<a id="11-message-plane"></a>
-## 11. Message plane v4
-
-<a id="11-1-framing"></a>
-### 11.1 Framing and envelope
-
-```text
-FramedContent  := ["city-g/msg/v4", gid, epoch, sender_leaf, sender_since, generation,
-                   content_type, authenticated_data, signed_timestamp_ms, plaintext]
-signature      := ML-DSA-65.Sign(sender_sk, CBOR_det(FramedContent), ctx = "city-g/msg/v4")
-EnvelopeHeader := ["city-g-msg-v4", epoch_ref, sender_leaf, sender_since, generation, key_commitment]
-Envelope       := [EnvelopeHeader fields..., ciphertext]
-ciphertext     := ChaCha20-Poly1305(key_g, nonce_g, aad = CBOR_det(EnvelopeHeader),
-                                    pt = CBOR_det([CBOR_det(FramedContent), signature]))
-```
-
-`content_type` 1 is UTF-8 text. Plaintexts are at most 256 KiB and
-authenticated data at most 4 KiB.
-
-<a id="11-2-ratchet"></a>
-### 11.2 Per-sender ratchet
-
-When an epoch becomes active, every member derives one chain per member of
-the epoch and erases `msg_secret_n`:
-
-```text
-sender_secret_0     := ExpandLabel(msg_secret_n, "msg sender", CBOR_det([leaf, since]), 32)
-sender_secret_{g+1} := DeriveSecret(sender_secret_g, "msg next")
-key_g               := ExpandLabel(sender_secret_g, "msg key", h'', 32)
-nonce_g             := ExpandLabel(sender_secret_g, "msg nonce", h'', 12)
-key_commitment_g    := H_L("msg/key-commitment", [key_g, nonce_g])
-```
-
-A device sends only on its own chain, with a strictly increasing
-`generation`, so no two messages share a key and nonce. A secret is erased
-as soon as its chain moves past it.
-
-<a id="11-3-receiving"></a>
-### 11.3 Receiving
-
-A receiver:
-
-1. selects the epoch by `epoch_ref`: the current epoch, or one of the
-   `MAX_GRACE_EPOCHS` (4) previous ones while their keys are kept (at most
-   `GRACE_WINDOW_MS` after the epoch that followed them became active);
-2. requires `[sender_leaf, sender_since]` to be a member of that epoch **and
-   of the current epoch** (the same occupancy), without a recorded removal:
-   a member removed by a later commit cannot keep sending during the grace
-   window;
-3. derives `key_g` and `nonce_g`: at most `MAX_FORWARD_GENERATIONS` (1024)
-   ahead of the chain; keys of skipped generations are kept, at most
-   `MAX_SKIPPED_KEYS` (256) per sender; a key is deleted once used, so a
-   replayed or too-old generation has no key and is rejected;
-4. checks the key commitment, opens the ciphertext, decodes the framed
-   content and checks that its `gid`, `epoch`, sender and `generation` match
-   the envelope;
-5. verifies the signature under the device key the sender held in that
-   epoch: its current key, or, if it rotated its key since, the key it held
-   then;
-6. only then releases the plaintext. Applications display
-   `signed_timestamp_ms` and the sender from the tree.
-
-<a id="12-delivery-service"></a>
-## 12. Delivery service
-
-The DS keeps, per group, a *ledger* (the public state, the replay state of
-the current and recent epochs, recorded proposals and join requests,
-invites, welcomes and cover-failure reports) and an ordered *log*.
-
-<a id="12-1-ledger"></a>
-### 12.1 Ledger rules
-
-* **Genesis.** A group is created by a valid genesis commit (section 9)
-  with its GroupInfo; `gid` MUST NOT exist.
-* **Ordering.** The first valid commit for epoch `n + 1` wins. A later
-  commit for the same epoch is rejected with an epoch mismatch; its author
-  syncs and rebuilds on the new epoch.
-* **Recorded proposals.** A removal proposal is recorded only if it is
-  authorized against the current epoch, and once per target occupancy. A
-  join request is recorded only if it is authorized for the next epoch, its
-  device has no other recorded request, the group has room for every member
-  and recorded request, and its invite (if any) is valid (below); recording
-  the same object twice is idempotent. Each is tagged with the epoch in
-  which it was recorded.
-* **Overdue proposals.** A proposal recorded before the current epoch
-  started is *overdue*. A commit MUST include every overdue removal (the
-  oldest `MAX_REMOVALS_PER_COMMIT` when more are waiting) and the oldest
-  overdue join requests, up to `MAX_JOINS_PER_COMMIT`. Proposals recorded
-  during the current epoch MAY wait for the next commit, so a commit never
-  fails because a proposal arrived while it was being built. After each
-  commit, the proposals it did not include are authorized again and dropped
-  if they no longer apply.
-* **GroupInfo and welcomes.** The GroupInfo published with a commit MUST be
-  signed by the commit's author for its leaf and describe exactly the epoch
-  the ledger computed. The commit comes with one welcome per join request it
-  includes, in order, each naming its request and epoch; the DS stores them
-  by `request_ref` (at most `MAX_WELCOMES` = 4096 per group, oldest out
-  first) and answers a request's status: pending, committed (with its epoch
-  and welcome) or unknown. The DS never signs a GroupInfo itself.
-* **Invites.** Admin-signed invites are stored by `invite_id` (at most
-  `MAX_INVITES` = 256 per group). An expired invite (by the DS clock), a
-  revoked one (an admin-signed revocation; at most `MAX_REVOKED_INVITES` =
-  1024 remembered) or one that already admitted `max_uses` joins is refused,
-  and so is a join whose admission embeds it; revoking an invite drops the
-  recorded join requests that rely on it. A use is counted when a join
-  request is recorded, or when an external join that was not recorded as a
-  request is accepted.
-* **Messages.** An envelope is accepted for the current epoch, or for one of
-  the `MAX_GRACE_EPOCHS` previous epochs during `GRACE_WINDOW_MS` after that
-  epoch ended, only from a sender that is a member of the current epoch (the
-  same occupancy) and of the envelope's epoch, without a recorded removal,
-  and at most once per `(epoch, sender, generation)` (a 64-generation sliding
-  window per sender). The DS cannot check the ciphertext.
-* **Cover failures.** Reports of current members naming the current epoch
-  are recorded (at most `MAX_COVER_FAILURES` = 256 per group).
-* **Light-member data.** For each accepted commit the DS computes its
-  LightCommit (section 14.3) from the tree the commit starts from, which only
-  it still holds afterwards, and keeps it with the commit in the log. It
-  serves leaf proofs against the current tree, and the LightJoin (section
-  14.4) of a committed join request while the commit's epoch is the current
-  one.
-
-<a id="12-2-log"></a>
-### 12.2 Log
-
-Every accepted commit (with its GroupInfo and LightCommit), envelope,
-recorded removal proposal and recorded join request is appended to the group
-log with a sequence number `seq` (starting at 1 with the genesis commit),
-its epoch and the DS acceptance time. Members read the log in order, in
-pages that also give `first_seq`, the oldest retained entry. Messages expire
-after a retention period, commits after a longer one, and the log keeps at
-most a bounded number of entries: when it is full, the oldest message or
-proposal goes first, then the oldest commit; neither the entry being
-appended nor the latest commit is ever dropped. Messages that expired before
-a member read them are lost to it; a member that meets a commit of a later
-epoch than the next one it needs has lost a commit and resyncs (section
-13.2).
-
-<a id="12-3-journal"></a>
-### 12.3 Persistence
-
-A DS journals a record of every state change before answering the request
-that caused it, and restores a group by replaying its records on its latest
-snapshot; replay is deterministic, derived data such as LightCommits
-included. A request whose record could not be written fails, and the
-in-memory group is reloaded from storage.
-
-<a id="13-member-behavior"></a>
-## 13. Member behavior
-
-<a id="13-1-create-join"></a>
-### 13.1 Creating and joining
-
-* **Create.** Draw `group_nonce`, build the genesis commit and GroupInfo,
-  publish them.
-* **Admission.** With an invite link (section 15.3), the joiner derives the
-  invite key, fetches the invite by `invite_id` and signs its own admission
-  with the invite key, for `device_id` of its fresh device key; or an admin
-  signs its admission directly. Made while epoch `n` is current, an
-  admission gets `not_after_epoch := min(max(n + validity, retired_floor +
-  1), n + MAX_ADMISSION_EPOCHS)` (the reference clients use a validity of
-  1024 epochs).
-* **Batched join.** The joiner records a join request and polls its status
-  for a short, randomized time (the reference client waits between 1 and 2
-  seconds). If a commit included it while its epoch is still the current
-  one, the joiner enters with its welcome (section 10.3). If nobody commits
-  it in time, the joiner authors an ExternalJoin that includes every
-  recorded removal and the other waiting requests (whose authors enter with
-  welcomes). If its request was committed but the group moved on before the
-  joiner could read that epoch, the joiner resyncs. On an epoch mismatch it
-  rebuilds on the new epoch; if its request was committed meanwhile, it
-  reads its welcome instead.
-
-<a id="13-2-sync"></a>
-### 13.2 Following the log
-
-A member processes log entries in order: commits (section 9.5), recorded
-removal proposals (messages from their targets are rejected from then on),
-join requests, and envelopes (section 11.3). If it cannot process a commit,
-it signs a cover-failure report and resyncs with a Resync commit; it also
-resyncs when a commit it needs is no longer in the log. If a commit removes
-it, it deletes the group state. A commit of its own that it did not see
-accepted (a lost reply) is recognised when it appears in the log.
-
-<a id="13-3-persistence"></a>
-### 13.3 Persistence order
-
-A member persists its state:
-
-* after encrypting a message and **before** sending it, so that a restarted
-  device never reuses a generation (and hence a key and nonce);
-* after every commit it applies or has accepted;
-* after following the log.
-
-The persisted state includes secrets and MUST be protected at rest.
-
-<a id="13-4-maintenance"></a>
-### 13.4 Maintenance
-
-* Online members commit the recorded proposals of *other* members (removals
-  and join requests); committers SHOULD wait a random delay to limit
-  concurrent commits.
-* A member MUST re-key its own leaf (a self-update) at least every
-  `FS_WINDOW` (default 24 hours).
-* A member erases the keys of a previous epoch `GRACE_WINDOW_MS` after the
-  next epoch became active.
-* A member whose own removal is recorded stops committing and sending.
-* A member MAY rotate its device key with a Member commit (key 17), for
-  instance when it suspects its key store; it then signs with the new key
-  only.
-
-<a id="14-light-members"></a>
-## 14. Light members
-
-<a id="14-1-state"></a>
-### 14.1 State
-
-A full member holds the whole public tree: about 4 KB per member (a device
-key and a leaf key per leaf, a key per parent node), so tens of megabytes
-for the largest groups. A *light member* holds instead:
-
-* `GroupContext_n` and `interim_transcript_hash_n`;
-* the registry (small, and checked against `registry_hash` at every commit);
-* the occupied leaves with the epoch each occupancy began (a few bytes per
-  member): with them it places entering members exactly like the tree does
-  (section 6.1) and derives the message chains (section 11.2);
-* its own leaf record, its private path keys and the epoch secrets, like a
-  full member;
-* the device keys of the members it verified (at most `MAX_KNOWN_KEYS` =
-  1024), kept current through the commits it processes: a key ends with its
-  occupancy, and a rotation replaces it.
-
-A full member becomes light by dropping its tree; a light member becomes
-full by fetching the snapshot of its current epoch and checking that it
-matches its context, registry, occupancies, own record and private keys.
-
-<a id="14-2-processing"></a>
-### 14.2 Processing a commit
-
-A light member processes the commit of epoch `n` with its LightCommit
-(section 14.3), in this order:
-
-1. the checks of section 9.5 that need no tree: encoding and key registry,
-   signatures, `gid`, `epoch`, `prev_interim_transcript_hash`;
-2. each proof of the LightCommit MUST verify against `tree_hash_{n-1}`
-   (section 6.7) and show an occupancy the light member knows (its own
-   record if it is its leaf);
-3. the transition of section 9.4, steps 1 to 7, on its *partial tree*: the
-   occupancies, plus the member records proven in step 2 and those the
-   commit itself brings (entrants). Authorizations that need a member record
-   use only these records, so a missing proof makes the commit fail;
-4. the update path's shape: `log2(width_n)` entries on the author's direct
-   path, valid keys and ciphertext sizes, where `width_n` is the canonical
-   width of the occupancies after step 3;
-5. the registry hash of step 3 MUST equal key 8;
-6. if the commit removes the light member, it stops here;
-7. the path secret: the entry of the lowest common ancestor with the author
-   (section 6.5), and in it the target naming a node whose private key the
-   light member holds; then the derived public keys MUST match the published
-   ones;
-8. the epoch secrets, with `tree_hash_n` taken from key 7, and the
-   confirmation tag; the GroupInfo, when present, MUST match the epoch and
-   verify under the author's key (its new key after a rotation);
-9. its private keys: it drops the keys of nodes on the direct path of a
-   removed leaf, of nodes above the new root and of the author's path, then
-   stores the keys derived in step 7.
-
-<a id="14-3-light-commit"></a>
-### 14.3 LightCommit
-
-```text
-LightCommit := ["city-g/light-commit/v1", [LeafProof, ... by increasing leaf]]
-```
-
-The proofs, against the tree of epoch `n - 1`, of every member record the
-commit's authorization refers to: the author of a Member or Resync commit;
-the target of each removal and, when it is not the target, the member whose
-device key signed it; and the member whose device key authorized each
-admission (the admin of a kind-0 admission, the inviter of a kind-1 one).
-A LightCommit is at most 8 MiB.
-
-<a id="14-4-light-join"></a>
-### 14.4 Light join
-
-```text
-LightJoin := ["city-g/light-join/v1", Registry (bstr), [MemberRef, ...], LeafProof]
-```
-
-For a committed join request whose epoch `n` is still current, the DS gives
-the registry of epoch `n`, its occupancies and the joiner's leaf proof. The
-joiner checks its welcome and the confirmation tag as in section 10.3, the
-GroupInfo under the author's key, the registry against key 8 of the commit,
-its leaf proof against key 7 (the leaf MUST hold its own record, `since =
-n`), and that the occupancies include itself, the author and every admin and
-fit the capacity; it then decrypts the update path with its leaf key. The
-occupancy list is not authenticated: a wrong list makes the joiner's view
-diverge, which the next commit it processes detects (a width or entry-leaf
-mismatch). A LightJoin is at most 1 MiB.
-
-<a id="14-5-messages"></a>
-### 14.5 Messages and commits
-
-* A message from a sender whose key the light member does not know waits
-  until the member obtains a leaf proof of the sender against the current
-  tree hash; senders of messages received while catching up are proven once
-  the member reached the DS's epoch. Keys of previous epochs follow section
-  11.3.
-* Removal proposals read from the log block their target's messages, as for
-  a full member; the light member checks the proposal's signature and
-  target, and relies on the DS for the proposer's authorization.
-* A light member does not author commits. To commit (a self-update, its
-  own maintenance, a rotation), it becomes full with the snapshot of its
-  epoch, commits, and becomes light again.
-
-<a id="14-6-trust"></a>
-### 14.6 What a light member relies on
-
-A light member verifies every signature, every authorization (removals,
-admin changes, admissions, retired admissions), the entry leaves, the
-registry, the path secrets and the confirmation tag. It cannot recompute the
-new tree hash, nor check that a joining device or a rotated key is not
-already used elsewhere in the tree; for these it relies on the DS, which
-verifies every commit on the full tree, and on the committer, whose tree
-hash the confirmation tag binds. Consequently, against a DS that colludes
-with a member, **membership agreement** holds for light members only up to
-the tree hash: they can be shown a tree that full members reject. Admission
-control, sender authentication and the confidentiality properties of section
-2.2 are unchanged: the DS still cannot forge a commit or authorize an
-admission.
-
-<a id="15-deployment-binding"></a>
-## 15. Deployment binding and HTTP API
-
-This section is outside the group protocol: its objects change no group
-state and no key.
-
-<a id="15-1-binding-objects"></a>
-### 15.1 Binding objects
-
-```text
-AliasBinding := ["city-g/alias/v1", gid, device_pk, alias]
-                signed with ctx "city-g/identity-binding/v1" by device_pk
-SessionAuth  := ["city-g/session-auth/v1", gid, device_pk, issued_at_ms]
-                signed with ctx "city-g/session-auth/v1" by device_pk
-```
-
-* An alias is a display name a member claims for itself: 1 to 64 bytes of
-  UTF-8, no control characters, no leading or trailing whitespace. It is
-  self-asserted; clients SHOULD pin the device key first seen for an alias
-  and warn when a different occupancy claims it (trust on first use). A new
-  key on the same occupancy is a rotation its old key signed.
-* A SessionAuth fresh within the DS clock skew (default 5 minutes) and
-  signed by a current member's device key is exchanged for a 32-byte bearer
-  token (default lifetime 1 hour). A token stops working when its member's
-  occupancy ends or its key is rotated.
-
-<a id="15-2-api"></a>
-### 15.2 HTTP API
-
-Every request is an HTTP `POST` of a protobuf message
-([`crates/cityg-proto/proto/cityg_v3.proto`](../crates/cityg-proto/proto/cityg_v3.proto))
-whose field 1 is `gid`; protocol objects travel as their exact
-deterministic-CBOR bytes. Bodies are at most 16 MiB. Routes marked *token*
-require `Authorization: Bearer <hex token>`.
-
-| Route | Request → response | Token |
+| Changes of the leaf | Condition in the tree before the window | New leaf |
 | --- | --- | --- |
-| `/v3/groups/create` | genesis commit + GroupInfo → epoch, seq | |
-| `/v3/groups/info` | → GroupInfo, tree, registry, recorded removals and join requests, head seq | |
-| `/v3/groups/commit` | commit + GroupInfo + welcomes → epoch, seq | |
-| `/v3/groups/log` | after_seq, limit (default 256, at most 1024), light → entries (commits with their LightCommit when `light`), head_seq, first_seq | token |
-| `/v3/groups/remove_proposal` | SignedRemoveProposal → recorded / already_recorded | |
-| `/v3/groups/join_request` | SignedJoinRequest → request_ref, recorded / already_recorded | |
-| `/v3/groups/join_status` | request_ref, light → pending / committed (epoch, welcome, commit) / unknown, current epoch, LightJoin when `light` | |
-| `/v3/groups/invite` | SignedInvite → invite_id | |
-| `/v3/groups/invite/get` | invite_id → SignedInvite | |
-| `/v3/groups/invite/revoke` | SignedInviteRevocation → references of the dropped join requests | |
-| `/v3/groups/send` | Envelope → epoch, seq | token |
-| `/v3/groups/cover_failure` | CoverFailureReport → count | |
-| `/v3/groups/cover_failures` | → reports | token |
-| `/v3/groups/session` | SessionAuth → token, expires_at_ms | |
-| `/v3/groups/alias` | AliasBinding → count | |
-| `/v3/groups/aliases` | → bindings of current members | token |
-| `/v3/groups/leaf_proofs` | leaves (at most 64) → epoch, one LeafProof per leaf against the current tree | |
+| join | the leaf is blank | `[device_pk, n, encryption_key, admission_hash, n]` |
+| removal, or eviction | the leaf is occupied by the target | blank |
+| removal or eviction, then join | the leaf is occupied by the target | the joiner's leaf: the join takes the leaf the removal empties |
+| update, or re-entry | the leaf is occupied by the member, whose key `replaces` names | the same leaf with the new key and `updated = n` |
 
-Errors carry a protobuf `ErrorResponse {code, message}` with these HTTP
-statuses: 400 malformed request or non-deterministic encoding, 401 missing
-or invalid token, 403 not allowed (not a member, pending removal, not an
-admin, revoked or used-up invite), 404 unknown group or invite, 409 conflict
-(stale epoch, overdue proposals not committed, a pending request of the same
-device, replay, existing group), 410 a route of a removed API version
-(`/v1/` and `/v2/`), 413 over a size or count limit, 422 verification
-failure, 429 rate limited (the reference DS does not rate-limit; a
-deployment may, in front of it), 500 internal error.
+Catch-up requests are not changes (section 11).
 
-**Notifications.** `GET /v3/ws?gid=<hex>&token=<hex>` upgrades to a
-WebSocket that sends `{"type":"head","gid":…,"head_seq":N}` when the log
-grows, and `{"type":"resync","gid":…}` when notices were dropped; the client
-then fetches the log.
+### 10.2 Structure of a window
 
-<a id="15-3-invite-link"></a>
-### 15.3 Invite links
+From the tree before the window and its changes:
+
+* **Height.** The window's height MUST be the smallest height, not below
+  the current one, whose width holds every changed leaf.
+* **Affected members.** The occupancies the window removes, evicts, updates
+  or re-enters. The *removed* ones are those it removes or evicts.
+* **Forced nodes.** Every node an affected member taints in the tree before
+  the window (the taint rule, E-4), and, if the window grows a non-empty
+  tree, the nodes `(k, 0)` for `old_height < k <= height` (section 5.4). A
+  forced node at or below the district level belongs to its district;
+  above it, to the city.
+* **Districts of the window.** Those with a changed leaf or a forced node.
+  A window commits exactly these districts.
+
+### 10.3 District commits
 
 ```text
-cityg-invite:{"version":5,"server_url":"<DS URL>","room_id":"<gid hex>","invite_seed":"<hex, 32 bytes>"}
+DistrictCommit := ["city-g/district-commit/v4", gid, epoch, district, height,
+                   prev_district_hash, committer, changes, nodes, wraps,
+                   district_hash, signature]
+  nodes := [[level, index, public_key or null], ...]       in plan order
+  wraps := [Wrap, ...]                                     in plan order
 ```
 
-The invite seed is a bearer secret: anyone holding the link can join until
-the invite expires, is revoked or has admitted `max_uses` devices. Links
-SHOULD be shared over an authenticated channel and given a short lifetime
-(default 7 days) and a use count matching their audience.
+Signed by the committer under `DISTRICT_COMMIT`. A verifier holding the
+state before the window (the DS, the sealer) checks:
+
+1. `gid`, `epoch = n`, `height` (section 10.2), `district` is a district of
+   the window;
+2. `changes` are exactly the window's changes of the district, in order;
+3. `prev_district_hash` is the hash of the district root in the tree before
+   the window, grown to the window's height;
+4. the committer (section 10.5);
+5. each change's request is available, of the change's kind and group, and
+   names the leaf's occupant (except a join); the rest of section 10.1
+   holds; the entry checks of section 6 hold if the verifier checks entries
+   (the DS and the committer do, the sealer does not, section 15);
+6. the nodes and wraps follow the district's plan (section 7.3), with the
+   district's forced nodes;
+7. `district_hash` is the hash of the district root after the new leaves
+   and the nodes are set, each node tainted by `committer`;
+8. the signature, under the committer's device key.
+
+### 10.4 Seals
+
+```text
+SealHeader := ["city-g/seal/v4", gid, epoch, prev_interim, kind, sealer, height,
+               district_bits, tree_hash, registry_hash, body_hash, time_ms,
+               [kem_output, request_ref] or null]
+SealBody   := ["city-g/seal-body/v4", [[district, H(district commit)], ...],
+               city_nodes, city_wraps, group_policy or null,
+               [nonce, creator_pk, encryption_key, root_pk] or null]
+Seal       := [SealHeader, SealBody, confirmation_tag, external_pk, signature]
+
+seal_hash := H(SealHeader)              body_hash := H(SealBody)
+signature := ML-DSA-65.Sign(sealer_sk, CBOR_det([seal_hash, confirmation_tag, external_pk]), SEAL)
+```
+
+* `kind` is 0 (genesis), 1 (sealed by a member of the previous epoch) or 2
+  (sealed by the window's entrant). The last header field is set exactly
+  for kind 2: the external init ciphertext and the entrant's request.
+* One signature covers the header, the confirmation tag and the next
+  external key: a joiner that checks it knows the tag is authentic, so an
+  unsigned welcome cannot be replaced (model
+  `anchored_join_unsigned_tag.pv`).
+* Members and joiners download *seal proofs*, `[SealHeader,
+  confirmation_tag, external_pk, signature]`, not bodies.
+
+The DS checks a seal against the state before the window:
+
+1. `gid`, `epoch = n`, `prev_interim` is the current interim transcript
+   hash, `district_bits`, `time_ms` not below the previous seal's;
+2. the body lists the window's district commits, in district order, with
+   their hashes;
+3. the window's structure (section 10.2) from the union of the commits'
+   changes; the districts listed are exactly the window's districts;
+4. the sealer and every committer (section 10.5);
+5. every district commit (section 10.3);
+6. the last node of each district commit is its district root; the city
+   nodes and wraps follow the city plan (section 7.3) with the city's forced
+   nodes, each city node tainted by the sealer; with no city, both lists are
+   empty;
+7. `tree_hash` and `registry_hash` after the window (section 8);
+8. `body_hash`, and no genesis field;
+9. the signature, under the sealer's device key.
+
+The confirmation tag cannot be checked without the epoch's secrets: members
+check it (section 12.2).
+
+### 10.5 Who may commit and seal
+
+* **Member windows (kind 1).** The sealer and every committer MUST be
+  members of epoch `n - 1` that the window does not affect: a committer
+  never removes or updates itself. Their device keys come from the tree.
+* **Entrant windows (kind 2).** The entrant's request MUST be a join or a
+  re-entry among the window's changes. The sealer is the entrant: for a
+  join, `[leaf, n]` where `leaf` is the join's leaf, with the key of the
+  join request, whose signature and admission (none, in an open group) MUST
+  be checked; for a
+  re-entry, the member's occupancy and device key, and the request's
+  signature MUST be checked. Every district commit of the window is by the
+  entrant.
+
+### 10.6 Applying a window
+
+The tree grows to the window's height; changed leaves take their new
+state; every node of a district commit takes its new key (or becomes
+blank) with the committer's taint, and every city node with the sealer's;
+the registry changes (section 8); the group policy of the body, if any,
+comes into force; the epoch, interim transcript hash, external key and
+time are those of the seal.
+
+<a id="11-welcomes"></a>
+## 11. Welcomes
+
+```text
+Welcome := ["city-g/welcome/v4", gid, epoch, request_ref, kem_ciphertext, sealed]
+context := CBOR_det([gid, epoch, request_ref, kem_pk_hash(init_key)])
+(ct, ss) := X-Wing.Encaps(init_key)
+sealed  := ChaCha20-Poly1305(ExpandLabel(ss, "welcome key", context, 32),
+                             ExpandLabel(ss, "welcome nonce", context, 12),
+                             aad = context, joiner_secret_n)
+```
+
+A welcome gives `joiner_secret_n` to the holder of a one-time init key: a
+joiner, a member re-entering its leaf, or a member that asked to jump
+(catch-up). It is not signed: the joiner secret must reproduce the
+confirmation tag the sealer signed.
+
+**Who welcomes.** In a member window, the committer of the district of the
+leaf welcomes joins and re-entries; the committer of the member's district
+welcomes a catch-up if that district is in the window, and the sealer
+otherwise. In an entrant window, the entrant welcomes everyone but itself.
+A welcomer seals its welcomes once it has followed the window (it then
+knows `joiner_secret_n` as a member of epoch `n - 1`).
+
+**Welcomer's checks.** A welcomer takes the init key from the request, never
+from the DS, and:
+
+* welcomes a join or a re-entry only if it is a change of a district commit
+  of its own that the seal lists (so that no device learns an epoch without
+  being in its tree);
+* welcomes a catch-up only if its member is in the tree of epoch `n`, the
+  request is signed with that member's device key, and its `prev_interim`
+  is the seal's (section 6).
+
+<a id="12-members"></a>
+## 12. Members
+
+### 12.1 State
+
+A member keeps:
+
+* its device key, occupancy and leaf key (and the new leaf key of an update
+  it requested, until a window applies it);
+* the secrets of its path, by level;
+* the secrets of its epoch (section 9) and the hash of the epoch's seal;
+* the *header* of its epoch: `gid`, epoch, shape, `tree_hash`, the
+  registry header, the interim transcript hash and the external public key;
+  and the header of the previous epoch, against which it audits the last
+  window (section 15).
+
+This is O(log N) whatever the size of the group: no member needs the whole
+tree.
+
+### 12.2 Following a window
+
+For the packet of the window creating epoch `n` (section 13.1), a member
+of epoch `n - 1`:
+
+1. checks `gid`, `epoch = n`, `prev_interim` (its interim transcript hash)
+   and `district_bits`; the height is not below its own;
+2. rebuilds the registry header from the update and checks it hashes to the
+   header's `registry_hash`. If the policy changed, the update carries the
+   new policy object: it MUST hash to the new `policy_hash`, match the new
+   `open` flag, and be signed by an admin of epoch `n - 1`; if the policy
+   did not change, `open` MUST NOT change either. So a closed group cannot
+   be opened, even by a sealer that colludes with the DS;
+3. takes `init_n-1`: its own for kind 1; for kind 2, the external init
+   secret recovered from `kem_output` with its external key;
+4. takes its leaf key: the current one, or the pending one if the packet
+   names it (an update or re-entry of its own was applied);
+5. derives its path from the packet's steps (section 7.4), then the root
+   secret, `GroupContext_n`, the epoch secrets, and checks the
+   confirmation tag;
+6. for kind 2 only, rebuilds the seal proof with the external key it
+   derived and checks the entrant evidence against its header of epoch
+   `n - 1` (section 13.2): the entrant's request, its admission (none in an
+   open group) or its leaf, and the seal signature;
+7. only then replaces its state.
+
+A member that cannot derive its path (a blank ancestor, a wrap it cannot
+open) or whose tag does not check rejects the window. Members that follow
+the group do not check the sealer's signature of a member window: the init
+chain makes the tag sufficient (E-5; model `fabrication.pv`).
+
+### 12.3 Checking the state it is shown
+
+A committer, a sealer or an entrant works on the public state the DS shows
+it. It MUST first check that state against its header (member) or its
+anchor (entrant): tree hash, registry, epoch, interim transcript hash and
+external key. Otherwise it could wrap secrets to keys the DS chose. The
+implementation checks the whole state; a deployment would send the
+districts concerned with proofs to the tree hash (section 19).
+
+### 12.4 Committing a district
+
+The committer of district `d`:
+
+1. checks the entries of the district (section 6), E-12;
+2. computes the district's new leaves and its plan (section 7.3), draws the
+   secrets hedged with its `init_secret`, and wraps them;
+3. signs the district commit (section 10.3);
+4. erases every secret it drew once the commit is sent. It learns its own
+   path's new secrets from the window like any member.
+
+A committer need not belong to the district it commits (E-3).
+
+### 12.5 Sealing
+
+The sealer:
+
+1. checks every district commit of the window (section 10.3, without the
+   entry checks);
+2. re-keys the city (section 7.3), hedged with its `init_secret`;
+3. takes the root secret: from its city re-key; with no city, by
+   following the single district commit along its own path; with nothing
+   re-keyed, its current root secret;
+4. computes the hashes, `GroupContext_n`, the epoch secrets from its
+   `init_secret`, the confirmation tag and the external key;
+5. signs the seal (section 10.4) and erases what it drew.
+
+### 12.6 Updating
+
+A member refreshes its leaf key with an `UpdateRequest` (section 6), keeps
+the new key pending, and uses it once a packet names it. The window re-keys
+its path and every node it taints. Members SHOULD update at least every
+`UPDATE_INTERVAL`, and an admin MAY evict members that do not (section 14.7).
+
+### 12.7 Sealing as an entrant
+
+With no member online, the DS makes the window's entrant (a joiner or a
+member re-entering its leaf) its only committer and sealer (section 14.4).
+The entrant:
+
+1. brings its anchor to the current epoch by following the chain of seals
+   (section 12.9) and checks the state against it (section 12.3);
+2. encapsulates to the current external key (section 9), and uses the
+   external init secret as `init_n-1` and as its hedge;
+3. commits every district of the window (section 12.4), then seals with
+   kind 2 (section 12.5), its request in the header;
+4. seals the welcomes of every other joiner, re-entering member and
+   catch-up of the window (section 11);
+5. keeps the secrets it drew on its own path (its whole path, since its
+   leaf changed) and erases the rest.
+
+### 12.8 Not sending while a removal waits
+
+A member MUST NOT send a message in an epoch while a removal the DS
+recorded more than `WINDOW_REMOVAL` ago waits: it applies the removal
+first, as a committer or sealer of the next window. The DS lists the
+recorded removals with their times (section 14.6); a DS that hides one can
+also relay ciphertexts to the removed member, so the rule protects against
+a DS that leaks later, not one that colludes now.
+
+### 12.9 Joining
+
+1. **Anchor.** The joiner trusts the anchor key of its admission (section
+   6), or, for an open group, an admin key from the group's public link. It
+   obtains a checkpoint signed with that key by an admin of the
+   checkpointed registry, and from the DS the registry header and external
+   key of the checkpointed epoch, which it checks against the checkpoint
+   (`registry_hash`, `external_pk_hash`).
+2. **Request.** It draws a leaf key and a one-time init key and records a
+   join request, with its admission or, in an open group, without one.
+3. **Chain of seals.** For every window from the checkpoint to the one it
+   enters, it follows the seal link (section 13.3): the seal is signed by a
+   member of the previous epoch, shown by a leaf proof against the previous
+   tree hash, or by an admitted entrant, and the transcript and registry
+   chain from the checkpoint.
+4. **Entry.** For the window that places it, it receives an entry (section
+   13.4): its leaf proof against the new tree hash, which MUST show its
+   device key, its leaf key and its token at `[leaf, n]`; the parents of
+   its path, checked against that proof; the steps of its path, from which
+   it recovers its path secrets (section 7.4) and checks each against its
+   node's key; and its welcome, whose joiner secret MUST reproduce the
+   signed confirmation tag and external key of the seal.
+
+If no member is online, the DS may instead make the joiner the window's
+entrant (section 12.7).
+
+### 12.10 Coming back
+
+A member that missed windows has three ways back (E-8):
+
+* **Replay.** It follows every packet it missed, in order.
+* **Jump.** It records a `CatchUpRequest` bound to the current interim
+  transcript hash, with a one-time init key. The next window welcomes it
+  (section 11). It follows the chain of seals from its own last epoch, and
+  recovers its path from the last step of each of its nodes (section 7.4),
+  its leaf key unchanged. The epochs it skipped stay unreadable to it.
+* **Re-entry.** It records a `ReEntryRequest` with a new leaf key and a
+  one-time init key. A member window re-keys its path and welcomes it; with
+  no member online, it seals the window itself as an entrant (section
+  12.7).
+
+### 12.11 Seeing who joined
+
+Every join is a change of a district commit that the seal lists. A member
+that holds the seal of an epoch it accepted can list the devices that
+window let in: it checks that the seal hashes to its transcript, that the
+body hashes to `body_hash`, that the body lists exactly the district
+commits it was given, and that each join's request hashes to its reference.
+In an open group this is how members see the devices of strangers, the DS's
+included. A device can never take a member's place: it cannot sign with the
+member's device key (a request claiming that key fails its signature), and
+a device key already in `devices` cannot join again.
+
+The protocol has no names. A client that shows names MUST bind each name
+to a device key and show when a name appears with another key, as when a
+contact's safety number changes.
+
+<a id="13-packets"></a>
+## 13. Packets, seal links and entries
+
+This version fixes the content of these objects, not yet their encoding
+(section 19). Sizes below are those of the scale test (section 16).
+
+### 13.1 Packets
+
+The packet of member `m` for the window creating epoch `n` holds:
+
+* the seal header and the confirmation tag;
+* for kind 2, the seal signature and the entrant evidence (section 13.2);
+* the registry update: the new roots, policy hash and `open` flag, the
+  admins only when they changed, and the new group policy object when the
+  window set one;
+* `kem_pk_hash` of `m`'s leaf key after the window;
+* the steps of `m`'s path (section 7.4): for each ancestor the window
+  re-keyed, the wrap to the child toward `m`, or `Chain`.
+
+The member does not need the new public keys of its path: a wrong secret
+fails the tag check. In the scale test (section 16), packets average 7.7 KB
+for 2,000 changes among 16,384 members, and 8.3 KB for 4,000 among 65,536.
+
+### 13.2 Entrant evidence
+
+* For a joiner: its join request, and proofs against the registry of epoch
+  `n - 1` that its device is not in `devices` and its token not in
+  `admissions`. A verifier checks the request's reference in the header,
+  `sealer.since = n`, the request's signature and validity, its admission
+  against the admins of epoch `n - 1` (or, without admission, that the
+  group of epoch `n - 1` is open), both proofs, and the seal signature
+  under the request's device key.
+* For a re-entering member: its re-entry request and its leaf proof against
+  the tree hash of epoch `n - 1`. A verifier checks the request's reference,
+  that the member is the sealer and is at the proven leaf, that `replaces`
+  names the proven leaf key, the request's signature and the seal signature
+  under the proven device key.
+
+### 13.3 Seal links
+
+A seal link holds the seal proof, the sealer evidence (the sealer's leaf
+proof against the previous tree hash, or the entrant evidence), the
+registry header after the window, and the group policy object if the
+window set one. Following a link from the header of
+epoch `n - 1`:
+
+1. `gid`, `epoch = n`, `prev_interim`, `district_bits`, height not below;
+2. kind 1: the leaf proof checks against the previous tree hash and shows
+   the sealer; the seal signature checks under its device key. Kind 2: the
+   entrant evidence (section 13.2). Other kinds are refused;
+3. the registry header hashes to `registry_hash`, and a change of policy
+   or of the `open` flag is checked as in section 12.2;
+4. the next header takes the seal's hashes, height and external key, and
+   `interim = H_L("interim-transcript", [H_L("confirmed-transcript",
+   [prev_interim, seal_hash]), tag])`.
+
+A link costs about a seal proof (4.8 KB), a leaf proof (3.2 KB plus 64
+bytes per level) and the registry roots: 9.0 KB in a tree of `2^14`
+leaves.
+
+### 13.4 Entries
+
+An entry holds the links from the entrant's anchor to the epoch it enters,
+its welcome, the last step of each level of its path with the epoch of that
+step, its leaf proof in the tree it enters, and the parents of its path in
+that tree.
+
+<a id="14-delivery-service"></a>
+## 14. Delivery service
+
+### 14.1 Recording requests
+
+The DS checks every request against the current state before recording it:
+
+* a join: its signature and validity, its admission (none needed in an
+  open group, section 6.1), its device not a member, its token unused, no
+  other queued join with the same device or token; for an invite, not
+  expired and not used up (uses applied plus uses queued). In an open
+  group, the DS SHOULD also limit the rate of joins, since anyone can
+  request one;
+* a removal: its target is a member, the proposer may remove it, the
+  signature; one per target;
+* an update or a re-entry: the member exists, `replaces` names its current
+  key, the signature; the latest one per member;
+* a catch-up: the member exists, `prev_interim` is current, the signature;
+  the latest one per member;
+* a group policy: signed by an admin, and not the policy in force;
+* a checkpoint: signed by an admin of the current registry, and matching
+  the epoch it names.
+
+### 14.2 Closing windows
+
+A window is due when its oldest request has waited `WINDOW_MAX`, or its
+oldest removal or eviction `WINDOW_REMOVAL`. The DS builds the window from
+the queue: removals and evictions (one per target), updates and re-entries
+of members the window does not remove (if `replaces` still names their
+key), joins, catch-ups bound to the current epoch whose member the window
+does not affect, and the pending policy.
+
+What may have changed since a request was recorded is checked again, so
+that no committer is handed an entry it must refuse: a request's and an
+admission's expiry, the admission's signer's admin status (or, without
+admission, that the group is still open), a device or token used
+meanwhile, a removal proposer's admin status, an eviction's policy and the
+member's `updated` epoch, and the admin status of the pending policy's
+signer. Signatures are not checked again. Entries that fail are
+left out, and joins and catch-ups that can no longer be valid leave the
+queue.
+
+### 14.3 Placement
+
+Joins go, in order (E-11):
+
+1. into the leaves the window empties by removals and evictions (a join
+   paired with a removal changes one leaf instead of two);
+2. into the lowest free leaves;
+3. into the leaves of a taller tree: the height is the smallest that holds
+   them (section 5.4), at most `MAX_HEIGHT`.
+
+### 14.4 Roles
+
+* **Volunteers.** Members of the current epoch the DS knows to be online,
+  that the window does not affect.
+* **Member window.** Each district of the window goes to a volunteer of that
+  district if there is one, otherwise to volunteers in turn. The sealer is a
+  volunteer without a district, if any, else the first volunteer. Welcomes
+  are assigned as in section 11.
+* **Entrant window.** With no volunteer, the first join or re-entry of the
+  window, in change order, makes its author the entrant: every district,
+  the seal and every welcome go to it.
+* **No window.** With no volunteer and no entrant, the window stays open.
+* **Failover.** The DS MAY give a district of an open member window to
+  another volunteer; a commit of the replaced committer is then refused,
+  and the welcomes it owed for the district (joins, re-entries, and
+  catch-ups of members of the district) go to the new committer. Districts
+  are those of the window's height.
+
+### 14.5 Checking and applying
+
+The DS checks every district commit as it arrives (section 10.3, with its
+committer) and the seal against them (section 10.4). It then applies the
+window (section 10.6) and keeps, for later requests:
+
+* the window: task, district commits, seal, requests, catch-ups, and the
+  index of its re-keyed nodes and wraps;
+* the sealer evidence of its seal link, and the registry header before and
+  after it;
+* for every node, its *latest re-key*: the epoch and the wraps by target,
+  which serve jumps; a node the window blanks leaves the index;
+* for every welcome of the window, the entry data: steps, leaf proof and
+  path parents in the new tree;
+* the audit records of its entries, with proofs against the state before
+  the window (section 15);
+* the leaf proofs of its committers and sealer in the new tree, for fraud
+  proofs.
+
+A welcome is accepted only for a request the window welcomes, and only from
+the welcomer the window assigned it: welcomes are not signed, so the DS
+authenticates their sender, and otherwise any member could replace a
+joiner's welcome with one it cannot open. Packets, links and entries are
+served as in section 13.
+
+### 14.6 Recorded removals
+
+From the moment it records a removal or an eviction until a window applies
+it, the DS:
+
+* refuses the target's messages, district commits and seals;
+* serves it no packet;
+* lists the recorded removals with their times to members (section 12.8).
+
+When no member is online and no entrant comes, nothing more happens until
+the first participant, member or entrant, whose window applies the removal
+(E-7). Removal without any participant cannot be cryptographic: it would
+need a non-interactive key agreement among the removed member's copath
+subtrees.
+
+### 14.7 Eviction
+
+Under a group policy in force that sets `max_idle_epochs`, the DS MAY queue
+an eviction of every member whose leaf key has not changed for more than
+that (section 6). Otherwise it MUST NOT evict. Verifiers check the policy
+and the leaf's `updated` epoch.
+
+<a id="15-audits"></a>
+## 15. Audits and fraud proofs
+
+No single device can check every entry of a large window: two signatures
+per join take about 210 s of CPU for 500,000 joins. Checking is split
+(E-12):
+
+| Who | Checks |
+| --- | --- |
+| DS | every request as it records it (section 14.1) |
+| Committer of a district | every entry of the district (section 12.4) |
+| Sealer | every district commit: signature, structure, taints, hashes (section 10.3 without entry checks) |
+| Members | random entries of the window, `AUDIT_K` audits per entry on average |
+
+**Audit records.** For each change of a window, the DS keeps the district,
+the committer, the change, the request, and the proofs against the state
+before the window: the changed leaf's proof (not for a join); for a join,
+the proofs that its device is not a member and its admission unused; for an
+eviction, the policy in force.
+
+**Auditing.** A member of the window's epoch checks sampled records
+against its header of the previous epoch. The verdict is:
+
+* an error, if the record's proofs do not check (nothing can be
+  concluded);
+* *fraud*, if the entry fails the rules of section 6 or section 10.1: an
+  invalid signature or admission, a join without admission in a closed
+  group, an expired request, a device already a member, a token already
+  used, a target that is not the leaf's occupant, a `replaces` that names
+  another key, an eviction without policy or of a member not idle long
+  enough;
+* *valid* otherwise.
+
+**Sampling.** With `E` entries and `M` auditing members, each member audits
+`ceil(AUDIT_K·E / M)` distinct entries drawn at random (all of them if
+fewer). With `AUDIT_K = 20`, an invalid entry escapes every auditor with
+probability about `e^-20 ≈ 2·10^-9`.
+
+**Fraud proofs.** A fraud proof holds the signed district commit, the audit
+record of the invalid entry, and the committer's leaf proof in the tree
+after the window. Anyone holding the headers before and after the window
+checks: the commit is of that window and signed by the committer shown by
+the leaf proof, it lists the change, the request matches the change's
+reference, and the audit verdict is fraud. What the group does with a
+fraud proof (removing the committer and the entry) is up to its admins.
 
 <a id="16-parameters"></a>
 ## 16. Parameters
 
 | Name | Value |
 | --- | --- |
-| `MAX_CAPACITY` | 8192 leaves (`capacity` a power of two, at least 2) |
-| `MAX_ADMINS` | 64 |
-| `MAX_RETIRED` | 4096 retired admissions per registry |
-| `MAX_ADMISSION_EPOCHS` | 4096 epochs of validity at most per admission |
-| `MAX_REMOVALS_PER_COMMIT`, `MAX_JOINS_PER_COMMIT` | 256, 64 |
-| `FS_WINDOW` | 24 hours (self-update interval) |
-| `GRACE_WINDOW_MS` | 600 000 (10 minutes) |
-| `MAX_GRACE_EPOCHS` | 4 previous epochs |
-| `MAX_FORWARD_GENERATIONS` | 1024 |
-| `MAX_SKIPPED_KEYS` | 256 per sender |
-| Replay window of the DS | 64 generations per sender and epoch |
-| Plaintext / authenticated data | 256 KiB / 4 KiB per message |
-| Envelope | at most 256 KiB + 4 KiB + 16 KiB |
-| Signed invite / admission / removal proposal / join request / welcome / invite revocation / GroupInfo / cover-failure report / binding | 8 / 16 / 8 / 32 / 2 / 8 / 16 / 8 / 12 KiB |
-| Commit | `max_commit_bytes(capacity)` (section 9.1) |
-| Leaf proof / LightCommit / LightJoin | 8 KiB / 8 MiB / 1 MiB |
-| `MAX_INVITES`, `MAX_COVER_FAILURES` | 256 per group |
-| `MAX_WELCOMES`, `MAX_REVOKED_INVITES` | 4096, 1024 per group |
-| `MAX_KNOWN_KEYS` (light members) | 1024 device keys |
-| Leaf proofs per request | 64 |
-| DS defaults | largest capacity 1024, message retention 7 days, commit retention 30 days, 50 000 log entries, session tokens 1 hour, SessionAuth skew 5 minutes |
-| Client defaults | admissions valid 1024 epochs, join wait 1 to 2 s, invite links 7 days |
+| `L` (`district_bits`) | 12 by default, fixed at genesis (the tests use 2) |
+| `WINDOW_MAX` | 60 s |
+| `WINDOW_REMOVAL` | 5 s |
+| `UPDATE_INTERVAL` | 7 days |
+| `CHECKPOINT_INTERVAL` | 1 hour |
+| `AUDIT_K` | 20 audits per entry on average |
+| `MAX_HEIGHT` | 24 (`2^24` leaves) |
+| `MAX_ADMISSION_EPOCHS` | 65,536 |
+| Invite / admission / other requests and checkpoints / welcome | 12 / 24 / 48 / 4 KiB |
+| District commit / seal | 64 MiB each |
 
-<a id="17-label-registry"></a>
+**Measured costs.** The scale test (`crates/cityg-core/tests/scale.rs`, one
+core, release build) builds a full group and runs a window of half removals
+and half joins paired with them. The number of wraps and new keys equals
+the count of the cost model (`research/rekey_sim.py`) for the same leaves;
+times vary with the machine:
+
+| | N = 16,384, L = 10, 2,000 changes | N = 65,536, L = 12, 4,000 changes |
+| --- | --- | --- |
+| Wraps (against the bound `D·ln(N/D)`) | 5,333 (×1.27) | 12,475 (×1.12) |
+| New keys | 4,349 | 10,506 |
+| District commits | 16, 11.7 MB in all, busiest 852 KB | 16, 27.8 MB in all, busiest 1.9 MB |
+| Seal | 51 KB | 51 KB |
+| Packet per member | mean 7.7 KB, max 13.4 KB | mean 8.3 KB, max 14.6 KB |
+| DS check of the whole window, every entry included | 0.8 s | 1.6 s |
+
+<a id="17-labels"></a>
 ## 17. Label registry
 
-<a id="17-1-labelled-hashes"></a>
 ### 17.1 Labelled hashes (`H_L`)
 
 | Label | Arguments | Section |
 | --- | --- | --- |
-| `group-id` | `[creator_device_pk, group_nonce]` | 5 |
-| `device-id` | `[gid, device_pk]` | 5 |
-| `invite-id` | `[invite_pk]` | 5 |
-| `proposal-ref` | `[signed proposal or join request]` | 5 |
-| `kem-pk` | `[pk]` | 5 |
-| `msg/epoch-ref` | `[gid, epoch]` | 5 |
-| `tree/leaf` | `[leaf, LeafNode or null]` | 6.3 |
-| `tree/parent-node` | `[encryption_key, unmerged]` | 6.3 |
-| `tree/parent` | `[node_digest or null, left_hash, right_hash]` | 6.3 |
-| `registry` | `[capacity, admins, retired, retired_floor]` | 7 |
-| `confirmed-transcript` | `[prev_interim, anchor_tbs, signature, rotation_signature or h'']` | 8 |
-| `interim-transcript` | `[confirmed, confirmation_tag]` | 8 |
-| `msg/key-commitment` | `[key, nonce]` | 11.2 |
+| `group-id` | `[creator_device_pk, group_nonce]` | 4 |
+| `device-id` | `[gid, device_pk]` | 4 |
+| `invite-id` | `[invite_pk]` | 4 |
+| `kem-pk` | `[pk]` | 3 |
+| `tree/leaf` | `[LeafNode or null]` | 5.3 |
+| `tree/node` | `[encryption_key, taint]` | 5.3 |
+| `tree/parent` | `[content or null, left_hash, right_hash]` | 5.3 |
+| `smm/leaf` | `[key, occupancy]` | 8 |
+| `smm/node` | `[left, right]` | 8 |
+| `registry` | `[admins, devices_root, admissions_root, policy_hash or null, open]` | 8 |
+| `confirmed-transcript` | `[prev_interim, seal_hash]` | 9 |
+| `interim-transcript` | `[confirmed, confirmation_tag]` | 9 |
 
-<a id="17-2-derivation-labels"></a>
 ### 17.2 Derivation labels and object labels
 
 | Kind | Labels |
 | --- | --- |
-| `ExpandLabel` / `DeriveSecret` / `KeyGen` | `joiner`, `epoch`, `init`, `msg`, `confirm`, `external`, `external kem`, `external init`, `tree leaf key`, `tree path`, `tree node key`, `tree path wrap key`, `tree path wrap nonce`, `welcome key`, `welcome nonce`, `msg sender`, `msg next`, `msg key`, `msg nonce` |
-| Framing tags | `city-g/v0.3` (H_L), `city-g/v0.3 expand`, `city-g/v0.3 mac` |
-| Encoded objects | `city-g/group-context/v3`, `city-g/remove/v3`, `city-g/invite/v2`, `city-g/admission/v2`, `city-g/invite-revocation/v1`, `city-g/join-request/v1`, `city-g/welcome/v1`, `city-g/group-info/v3`, `city-g/cover-failure/v2`, `city-g/msg/v4`, `city-g-msg-v4` (envelope header), `city-g/light-commit/v1`, `city-g/light-join/v1`, `city-g/alias/v1`, `city-g/session-auth/v1` |
+| `ExpandLabel` / `DeriveSecret` / `KemKey` | `tree node key`, `tree path`, `fresh node`, `wrap key`, `wrap nonce`, `commit`, `joiner`, `epoch`, `init`, `msg`, `confirm`, `external`, `external kem`, `external init`, `welcome key`, `welcome nonce` |
+| Framing tags | `city-g/v0.4` (H_L), `city-g/v0.4 expand`, `city-g/v0.4 mac`; profile identifier `city-g/v0.4` |
+| Encoded objects | `city-g/group-context/v4`, `city-g/invite/v4`, `city-g/admission/v4`, `city-g/join-request/v4`, `city-g/remove/v4`, `city-g/eviction/v4`, `city-g/group-policy/v4`, `city-g/update/v4`, `city-g/catch-up/v4`, `city-g/re-entry/v4`, `city-g/checkpoint/v4`, `city-g/district-commit/v4`, `city-g/seal/v4`, `city-g/seal-body/v4`, `city-g/welcome/v4` |
 
-<a id="17-3-contexts"></a>
 ### 17.3 Signature contexts (FIPS 204 `ctx`)
+
+The context of a signed array is its label (section 3.4); the seal has a
+context of its own.
 
 | Context | Signed object |
 | --- | --- |
-| `city-g/anchor/v3` | commit (`anchor_tbs`), by the author |
-| `city-g/key-rotation/v1` | commit (`anchor_tbs`), by the author's new device key |
-| `city-g/group-info/v3` | GroupInfo |
-| `city-g/admission/v2` | Admission |
-| `city-g/invite/v2` | Invite |
-| `city-g/invite-revocation/v1` | InviteRevocation |
-| `city-g/join-request/v1` | JoinRequest |
-| `city-g/remove/v3` | RemoveProposal |
-| `city-g/cover-failure/v2` | CoverFailureReport |
-| `city-g/msg/v4` | FramedContent |
-| `city-g/identity-binding/v1` | AliasBinding |
-| `city-g/session-auth/v1` | SessionAuth |
-| `city-g/policy/v1` | deployment policy documents (reserved) |
+| `city-g/district-commit/v4` | DistrictCommit, by its committer |
+| `city-g/seal/v4` | `[seal_hash, confirmation_tag, external_pk]`, by the sealer |
+| `city-g/invite/v4` | Invite, by the inviter |
+| `city-g/admission/v4` | Admission, by an admin or an invite key |
+| `city-g/join-request/v4` | JoinRequest, by the joining device |
+| `city-g/remove/v4` | RemoveProposal, by an admin or the target |
+| `city-g/update/v4` | UpdateRequest, by the member |
+| `city-g/catch-up/v4` | CatchUpRequest, by the member |
+| `city-g/re-entry/v4` | ReEntryRequest, by the member |
+| `city-g/checkpoint/v4` | Checkpoint, by an admin |
+| `city-g/group-policy/v4` | GroupPolicy, by an admin |
 
-Any change to an encoding, a label or a context is a new profile version.
+<a id="18-security-considerations"></a>
+## 18. Security considerations
 
-<a id="18-conformance"></a>
-## 18. Conformance
+* **Windows sealed by an entrant.** The external public key is public, so
+  the DS can compute a correct confirmation tag for a window it seals itself
+  (model `external_tag_only.pv`). Members MUST check the entrant evidence of
+  every kind-2 window: an admin-signed admission never used (or, in an open
+  group, none) and a device not a member, or a re-entry signed by the
+  member's device key, and the seal signature under the entrant's key
+  (`external_checked.pv`). The DS refuses such a window too (section 10.5),
+  but members cannot rely on it.
+* **Open groups.** Anyone can join an open group, so it has no
+  confidentiality against the DS or anyone else who joins: a device kept in
+  the group reads from its join on (`open_group.pv`). Epochs before that
+  join stay closed to it. What an open group keeps: joins are visible
+  (section 12.11); nobody can speak as a member, since messages and
+  requests are signed with the member's device key (`open_group.pv`);
+  removals, evictions and admin rights keep their rules; and the admission
+  mode changes only by an admin's policy, which members check themselves
+  (section 12.2). A DS that seals a window with a device of its own acts as
+  committer of every district: an invalid removal or update it places is
+  caught by audits, as any committer's (section 15), and its victim sees
+  it. Rate limits and abuse control belong to the DS and the application.
+* **Removed members and the external init.** Every member of epoch `n - 1`
+  can recover the external init secret of window `n`, including the members
+  the window removes. The new epoch is secret from them only because the
+  window re-keys every node they know: their path, and every node they
+  taint (`entrant_removal.pv`, `taint.pv`).
+* **Committers and entrants.** They learn the secrets they draw. Erasure is
+  required; taints make a removed committer's knowledge useless, at the cost
+  of re-keying what it drew (for an entrant, possibly the whole window).
+  `taint_without_rule.pv` shows the attack without the rule, and the test
+  `removing_a_committer_rekeys_the_nodes_it_drew` shows it on real commits.
+* **No one online.** Removals then wait for the first participant; the DS
+  enforces them meanwhile (section 14.6) and members do not send while one
+  waits (section 12.8). A DS that colludes with a removed member can keep
+  relaying to it until the removal is applied.
+* **The state a role is shown** MUST be checked against a trusted header or
+  anchor (section 12.3); otherwise the DS could have secrets wrapped to keys
+  of its choosing.
+* **Audits are probabilistic.** An invalid entry that escapes the DS, its
+  committer and every sampled auditor enters the group. A fraud proof names
+  the committer, but only after the fact: admins should remove both the
+  committer and the entry. The probability of escape is about `e^-AUDIT_K`
+  per entry, if members audit honestly. A fraud proof is checked against
+  the verifier's own headers of the epochs around the window; it does not
+  show by itself that the commit was sealed (section 19).
+* **Forks.** The DS decides what each member sees and can split the group
+  into branches. Joiners anchor on admin checkpoints and check the chain of
+  seals (`anchored_join.pv`); a joiner that checked only the epoch it
+  enters could be led into an epoch the DS fabricated
+  (`join_without_anchor.pv`). Members that follow the group check only tags
+  and would not notice a fork; they SHOULD compare the interim transcript
+  hash out of band.
+* **Replays.** A leaf-key request names the key it replaces; a catch-up is
+  bound to one window; an admission admits once; occupancies are never
+  reused. A welcome is bound to its epoch, request and init key.
+* **Jumps.** A member that jumps checks every recovered path secret against
+  the key of its node in the tree it enters, itself checked by its leaf
+  proof against the tree hash of a seal it verified: stale or forged wraps
+  are detected.
+* **Placement and roles** do not affect security: a bad placement costs
+  bandwidth, a bad role assignment delays a window.
+* **Time.** `time_ms` of a seal is the sealer's clock, only required not to
+  go backwards.
 
-* [`kat/v0.3/vectors.json`](../kat/v0.3/vectors.json) holds vectors for
-  `CBOR_det`, `H_L`, the KDF functions, the identifiers, the X-Wing draft
-  vector and the ML-DSA-65 signatures of the suite, the key schedule
-  (joiner secret) and external init, the tree hash and a leaf proof, the
-  registry hash, the path-secret and welcome wraps, a complete genesis
-  commit with its GroupInfo and two messages of epoch 0, and every signed
-  array layout.
-* The reference implementation recomputes them
-  (`cargo test -p cityg-core --test vectors`).
-* [`kat/v0.3/verify_vectors.py`](../kat/v0.3/verify_vectors.py) recomputes
-  them independently from this document (CBOR, BLAKE3 derivations,
-  ChaCha20-Poly1305, X-Wing and ML-DSA-65 re-implemented or taken from
-  independent libraries), including the genesis tree hash, registry hash,
-  transcript hashes, confirmation tag, the leaf proof and the decryption of
-  the messages.
-* [`kat/kat-v0.3-conformance-manifest.json`](../kat/kat-v0.3-conformance-manifest.json)
-  maps each requirement to this document and to the vectors and tests that
-  exercise it.
-* The symbolic model in [`docs/formal/`](formal/) (ProVerif) proves, in
-  bounded scenarios and with ideal primitives, the confidentiality of epoch
-  secrets and welcomes against the delivery service, membership agreement
-  (joiners included, when they check the GroupInfo under a key they know),
-  admission control, join secrecy, forward secrecy, post-compromise security
-  after a self-update, the authentication of a member's commits and
-  messages after it rotated its device key even if the old key leaks,
-  post-removal secrecy, and sender authentication. Sanity scenarios find the
-  attacks that the author rule and retired admissions prevent, and the
-  forked view of section 2.3. Its README lists the abstractions.
+<a id="19-open-items"></a>
+## 19. Open items
 
-<a id="19-security-considerations"></a>
-## 19. Security considerations
+This version does not yet specify or implement:
 
-* **Batched joins.** A commit places every waiting join request at once, so
-  the cost of a commit grows with the number of joiners but the number of
-  epochs does not: a group absorbs a wave of joins in one epoch instead of
-  one epoch per joiner, and members re-key once. The overdue rule (section
-  12.1) keeps committers from skipping recorded removals and joins: every
-  commit includes the oldest overdue ones, up to the caps, so a proposal
-  waits for the next commit, plus the commits needed for the backlog ahead
-  of it.
-* **Unmerged leaves.** A joiner does not know the parent keys above it until
-  a commit re-keys them; encryptors add it to the resolution of those nodes.
-  The number of ciphertexts of an update grows with the unmerged leaves, and
-  shrinks back as members self-update. Removals blank the direct path of the
-  removed leaf, which also makes resolutions larger until the next
-  self-updates. `FS_WINDOW` bounds both effects.
-* **Welcomes.** The welcome's `init_key` is distinct from the leaf key and
-  used once: the leaf key of a member may leak later without exposing the
-  epoch of its join.
-* **Retired admissions.** Admissions carry a validity window
-  (`not_after_epoch`), so the registry keeps only the admissions that could
-  still be used. Its size is bounded without letting a removed member back:
-  under heavy churn (more than `MAX_RETIRED` removals within an admission's
-  validity), the retired floor refuses the admissions whose entries were
-  dropped, at the price of shortening the window in which new admissions can
-  be used.
-* **Device-key rotation.** A rotation is authorized by the old key and
-  proven by the new one; messages of previous epochs still verify under the
-  key held then. A rotation does not change the occupancy, the admission or
-  the admin rights.
-* **Joiners.** A joiner trusts the DS for the state of the epoch it enters,
-  and compares its security code with a member it knows to detect a forked
-  view (section 2.3). The admin that admitted it does not need to be online.
-* **Light members.** See section 14.6.
-* **Large groups.** The largest update of an 8192-leaf tree is under 10 MB
-  and a full tree of 8192 members about 35 MB. A light member of such a
-  group keeps its occupancies and registry (a few hundred kilobytes), the
-  device keys it verified and its message ratchets: a few megabytes at
-  most.
+* **The message plane.** The members of epoch `n` share `msg_secret_n`.
+  The framing of application messages, per-sender ratchets derived from
+  that secret, sender authentication with device keys, and messages that
+  arrive after the next epoch remain to be specified. With millions of
+  members, per-sender chains must be derived on demand (for instance from a
+  secret tree over the leaves, as in MLS), not one per member at every
+  epoch.
+* test vectors, an independent verifier and a conformance manifest;
+* the encodings of packets, seal links, entries, audit records and fraud
+  proofs, and district views with proofs for committers (section 12.3);
+* the delivery service's API, persistence, and the clients;
+* device-key rotation, admin changes beyond the promotion rule, invite
+  revocation;
+* reports of wraps a member cannot open, so that a malicious committer
+  cannot silently cut members off (section 2.3);
+* fraud proofs that also bind the district commit to the seal that listed
+  it, so that a proof holds on its own across forks (section 15);
+* shrinking the tree; pruning the admission map;
+* for open groups, optional unique handles bound to device keys, so that a
+  name cannot move to another key without every client noticing;
+* newer checkpoints signed by later admins, so that a joiner holding an old
+  checkpoint does not check a long chain;
+* a formal model of this specification: the model of [`formal/`](formal/)
+  checks the design choices it rests on.
 
-<a id="20-changes"></a>
-## 20. Changes from profile v0.2
+<a id="20-mls"></a>
+## 20. Relation to MLS
 
-Profile v0.3 is a new protocol; v0.2 groups cannot be upgraded in place.
+City-G keeps the structure of MLS (RFC 9420) where it can, and departs from
+it where a group of millions of members needs something else.
 
-| v0.2 | v0.3 | Section |
+| | MLS (RFC 9420) | City-G |
 | --- | --- | --- |
-| Fixed barrier tree of `n_max` slots in heap order, and a separate roster | Growable ratchet tree in the RFC 9420 array layout holding the members, and a registry for capacity, admins and retired admissions | 6, 7 |
-| One join per external commit | Join requests recorded concurrently and placed by any commit, welcomes with the joiner secret, unmerged leaves | 9.4, 10.3, 12.1 |
-| `leaf_id` and slot generations | `device_id`, and member references `[leaf, since]` | 5 |
-| The last 4096 removed device ids, retired for good | Admissions valid for a bounded number of epochs, retired while valid, and a retired floor when the list overflows | 7, 10.2 |
-| Device keys never rotated | Rotation by a Member commit signed by the old and the new key | 9.2, 9.3 |
-| ML-KEM-768 | X-Wing (ML-KEM-768 and X25519) | 3 |
-| ML-DSA-87 | ML-DSA-65 | 3 |
-| `epoch_secret` from the commit secret and init secret | `joiner_secret` step, `commit_secret` one step past the root | 8 |
-| Invites expire | Invites also count their uses and can be revoked | 10.2, 12.1 |
-| Late messages for one previous epoch | Up to four previous epochs, each for `GRACE_WINDOW_MS` | 11.3, 12.1 |
-| Every recorded removal in the next commit | Overdue proposals (recorded before the current epoch) in the next commit, up to the caps | 12.1 |
-| Every member holds the whole tree | Light members with Merkle proofs of the records they need | 6.7, 14 |
-| `n_max` at most 1024 | Capacity up to 8192 | 6.1 |
+| Key schedule | init secret chain, joiner secret from the init secret, the commit secret and the group context, epoch secret, confirmation tag over the confirmed transcript hash, interim transcript hash | the same structure (section 9), with the commit secret taken from the window's root secret |
+| Tree | left-balanced array, unmerged leaves, resolutions of blank nodes | sparse, up to `2^24` leaves, split into districts under a city; a parent is blank exactly when its subtree is empty (section 5) |
+| Changes | proposals, then one commit by one member per epoch | one window per epoch: district commits built in parallel by several members, then a seal (section 10) |
+| Re-key | the committer's update path, encrypted to the resolutions of its copath | a multi-path re-key of each changed district and of the city, chained where possible (section 7.3) |
+| Who knows a node's secret | a committer re-keys only its own path, which its removal blanks | a committer re-keys other members' nodes too; taints record who drew each node, and a removal or an update re-keys every node its member drew (section 10.2) |
+| Joining | a welcome for a member added by a commit, or an external commit to the group's external key | a welcome for a join a member committed, or, with nobody online, an entrant that seals the window itself with an external init (sections 11 and 12.7) |
+| What a joiner checks | the group information signed by a member | the chain of seals from an admin checkpoint (section 12.9) |
+| What a member keeps | the public tree | its path, the secrets and the header of its epoch: O(log N) (section 12.1) |
+| What a member receives per epoch | the commit | one packet with the steps of its own path (section 13.1) |
+| Who validates changes | every member, every proposal | the DS and the committers every entry, the sealer every commit's structure, members random samples (section 15) |
+| Suite | the cipher suites of RFC 9420 (classical KEMs and signatures) | X-Wing, ML-DSA-65, BLAKE3 and ChaCha20-Poly1305 (section 3) |

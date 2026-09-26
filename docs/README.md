@@ -1,62 +1,24 @@
 # City-G documentation
 
-City-G's current protocol is profile **`city-g/v0.3`**. The normative
-reference is the [specification](specs.md); everything else here explains,
-operates or checks it. The specification of the former profile v0.2 is
-archived in [`legacy/v0.2/`](legacy/v0.2/specs.md), and the documentation of
-profile v0.1.4 in [`legacy/v0.1.4/`](legacy/v0.1.4/README.md).
+City-G's protocol is profile **`city-g/v0.4`**, its initial version. The
+reference is the [specification](specs.md); everything else here explains
+or checks it.
 
 ## Protocol
 
 | Document | Content |
 | --- | --- |
-| [specs.md](specs.md) | Normative specification: threat model and security properties, cryptographic suite, encodings, ratchet tree and leaf proofs, registry, key schedule, commits, admission, joins and welcomes, message plane, delivery-service rules, light members, parameters, registries. |
-| [design-v0.3.md](design-v0.3.md) | Why profile v0.3 changed what it changed (decisions D-1 to D-9), their costs, and what was left out. |
-| [formal/](formal/) | Symbolic model of the key schedule, joins and welcomes, removal, admission, key rotation and messages, with the security lemmas of specs.md section 2. |
-| [design-v0.4.md](design-v0.4.md) | Draft profile v0.4 ("Cité"), for groups of millions of members: windows, districts under a city, taints, district welcomes, anchored joins, a group with no member online, catch-up, sampling audits, open groups (decisions E-1 to E-14). Not normative. |
-| [specs-v0.4-draft.md](specs-v0.4-draft.md) | Draft specification of profile `city-g/v0.4-draft`, aligned with the prototype crate [`cityg-cite`](../crates/cityg-cite). Not normative; no test vectors yet. |
-| [../kat/](../kat/README.md) | Conformance vectors, their independent verifier, and the requirement-to-test manifest. |
-| [workflows.md](workflows.md) | Sequence diagrams: create, invite and batched join, send, leave, remove, concurrent commits, resync, key rotation, light members. |
-| [fingerprints.md](fingerprints.md) | The security code and the tree and registry hashes, and what comparing them proves. |
+| [specs.md](specs.md) | Specification: threat model and security properties, cryptographic suite and encodings, tree, signed requests, re-key, registry, key schedule, district commits and seals, welcomes, members, packets, delivery service, audits, parameters, label registry, security considerations, open items, relation to MLS. |
+| [design.md](design.md) | Why the protocol is built as it is (decisions E-1 to E-14), what each decision costs, and what was left out. |
+| [workflows.md](workflows.md) | Sequence diagrams: creating a group, joining, a window of changes, nobody online, coming back, seeing who joined an open group. |
 | [GLOSSARY.md](GLOSSARY.md) | Terms of the specification. |
-
-## Using and integrating
-
-| Document | Content |
-| --- | --- |
-| [gui-user-guide.md](gui-user-guide.md) | The desktop client: create, invite, join, chat, administer, leave. |
-| [api-reference.md](api-reference.md) | The `/v3` delivery-service API, its errors, and the Rust member drivers (full and light). |
-| [configuration.md](configuration.md) | Configuration files and environment variables. |
-| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Symptoms, causes, fixes. |
-
-## Operating
-
-| Document | Content |
-| --- | --- |
-| [deployment.md](deployment.md) | Native server and Cloudflare Worker, one writer per room, storage, capacity. |
-| [examples/](examples/README.md) | Docker Compose, systemd, Kubernetes, Prometheus and Grafana samples. |
-| [OBSERVABILITY.md](OBSERVABILITY.md) | Logs, metrics, health probes, load testing. |
-| [release-qa-checklist.md](release-qa-checklist.md) | Release gate. |
+| [formal/](formal/README.md) | ProVerif model of the security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins, windows sealed by an entrant, open groups. |
 | [security-review-checklist.md](security-review-checklist.md) | Security review of a change or a release. |
-
-## Audits
-
-| Document | Content |
-| --- | --- |
-| [audits/audit-crypto-conformite-2026-09-25.md](audits/audit-crypto-conformite-2026-09-25.md) | Cryptographic and conformance audit of profile v0.1.4 (in French), its proposals P-1 to P-8, and the status of each finding after the move to v0.2; profile v0.3 keeps those fixes. |
-| [audits/](audits/README.md) | Earlier audits, kept as written. |
 
 ## Research
 
 | Document | Content |
 | --- | --- |
-| [research/grands-groupes-2026-09-25.md](research/grands-groupes-2026-09-25.md) | Groups of millions of members (in French): why profile v0.3 stops at 8192, the lower bounds and related work, and a proposed architecture ("Cité": districts re-keyed in parallel by committers that hold no state of their own, per-district delivery-service queues, taint tracking, district welcomes, anchored joins, sampling audits), with its costs, guarantees, risks and roadmap. The draft profile v0.4 follows it. |
-| [research/rekey_sim.py](research/rekey_sim.py) | Cost model behind the note's figures: waves, placement of joins, district size, CPU, steady-state traffic, audits. |
-| [research/formal/](research/formal/README.md) | ProVerif model of the design's security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins, windows sealed by an entrant when no member is online, open groups. |
+| [research/grands-groupes-2026-09-25.md](research/grands-groupes-2026-09-25.md) | Groups of millions of members (in French): the limits of a classic TreeKEM group, lower bounds and related work, the architecture of City-G (districts re-keyed in parallel by committers that hold no state of their own, per-district queues, taints, district welcomes, anchored joins, sampling audits), its costs, guarantees, risks and roadmap. |
+| [research/rekey_sim.py](research/rekey_sim.py) | Cost model behind the note's figures: windows, placement of joins, district size, CPU, steady-state traffic, audits. |
 | [research/bench/](research/bench/src/main.rs) | Micro-benchmarks of the primitives (X-Wing, ML-DSA-65, BLAKE3) through `cityg-core`, the source of the CPU figures. |
-
-## Design notes
-
-| Document | Content |
-| --- | --- |
-| [gui-material-system-roadmap.md](gui-material-system-roadmap.md) | Visual design direction of the GUI. |

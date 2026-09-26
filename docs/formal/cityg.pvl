@@ -1,9 +1,10 @@
-(* City-G "Cite" research model: shared definitions.
+(* City-G symbolic model: shared definitions.
 
-   Symbolic (Dolev-Yao) model of the design studied in
-   docs/research/grands-groupes-2026-09-25.md: epochs sealed per window,
-   districts re-keyed by committers that need not belong to them, a city
-   committer above them, taints, district welcomes and anchored joins.
+   Symbolic (Dolev-Yao) model of the design choices of City-G
+   (docs/design.md, docs/research/grands-groupes-2026-09-25.md): epochs
+   sealed per window, districts re-keyed by committers that need not belong
+   to them, a sealer re-keying the city above them, taints, district
+   welcomes and anchored joins.
    Primitives are ideal: the X-Wing wrap of a secret is one ideal public-key
    encryption, ML-DSA-65 an unforgeable signature, BLAKE3 and its keyed modes
    one-way functions. Trees are written out in each scenario. *)
@@ -54,8 +55,8 @@ letfun leaf_pk(ls: key) = kempk(leaf_sk(ls)).
 
 (* ---------- Key schedule ---------- *)
 
-(* With the init chain (as in profile v0.3, section 8): the root secret of
-   the window goes through the joiner secret, which district welcomes carry. *)
+(* With the init chain (docs/specs.md, section 9): the root secret of the
+   window goes through the joiner secret, which district welcomes carry. *)
 letfun joiner_secret(init_prev: key, root: key, gc: bitstring) = kdf2(init_prev, root, gc).
 letfun epoch_secret(js: key) = kdf(js, L_epoch).
 letfun init_secret(es: key) = kdf(es, L_init).

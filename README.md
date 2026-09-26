@@ -1,211 +1,156 @@
-## City‑G: post-quantum end-to-end encrypted groups (research prototype)
+## City‑G: post-quantum end-to-end encrypted groups of millions of members
 
-[![Status](https://img.shields.io/badge/status-research%20prototype-orange)]()
+[![Status](https://img.shields.io/badge/status-research-orange)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**City‑G** is a research protocol and implementation for end-to-end
-encrypted group messaging with post-quantum primitives. Its current profile,
-**`city-g/v0.3`**, follows MLS (RFC 9420): an epoch-chained key schedule, a
-ratchet tree in the RFC 9420 array layout over X-Wing (ML-KEM-768 with
-X25519), commits signed with ML-DSA-65, welcomes for members added by
-someone else's commit, and a per-sender message ratchet. It is built for
-groups of thousands of members where people join and leave all the time:
-joins wait in the delivery service and enter together with the next commit,
-the tree grows and shrinks with the group, members may follow the group as
-*light members* without holding the tree, and a device can rotate its
-signature key without leaving. A delivery service orders commits and relays
-ciphertexts without holding any group secret.
+**City‑G** is a research protocol for end-to-end encrypted groups with
+post-quantum primitives, built for groups of millions of members, bursts of
+hundreds of thousands of joins and departures, and groups where no member
+may be online for long periods. Its profile, **`city-g/v0.4`**, keeps the
+structure of MLS (RFC 9420) — a ratchet tree whose root secret feeds an
+epoch-chained key schedule, confirmation tags, welcomes and an external
+init — over X-Wing (ML-KEM-768 with X25519) and ML-DSA-65, and changes how
+the group is re-keyed: the tree is split into *districts* under a *city*,
+every *window* of requests becomes one epoch, districts are re-keyed in
+parallel by different members, and a delivery service orders and checks
+everything without holding any group secret.
 
-> **Status.** Research prototype. Profile v0.3 replaces profile v0.2
-> ([why](docs/design-v0.3.md)), which replaced profile v0.1.4 after the
-> [2026-09-25 audit](docs/audits/audit-crypto-conformite-2026-09-25.md)
-> (in French). v0.3 has conformance vectors checked by an independent
-> implementation and a symbolic model, but no independent human
-> cryptographic review yet. Prefer MLS implementations for production.
+> **Status.** Initial version, research. This repository holds the
+> [specification](docs/specs.md), the [design note](docs/design.md), a
+> [symbolic model](docs/formal/) and the protocol core
+> [`cityg-core`](crates/cityg-core) with an in-memory delivery service. The
+> message plane, the networked delivery service and the clients are not
+> there yet ([specification, section 19](docs/specs.md#19-open-items)).
+> There are no test vectors and no independent human cryptographic review:
+> prefer MLS implementations for production.
 
 ---
 
 ## Security properties
 
-From the [specification](docs/specs.md), section 2.2, for full members.
-"Server" is the delivery service, passive or active.
+From the [specification](docs/specs.md), section 2.2, for members that
+follow the group. "Epoch secrets" are what the message plane will encrypt
+under. The delivery service is passive or active.
 
-| Property | Against the server | Against a removed member | Device state compromised | Device key stolen |
+| Property | Against the delivery service | Against a removed member | Device state compromised | Device key stolen |
 | --- | --- | --- | --- | --- |
-| Confidentiality of messages | yes | yes, for epochs after its removal | outside the FS and PCS windows | no, until the device is removed |
-| Sender authentication | yes | yes | yes | yes, for the other members |
+| Confidentiality of epoch secrets | yes in a closed group; none in an open group, which anyone can join | yes, from the window that applies its removal | outside the forward-secrecy and post-compromise windows | no, until the device is removed |
 | Membership agreement | yes | yes | yes | yes |
-| Admission control (no member without an admin's signature) | yes | yes | yes | yes, unless the device is an admin |
-| Post-removal secrecy | yes | yes, even if it authored a commit before | n/a | once the device, and any device it admitted, is removed |
-| Forward secrecy | yes | n/a | keys older than `FS_WINDOW` (24 h) | yes |
-| Post-compromise security | n/a | n/a | after the device's next self-update | no, until the device is removed |
-| Join secrecy (nothing of the epochs before a join) | yes | n/a | yes | yes |
+| Admission control in a closed group (no member without an admin's admission) | yes | yes | yes | yes, unless the device is an admin |
+| Post-removal secrecy | n/a | yes, including for the nodes it drew as a committer | n/a | once the device is removed |
+| Forward secrecy | yes | n/a | for the epochs the device erased | yes |
+| Post-compromise security | n/a | n/a | after the device's next update | no, until the device is removed |
+| Join secrecy | yes | n/a | yes | yes |
 
-Device keys (ML-DSA-65) are long-term credentials: whoever steals one can
-act as that device until it is removed and replaced. A device can rotate
-its key, but that does not undo a compromise already used. Light members
-get the same properties except membership agreement, which holds for them
-only up to the tree hash against a server colluding with a member
-([section 14.6](docs/specs.md#14-6-trust)). Not provided at all: metadata
-privacy (the server sees the members, who sends when, message sizes and
-aliases), availability (the server can deny service), secrecy from members
-of the same epoch, and authenticated identities (aliases are self-asserted:
-compare [security codes](docs/fingerprints.md)).
+A malicious member that commits a district can place an entry without a
+valid admission; sampled audits catch it with probability about
+`1 - e^-20` and leave a transferable fraud proof. Not provided: metadata
+privacy, availability (the delivery service can deny service), secrecy from
+members of the same epoch, and, in an open group, secrecy from whoever joins
+it. Every join stays visible, and nobody can speak as another member.
 
 ## How it works
 
-* **Groups and epochs.** A group (`gid`, bound to its creator's key) moves
-  from epoch to epoch through commits. Every secret of epoch `n` derives
-  from the previous epoch's `init_secret` and from a fresh path secret of the
-  commit's author, bound to a `GroupContext` that commits to the tree, the
-  registry (capacity, admins, retired admissions) and the whole transcript:
-  members with different views derive different keys and reject the commit.
-* **Ratchet tree.** The members live in the leaves of a tree of X-Wing keys
-  (RFC 9420 layout) that doubles when it is full, up to the capacity chosen
-  at genesis (at most 8192), and halves when its right half empties. Each
-  commit renews its author's leaf and direct path and encrypts the new path
-  secrets to the rest of the tree; removed members' leaves and paths are
-  blanked first, so they learn nothing of later epochs. A member is named by
-  its occupancy `[leaf, since]`.
-* **Joining.** An admin shares an invite link (server URL, group, invite
-  seed); invites expire, count their uses and can be revoked. The joiner
-  signs its own admission with the invite key and records a join request.
-  The next commit, by any member, places every waiting request at once, and
-  each joiner opens a *welcome* holding the new epoch's joiner secret. If
-  nobody commits within a second or two, the joiner commits its own entry
-  (an external commit) and brings the other waiting joiners along. Every
-  member checks that each admission chains to a current admin.
-* **Leaving and removal.** A member never commits its own removal: it signs
-  a removal proposal, and another member (or an admin directly) commits it.
-  Recorded proposals cannot be skipped: every commit includes the oldest
-  overdue ones.
-* **Messages.** Each member sends on its own chain of keys derived from the
-  epoch; messages are signed, bound to their epoch and sender occupancy, and
-  accepted only from current members. Late messages of the four previous
-  epochs stay readable for 10 minutes.
-* **Light members.** A member may keep only the occupancies, the registry,
-  its own path and the keys of the senders it met, and check each commit with
-  Merkle proofs that the delivery service computes. It becomes full for the
-  commits it authors.
-* **Key rotation.** A member replaces its signature key with a commit signed
-  by the old key and the new one; its occupancy, admission and admin rights
-  stay.
-* **Delivery service.** It verifies every commit against public state,
-  accepts the first valid commit of each epoch, keeps the join requests,
-  welcomes and light-member proofs, relays envelopes, and journals
-  everything. Members authenticate to it with signed session requests; there
-  is no operator token.
+* **Windows.** The delivery service collects requests (joins, removals,
+  evictions, key updates, re-entries, catch-ups) for up to `WINDOW_MAX`
+  (60 s), or `WINDOW_REMOVAL` (5 s) when a removal waits. One epoch seals
+  the whole window, with no cap on its size.
+* **Districts and a city.** The tree has up to `2^24` leaves, split into
+  districts of `2^L` leaves (`L = 12` by default). Each district a window
+  changes gets a *district commit* from its own committer, in parallel; a
+  *sealer* re-keys the city above them and signs the *seal* that creates the
+  epoch. Secrets chain up each changed path, so the cost stays within a
+  small factor of the `D·ln(N/D)` lower bound for `D` changes among `N`
+  members.
+* **Taints.** Committers re-key nodes of other members, so every node
+  records who drew its secret. Removing or updating a member re-keys every
+  node it drew: a removed committer keeps nothing.
+* **Anyone can commit.** Any member of the epoch can commit any district or
+  seal a window from the public state, once it has checked that state
+  against its own header.
+* **Nobody online.** A joiner or a returning member seals the window itself
+  with an external init, and members check its admission and signature
+  later. With no participant at all, recorded removals are enforced by the
+  delivery service at delivery until someone comes.
+* **Members.** A member keeps its path, its epoch's secrets and header —
+  O(log N) — and downloads one packet per window, checked by the
+  confirmation tag: about 12 KB for a window of 200,000 changes among a
+  million members, in the cost model.
+* **Joining.** A joiner anchors on an admin checkpoint and checks the chain
+  of seals up to the epoch it enters; a welcome gives it the joiner secret.
+  A member coming back replays, jumps to the present with a welcome, or
+  re-enters its leaf.
+* **Open groups.** An admin-signed policy can open a group: any device joins
+  with its own signed request, and every join is visible to the members.
+* **Audits.** The delivery service checks every request, committers the
+  entries of their districts, the sealer the structure of every commit, and
+  members audit random entries.
 
-Sequence diagrams: [docs/workflows.md](docs/workflows.md).
+Sequence diagrams: [docs/workflows.md](docs/workflows.md). Measured costs,
+from the scale test (one core, release build): a window of 1,000 removals
+and 1,000 joins among 16,384 members in 16 districts takes 5,333 wraps, the
+count of the cost model; district commits of 852 KB at most, a 51 KB seal,
+packets of 7.7 KB on average and seal links of 9 KB.
 
 ## Repository
 
-| Crate | Role |
+| Path | Content |
 | --- | --- |
-| [`cityg-core`](crates/cityg-core) | Protocol core without I/O: encodings, KDF, X-Wing, tree and leaf proofs, key schedule, commits, admission, joins and welcomes, messages, full and light member sessions, delivery-service ledger. |
-| [`cityg-pqc`](crates/cityg-pqc) | FIPS 204 ML-DSA-65 with per-usage contexts. |
-| [`cityg-cite`](crates/cityg-cite) | Prototype of the draft profile v0.4 for groups of millions of members: districts, windows, taints, a group with no member online, and an in-memory delivery service. No I/O; not wired to the `/v3` stack. |
-| [`cityg-proto`](crates/cityg-proto) | Protobuf schema and routes of the `/v3` API. |
-| [`cityg-server`](crates/cityg-server), [`cityg-runtime`](crates/cityg-runtime) | Delivery-service rooms, journals and request handlers. |
-| [`cityg-api`](crates/cityg-api) | Native delivery service (HTTP, WebSocket, metrics). |
-| [`cityg-worker`](crates/cityg-worker) | Cloudflare Worker delivery service, one Durable Object per room. |
-| [`cityg-api-client`](crates/cityg-api-client) | HTTP client and member drivers, full and light. |
-| [`cityg-gui`](crates/cityg-gui) | Desktop client (GPUI) and the `join_leave` CLI. |
-| [`cityg-stress`](crates/cityg-stress) | Load and chaos testing. |
-| [`cityg-config`](crates/cityg-config) | Configuration. |
-
-Documentation index: [docs/README.md](docs/README.md). Conformance:
-[kat/](kat/README.md). Earlier profiles are archived:
-[v0.2](docs/legacy/v0.2/specs.md) and [v0.1.4](docs/legacy/v0.1.4/README.md).
+| [`crates/cityg-core`](crates/cityg-core) | Protocol core without I/O: deterministic CBOR, X-Wing, device identities, hashing and wraps, the tree, re-key plans, the registry, the key schedule, signed requests, district commits and seals, welcomes, members, joiners and returning members, an in-memory delivery service, audits and fraud proofs. |
+| [`crates/cityg-pqc`](crates/cityg-pqc) | FIPS 204 ML-DSA-65 with per-usage contexts. |
+| [`docs/`](docs/README.md) | Specification, design note, glossary, workflows, symbolic model, research. |
+| [`scripts/`](scripts/) | Local CI, security review, delivery-service guardrail. |
 
 ## Quick start
 
-A delivery service and two desktop clients on one machine:
-
 ```bash
-# Terminal 1: the delivery service (rooms in memory; set
-# CITYG_SERVER_STATE_PATH to keep them across restarts)
-cargo run -p cityg-api
-
-# Terminals 2 and 3: two clients with separate state
-CITYG_GUI_CONFIG_DIR=/tmp/cityg-alice cargo run -p cityg-gui --features native-app
-CITYG_GUI_CONFIG_DIR=/tmp/cityg-bob   cargo run -p cityg-gui --features native-app
+cargo test --workspace                                            # unit and scenario tests
+cargo test -p cityg-core --release --test scale -- --ignored --nocapture   # a large window
+./scripts/ci/local-ci.sh                                          # everything the CI runs
+docs/formal/run.sh /path/to/proverif                              # symbolic model (ProVerif 2.05)
+cargo run --release --manifest-path docs/research/bench/Cargo.toml   # primitive costs
+python3 docs/research/rekey_sim.py                                # cost model
 ```
 
-In the first client, enter `http://127.0.0.1:8080`, choose **New room** and
-**Create room**, then **Copy Invite**. In the second, paste the link and
-**Join room**. See the [GUI guide](docs/gui-user-guide.md).
-
-Simulated members from the command line:
-
-```bash
-cargo run -p cityg-gui --bin join_leave -- http://127.0.0.1:8080 --count=3 --batch --message-burst-count=2
-```
-
-Rust integration goes through the member driver of `cityg-api-client`
-([API reference](docs/api-reference.md)); deployment options are in
-[docs/deployment.md](docs/deployment.md).
-
-## Verification
-
-```bash
-cargo test --workspace && cargo test -p cityg-gui --features native-app
-./scripts/ci/local-ci.sh                     # everything the CI runs
-./scripts/security_review.sh                 # tests and the server-blindness guardrail
-python3 kat/v0.3/verify_vectors.py           # independent check (pip install blake3 kyber-py dilithium-py)
-```
-
-* **Conformance vectors** ([`kat/v0.3/vectors.json`](kat/v0.3/vectors.json))
-  are computed by the implementation and recomputed from the specification
-  by an independent Python verifier.
-* **A requirement map** ([`kat/kat-v0.3-conformance-manifest.json`](kat/kat-v0.3-conformance-manifest.json))
-  links every requirement of the specification to its vectors and tests; a
-  test checks that nothing is left out.
-* **A symbolic model** ([`docs/formal/`](docs/formal/)) states the security
-  goals for the key schedule, joins and welcomes, removal, admission, key
-  rotation and messages.
-* **`scripts/verify_no_secrets.sh`** checks, syntactically, that the
-  server-side code uses no secret-holding type. It is a guardrail, not a
-  proof.
+The scenario tests of `crates/cityg-core/tests/scenarios.rs` run whole
+groups on the in-memory delivery service: growth over several districts,
+windows sealed by an entrant with nobody online, recorded removals, removal
+of a committer that kept its secrets, forged epochs, jumps and re-entries,
+failed committers, eviction, audits and fraud proofs, invites, anchored
+joins, and open groups.
 
 ## Limits
 
-* Metadata is visible to the delivery service.
-* Groups have at most 8192 members (the reference delivery service accepts
-  up to 1024 by default). The largest commit of an 8192-member group is
-  under 10 MB and its tree about 35 MB, which is why such groups need light
-  members. A [research note](docs/research/grands-groupes-2026-09-25.md)
-  (in French) studies how to reach groups of millions of members. A draft
-  profile v0.4 ([design note](docs/design-v0.4.md),
-  [draft specification](docs/specs-v0.4-draft.md)) and its prototype crate
-  `cityg-cite` follow it; they are not normative and not deployed.
-* A joiner cannot check the history before the epoch it enters: a malicious
-  delivery service can show it a fabricated view of the group until it
-  compares its security code with a member it knows.
-* Light members rely on the delivery service for the new tree hash of each
-  commit and for the uniqueness of device keys.
-* Invite links are bearer secrets until their invite expires, is revoked or
-  has admitted its number of devices.
-* A malicious member can author a commit that others cannot process: it is
-  detected, attributed and recovered from (resync), not prevented.
-* Research code: side channels of the dependencies and of the GUI's local
-  storage have not been assessed.
+* The delivery service sees the members, the requests and the timing of
+  windows.
+* Removals take effect when their window is sealed; until then the delivery
+  service enforces them, which is not cryptographic.
+* Committers learn the secrets they draw until they erase them; taints make
+  a removed committer's knowledge useless, at the cost of re-keying what it
+  drew.
+* Admission control in a closed group rests, for entries a malicious
+  committer places, on sampled audits.
+* A committer can wrap a secret that some members cannot open: they reject
+  the window and must re-enter. Reports that expose such a committer are an
+  open item.
+* Members that follow the group check tags, not the history: comparing the
+  interim transcript hash out of band detects a fork.
+* Research code: side channels of the dependencies have not been assessed.
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Protocol changes start with the
-specification and come with regenerated vectors and an updated requirement
-map. Report vulnerabilities privately ([SECURITY.md](SECURITY.md)).
+specification. Report vulnerabilities privately ([SECURITY.md](SECURITY.md)).
 
 ## Citation
 
 ```bibtex
 @misc{cityg2026,
-  title={City-G: Post-Quantum End-to-End Encrypted Groups},
+  title={City-G: Post-Quantum End-to-End Encrypted Groups of Millions of Members},
   author={Sabri Haddouche},
   year={2026},
   howpublished={\url{https://github.com/pwnsdx/cityg}},
-  note={Protocol specification: profile city-g/v0.3}
+  note={Protocol specification: profile city-g/v0.4}
 }
 ```
 
@@ -221,6 +166,7 @@ MIT, see [LICENSE](LICENSE). Copyright (c) 2025 Sabri Haddouche.
 
 ## Acknowledgments
 
-City-G builds on MLS (RFC 9420) and the TreeKEM line of work, on the NIST
+City-G builds on MLS (RFC 9420) and the TreeKEM line of work, on batch
+re-keying of multicast key trees and Tainted TreeKEM, on the NIST
 post-quantum standards FIPS 203 (ML-KEM) and FIPS 204 (ML-DSA), and on
 BLAKE3 and ChaCha20-Poly1305.

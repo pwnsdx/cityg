@@ -22,8 +22,7 @@ The script prints:
      and the city commit, the total against the lower bound D*ln(N/D) of
      Anastos et al. (2024), what one member downloads, the extra re-key when
      the busiest district's committer is removed right after its commit
-     (every node it re-keyed is tainted by it), and the number of successive
-     commits profile v0.3 needs (at most 64 joins and 256 removals each);
+     (every node it re-keyed is tainted by it);
   2. placement of the joins of a wave: at random, into the leaves removed in
      the same window (paired), in whole free districts (contiguous), or
      paired first and the surplus in free districts (mixed);
@@ -221,10 +220,6 @@ def member_window_bytes(r, h, signed):
     return r["member_mean"] * WRAP + HEADER
 
 
-def v03_commits(joins, removals):
-    return max(math.ceil(removals / 256), math.ceil(joins / 64))
-
-
 # ---------------------------------------------------------------- reports
 
 
@@ -250,7 +245,6 @@ def report_wave(h, l, d):
           f" {human(member_window_bytes(r, h, False))} with the tag only")
     print(f"  busiest committer removed: {r['taint_wraps']:,} wraps, {r['taint_nodes']:,} new keys"
           f" ({human(r['taint_wraps'] * WRAP + r['taint_nodes'] * KEM_PK)})")
-    print(f"  profile v0.3            : {v03_commits(joins, removals):,} successive commits")
     print()
 
 

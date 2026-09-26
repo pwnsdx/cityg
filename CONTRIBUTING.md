@@ -1,10 +1,10 @@
 # Contributing to City-G
 
-City-G is a research protocol for end-to-end encrypted groups with
-post-quantum primitives. Its current profile is `city-g/v0.3`, specified in
-[`docs/specs.md`](docs/specs.md); the [design note](docs/design-v0.3.md)
-explains its choices and the [glossary](docs/GLOSSARY.md) defines its
-terms.
+City-G is a research protocol for end-to-end encrypted groups of millions
+of members with post-quantum primitives. Its profile is `city-g/v0.4`,
+specified in [`docs/specs.md`](docs/specs.md); the
+[design note](docs/design.md) explains its choices and the
+[glossary](docs/GLOSSARY.md) defines its terms.
 
 ## Code of conduct
 
@@ -14,37 +14,29 @@ help newcomers, and report concerning behavior to the maintainers.
 ## Getting started
 
 Prerequisites: a recent stable Rust toolchain (the workspace uses edition
-2024), Git, and for the GUI on Linux the packages `pkg-config libxcb1-dev
-libxkbcommon-dev libxkbcommon-x11-dev`. Python 3 with the `blake3`,
-`kyber-py` and `dilithium-py` packages runs the independent vector check.
+2024) and Git. ProVerif 2.05 runs the symbolic model; Python 3 runs the
+cost model.
 
 ```bash
 git clone https://github.com/pwnsdx/cityg.git
 cd cityg
-cargo test --workspace                                  # every crate
-cargo test -p cityg-gui --features native-app           # the GUI
-./scripts/verify_no_secrets.sh --no-build               # server-blindness guardrail
-python3 -m pip install blake3 kyber-py dilithium-py && python3 kat/v0.3/verify_vectors.py
+cargo test --workspace                     # unit and scenario tests
+./scripts/verify_no_secrets.sh             # delivery-service guardrail
+docs/formal/run.sh /path/to/proverif       # symbolic model
 ```
 
 ### Where things are
 
 | Path | Content |
 | --- | --- |
-| `docs/specs.md` | Normative specification. |
+| `docs/specs.md` | Specification. |
+| `docs/design.md` | Design decisions E-1 to E-14. |
 | `crates/cityg-pqc` | ML-DSA-65 (FIPS 204) with per-usage contexts. |
-| `crates/cityg-core` | Protocol core without I/O: encodings, KDF, X-Wing, tree and leaf proofs, key schedule, commits, admission, joins and welcomes, messages, full and light member sessions, delivery-service ledger. |
-| `crates/cityg-proto` | Protobuf schema and routes of the `/v3` API. |
-| `crates/cityg-server` | Rooms of the delivery service: log, journal, stores. |
-| `crates/cityg-runtime` | Request handlers and sessions, shared by the two transports. |
-| `crates/cityg-api` | Native HTTP server. |
-| `crates/cityg-worker` | Cloudflare Worker (one Durable Object per room). |
-| `crates/cityg-api-client` | HTTP client and member drivers (full and light). |
-| `crates/cityg-gui` | Desktop client and the `join_leave` CLI. |
-| `crates/cityg-stress` | Load and chaos tool. |
-| `crates/cityg-config` | Configuration. |
-| `kat/` | Conformance vectors, independent verifier, requirement map. |
-| `docs/formal/` | Symbolic model of the protocol. |
+| `crates/cityg-core` | Protocol core without I/O and an in-memory delivery service. Its module documentation lists the layers, from deterministic CBOR up to members and the delivery service. |
+| `crates/cityg-core/tests/scenarios.rs` | Whole groups on the in-memory delivery service. |
+| `crates/cityg-core/tests/scale.rs` | A large window on a full group, against the cost model (release, `--ignored`). |
+| `docs/formal/` | Symbolic model of the security choices. |
+| `docs/research/` | Research note (in French), cost model, benchmarks. |
 
 ## Workflow
 
@@ -54,7 +46,7 @@ python3 -m pip install blake3 kyber-py dilithium-py && python3 kat/v0.3/verify_v
 
    ```bash
    ./scripts/setup-git-hooks.sh          # once: blocks pushes that fail the checks
-   ./scripts/ci/local-ci.sh              # fmt, strict clippy, tests, guardrail, wasm, GUI, builds
+   ./scripts/ci/local-ci.sh              # fmt, strict clippy, tests, guardrail, scale test, model
    CITYG_FAST=1 ./scripts/ci/local-ci.sh # fmt, clippy and tests only
    ```
 
@@ -68,8 +60,8 @@ python3 -m pip install blake3 kyber-py dilithium-py && python3 kat/v0.3/verify_v
 
 - `cargo fmt --all` and the strict clippy set of the CI (no `unwrap`,
   `expect`, `panic!`, `todo!` or `unimplemented!` outside tests).
-- Tests with the change; coverage must not drop.
-- No `unsafe` in protocol crates.
+- Tests with the change.
+- No `unsafe`.
 - Update the documentation the change affects and `CHANGELOG.md`.
 
 ### Protocol changes
@@ -77,30 +69,21 @@ python3 -m pip install blake3 kyber-py dilithium-py && python3 kat/v0.3/verify_v
 The specification comes first; the code implements it.
 
 - Any change to an encoding, a label, a signature context, an algorithm or
-  a parameter is a **new profile version**: it changes `city-g/v0.3` and
-  every vector.
-- Register new labels and contexts (specs.md, section 17).
-- Regenerate the vectors, review the diff, and keep the independent verifier
-  in step:
-
-  ```bash
-  CITYG_WRITE_VECTORS=1 cargo test -p cityg-core --test vectors
-  python3 kat/v0.3/verify_vectors.py
-  ```
-
-- Map each new requirement in `kat/kat-v0.3-conformance-manifest.json` to
-  its section, its vectors, its tests and its origin. `cargo test -p cityg-core --test
-  conformance_manifest` fails if a section, a vector section or a test of
-  `cityg-core` is left out.
-- Update the formal model in `docs/formal/` if the change touches the key
-  schedule, joins and welcomes, the tree, removal, admission or key
-  rotation.
+  a parameter is a **new profile version**.
+- Register new labels and contexts (specs.md, section 17); the context of a
+  signed array is its label.
+- Record a design decision in `docs/design.md` when the change makes one.
+- Update the symbolic model in `docs/formal/` if the change touches the key
+  schedule, taints, removals, joins and welcomes, entrants or open groups.
+- Run the scale test if the change touches the tree, the re-key or the
+  delivery service.
 
 ### Security-critical code
 
-- The server-side crates (`cityg-server`, `cityg-runtime`, `cityg-api`,
-  `cityg-worker`) must never use member-side, secret-holding types;
-  `scripts/verify_no_secrets.sh` checks it syntactically.
+- The public modules of `cityg-core` that the delivery service and auditors
+  run (`ds`, `window`, `audit`, `packet`, `registry`, `smm`, `tree`) never
+  name a secret-holding type; `scripts/verify_no_secrets.sh` checks it
+  syntactically.
 - Secrets are zeroized on drop, never logged, and compared in constant time.
 - Every decoded object is re-encoded and compared byte for byte; relayed
   objects are never re-encoded.
@@ -113,13 +96,13 @@ Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 We are especially interested in:
 
-- extending the symbolic model (`docs/formal/`) and computational proofs of
-  the key schedule and the tree;
+- a model of the whole specification and computational proofs of the taint
+  rule, the init chain and anchored joins;
+- a message plane for millions of members (per-sender ratchets derived on
+  demand);
 - cryptanalysis of the construction and of its parameter choices;
-- side-channel analysis of the ML-KEM and ML-DSA backends and of the
-  constant-time comparisons;
-- scaling beyond `MAX_N_MAX` (sub-groups, federation) and reducing commit
-  sizes.
+- side-channel analysis of the ML-KEM and ML-DSA backends;
+- reducing what members download and what committers send.
 
 ## Review
 

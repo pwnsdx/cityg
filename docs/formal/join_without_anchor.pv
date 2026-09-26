@@ -1,8 +1,8 @@
 (* Scenario ANCHOR without the checkpoint (sanity check): as
    anchored_join.pv, but J accepts a commit signed by any key it is shown,
-   as a v0.3 joiner that takes the signer from the tree it received
-   (specification, section 2.3). The delivery service signs a fabricated
-   epoch with its device E: J must enter an epoch the attacker knows. *)
+   as a joiner that checks only the epoch it enters and takes the signer
+   from the tree it received. The delivery service signs a fabricated epoch
+   with its device E: J must enter an epoch the attacker knows. *)
 
 free MJ: bitstring [private].
 query attacker(MJ).

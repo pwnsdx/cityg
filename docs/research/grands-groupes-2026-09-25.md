@@ -1,45 +1,35 @@
-# Groupes de plusieurs millions de membres : état de l'art et architecture « Cité »
+# Groupes de plusieurs millions de membres : état de l'art et architecture de City-G
 
 | | |
 | --- | --- |
-| Date | 2026-09-25, révision 2 |
-| Nature | Note de recherche. Le profil en vigueur reste [`city-g/v0.3`](../specs.md) ([note de conception](../design-v0.3.md)). Depuis le 2026-09-26, un brouillon de profil `city-g/v0.4-draft` suit cette architecture : [note de conception](../design-v0.4.md), [brouillon de spécification](../specs-v0.4-draft.md) et prototype [`crates/cityg-cite`](../../crates/cityg-cite) (section 8). |
-| Question | Comment City-G peut-il servir des groupes de millions de membres, où des centaines de milliers de personnes entrent et sortent en même temps, sans que les demandes en attente au service de distribution (DS) deviennent un goulot d'étranglement ? |
-| Compagnons | [`rekey_sim.py`](rekey_sim.py) : modèle de coût (`python3 docs/research/rekey_sim.py` redonne tous les chiffres de la section 4, graine fixe, en une minute et demie). [`formal/`](formal/README.md) : modèle ProVerif des choix de sécurité (section 5). [`bench/`](bench/src/main.rs) : mesure du coût CPU des primitives. |
-| Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Le modèle symbolique couvre les choix clés ; il n'existe qu'un brouillon de spécification et aucune preuve calculatoire (feuille de route, section 8). Une relecture cryptographique humaine reste nécessaire avant toute décision. |
+| Date | 2026-09-25, révisée le 2026-09-26 |
+| Nature | Note de recherche à l'origine de la conception de City-G : [spécification](../specs.md) du profil `city-g/v0.4`, [note de conception](../design.md) (décisions E-1 à E-14) et implémentation [`crates/cityg-core`](../../crates/cityg-core) (section 8). |
+| Question | Comment un groupe chiffré de bout en bout peut-il servir des millions de membres, où des centaines de milliers de personnes entrent et sortent en même temps, sans que les demandes en attente au service de distribution (DS) deviennent un goulot d'étranglement ? |
+| Compagnons | [`rekey_sim.py`](rekey_sim.py) : modèle de coût (`python3 docs/research/rekey_sim.py` redonne tous les chiffres de la section 4, graine fixe, en une minute et demie). [`../formal/`](../formal/README.md) : modèle ProVerif des choix de sécurité (section 5). [`bench/`](bench/src/main.rs) : mesure du coût CPU des primitives. |
+| Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Le modèle symbolique couvre les choix clés ; il n'existe aucune preuve calculatoire (feuille de route, section 8). Une relecture cryptographique humaine reste nécessaire. |
 
 Vocabulaire :
-- une *enveloppe* est le secret d'un nœud de l'arbre chiffré vers la clé publique d'un enfant : un chiffré X-Wing (1120 octets) et le secret scellé (48 octets) ;
+- une *enveloppe* (un *wrap* dans la spécification) est le secret d'un nœud de l'arbre chiffré vers la clé publique d'un enfant : un chiffré X-Wing (1120 octets) et le secret scellé (48 octets) ;
+- le *committer de ville* est le *sealer* de la spécification, et son commit le *sceau* (seal) ;
+- une *vague* est un afflux d'entrées et de départs ;
 - Δ est la durée d'une fenêtre ;
 - N est la taille du groupe ;
 - D est le nombre de changements d'une fenêtre (entrées, retraits, mises à jour de clé).
 
-**Ce que change la révision 2**, par rapport à la première version du même jour :
-
-1. **La chaîne d'init est conservée.**
-   - Le modèle formel montre ce qu'elle apporte. Elle protège les époques passées quand une clé de feuille fuit, et elle empêche un DS de fabriquer une époque même si le membre ne vérifie que le confirmation tag.
-   - Sans elle, il faudrait vérifier une signature à chaque fenêtre.
-   - Les welcomes reviennent, scellés par quartier et en parallèle. Le trafic de fond d'un membre est divisé par 2 à 4.
-2. **L'en-tête signé d'un commit doit contenir le confirmation tag.** Le modèle a trouvé l'attaque contraire lors d'une entrée.
-3. **Plus de KEM multi-destinataires.** Les constructions sur réseaux euclidiens qui partagent l'aléa entre destinataires sont cassées par des clés publiques malveillantes, et un membre choisit sa propre clé de feuille.
-4. **Placement des entrées.** Donner aux entrants les feuilles libérées dans la même fenêtre, puis des quartiers libres pour le surplus, réduit une vague de 30 à 43 %.
-5. **Vérification des entrées répartie** entre le DS, les committers de quartier et des audits par échantillonnage chiffrés. Le committer de ville ne peut pas vérifier seul un million de signatures.
-6. **Nouveaux chiffres :** coûts CPU mesurés, taille des quartiers, latence d'une fenêtre, et modèle ProVerif de douze scénarios.
-
 ## 0. Résumé
 
-1. **La v0.3 ne peut pas atteindre l'échelle visée**, pour quatre raisons :
-   - sa capacité est plafonnée à 8192 membres ;
-   - ses commits sont séquentiels et font entrer au plus 64 membres et en retirer au plus 256 chacun ;
-   - chaque membre traite chaque commit ;
-   - l'arbre complet d'un million de membres pèserait environ 4,5 Go.
+1. **Un groupe TreeKEM classique, à la MLS, ne peut pas atteindre l'échelle visée**, pour quatre raisons :
+   - chaque époque passe par le commit d'un seul membre, et les commits concurrents sont refusés puis refaits ;
+   - chaque membre traite chaque commit et vérifie chaque proposition ;
+   - chaque membre tient l'arbre public complet : environ 4,5 Go pour un million de membres avec des clés post-quantiques ;
+   - il faut un membre en ligne pour committer, donc pour appliquer un retrait.
 
-   Une vague de 100 000 entrées et 100 000 départs demanderait 1 563 commits successifs, soit 26 minutes à un commit par seconde. Pendant ce temps, les derniers membres retirés gardent l'accès.
+   Une vague de 100 000 entrées et 100 000 départs impose soit un commit géant, préparé par un seul appareil et dont chaque membre doit vérifier les 200 000 signatures, soit une longue suite de commits pendant laquelle les derniers membres retirés gardent l'accès.
 2. **Le travail d'une vague a un coût minimal qu'aucun protocole ne peut éviter.** Remplacer D membres parmi N coûte au moins de l'ordre de D·ln(N/D) chiffrés, et cette borne est atteinte. Pour 200 000 changements dans un groupe d'un million, cela fait de l'ordre de 331 000 chiffrés. Ce qu'on peut choisir :
    - le payer une seule fois par fenêtre ;
    - le répartir entre de nombreux appareils ;
    - garder ce que chaque membre télécharge en O(log N).
-3. **Proposition « Cité » :**
+3. **L'architecture de City-G :**
    - **Arbre :** un seul arbre de clés, découpé en *quartiers* de 4096 feuilles et surmonté d'une *ville* ; les époques avancent par fenêtres de temps.
    - **Commits :** à la fin d'une fenêtre, un committer par quartier re-keye en parallèle tous les chemins modifiés de son quartier, puis un committer de ville re-keye les niveaux supérieurs. Les committers de quartier scellent ensuite les welcomes des entrants.
    - **Rôles :** aucun rôle ne demande d'état propre ; tout membre qui suit le groupe peut en prendre un.
@@ -55,24 +45,22 @@ Vocabulaire :
    - les committers voient plus de secrets, d'où le suivi des taches et l'effacement ;
    - les entrées des autres quartiers sont vérifiées par le DS, les committers et des audits, pas par chaque membre ;
    - un membre qui suit tout reçoit de 1 à 10 Mo par jour selon la fenêtre (de 10 min à 1 min), surtout à cause des mises à jour quotidiennes des feuilles.
-6. **Suite :** un brouillon de spécification, l'extension du modèle formel à cette spécification, un prototype du re-key multi-chemins et un DS à files par quartier testé en charge.
+6. **Suite :** la spécification et le cœur du protocole existent (section 8) ; restent le plan de messages, le DS réel et les clients, des vecteurs de test et l'extension du modèle formel à la spécification.
 
-## 1. Où bloque la v0.3
+## 1. Où bloque un groupe TreeKEM classique
 
-La v0.3 regroupe déjà les entrées : les demandes attendent au DS et le
-prochain commit les place ensemble. Mais tout passe par une seule chaîne de
-commits, que chaque membre rejoue.
+MLS (RFC 9420) regroupe déjà des changements : des propositions, puis un
+commit qui les applique. Mais tout passe par une seule chaîne de commits,
+que chaque membre rejoue.
 
-| Limite | Spécification | Effet à l'échelle visée |
-| --- | --- | --- |
-| Capacité fixée à la genèse, au plus `MAX_CAPACITY` = 8192 feuilles | 6.1, 16 | Impossible au-delà de 8192 membres. La borne servait à garder une mise à jour sous 10 Mo. |
-| Une seule chaîne d'époques : le premier commit valide de l'époque n + 1 gagne, les autres sont refusés et reconstruits | 12.1 | Un seul commit à la fois pour tout le groupe. |
-| Au plus 64 entrées et 256 retraits par commit, les plus anciens d'abord | 12.1, 16 | 100 000 entrées et 100 000 retraits demandent 1 563 commits successifs. La file du DS se vide à ce rythme, et un retrait attend tous ceux qui le précèdent. |
-| Chaque membre traite chaque commit, dans l'ordre | 13.2, 14.2 | Chaque membre, même léger, télécharge et vérifie 1 563 commits. |
-| Arbre complet d'environ 35 Mo pour 8192 membres | 19 | Environ 4,5 Go pour un million. Il faudrait des membres légers partout, et l'auteur d'un commit doit tenir l'arbre complet. |
-| Un welcome par entrée, scellé par l'auteur du commit | 10.3 | Tout le travail des entrées d'une époque retombe sur un seul appareil. |
-| Registre en listes bornées : 4096 admissions retirées, puis un plancher | 7 | Avec 100 000 retraits par vague, le plancher monte à chaque vague et refuse des admissions encore valides. |
-| Feuilles non fusionnées et chemins effacés | 6.4, 19 | Les commits suivants grossissent tant que les membres ne se remettent pas à jour ; l'effet est mesuré pour MLS (section 2.3). |
+| Limite | Effet à l'échelle visée |
+| --- | --- |
+| Une seule chaîne d'époques : le premier commit valide de l'époque n + 1 gagne, les autres sont refusés et reconstruits | Un seul commit à la fois pour tout le groupe, préparé par un seul appareil. |
+| Chaque membre vérifie chaque proposition du commit | Deux signatures par entrée : 42 s de CPU pour 100 000 entrées, sur chaque appareil. |
+| Chaque membre, et l'auteur d'un commit, tient l'arbre public complet | Environ 35 Mo pour 8192 membres avec X-Wing et ML-DSA-65, environ 4,5 Go pour un million. |
+| Un welcome par entrée, scellé par l'auteur du commit | Tout le travail des entrées d'une époque retombe sur un seul appareil. |
+| Feuilles non fusionnées et nœuds effacés | Les commits suivants grossissent tant que les membres ne se remettent pas à jour ; l'effet est mesuré pour MLS (section 2.3). |
+| Il faut un membre en ligne pour committer | Un retrait attend qu'un membre revienne ; un entrant peut entrer seul par un commit externe, mais pas retirer quelqu'un. |
 
 ## 2. Ce que dit la recherche
 
@@ -120,7 +108,7 @@ commits, que chaque membre rejoue.
 LKH et le re-key par lots supposent un serveur de clés qui connaît toutes
 les clés. TreeKEM, dans MLS comme dans City-G, place des clés publiques aux
 nœuds : n'importe quel membre peut re-keyer sans connaître les secrets des
-autres. « Cité » reprend le re-key par lots de LKH dans ce cadre.
+autres. City-G reprend le re-key par lots de LKH dans ce cadre.
 
 ### 2.3 CGKA et concurrence
 
@@ -165,7 +153,7 @@ des sous-arbres disjoints.
 
 * **Sécurité interne de MLS** (Alwen, Jost et Mularczyk, CRYPTO 2022). Dans MLS, l'intégrité de l'arbre face à un membre malveillant repose sur le *parent hash* : chaque nœud est lié à la feuille du membre qui l'a posé, dans son propre sous-arbre.
   - TreeSync (USENIX Security 2023) et une preuve mécanisée de TreeKEM dans le modèle de Dolev-Yao (2025) couvrent ce mécanisme.
-  - Dans « Cité », un committer pose des nœuds hors de son sous-arbre : cet invariant ne tient plus. C'est la tache, liée à la signature du committer, qui le remplace (section 3.5), et cela demande sa propre analyse (section 8).
+  - Dans City-G, un committer pose des nœuds hors de son sous-arbre : cet invariant ne tient plus. C'est la tache, liée à la signature du committer, qui le remplace (section 3.5), et cela demande sa propre analyse (section 8).
 
 ### 2.6 La pratique aujourd'hui
 
@@ -174,15 +162,15 @@ vers mille membres : 1000 chez Signal, 1024 chez WhatsApp. Les chaînes
 WhatsApp, sans limite de taille, ne sont pas chiffrées de bout en bout. Nous
 n'avons trouvé aucune messagerie déployée qui offre un groupe chiffré de bout
 en bout d'un million de membres, avec sécurité après compromission et après
-retrait. « Cité » vise donc une case vide : c'est de la recherche appliquée,
+retrait. City-G vise donc une case vide : c'est de la recherche appliquée,
 pas un portage.
 
-## 3. L'architecture « Cité »
+## 3. L'architecture de City-G
 
 ### 3.1 Vue d'ensemble
 
-Le groupe est un seul arbre binaire de clés, comme en v0.3, dont la largeur
-double quand il le faut. Les l = 12 premiers niveaux forment des *quartiers* :
+Le groupe est un seul arbre binaire de clés, dont la largeur double quand il
+le faut. Les l = 12 premiers niveaux forment des *quartiers* :
 des sous-arbres de 4096 feuilles. Les niveaux au-dessus forment la *ville*.
 
 ```
@@ -200,12 +188,12 @@ Chaque nœud porte trois informations :
 - son haché ;
 - sa *tache* : l'occupation `[leaf, since]` du committer qui a produit son secret actuel.
 
-Chaque feuille est un membre, décrit comme en v0.3. Un groupe d'au plus 4096
-membres n'a qu'un quartier : son committer fait aussi office de committer de
-ville, et le groupe se comporte presque comme en v0.3. La taille des
+Chaque feuille est un membre : sa clé d'appareil, sa clé de feuille et son
+occupation `[leaf, since]`. Un groupe d'au plus 4096 membres n'a qu'un
+quartier : son committer fait aussi office de committer de ville, et le
+groupe se comporte presque comme un groupe TreeKEM classique. La taille des
 quartiers borne le coût d'un commit (au plus environ 12 Mo et 1,35 s de CPU,
-quand tout le quartier change), comme la capacité de 8192 le faisait en
-v0.3, mais sans borner la taille du groupe. La section 4.3 discute ce choix
+quand tout le quartier change), sans borner la taille du groupe. La section 4.3 discute ce choix
 de 4096.
 
 Une fenêtre se déroule en trois phases :
@@ -250,18 +238,18 @@ Quels nœuds changent, et comment :
 * **Chaînage.** Un nœud renouvelé tire son secret de celui d'un de ses enfants renouvelés, par dérivation à sens unique, comme les path secrets de TreeKEM. Ce secret est enveloppé vers l'autre enfant, avec la nouvelle clé de celui-ci s'il est aussi renouvelé.
 * **Deux niveaux sans chaînage.** Juste au-dessus des feuilles, les secrets sont ceux des membres. Juste au-dessus des racines de quartier, pour le committer de ville, ce sont ceux des committers de quartier. À ces deux niveaux, le committer ne connaît le nouveau secret d'aucun enfant : il tire un secret frais et l'enveloppe vers les deux enfants.
 * **Retraits et entrées.** Une feuille retirée devient vide et ne reçoit rien. Une feuille qui entre reçoit tout son chemin dans la fenêtre : il n'y a ni feuille non fusionnée ni chemin effacé.
-* **Clés.** Comme en v0.3 (section 6.5), la clé publique d'un nœud dérive de son secret.
+* **Clés.** Comme dans TreeKEM, la clé publique d'un nœud dérive de son secret.
 
-Le calendrier de clés reste celui de la v0.3 (section 8), avec la racine de
-la fenêtre à la place du commit secret :
+Le calendrier de clés suit celui de MLS, avec la racine de la fenêtre à la
+place du commit secret :
 
 ```text
 joiner_secret(n+1) = ExpandLabel(Extract(init_secret(n), racine(n+1)), "joiner", H(GroupContext(n+1)))
 epoch_secret(n+1)  = DeriveSecret(joiner_secret(n+1), "epoch")
 ```
 
-La première version de cette note supprimait la chaîne d'init. Le modèle
-formel (section 5) montre ce qu'elle apporte :
+On pourrait supprimer la chaîne d'init et dériver l'époque de la seule
+racine. Le modèle formel (section 5) montre ce qu'elle apporte :
 
 * **Confidentialité persistante.** Un adversaire qui vole plus tard la clé de feuille d'un membre retrouve, à partir du trafic enregistré, les racines passées que cette clé ouvrait, mais pas les secrets d'époque, qui dépendent aussi des init secrets effacés. Le scénario `forward_secrecy` est prouvé. Sans la chaîne, toutes les époques depuis la dernière mise à jour de la feuille tombent (`forward_secrecy_without_init`).
 * **Authenticité face au DS.** Sans init secret, le DS ne peut pas produire de confirmation tag valide. Un membre peut donc se contenter de vérifier le tag à chaque fenêtre, sans signature (`fabrication` prouvé). Sans la chaîne, le DS enveloppe une racine de son choix vers la feuille d'un membre et calcule le tag lui-même (`fabrication_without_init`) : il faudrait alors vérifier une signature à chaque fenêtre (`fabrication_without_init_signed`), ce qui double ou quadruple le trafic de fond (section 4.5).
@@ -269,7 +257,7 @@ formel (section 5) montre ce qu'elle apporte :
 Ce que la chaîne d'init impose :
 * **Des welcomes.** Un entrant ne connaît pas `init_secret(n)`. Une fois le commit de ville publié, le committer de son quartier, membre de l'époque n, calcule `joiner_secret(n+1)` et le scelle à la clé à usage unique de la demande d'entrée. C'est une enveloppe par entrant, faite en parallèle par quartier : 38 à 61 ms de CPU par quartier dans les plus grandes vagues simulées. Le secret d'entrée est prouvé (`join`).
 * **Un rattrapage en deux modes (section 3.7).** Un membre absent rejoue chaque fenêtre manquée, ou saute au présent grâce à un welcome de rattrapage.
-* **Un tag signé.** Le welcome n'est pas signé. L'en-tête signé du commit de ville doit donc contenir le confirmation tag, sinon le DS remplace à la fois le welcome et le tag et fait entrer le nouveau venu dans une époque qu'il connaît (`anchored_join_unsigned_tag`). La v0.3 le fait déjà, puisque le tag est dans le GroupInfo signé.
+* **Un tag signé.** Le welcome n'est pas signé. L'en-tête signé du commit de ville doit donc contenir le confirmation tag, sinon le DS remplace à la fois le welcome et le tag et fait entrer le nouveau venu dans une époque qu'il connaît (`anchored_join_unsigned_tag`). MLS fait de même : le tag est dans le GroupInfo signé.
 
 Enfin, un committer peut tirer ses secrets frais de `KDF(son aléa, init_secret(n), nœud)` : c'est une défense en profondeur contre un mauvais aléa, face à un adversaire extérieur.
 
@@ -290,7 +278,7 @@ C'est le re-key par lots de LKH, avec le chaînage de TreeKEM. Son coût reste
 * **Qui peut tenir un rôle.** Il suffit d'être membre de l'époque en cours et de la suivre. N'importe quel membre peut donc prendre n'importe quel rôle.
   - Le DS attribue les rôles de chaque fenêtre parmi des membres volontaires et bien connectés, en préférant les plus stables.
   - Il remplace un committer qui ne livre pas avant l'échéance.
-  - La règle C-03 de la v0.3 reste : un committer ne figure jamais parmi les membres qu'il retire, et un membre dont le retrait est demandé ne reçoit pas de rôle.
+  - Un committer ne figure jamais parmi les membres qu'il retire, et un membre dont le retrait est demandé ne reçoit pas de rôle.
 * **Retrait jamais reporté.** Si un quartier a un retrait en attente et qu'aucun committer ne livre, le committer de ville re-keye lui-même ce quartier. C'est le même travail, sur un état public. Un retrait n'est donc jamais reporté de plus d'une fenêtre.
 
 ### 3.5 Taches et effacement
@@ -317,14 +305,14 @@ Deux choses réduisent ce risque :
 ### 3.6 Les files du DS et le placement des entrées
 
 * **Une file par quartier.** Le DS peut se partager par quartier : un rédacteur par quartier et un pour la ville, au lieu d'un par groupe.
-* **Réception.** Le DS vérifie à la réception ce qu'il vérifie aujourd'hui : signatures, admissions, invitations, unicité des demandes en attente. Pour une vague de 100 000 entrées et 100 000 retraits, cela fait environ 63 s de CPU, réparties sur ses serveurs.
+* **Réception.** Le DS vérifie tout à la réception : signatures, admissions, invitations, unicité des demandes en attente. Pour une vague de 100 000 entrées et 100 000 retraits, cela fait environ 63 s de CPU, réparties sur ses serveurs.
 * **Placement.** Le service de placement choisit la feuille de chaque entrant, et ce choix pèse sur le coût (section 4.2).
   - D'abord, un entrant prend une feuille libérée par un retrait de la même fenêtre : les deux changements partagent alors un seul chemin.
   - Ensuite, le surplus d'entrants remplit des quartiers libres, à la suite.
   - Un retrait, une mise à jour ou une rotation va dans la file du quartier du membre.
-* **Vidage complet.** Toute la file part dans la prochaine fenêtre. Il n'y a plus de plafond par commit, de course entre entrants, de commit externe ni de 409 à reconstruire.
+* **Vidage complet.** Toute la file part dans la prochaine fenêtre. Il n'y a ni plafond par commit, ni course entre entrants, ni commit à reconstruire.
 * **Débit.** Il est borné par le coût total du re-key (section 2.1), réparti entre les committers de quartier qui travaillent en parallèle. Le commit de ville ne dépend que du nombre de quartiers : au plus 3 071 enveloppes pour 2 048 quartiers.
-* **Un DS malveillant** peut mal placer, ce qui coûte, ou retarder et refuser, ce qui nuit à la disponibilité, comme aujourd'hui. Il ne peut ni lire ni forger.
+* **Un DS malveillant** peut mal placer, ce qui coûte, ou retarder et refuser, ce qui nuit à la disponibilité. Il ne peut ni lire ni forger.
 
 ### 3.7 Livraison par membre et rattrapage
 
@@ -336,7 +324,7 @@ Deux choses réduisent ce risque :
   Le membre dérive le secret d'époque avec son init secret et vérifie le tag, ce qui suffit contre le DS. Il peut en plus :
   - vérifier les signatures de certaines fenêtres, pour l'imputabilité ;
   - contrôler les clés de son chemin contre le haché d'arbre, pour 32 octets par niveau.
-* **Rattrapage par rejeu.** Un membre absent rejoue chaque fenêtre manquée : son paquet, environ 7 Ko avec le tag seul. Il lit ainsi tous les messages de son absence, comme en v0.3.
+* **Rattrapage par rejeu.** Un membre absent rejoue chaque fenêtre manquée : son paquet, environ 7 Ko avec le tag seul. Il lit ainsi tous les messages de son absence.
 * **Rattrapage par saut.** Le membre publie une clé à usage unique signée par son appareil. Dans la fenêtre suivante, le committer de son quartier lui scelle le joiner secret, comme à un entrant, et la dernière enveloppe de chaque nœud de son chemin lui redonne ses secrets de chemin.
   - Coût : au plus H enveloppes (20 pour un million de membres), un welcome et la chaîne des hachés de transcript, à 32 octets par époque manquée, quelle que soit la durée d'absence.
   - Les messages des époques sautées restent illisibles : c'est la confidentialité persistante.
@@ -351,7 +339,7 @@ Deux choses réduisent ce risque :
 * **Opérations globales.** Les admins, les changements d'admin, les invitations et leurs révocations passent par le commit de ville ; ces opérations sont rares.
 * **Points de contrôle.** Un admin signe régulièrement un couple (époque, haché de transcript), et les invitations portent le plus récent.
   - L'entrant vérifie la chaîne des en-têtes signés, du point de contrôle jusqu'à son époque d'entrée. Il contrôle les signatures de committers membres, avec leurs preuves de feuille.
-  - Cela lève la limite « Entering a group » de la v0.3 (section 2.3 de la spécification ; les *anchored joins* avaient été laissés de côté en v0.3). Un DS ne peut plus fabriquer une époque pour un entrant sans la signature d'un membre : `anchored_join` est prouvé, et l'attaque revient sans l'ancrage (`join_without_anchor`).
+  - Un entrant qui ne vérifierait que son époque d'entrée pourrait être conduit par le DS dans une époque fabriquée, où le DS lirait ce qu'il envoie. Avec l'ancrage, le DS ne peut plus fabriquer une époque pour un entrant sans la signature d'un membre : `anchored_join` est prouvé, et l'attaque revient sans l'ancrage (`join_without_anchor`).
   - Coût : pour un point de contrôle horaire avec Δ = 60 s, environ 60 en-têtes, 270 Ko et 13 ms de CPU.
 
 ### 3.9 Qui vérifie quoi
@@ -380,9 +368,10 @@ Un DS qui refuse de servir une entrée échantillonnée est vu comme tel, mais
 ce refus n'est pas prouvable. C'est le problème de disponibilité des
 données, qui ne se règle pas sans redondance.
 
-C'est le principal recul par rapport à la v0.3, où chaque membre complet
-vérifie chaque entrée : la vérification des autres quartiers devient
-répartie et probabiliste, avec une probabilité d'échec chiffrée.
+C'est le principal prix de l'échelle. Dans un groupe TreeKEM classique,
+chaque membre vérifie chaque entrée ; ici, la vérification des autres
+quartiers devient répartie et probabiliste, avec une probabilité d'échec
+chiffrée.
 
 ### 3.10 Bande passante : ce qui marche et ce qui ne marche pas
 
@@ -398,8 +387,8 @@ répartie et probabiliste, avec une probabilité d'échec chiffrée.
 
 ### 3.11 Pistes écartées
 
-* **Supprimer la chaîne d'init** (première version de cette note) : moins de confidentialité persistante, et une signature à vérifier à chaque fenêtre (section 3.3).
-* **Des sous-groupes v0.3 indépendants (groupe de groupes)** : un message doit être chiffré pour chaque sous-groupe, soit O(K) par message, ou relayé par des agents qui le voient en clair (Iolus).
+* **Supprimer la chaîne d'init** : moins de confidentialité persistante, et une signature à vérifier à chaque fenêtre (section 3.3).
+* **Des sous-groupes indépendants (groupe de groupes)** : un message doit être chiffré pour chaque sous-groupe, soit O(K) par message, ou relayé par des agents qui le voient en clair (Iolus).
 * **Fusionner des mises à jour concurrentes** (CoCoA, DCGKA, BeeKEM) : c'est plus cher d'après la section 2.1, et inutile quand un DS peut ordonner.
 * **DMLS** : il rend les forks sûrs à trancher, mais l'historique reste séquentiel.
 * **Chiffrer à plat vers chaque membre du quartier** (à la Chained CmPKE) : moins cher quand presque tout le quartier change, mais 4096 enveloppes par quartier touché en charge normale. C'est une optimisation possible pour les quartiers entièrement neufs, à évaluer à l'étape R3.
@@ -431,25 +420,25 @@ d'un Xeon à 2,1 GHz, en build release, par les mêmes chemins de code que
 
 **Un million de membres** (2^20, 256 quartiers) :
 
-| Changements D | Quartiers touchés | Commit du quartier le plus chargé | Commit de ville | Tous les commits | Enveloppes / borne D·ln(N/D) | Par membre : enveloppes (moy. / max), octets | Retrait du committer le plus chargé | Commits successifs en v0.3 |
-| ---: | ---: | --- | --- | ---: | ---: | --- | --- | ---: |
-| 100 | 81 | 34 env., 83 Ko | 247 env., 510 Ko | 3,3 Mo | ×1,58 | 4,2 / 10, 5 Ko | 51 env., 119 Ko | 1 |
-| 1 000 | 250 | 88 env., 208 Ko | 383 env., 761 Ko | 25 Mo | ×1,55 | 6,2 / 12, 7 Ko | 105 env., 244 Ko | 8 |
-| 10 000 | 256 | 402 env., 922 Ko | 383 env., 761 Ko | 170 Mo | ×1,59 | 7,9 / 14, 9 Ko | 417 env., 953 Ko | 79 |
-| 100 000 | 256 | 1 816 env., 4,1 Mo | 383 env., 761 Ko | 937 Mo | ×1,77 | 9,5 / 17, 11 Ko | 1 828 env., 4,1 Mo | 782 |
-| 200 000 | 256 | 2 683 env., 6,0 Mo | 383 env., 761 Ko | 1,4 Go | ×1,96 | 10,0 / 18, 12 Ko | 2 693 env., 6,0 Mo | 1 563 |
-| 500 000 | 256 | 4 070 env., 9,0 Mo | 383 env., 761 Ko | 2,3 Go | ×2,74 | 10,6 / 19, 13 Ko | 4 078 env., 9,0 Mo | 3 907 |
+| Changements D | Quartiers touchés | Commit du quartier le plus chargé | Commit de ville | Tous les commits | Enveloppes / borne D·ln(N/D) | Par membre : enveloppes (moy. / max), octets | Retrait du committer le plus chargé |
+| ---: | ---: | --- | --- | ---: | ---: | --- | --- |
+| 100 | 81 | 34 env., 83 Ko | 247 env., 510 Ko | 3,3 Mo | ×1,58 | 4,2 / 10, 5 Ko | 51 env., 119 Ko |
+| 1 000 | 250 | 88 env., 208 Ko | 383 env., 761 Ko | 25 Mo | ×1,55 | 6,2 / 12, 7 Ko | 105 env., 244 Ko |
+| 10 000 | 256 | 402 env., 922 Ko | 383 env., 761 Ko | 170 Mo | ×1,59 | 7,9 / 14, 9 Ko | 417 env., 953 Ko |
+| 100 000 | 256 | 1 816 env., 4,1 Mo | 383 env., 761 Ko | 937 Mo | ×1,77 | 9,5 / 17, 11 Ko | 1 828 env., 4,1 Mo |
+| 200 000 | 256 | 2 683 env., 6,0 Mo | 383 env., 761 Ko | 1,4 Go | ×1,96 | 10,0 / 18, 12 Ko | 2 693 env., 6,0 Mo |
+| 500 000 | 256 | 4 070 env., 9,0 Mo | 383 env., 761 Ko | 2,3 Go | ×2,74 | 10,6 / 19, 13 Ko | 4 078 env., 9,0 Mo |
 
 **Huit millions de membres** (2^23, 2 048 quartiers) :
 
-| Changements D | Quartiers touchés | Commit du quartier le plus chargé | Commit de ville | Tous les commits | Enveloppes / borne | Par membre | Retrait du committer le plus chargé | Commits successifs en v0.3 |
-| ---: | ---: | --- | --- | ---: | ---: | --- | --- | ---: |
-| 10 000 | 2 040 | 124 env., 289 Ko | 3 071 env., 6,1 Mo | 242 Mo | ×1,55 | 7,9 / 15, 9 Ko | 142 env., 328 Ko | 79 |
-| 100 000 | 2 048 | 501 env., 1,1 Mo | 3 071 env., 6,1 Mo | 1,6 Go | ×1,59 | 9,5 / 17, 11 Ko | 518 env., 1,2 Mo | 782 |
-| 1 000 000 | 2 048 | 2 069 env., 4,6 Mo | 3 071 env., 6,1 Mo | 8,7 Go | ×1,81 | 11,1 / 20, 13 Ko | 2 082 env., 4,7 Mo | 7 813 |
+| Changements D | Quartiers touchés | Commit du quartier le plus chargé | Commit de ville | Tous les commits | Enveloppes / borne | Par membre | Retrait du committer le plus chargé |
+| ---: | ---: | --- | --- | ---: | ---: | --- | --- |
+| 10 000 | 2 040 | 124 env., 289 Ko | 3 071 env., 6,1 Mo | 242 Mo | ×1,55 | 7,9 / 15, 9 Ko | 142 env., 328 Ko |
+| 100 000 | 2 048 | 501 env., 1,1 Mo | 3 071 env., 6,1 Mo | 1,6 Go | ×1,59 | 9,5 / 17, 11 Ko | 518 env., 1,2 Mo |
+| 1 000 000 | 2 048 | 2 069 env., 4,6 Mo | 3 071 env., 6,1 Mo | 8,7 Go | ×1,81 | 11,1 / 20, 13 Ko | 2 082 env., 4,7 Mo |
 
 Lecture :
-* **Membres.** À N fixé, ce qu'un membre télécharge croît comme log D : 4 enveloppes pour 100 changements, 10 pour 200 000. Une vague de 200 000 changements entre en une époque au lieu de 1 563. Si le membre vérifiait les signatures et le haché d'arbre à chaque fenêtre (première version), ce serait 10 à 21 Ko au lieu de 5 à 13 Ko.
+* **Membres.** À N fixé, ce qu'un membre télécharge croît comme log D : 4 enveloppes pour 100 changements, 10 pour 200 000. Une vague de 200 000 changements entre en une seule époque. Si le membre vérifiait les signatures et le haché d'arbre à chaque fenêtre (sans chaîne d'init), ce serait 10 à 21 Ko au lieu de 5 à 13 Ko.
 * **Coût total.** Il reste entre 1,5 et 2 fois la borne inférieure jusqu'à ce que 20 % du groupe change en une fenêtre. Quand la moitié du groupe change, le facteur monte à 2,7, mais il faut alors de toute façon re-keyer presque tout l'arbre.
 * **Taille des commits.** Un commit de quartier reste sous 9 Mo dans ces scénarios, et monte à environ 12 Mo au plus si tout un quartier change. Celui de ville ne dépend que du nombre de quartiers : 0,76 Mo pour 256 quartiers, 6,1 Mo pour 2 048.
 * **Welcomes.** Ils ajoutent une enveloppe par entrant, soit 1,2 Ko, répartie entre les committers de quartier.
@@ -525,7 +514,7 @@ seul (avec chaîne d'init).
 
 Pour situer ces rythmes :
 - 0,1 changement par seconde fait 8 640 par jour, soit 0,8 % d'un million de membres.
-- 12 changements par seconde, c'est ce que coûte la mise à jour quotidienne de toutes les feuilles d'un million de membres (`FS_WINDOW` de la v0.3).
+- 12 changements par seconde, c'est ce que coûte la mise à jour quotidienne de toutes les feuilles d'un million de membres.
 - 1,7 changement par seconde correspond à une mise à jour hebdomadaire.
 
 Ce qu'on en tire :
@@ -552,10 +541,10 @@ e^(−k).
 
 ## 5. Modèle formel
 
-[`formal/`](formal/README.md) contient un modèle ProVerif de douze scénarios,
-chacun sur deux fenêtres et des arbres de deux à quatre feuilles.
-`docs/research/formal/run.sh` les exécute en quelques secondes et compare
-chaque verdict à celui attendu. Tous sont conformes.
+[`../formal/`](../formal/README.md) contient un modèle ProVerif de seize
+scénarios, chacun sur deux fenêtres et des arbres de deux à quatre feuilles.
+`docs/formal/run.sh` les exécute en quelques secondes et compare chaque
+verdict à celui attendu. Tous sont conformes.
 
 | Scénario | Question | Résultat |
 | --- | --- | --- |
@@ -570,32 +559,36 @@ chaque verdict à celui attendu. Tous sont conformes.
 | `join` | L'entrant d'un welcome de quartier, dont l'état fuit ensuite, expose-t-il l'époque d'avant ? | Non (prouvé) |
 | `anchored_join` | Le DS peut-il faire entrer quelqu'un dans une époque fabriquée, malgré l'ancrage ? | Non (prouvé) |
 | `anchored_join_unsigned_tag` | Et si le tag n'est pas signé ? | Oui (attaque) |
-| `join_without_anchor` | Et sans ancrage, comme en v0.3 ? | Oui (attaque) |
+| `join_without_anchor` | Et sans ancrage ? | Oui (attaque) |
+| `entrant_removal` | Quand un entrant scelle la fenêtre qui retire un membre, le retiré, qui connaît l'init externe, lit-il la nouvelle époque ? | Non (prouvé) |
+| `external_tag_only` | Un DS peut-il sceller lui-même une fenêtre d'entrant, si les membres ne vérifient que le tag ? | Oui (attaque) |
+| `external_checked` | Et si les membres vérifient l'admission et la signature de l'entrant ? | Non (prouvé) |
+| `open_group` | Dans un groupe ouvert, le DS peut-il entrer et lire ? Peut-il se faire passer pour un membre ? | Il peut entrer et lire (attendu) ; il ne peut pas usurper un membre (prouvé) |
 
 Le modèle est symbolique : la primitive d'enveloppe y est idéale, ce qui
 cache les attaques algébriques de la section 2.4. Les quartiers y ont deux
 feuilles, et l'attribution des rôles est donnée. Le README du modèle détaille
 ces limites.
 
-## 6. Garanties : ce qui change par rapport à la v0.3
+## 6. Garanties
 
-| Propriété | v0.3 | « Cité » |
+| Propriété | Groupe TreeKEM classique (MLS) | City-G |
 | --- | --- | --- |
-| Taille du groupe | Au plus 8192 | Des millions (simulé jusqu'à 2^23) |
-| Changements par époque | Au plus 64 entrées et 256 retraits | Toute la file de chaque quartier |
-| Délai de retrait | Le prochain commit, mais derrière toute la file : 26 min pour une vague de 200 000 à un commit par seconde | La fin de la fenêtre, soit Δ plus quelques secondes, quelle que soit la vague |
-| Sécurité après compromission | Mise à jour du membre, puis commit par un membre honnête | Pareil ; la mise à jour re-keye aussi les nœuds que le membre tache (prouvé sur un exemple) |
-| Confidentialité persistante | Chaîne d'init ; annoncée hors d'une fenêtre `FS_WINDOW` | Chaîne d'init, prouvée sur un exemple même avec une clé de feuille ancienne ; les committers effacent |
+| Taille du groupe | Des milliers en pratique : chaque membre tient l'arbre et traite chaque commit | Des millions (simulé jusqu'à 2^23) |
+| Changements par époque | Ceux du commit d'un seul membre | Toute la file de chaque quartier |
+| Délai de retrait | Le prochain commit, qui attend un membre en ligne | La fin de la fenêtre, soit Δ plus quelques secondes, quelle que soit la vague ; sans personne en ligne, le premier participant, et le DS l'applique à la livraison en attendant |
+| Sécurité après compromission | Mise à jour du membre | Pareil ; la mise à jour re-keye aussi les nœuds que le membre tache (prouvé sur un exemple) |
+| Confidentialité persistante | Chaîne d'init | Chaîne d'init, prouvée sur un exemple même avec une clé de feuille ancienne ; les committers effacent |
 | Secrets qu'un appareil connaît | Son chemin | Son chemin ; un committer connaît en plus, jusqu'à effacement, les nœuds qu'il re-keye (tachés par lui) |
-| Authenticité d'une époque face au DS | Signature du commit et tag | Tag, grâce à la chaîne d'init ; signatures pour l'imputabilité, les entrants et le rattrapage |
-| Vérification des entrées | Chaque membre complet vérifie tout ; les membres légers font confiance au DS pour le haché d'arbre | Le DS vérifie tout ; chaque committer vérifie sa file ou les commits de quartier ; les membres font des audits par échantillonnage ; une fraude est signée, donc prouvable |
-| Entrée dans le groupe | L'entrant fait confiance au DS pour son époque d'entrée (section 2.3) | Ancrée sur un point de contrôle signé par un admin (prouvé sur un exemple) |
-| État d'un membre | Arbre complet (35 Mo à 8192 membres) ou membre léger | Son chemin (O(log N)), son init secret et les en-têtes |
-| Rattrapage après une absence | Rejouer chaque commit | Rejouer chaque fenêtre (environ 7 Ko chacune), ou sauter au présent pour au plus H enveloppes et un welcome |
+| Authenticité d'une époque face au DS | Signature du commit et tag | Tag, grâce à la chaîne d'init ; signatures pour les entrants, le rattrapage et l'imputabilité |
+| Vérification des entrées | Chaque membre vérifie tout | Le DS vérifie tout ; chaque committer vérifie sa file, le committer de ville les commits de quartier ; les membres font des audits par échantillonnage ; une fraude est signée, donc prouvable |
+| Entrée dans le groupe | L'entrant vérifie le GroupInfo de son époque d'entrée | Ancrée sur un point de contrôle signé par un admin (prouvé sur un exemple) |
+| État d'un membre | L'arbre complet | Son chemin (O(log N)), les secrets et l'en-tête de son époque |
+| Rattrapage après une absence | Rejouer chaque commit | Rejouer chaque fenêtre (environ 7 Ko chacune), sauter au présent pour au plus H enveloppes et un welcome, ou rentrer dans sa feuille |
 | Commits concurrents | Le premier gagne, les autres sont refaits | Aucun conflit : sous-arbres disjoints, un seul committer de ville |
 | Welcomes | Un par entrée, tous scellés par l'auteur du commit | Un par entrée, scellés par quartier et en parallèle |
-| Registre | Listes bornées et plancher | Cartes de Merkle creuses, sans plafond |
-| Primitives | X-Wing, ML-DSA-65 | Les mêmes ; FN-DSA quand FIPS 206 paraîtra ; aucun KEM multi-destinataires |
+| Personne en ligne | Rien ne change avant le retour d'un membre ; un entrant peut entrer seul | Un entrant scelle toute la fenêtre avec une init externe, et les membres vérifient son admission et sa signature |
+| Primitives | Les suites de RFC 9420, classiques | X-Wing, ML-DSA-65 ; FN-DSA quand FIPS 206 paraîtra ; aucun KEM multi-destinataires |
 
 ## 7. Risques et questions ouvertes
 
@@ -609,31 +602,29 @@ ces limites.
 3. **Vérification répartie.** Les audits ne valent que si assez de membres actifs y participent. Un DS peut refuser de servir une entrée : c'est visible, mais pas prouvable.
 4. **Trafic.** De 1 à 10 Mo par jour pour un membre qui suit tout, selon la fenêtre, et des To par jour côté DS pour un million de membres actifs. Les messages coûtent autant ou plus : FN-DSA dès que possible.
 5. **Membres absents longtemps.** Une clé de feuille ancienne expose les époques futures tant qu'elle n'est pas renouvelée, mais plus les époques passées. Quarantined-TreeKEM et les UKEM sont des pistes.
-6. **Métadonnées.** Le DS voit la structure, les placements et le rythme des changements, comme aujourd'hui.
+6. **Métadonnées.** Le DS voit la structure, les placements et le rythme des changements.
 7. **Complexité.**
    - Il y a trois phases par fenêtre, des taches, des cartes creuses, des points de contrôle et des audits : la spécification et l'implémentation grossissent.
-   - Un groupe d'au plus 4096 membres reste un seul quartier, au comportement proche de la v0.3.
+   - Un groupe d'au plus 4096 membres reste un seul quartier, au comportement proche d'un groupe TreeKEM classique.
 8. **Placement adverse.** Un DS qui concentre les entrées dans quelques quartiers grossit leurs commits (au plus environ 12 Mo chacun), sans rien apprendre.
 
 ## 8. Feuille de route
 
-La v0.3 reste le profil en vigueur. « Cité » serait un nouveau profil, qui
-ne serait adopté qu'après les étapes R1 et R2 ; on n'y migrerait pas les
-groupes v0.3.
-
 | Étape | Livrable | Critère de sortie |
 | --- | --- | --- |
-| R1 | Une note `docs/design-v0.4.md` et un brouillon de profil `city-g/v0.4-draft`, qui couvrent : fenêtres et phases, commits de quartier et de ville, taches et leur intégrité, welcomes de quartier, rattrapage par rejeu et par saut, paquets par membre, cartes creuses, points de contrôle, audits et règles du DS | Relecture ; vecteurs d'un exemple à deux quartiers |
-| R2 | Étendre [`formal/`](formal/README.md) à la spécification : quartiers de quatre feuilles et plus, chaînage dans un quartier, cartes creuses, chaîne d'en-têtes d'un point de contrôle ; puis une analyse calculatoire de la sécurité interne | Verdicts attendus, sanity checks compris |
-| R3 | Un prototype dans `cityg-core` : re-key multi-chemins d'un quartier, taches, welcomes de quartier, vérification d'un paquet | Les coûts de la section 4.4 retrouvés à ±20 % |
+| R1 | Une note de conception et une spécification, qui couvrent : fenêtres et phases, commits de quartier et sceau, taches et leur intégrité, welcomes de quartier, rattrapage par rejeu et par saut, paquets par membre, cartes creuses, points de contrôle, audits et règles du DS | Relecture ; vecteurs d'un exemple à deux quartiers |
+| R2 | Étendre [`../formal/`](../formal/README.md) à la spécification : quartiers de quatre feuilles et plus, chaînage dans un quartier, cartes creuses, chaîne d'en-têtes d'un point de contrôle ; puis une analyse calculatoire de la sécurité interne | Verdicts attendus, sanity checks compris |
+| R3 | Le cœur du protocole dans `cityg-core` : re-key multi-chemins d'un quartier, taches, welcomes de quartier, vérification d'un paquet | Les coûts de la section 4.4 retrouvés à ±20 % |
 | R4 | Côté DS : files par quartier, placement apparié, fenêtres, attribution et remplacement des committers, audits ; puis un test de charge | 2^20 membres simulés et 200 000 changements scellés en une fenêtre, en moins de Δ + 10 s |
 | R5 | Bande passante : FN-DSA quand FIPS 206 paraît ; suivi des UKEM ; KEM multi-destinataires limité aux clés de nœud, avec la vérification des clés de chemin | Décision documentée |
+| R6 | Le plan de messages, le DS réel (API, persistance) et les clients | Un groupe utilisable de bout en bout |
 
 **État au 2026-09-26.**
-* **R1 : fait, sans vecteurs.** [`design-v0.4.md`](../design-v0.4.md) (décisions E-1 à E-13) et [`specs-v0.4-draft.md`](../specs-v0.4-draft.md). Le brouillon ajoute ce que la note ne traitait pas : un groupe sans aucun membre en ligne (un entrant scelle lui-même la fenêtre, un retrait attend le premier participant et le DS l'applique à la livraison en attendant), la ré-entrée, et l'expulsion sous une politique signée par un admin.
-* **R2 : en partie.** Trois scénarios « personne en ligne » ont rejoint [`formal/`](formal/README.md) ; le modèle de la spécification elle-même reste à faire.
-* **R3 : fait**, dans une crate séparée, [`cityg-cite`](../../crates/cityg-cite), plutôt que dans `cityg-core`, pour ne pas toucher à la v0.3. Son test d'échelle retrouve exactement le décompte d'enveloppes et de clés du modèle de coût, et ses tailles à quelques pour cent.
+* **R1 : fait, sans vecteurs.** [`design.md`](../design.md) (décisions E-1 à E-14) et [`specs.md`](../specs.md), profil `city-g/v0.4`. La spécification ajoute ce que cette note ne traitait pas : un groupe sans aucun membre en ligne (un entrant scelle lui-même la fenêtre, un retrait attend le premier participant et le DS l'applique à la livraison en attendant), la ré-entrée, l'expulsion sous une politique signée par un admin, et les groupes ouverts.
+* **R2 : en partie.** Seize scénarios dans [`../formal/`](../formal/README.md) ; le modèle de la spécification elle-même reste à faire.
+* **R3 : fait**, dans [`cityg-core`](../../crates/cityg-core). Son test d'échelle retrouve exactement le décompte d'enveloppes et de clés du modèle de coût, et ses tailles à quelques pour cent.
 * **R4 : en partie.** Un DS en mémoire (files, placement apparié, fenêtres, rôles et remplacement, paquets, audits), sans files par quartier ni test de charge à 2^20 membres.
+* **R5, R6 : à faire.**
 
 ## 9. Sources
 

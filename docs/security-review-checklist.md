@@ -1,21 +1,16 @@
 # Security review checklist
 
-For a release candidate or a change that touches the protocol, the delivery
-service or client state. Each item names the check that backs it.
+For a release candidate or a change that touches the protocol. Each item
+names the check that backs it.
 
 ## Automated
 
-- [ ] `./scripts/security_review.sh` passes: protocol core, delivery service,
-      client driver and GUI tests, then the server-blindness guardrail.
-- [ ] `./scripts/run_protocol_mutation_suite.sh` passes: tampered commits,
-      update paths, signatures and encodings, forged senders, forks, joins
-      without authority, genesis rules.
-- [ ] `./scripts/verify_client_state_hardening.sh` passes: encrypted state,
-      refusal of damaged state, durable spent generations, resyncs.
-- [ ] `cargo test -p cityg-core --test vectors --test conformance_manifest`
-      and `python3 kat/v0.3/verify_vectors.py` pass: the implementation
-      matches the published vectors, an independent implementation agrees,
-      and every requirement maps to existing tests.
+- [ ] `./scripts/security_review.sh` passes: the protocol core and the
+      signature crate, the delivery-service guardrail, and the symbolic
+      model when ProVerif is installed.
+- [ ] `cargo test -p cityg-core --release --test scale -- --ignored` passes:
+      a window of thousands of changes on a full group matches the cost
+      model's count of wraps and keys.
 - [ ] `docs/formal/run.sh` (ProVerif 2.05) reports every scenario with its
       expected verdicts: the security properties are proved and the sanity
       scenarios still find their attacks.
@@ -23,45 +18,56 @@ service or client state. Each item names the check that backs it.
 
 ## Protocol changes
 
-- [ ] The change is specified in [`specs.md`](specs.md) first. A change to an
-      encoding, a label, a signature context, an algorithm or a parameter is
-      a new profile version.
+- [ ] The change is specified in [`specs.md`](specs.md) first, and a design
+      decision is recorded in [`design.md`](design.md) if it makes one. A
+      change to an encoding, a label, a signature context, an algorithm or
+      a parameter is a new profile version.
 - [ ] New labels and contexts are registered (specs.md, section 17) and
-      distinct from existing ones.
-- [ ] The vectors are regenerated (`CITYG_WRITE_VECTORS=1 cargo test -p
-      cityg-core --test vectors`), the diff is reviewed, and
-      `verify_vectors.py` is updated so that it still recomputes them.
-- [ ] The conformance manifest maps the new requirement to its section,
-      vectors and tests, and to the audit item or design decision it comes
-      from.
+      distinct from existing ones; the context of a signed array is its
+      label.
 - [ ] The formal model in [`formal/`](formal/) still states the security
       goals of the changed part, or is updated.
 
 ## Invariants to re-check by reading the diff
 
-- [ ] Server blindness: the server-side crates use no secret-holding type
-      (`scripts/verify_no_secrets.sh` is a grep, not a proof).
-- [ ] A member never authors the commit that removes it.
-- [ ] Every entry into the tree carries an admission authorized against the
-      admins at that point, not retired and above the retired floor.
-- [ ] A light member refuses a commit whose authorization needs a member
-      record it has no proof of; the only things it takes on trust are the
-      new tree hash and the uniqueness of device keys (specs.md, section
-      14.6).
+- [ ] The delivery service holds no group secret: the public modules of
+      `cityg-core` (`ds`, `window`, `audit`, `packet`, `registry`, `smm`,
+      `tree`) name no secret-holding type (`scripts/verify_no_secrets.sh` is
+      a grep, not a proof).
+- [ ] A committer or sealer is never a member its window removes, evicts,
+      updates or re-enters; an entrant commits every district of its
+      window.
+- [ ] Every node a window re-keys is tainted by the signer of the commit that
+      re-keyed it, and removing or updating a member re-keys every node it
+      taints.
+- [ ] A parent node is blank exactly when its subtree holds no member.
+- [ ] In a closed group, every join carries an admission signed by an admin
+      of the previous epoch, directly or through an invite, and every
+      admission admits once; a closed group opens only by an admin's policy,
+      which members check themselves.
+- [ ] Members check the entrant's evidence and signature for every window
+      sealed by an entrant: the confirmation tag alone proves nothing then.
+- [ ] Joiners and returning members check the chain of seals from their
+      anchor, and every recovered path secret against the key of its node.
+- [ ] A role checks the public state it is shown against its trusted header
+      or anchor before wrapping anything.
 - [ ] Every signature uses the context of its usage, and every signed object
       is verified before use.
 - [ ] Every decoded object is re-encoded and compared byte for byte
       (deterministic CBOR), and relayed objects are never re-encoded.
-- [ ] No secret of epoch `n` is used before the confirmation tag of its
-      commit verified; secrets and message keys are erased as specified.
-- [ ] A client persists its state after encrypting a message and before
-      sending it.
+- [ ] No secret of epoch `n` is used before the confirmation tag of its seal
+      verified; committers erase the secrets they drew once their commit is
+      sent.
 - [ ] Secret material is zeroized on drop and never logged; comparisons of
-      tags and secrets are constant time.
+      MAC tags and secrets are constant time.
+- [ ] The delivery service accepts a welcome only from the welcomer the
+      window assigned.
 
 ## Claims
 
 - [ ] README, SECURITY.md and user-facing text claim no property beyond the
       table of specs.md, section 2.2, for the stated adversary.
-- [ ] Known limits (metadata, availability, self-asserted aliases, bearer
-      invite links, insider access to group content) are stated.
+- [ ] Known limits are stated: metadata, availability, insider access to
+      the epoch secrets, no confidentiality of an open group against whoever
+      joins it, removals enforced by the delivery service until the next
+      window, and the items of specs.md, section 19.

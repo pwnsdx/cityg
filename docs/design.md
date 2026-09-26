@@ -1,35 +1,35 @@
-# Profile v0.4 design note (draft)
+# City-G design note
 
 | | |
 | --- | --- |
-| Profile | `city-g/v0.4-draft`, drafted in [specs-v0.4-draft.md](specs-v0.4-draft.md) |
-| Status | Draft. Profile [v0.3](specs.md) stays the normative profile; v0.4 does not interoperate with it and replaces nothing yet. |
-| Goal | Groups of millions of members, waves of hundreds of thousands of joins and departures, and a group that keeps working when none of its members is online |
-| Prototype | [`crates/cityg-cite`](../crates/cityg-cite): protocol core and an in-memory delivery service, no I/O |
-| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French): lower bounds, related work, cost model, measured costs; [`research/formal/`](research/formal/README.md): symbolic model of the security choices |
+| Profile | `city-g/v0.4`, specified in [specs.md](specs.md) |
+| Goal | Groups of millions of members, bursts of hundreds of thousands of joins and departures, and a group that keeps working when none of its members is online |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core): protocol core and an in-memory delivery service, no I/O |
+| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French): lower bounds, related work, cost model, measured costs; [`formal/`](formal/README.md): symbolic model of the security choices |
 
 The research note says why this design and what it costs. This note
-records the decisions of the draft profile (E-1 to E-14), what each one
-costs, and what was left out.
+records its decisions (E-1 to E-14), what each one costs, and what was left
+out.
 
 ## Starting point
 
-Profile v0.3 serves thousands of members. Four limits stop it well before
-a million:
+A TreeKEM group in the style of MLS (RFC 9420) serves thousands of members.
+Four things stop it well before a million:
 
-* **A capacity of 8192 leaves.** It bounds the size of an update, not the
-  size a group would need.
-* **One chain of commits.** Each commit carries at most 64 joins and 256
-  removals, one commit at a time. A wave of 100,000 joins and 100,000
-  departures takes 1,563 commits, and the last removed member keeps access
-  meanwhile.
-* **Every member replays every commit,** and a full member holds the whole
-  tree: about 4.5 GB for a million members.
+* **One chain of commits.** Every epoch is the commit of one member;
+  concurrent commits are refused and rebuilt. The whole re-key of a burst
+  lands on one device, and every other change waits for the next commit.
+* **Every member checks everything.** Each member processes every commit
+  and checks every proposal: two signatures per join, 42 s of CPU for
+  100,000 joins, on every device.
+* **Every member holds the tree.** Members and committers hold the whole
+  public tree: with X-Wing and ML-DSA-65 keys, about 4.5 GB for a million
+  members.
 * **Committing needs an online member.** A joiner can enter by itself with an
   external commit, but a removal waits for a member.
 
 The lower bounds of the research note (section 2.1) show that the total
-work of a wave cannot shrink below about D·ln(N/D) ciphertexts for D
+work of a burst cannot shrink below about D·ln(N/D) ciphertexts for D
 changes among N members. What a design can choose is to pay it once per
 window, to spread it over many devices, and to keep what each member
 downloads in O(log N).
@@ -87,7 +87,7 @@ L = 12.
 seal a window: it needs the public state of what it re-keys and the
 secrets every member holds. The delivery service assigns the roles of a
 window among online volunteers. A committer is never among the members its
-window removes (rule C-03 of v0.3).
+window removes or updates.
 
 **Why.** A district with no member online is committed by a member of
 another district, and a failed committer is replaced at once.
@@ -118,10 +118,11 @@ commit of its district.
 <a id="e-5"></a>
 ### E-5 — Key schedule with the init chain
 
-**Decision.** The key schedule is v0.3's, with the root secret of the
-window in place of the commit secret: `joiner_secret` derives from the
-previous `init_secret` and the window's commit secret. The seal carries one
-signature over its content, the confirmation tag and the next external key.
+**Decision.** The key schedule follows MLS, with the window's root secret
+in place of the committer's path secret: `joiner_secret` derives from the
+previous `init_secret`, the window's commit secret and the group context.
+The seal carries one signature over its content, the confirmation tag and
+the next external key.
 
 A member that follows the group checks the confirmation tag of every
 window. It does not have to check the sealer's signature. Signatures are
@@ -151,8 +152,8 @@ seals it to the one-time init key of each joiner of its district. The
 joiner decrypts its path with its leaf key and derives the epoch from the
 welcome.
 
-**Why.** The work of a wave of joiners is spread over the districts: 38 to
-61 ms of CPU per district in the largest simulated waves. The init key is
+**Why.** The work of a burst of joiners is spread over the districts: 38 to
+61 ms of CPU per district in the largest simulated bursts. The init key is
 used once, so a later leak of the leaf key does not expose the epoch of the
 join (`join.pv`).
 
@@ -168,7 +169,7 @@ signs a group object. When no member is online at the end of a window:
   re-entry request from a returning member, the first such device seals the
   whole window. It commits every district that changes, seals with an
   *external init* (it encapsulates to the external key of the current
-  epoch, as a v0.3 external commit does), and seals every welcome. Members
+  epoch, as an MLS external commit does), and seals every welcome. Members
   catch up later and derive the epoch with their external secret.
 * **Deferred removal.** Otherwise the window stays open. A recorded removal
   is enforced at once by the delivery service: it refuses the removed
@@ -226,8 +227,9 @@ The seal applies the map changes that follow from the window's changes,
 and the registry hash binds the map roots. An admission is good for one
 join: it stays in its map for good.
 
-**Why.** No cap and no floor, whatever the churn: v0.3 kept at most 4096
-retired admissions, and a wave of removals pushed its floor up.
+**Why.** No cap and no floor, whatever the churn: a bounded list of used
+admissions would have to forget old ones, and a forgotten admission could
+admit a second device.
 
 **Cost.** Checking that a device is new or an admission unused takes a map
 proof instead of a list lookup. The admission map only grows: 64 bytes per
@@ -244,12 +246,14 @@ signed by a member of the previous epoch, shown by a leaf proof against the
 previous tree hash, or by an admitted entrant (any new device, in an open
 group).
 
-**Why.** It closes the forked entry of v0.3 (specification section 2.3):
-`anchored_join.pv` is proved, and `join_without_anchor.pv` finds the attack.
+**Why.** A joiner that checks only the epoch it enters can be led by the
+delivery service into an epoch it fabricated, where the service reads what
+the joiner sends: `join_without_anchor.pv` finds the attack, and
+`anchored_join.pv` is proved.
 
 **Cost.** For an hourly checkpoint and `WINDOW_MAX` = 60 s: about 60
 seals to check, each with its sealer's leaf proof, about 9 KB per window
-in the prototype: 0.55 MB and 13 ms of CPU for a joiner.
+in the implementation: 0.55 MB and 13 ms of CPU for a joiner.
 
 <a id="e-11"></a>
 ### E-11 — Placement of joins
@@ -260,14 +264,15 @@ in the prototype: 0.55 MB and 13 ms of CPU for a joiner.
 3. into new districts, once the tree has grown by doubling.
 
 **Why.** Pairing a join with a removal makes one changed leaf out of two.
-This cuts a wave by 30 to 43 % (research note, section 4.2).
+This cuts the cost of a large window by 30 to 43 % (research note, section
+4.2).
 
 **Cost.** None for security: a bad placement only costs bandwidth.
 
 <a id="e-12"></a>
 ### E-12 — Who checks what
 
-**Decision.** Checking the entries of a wave is split:
+**Decision.** Checking the entries of a window is split:
 * the delivery service checks every request as it records it;
 * each district committer checks its queue;
 * the sealer checks every district commit: signature, structure, taints;
@@ -276,12 +281,12 @@ This cuts a wave by 30 to 43 % (research note, section 4.2).
 An entry without a valid admission, in a signed district commit, is a
 transferable fraud proof against its committer.
 
-**Why.** No single device can check a wave: two signatures per join are 210
-s of CPU for 500,000 joins. With each entry checked by 20 members on average,
+**Why.** No single device can check a large window: two signatures per join
+are 210 s of CPU for 500,000 joins. With each entry checked by 20 members on average,
 a fraud escapes all of them with probability 2·10⁻⁹.
 
 **Cost.** Checking the other districts becomes shared and probabilistic,
-where v0.3 had every full member check everything.
+where MLS has every member check every proposal.
 
 <a id="e-13"></a>
 ### E-13 — One packet per member
@@ -290,8 +295,8 @@ where v0.3 had every full member check everything.
 and a header: epoch, hashes, sealed transcript hash, tag and external key.
 The delivery service builds these packets; the member checks the tag.
 
-**Why.** About 12 KB per member for a wave of 200,000 changes in a group of
-a million (research note, section 4.1). SAIK showed the same slicing works
+**Why.** About 12 KB per member for a window of 200,000 changes in a group
+of a million (research note, section 4.1). SAIK showed the same slicing works
 when only a small tag is authenticated.
 
 **Cost.** The delivery service stores every window and serves a packet per
@@ -357,10 +362,12 @@ millions of members.
 
 ## Left out
 
-* **The HTTP API, the Worker, the clients and the GUI.** The draft has a
-  core and an in-memory delivery service; the `/v3` stack stays as it is.
-* **Light members.** Every v0.4 member keeps only its path, its epoch
-  secrets and the headers, so the distinction disappears.
+* **The delivery service's API, persistence and the clients.** This version
+  has the protocol core and an in-memory delivery service.
+* **The message plane.** Members share `msg_secret` per epoch. Per-sender
+  ratchets must be derived on demand from it, for instance from a secret
+  tree over the leaves as in MLS: a million chains per epoch are not an
+  option.
 * **Multi-recipient KEMs.** Those on lattices that share randomness fall to
   malicious public keys, and members choose their own leaf keys (research
   note, section 3.10).
@@ -368,25 +375,18 @@ millions of members.
   frequent updates, for ciphertexts nearly three times larger; the init
   chain already protects past epochs.
 * **Shrinking the tree.** The tree grows by doubling; halving when the right
-  half empties is left for a later draft.
+  half empties is left for later.
 * **Device-key rotation and admin changes other than the promotion rule.**
-  They carry over from v0.3 as leaf and registry changes, and are not in
-  the prototype yet.
-* **The message plane.** Messages are unchanged from v0.3 section 11, keyed
-  by the epoch's `msg_secret`.
+  They would be leaf and registry changes of a window; they are not
+  specified yet.
 
-## Relation to profile v0.3
+## Relation to MLS
 
-The draft keeps from v0.3:
-* the suite: X-Wing, ML-DSA-65, BLAKE3, ChaCha20-Poly1305;
-* the deterministic CBOR encodings;
-* occupancies;
-* the structure of the key schedule;
-* admissions and invites;
-* the rule that a committer never removes itself;
-* external init for entrants.
-
-It changes the tree (districts and taints), the commit (district commits
-and a seal per window), who commits (anyone, per window, including an
-entrant), the registry (maps), the checks of a following member (tag
-only), and the entry (welcomes per district, anchored on checkpoints).
+The design keeps from MLS the structure of the key schedule (init chain,
+joiner secret, epoch secret, confirmation tag and transcript hashes), the
+external init, welcomes, and the rule that a committer never removes
+itself. It changes the tree (districts, taints, no unmerged leaves), the
+commit (district commits and a seal per window), who commits (anyone, per
+window, including an entrant), who checks what (sampled audits), what a
+member keeps (its path) and how a joiner enters (anchored on checkpoints).
+The specification compares them point by point in its section 20.
