@@ -1,0 +1,26 @@
+(* Scenario SPLIT_REKEY_UNSIGNED: the same two servers, but member A does
+   not check that S2 signed the share it receives.
+
+   Expected: attack. The attacker wraps a share of its own to A's leaf,
+   whose key is public, in place of S2's; A's epoch then depends only on
+   what the attacker knows. Each server signs its shares, and members check
+   every server's signature. *)
+
+free skS2: skey [private].
+
+free MA: bitstring [private].
+query attacker(MA).
+
+process
+  new es1: key; new lsA: key; new rb: key; new q: key;
+  out(c, (es1, leaf_pk(lsA), spk(skS2)));
+  (
+    let wb = seal(leaf_pk(lsA), q, N2, rb) in
+    out(c, (wb, sign(skS2, (L_share, N2, wb))))
+  ) | (
+    in(c, (wa: bitstring, wb2: bitstring, gc: bitstring));
+    let ra = open(leaf_sk(lsA), N2, wa) in
+    let rb2 = open(leaf_sk(lsA), N2, wb2) in
+    let es = epoch_secret(joiner_secret(init_secret(es1), commit_secret(split_root(ra, rb2)), gc)) in
+    out(c, aenc(msg_key(es), MA))
+  )

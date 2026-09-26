@@ -1,0 +1,31 @@
+(* Scenario WRAP_DISPUTE_REPLAY: a cheaper dispute, which reveals the shared
+   secret of the wrap's encapsulation, is rejected.
+
+   A wrap is an X-Wing encapsulation to the child's key and an AEAD under a
+   key derived from the encapsulation's shared secret and the wrap's
+   context (epoch, node). Member B holds the key of node u; in epoch 1, a
+   secret s1 was wrapped to u. In window 2, the hostile committer, the
+   attacker here, replays the encapsulation of that wrap with an AEAD of its
+   own. B cannot open it, and files a dispute that reveals the
+   encapsulation's shared secret, as a proof of correct decapsulation would.
+
+   Expected: attack. The shared secret is that of epoch 1's wrap: the
+   attacker derives its key and reads s1. A dispute proves the verdict in
+   the wrap's context (wrap_dispute_report.pv); it never reveals the shared
+   secret of the encapsulation. *)
+
+free skU: key [private].
+free s1: key [private].
+query attacker(s1).
+
+process
+  new r1: key;
+  let k1 = kem_ct(kempk(skU), r1) in
+  out(c, (kempk(skU), k1, senc(kdf(kem_ss(kempk(skU), r1), N1), N1, s1)));
+  (* Member B, window 2. *)
+  in(c, (k2: bitstring, blob: bitstring));
+  let ss = decaps(skU, k2) in
+  let m = sdec(kdf(ss, N2), N2, blob) in
+    0
+  else
+    out(c, ss)

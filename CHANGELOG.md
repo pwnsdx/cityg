@@ -55,6 +55,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Its cost model, [`docs/research/parity_sim.py`](docs/research/parity_sim.py), and its symbolic model,
   [`docs/research/formal-parity/`](docs/research/formal-parity/README.md): 10 ProVerif scenarios, run by
   the formal-model CI job and the local CI.
+- Whether the server could re-key the tree instead of members, in
+  [`docs/research/rekey-serveur-2026-09-26.md`](docs/research/rekey-serveur-2026-09-26.md)
+  (in French), not part of the profile:
+  - a server cannot draw the tree's secrets without knowing them, and no
+    zero-knowledge proof changes that; one that draws them reads, with a
+    single member it removed, every later epoch;
+  - the options compared with MLS: one server, k servers that each draw a
+    share of every node, an enclave, and members that draw while the server
+    manages the rest;
+  - the recommendation: members' work as background tasks the server hands
+    out, disputes of wraps proved in zero knowledge, which reveal no key and
+    no past secret, and repairs; a cheaper dispute, which reveals the
+    encapsulation's shared secret, is rejected (replay).
+- The parity cost model prints what members download and servers compute
+  when one or k servers re-key the tree, and the size of the members'
+  tasks; the parity symbolic model gains 9 scenarios (19 in all).
 
 ## [0.4.0] — initial version
 

@@ -1,0 +1,22 @@
+(* Scenario SPLIT_REKEY_COLLUDE: the same two servers, and both help the
+   attacker, with M, the member window 2 removes.
+
+   Expected: attack. The attacker knows both shares and the init secret of
+   epoch 1. With two servers, the epoch is kept from any one of them with a
+   removed member, not from all of them together. *)
+
+free skS2: skey.
+
+free MA: bitstring [private].
+query attacker(MA).
+
+process
+  new es1: key; new lsA: key;
+  out(c, (es1, leaf_pk(lsA)));
+  (* Member A: both shares come from the attacker. *)
+  in(c, (wa: bitstring, wb: bitstring, sg: bitstring, gc: bitstring));
+  if checksign(spk(skS2), (L_share, N2, wb), sg) = true then
+  let ra = open(leaf_sk(lsA), N2, wa) in
+  let rb = open(leaf_sk(lsA), N2, wb) in
+  let es = epoch_secret(joiner_secret(init_secret(es1), commit_secret(split_root(ra, rb)), gc)) in
+  out(c, aenc(msg_key(es), MA))

@@ -15,7 +15,11 @@ script prints, for a group of 2^20 members:
   3. a burst of 100,000 joins and 100,000 departures: commits, what each
      member downloads, what each joiner downloads, and the authorizations;
   4. coming back after an absence: replaying every window, or jumping;
-  5. seeing every change of the membership (the membership log).
+  5. seeing every change of the membership (the membership log);
+  6. who re-keys the tree: members, as in the profile, or servers that draw
+     the secrets themselves, one or k of them each drawing a share
+     (`rekey-serveur-2026-09-26.md`): what a member downloads, what the
+     servers compute, and the tasks members do when they re-key.
 
 Sizes in bytes, CPU in microseconds on one core (MSG_US and CPU_US of
 docs/research/bench). It reuses rekey_sim.py (re-key of a window) and
@@ -27,7 +31,8 @@ Run: python3 docs/research/parity_sim.py
 import math
 
 import msg_sim
-from rekey_sim import HEADER, KEM_PK, SIG, WRAP, commit_bytes, human, member_window_bytes, simulate
+from rekey_sim import (HEADER, KEM_PK, SIG, WRAP, commit_bytes, commit_cpu_us, human,
+                       member_window_bytes, simulate)
 
 H = 20
 L = 12
@@ -156,6 +161,76 @@ def report_log():
     print()
 
 
+def server_window_bytes(r, servers, sig):
+    """Bytes a member downloads for one window when `servers` servers each
+    re-key a tree of shares: from each, its wraps, a header, the server's
+    signature of its commit and the proof that its wraps are in it."""
+    return servers * (r["member_mean"] * WRAP + HEADER + sig + H * PROOF_STEP)
+
+
+def report_who_rekeys():
+    rate = 1.7
+    fndsa = msg_sim.SCHEMES["FN-DSA-512"][0]
+    print(f"6. Who re-keys the tree ({rate} changes/s, N = 2^{H})")
+    print("   per member and per day; the servers sign with ML-DSA-65 (with FN-DSA-512)")
+    print(f"   {'window':>7} {'members (profile)':>18} {'1 server':>18} {'2 servers':>18} {'3 servers':>18}")
+    for window in (60, 300):
+        d = max(1, round(rate * window))
+        r = simulate(H, L, d - d // 2, d // 2, seed=11)
+        windows = DAY / window
+        members = member_window_bytes(r, H, False) * windows
+        cells = []
+        for k in (1, 2, 3):
+            ml = server_window_bytes(r, k, SIG) * windows
+            fn = server_window_bytes(r, k, fndsa) * windows
+            cells.append(f"{human(ml) + ' (' + human(fn) + ')':>18}")
+        print(f"   {window:>6}s {human(members):>18} " + " ".join(cells))
+    tagged = []
+    for window in (60, 300):
+        d = max(1, round(rate * window))
+        r = simulate(H, L, d - d // 2, d // 2, seed=11)
+        per_day = member_window_bytes(r, H, False) * DAY / window
+        tagged.append(f"{window} s: " + ", ".join(f"{human(k * per_day)} for k = {k}" for k in (1, 2, 3)))
+    print("   when a member still computes the tag and seals the welcomes (A1, B1), members check the tag,")
+    print("   not the servers' signatures: " + "; ".join(tagged))
+    for window in (60, 300):
+        d = max(1, round(rate * window))
+        r = simulate(H, L, d - d // 2, d // 2, seed=11)
+        cpu = commit_cpu_us(r["total_wraps"], r["total_nodes"])
+        print(f"   server CPU, windows of {window:>3} s: {r['total_wraps']:,} wraps, {cpu / 1e6:.2f} s of one core"
+              f" per window, {cpu * DAY / window / 1e6 / 3600:.2f} core-hours a day, per server")
+    joins = removals = 100_000
+    r = simulate(H, L, joins, removals)
+    cpu = commit_cpu_us(r["total_wraps"], r["total_nodes"])
+    print(f"   server CPU, a burst of {joins:,} joins and {removals:,} departures: {r['total_wraps']:,} wraps,"
+          f" {cpu / 1e6:.0f} s of one core, {cpu / 1e6 / 32:.1f} s on 32 cores, per server")
+    one_tree = joiner_entry(CHECKPOINT)
+    two_trees = one_tree + (H * (KEM_PK + 32) + H * WRAP + WELCOME)
+    print(f"   each joiner: {human(one_tree)} with one tree, {human(two_trees)} with two trees of shares")
+    print("   tasks of the members when they re-key (the profile), per window:")
+    for window in (60, 300):
+        d = max(1, round(rate * window))
+        r = simulate(H, L, d - d // 2, d // 2, seed=11)
+        district_wraps = r["total_wraps"] - r["city"][1]
+        district_nodes = r["total_nodes"] - r["city"][2]
+        tasks = r["changed_districts"]
+        mean_wraps = district_wraps / tasks
+        mean_cpu = commit_cpu_us(district_wraps, district_nodes) / tasks
+        mean_bytes = commit_bytes(district_wraps / tasks, district_nodes / tasks)
+        city_cpu = commit_cpu_us(r["city"][1], r["city"][2])
+        city_bytes = commit_bytes(r["city"][1], r["city"][2])
+        print(f"     windows of {window:>3} s: {tasks} district tasks of {mean_wraps:.0f} wraps"
+              f" ({mean_cpu / 1e3:.0f} ms, {human(mean_bytes)} sent), busiest {r['busiest'][1]} wraps;"
+              f" the city's task, {r['city'][1]} wraps ({city_cpu / 1e3:.0f} ms, {human(city_bytes)});"
+              f" {d // 2} welcomes")
+    r = simulate(H, L, joins, removals)
+    busiest_cpu = commit_cpu_us(r["busiest"][1], r["busiest"][2])
+    print(f"     the burst: {r['changed_districts']} district tasks, the busiest {r['busiest'][1]:,} wraps"
+          f" ({busiest_cpu / 1e6:.1f} s, {human(commit_bytes(r['busiest'][1], r['busiest'][2]))});"
+          f" the city's task, {r['city'][1]} wraps")
+    print()
+
+
 def main():
     print("Cost model of City-G at parity with MLS.")
     print()
@@ -164,6 +239,7 @@ def main():
     report_burst()
     report_return()
     report_log()
+    report_who_rekeys()
 
 
 if __name__ == "__main__":

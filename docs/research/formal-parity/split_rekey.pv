@@ -1,0 +1,36 @@
+(* Scenario SPLIT_REKEY: two servers re-key the tree, each drawing a share
+   of every node; one of them helps the attacker.
+
+   Servers S1 and S2 each keep a tree of shares over the same leaves and
+   re-key it for window 2; the root secret combines the roots of both
+   trees. S1 works with the network, and so does M, a member of epoch 1
+   that window 2 removes: the attacker knows the epoch secret of epoch 1
+   and chooses S1's share. S2 draws its share, wraps it to A's leaf and
+   signs the wrap. Member A checks S2's signature, combines both shares and
+   chains the init secret of epoch 1, then sends MA.
+
+   Expected: proved. S1 and M know everything but S2's share, which is
+   enough: A's epoch stays secret unless every server helps. *)
+
+free skS2: skey [private].
+
+free MA: bitstring [private].
+query attacker(MA).
+
+process
+  new es1: key; new lsA: key; new rb: key; new q: key;
+  (* What M gives the attacker; A's leaf key and S2's key are public. *)
+  out(c, (es1, leaf_pk(lsA), spk(skS2)));
+  (
+    (* S2 re-keys its tree of shares. *)
+    let wb = seal(leaf_pk(lsA), q, N2, rb) in
+    out(c, (wb, sign(skS2, (L_share, N2, wb))))
+  ) | (
+    (* Member A. *)
+    in(c, (wa: bitstring, wb2: bitstring, sg: bitstring, gc: bitstring));
+    if checksign(spk(skS2), (L_share, N2, wb2), sg) = true then
+    let ra = open(leaf_sk(lsA), N2, wa) in
+    let rb2 = open(leaf_sk(lsA), N2, wb2) in
+    let es = epoch_secret(joiner_secret(init_secret(es1), commit_secret(split_root(ra, rb2)), gc)) in
+    out(c, aenc(msg_key(es), MA))
+  )

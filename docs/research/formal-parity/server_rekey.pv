@@ -1,0 +1,41 @@
+(* Scenario SERVER_REKEY: the server re-keys the tree itself, and nobody
+   who knows a secret of epoch 1 helps it.
+
+   Window 2 creates epoch 2. The server, which is the network here, draws
+   the root of the tree and wraps it to every leaf: the attacker chooses
+   the root and knows it. A is a member of epoch 1. Entrant J joins with an
+   external init: a fresh secret sealed to the external key of epoch 1,
+   signed with J's device key, which the window lists. A opens it with the
+   external key it derives from epoch 1. Both compute epoch 2 from that
+   secret and the root's commit secret, and each sends a message.
+
+   Expected: proved. The server knows the root, but not the init secret of
+   epoch 1 nor J's external init: the key schedule keeps the epoch from the
+   server alone. *)
+
+free MA, MJ: bitstring [private].
+query attacker(MA).
+query attacker(MJ).
+
+process
+  new es1: key; new lsA: key; new lsJ: key; new skJ: skey; new x: key; new q: key;
+  out(c, (leaf_pk(lsA), leaf_pk(lsJ), spk(skJ), external_pk(es1)));
+  (* J's external init. *)
+  let xi = seal(external_pk(es1), q, N2, x) in
+  out(c, (xi, sign(skJ, (L_ext, xi))));
+  (
+    (* Member A: the root the server wrapped to its leaf, and J's external
+       init. *)
+    in(c, (w: bitstring, xi2: bitstring, sg: bitstring, gc: bitstring));
+    if checksign(spk(skJ), (L_ext, xi2), sg) = true then
+    let root = open(leaf_sk(lsA), N2, w) in
+    let x2 = open(external_sk(es1), N2, xi2) in
+    let es = epoch_secret(joiner_secret(x2, commit_secret(root), gc)) in
+    out(c, aenc(msg_key(es), MA))
+  ) | (
+    (* Entrant J. *)
+    in(c, (w: bitstring, gc: bitstring));
+    let root = open(leaf_sk(lsJ), N2, w) in
+    let es = epoch_secret(joiner_secret(x, commit_secret(root), gc)) in
+    out(c, aenc(msg_key(es), MJ))
+  )

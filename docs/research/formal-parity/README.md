@@ -5,9 +5,13 @@ mechanisms that the research note
 [`parite-mls-2026-09-26.md`](../parite-mls-2026-09-26.md) (in French) adds
 to City-G so that it keeps the guarantees of MLS (RFC 9420) for groups of a
 million members, bursts of joins and departures, and a membership that the
-service authorizes. None of them is part of profile `city-g/v0.4`. The model
-of the protocol itself is in [`docs/formal/`](../../formal/README.md); that
-of the message-plane note in [`../formal-messages/`](../formal-messages/README.md).
+service authorizes. It also models the options of the note
+[`rekey-serveur-2026-09-26.md`](../rekey-serveur-2026-09-26.md) (in French),
+which asks whether the server could re-key the tree instead of members, and
+the disputes it proposes against a committer that sends bad wraps. None of
+them is part of profile `city-g/v0.4`. The model of the protocol itself is
+in [`docs/formal/`](../../formal/README.md); that of the message-plane note
+in [`../formal-messages/`](../formal-messages/README.md).
 
 ## Running it
 
@@ -44,6 +48,15 @@ creates.
 | [`history_link_rejoin.pv`](history_link_rejoin.pv) | M, removed by window 2, joins again in window 3. | Attack: with its old init secret and the link, M reads epoch 2, where it was not a member. History links are rejected. |
 | [`sender_hidden.pv`](sender_hidden.pv) | A or B sends a message framed as an MLS PrivateMessage: sender data encrypted under the epoch's sender-data key with a fresh nonce, content and card signature under the sender's key. | Proved: the delivery service cannot tell who sent it (observational equivalence). |
 | [`sender_visible.pv`](sender_visible.pv) | The same message with the sender's leaf in clear. | Not proved, as expected. |
+| [`server_rekey.pv`](server_rekey.pv) | The server draws the root of window 2 and wraps it to every leaf; entrant J joins with a signed external init. Nobody who knows a secret of epoch 1 helps the server. | Proved: what member A and entrant J send in epoch 2 stays secret. The init secret and the external init keep the epoch from the server alone. |
+| [`server_rekey_removed.pv`](server_rekey_removed.pv) | The same server draws the roots of windows 2 and 3; M, a member of epoch 1 that window 2 removes, gives it the secrets of epoch 1. | Attack on both epochs: M opens J's external init, and the server, which draws every root, derives epoch 2 and every later epoch. |
+| [`member_rekey_removed.pv`](member_rekey_removed.pv) | The same removal when committers, members of the group, draw the roots, as in v0.4. | Proved: neither M nor the server reads the real epochs 2 and 3. |
+| [`split_rekey.pv`](split_rekey.pv) | Two servers each keep a tree of shares and re-key it; the root secret combines both roots. Server S1 and the removed M help the attacker; S2 signs its shares. | Proved: what A sends stays secret. |
+| [`split_rekey_unsigned.pv`](split_rekey_unsigned.pv) | A does not check S2's signature. | Attack: the attacker wraps a share of its own to A's leaf. |
+| [`split_rekey_collude.pv`](split_rekey_collude.pv) | Both servers and M help the attacker. | Attack. |
+| [`wrap_dispute.pv`](wrap_dispute.pv) | An honest committer wraps a node's secret to child u; a hostile member under u, which holds u's key, files disputes: a wrap from a signed commit and a proof of decryption in the wrap's context. The judge convicts if the wrap is not well formed or opens to a secret whose public key is not the node's. | Proved: the honest committer is never convicted. |
+| [`wrap_dispute_report.pv`](wrap_dispute_report.pv) | Member B, which holds u's key, files a dispute against a hostile committer, which may replay a wrap of epoch 1. | Proved: u's key and the secret wrapped to u in epoch 1 stay secret. Reachable, as intended: the hostile committer is convicted (third query false). |
+| [`wrap_dispute_replay.pv`](wrap_dispute_replay.pv) | A cheaper dispute reveals the shared secret of the wrap's encapsulation, which does not depend on the wrap's context; the hostile committer replays the encapsulation of a wrap of epoch 1. | Attack: the attacker reads the secret of epoch 1. A dispute proves the verdict in the wrap's context and never reveals the encapsulation's secret. |
 
 ## Abstractions and limits
 
@@ -53,5 +66,12 @@ creates.
   Merkle proofs of depth one.
 * **Trust.** The authorizer is honest in these scenarios: an authorizer
   that signs for the adversary admits it, as a compromised MLS
-  authentication service would.
+  authentication service would. A server that re-keys the tree is the
+  network, hence the adversary, in the `server_rekey` scenarios; a second
+  server is honest in `split_rekey.pv`.
+* **Ideal proofs of decryption.** The proof of a dispute is a constructor
+  with one destructor that returns the plaintext of the wrap in its
+  context, or a verdict that the wrap is not well formed. It stands for a
+  zero-knowledge proof over the decapsulation, the derivation of the AEAD
+  key and the AEAD; its cost and its soundness are not modelled.
 * **No computational proof.**

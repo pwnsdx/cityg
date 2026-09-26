@@ -1,0 +1,47 @@
+(* Scenario WRAP_DISPUTE_REPORT: a member files a dispute against a hostile
+   committer.
+
+   Member B holds the key of node u; in epoch 1, a secret s1 was wrapped to
+   u. In window 2, committer H, the attacker here with the delivery
+   service, publishes a signed commit with a node's public key and a wrap to
+   u of its choice, possibly one of epoch 1 replayed. B accepts the wrap if
+   it opens to a secret that matches the node's public key; otherwise it
+   files a dispute with a proof of decryption under u's key, in the wrap's
+   context. The judge convicts as in wrap_dispute.pv.
+
+   Expected: whatever H sends, u's key and s1 stay secret (proved), and H
+   is convicted when its wrap is bad: the event is reachable, so ProVerif
+   reports the third query false, as intended. *)
+
+free skH: skey.         (* the hostile committer's key: the attacker holds it *)
+free skU: key [private].
+free s1: key [private].
+
+event Convicted(spkey).
+query attacker(skU).
+query attacker(s1).
+query event(Convicted(spk(skH))).
+
+process
+  new r1: key;
+  out(c, (spk(skH), kempk(skU), seal(kempk(skU), r1, N1, s1)));
+  (
+    (* Member B. *)
+    in(c, (pkv: kpk, w: bitstring, sg: bitstring));
+    if checksign(spk(skH), (L_commit_sig, N2, pkv, w), sg) = true then
+    let m = open(skU, N2, w) in
+      (if node_pk(m) <> pkv then out(c, decproof(skU, N2, w)))
+    else
+      out(c, decproof(skU, N2, w))
+  ) | (
+    (* The judge. *)
+    ! in(c, (pkc: spkey, pkv2: kpk, w2: bitstring, sg2: bitstring, pf: bitstring));
+      if checksign(pkc, (L_commit_sig, N2, pkv2, w2), sg2) = true then
+      let v = proved_open(kempk(skU), N2, w2, pf) in
+      if v = bad then
+        event Convicted(pkc)
+      else
+        let ok(m2: key) = v in
+        if node_pk(m2) <> pkv2 then
+        event Convicted(pkc)
+  )

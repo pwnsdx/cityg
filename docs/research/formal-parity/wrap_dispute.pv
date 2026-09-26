@@ -1,0 +1,37 @@
+(* Scenario WRAP_DISPUTE: a committer that wraps correctly cannot be
+   convicted.
+
+   Committer C re-keys node v in window 2: it draws the node's secret,
+   publishes the node's public key, wraps the secret to child u and signs
+   the commit. A hostile member under u holds u's key; it is the attacker
+   here, with the delivery service. Whoever cannot open a wrap files a
+   dispute: the wrap, taken from a signed commit, and a proof of decryption
+   under the child's key, in the wrap's context. The judge (the delivery
+   service, an auditor, any member) convicts the signer of the commit if the
+   proof shows that the wrap is not a well-formed encryption to u in that
+   context, or that it opens to a secret whose public key is not the node's.
+
+   Expected: proved. The hostile member can only prove what the wrap
+   decrypts to, the node's secret, which matches the node's public key. *)
+
+free skC: skey [private].
+free skU: key.          (* u's node key: the hostile member under u holds it *)
+
+event Convicted(spkey).
+query event(Convicted(spk(skC))).
+
+process
+  new sv: key; new r: key;
+  let pkv = node_pk(sv) in
+  let w = seal(kempk(skU), r, N2, sv) in
+  out(c, (spk(skC), pkv, w, sign(skC, (L_commit_sig, N2, pkv, w))));
+  (* The judge. *)
+  ! in(c, (pkc: spkey, pkv2: kpk, w2: bitstring, sg: bitstring, pf: bitstring));
+    if checksign(pkc, (L_commit_sig, N2, pkv2, w2), sg) = true then
+    let v = proved_open(kempk(skU), N2, w2, pf) in
+    if v = bad then
+      event Convicted(pkc)
+    else
+      let ok(m: key) = v in
+      if node_pk(m) <> pkv2 then
+      event Convicted(pkc)

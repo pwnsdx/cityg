@@ -14,6 +14,16 @@
    * history links, studied and rejected: a removed member that joins again
      would read the epochs it was out of.
 
+   It also models the options of docs/research/rekey-serveur-2026-09-26.md,
+   which asks whether the server could re-key the tree instead of members:
+
+   * a server that draws the tree's secrets itself, alone or as one of two
+     servers that each draw a share of every node;
+   * disputes of a wrap: the recipient of a wrap it cannot open proves so
+     with a proof about the wrap in its context, which reveals neither its
+     node key nor what that key protected before; a cheaper dispute, which
+     reveals the shared secret of the encapsulation, is rejected.
+
    Primitives are ideal. The key schedule is the one of docs/formal/cityg.pvl,
    with commit secrets: joiner_n := kdf2(init_n-1, commit_n, context_n). *)
 
@@ -27,6 +37,7 @@ free c: channel.
 const N1, N2, N3: bitstring.       (* epochs, windows *)
 const L_node, L_leaf, L_commit, L_epoch, L_init, L_confirm, L_msg: bitstring.
 const L_join, L_batch, L_ckpt, L_hist, L_sender_data, L_card: bitstring.
+const L_ext, L_split, L_share, L_commit_sig: bitstring.
 const LA, LB: bitstring.           (* two leaves *)
 
 (* ---------- BLAKE3 ---------- *)
@@ -70,3 +81,35 @@ letfun tag(es: key, gc: bitstring) = mac(kdf(es, L_confirm), hash(gc)).
 (* History link of epoch n: the commit secret of epoch n - 1 under a key
    derived from that of epoch n (rejected, see history_link_rejoin.pv). *)
 letfun history_link(cs: key, gc: bitstring, cs_prev: key) = senc(kdf(cs, L_hist), gc, cs_prev).
+
+(* External key pair of an epoch; an entrant's external init replaces the
+   init secret of the previous epoch in the key schedule. *)
+letfun external_sk(es: key) = kdf(es, L_ext).
+letfun external_pk(es: key) = kempk(external_sk(es)).
+
+(* A root drawn in two shares by two servers: each server re-keys its own
+   tree of shares, and the root secret combines both roots. *)
+letfun split_root(ra: key, rb: key) = kdf2(ra, rb, L_split).
+
+(* ---------- Proofs of decryption (disputes) ---------- *)
+
+(* The holder of a node key proves what a wrap to that node decrypts to in
+   the wrap's context (epoch and node): the plaintext, or that the wrap is
+   not a well-formed encryption to the node in that context. The proof
+   covers the decapsulation, the derivation of the AEAD key from the
+   context, and the AEAD; it reveals that wrap's plaintext, not the key. *)
+fun ok(key): bitstring [data].
+const bad: bitstring.
+fun decproof(key, bitstring, bitstring): bitstring.     (* node key, associated data, wrap *)
+fun proved_open(kpk, bitstring, bitstring, bitstring): bitstring
+reduc forall sk: key, r: key, ad: bitstring, m: key;
+    proved_open(kempk(sk), ad, seal(kempk(sk), r, ad, m), decproof(sk, ad, seal(kempk(sk), r, ad, m))) = ok(m)
+otherwise forall sk: key, ad: bitstring, w: bitstring;
+    proved_open(kempk(sk), ad, w, decproof(sk, ad, w)) = bad.
+
+(* X-Wing as a KEM, for the cheaper dispute: the encapsulation does not
+   depend on the wrap's context; the AEAD key derives from its shared secret
+   and the context. *)
+fun kem_ct(kpk, key): bitstring.              (* recipient key, coins *)
+fun kem_ss(kpk, key): key.
+reduc forall sk: key, r: key; decaps(sk, kem_ct(kempk(sk), r)) = kem_ss(kempk(sk), r).

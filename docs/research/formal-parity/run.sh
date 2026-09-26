@@ -11,9 +11,13 @@ FAILED=0
 
 # scenario: expected verdict of each query, in order ("true": the property
 # is proved; "false": ProVerif finds an attack, as expected for sanity
-# checks, for the fork of history_link and for history_link_rejoin, which
-# is why history links are rejected; "unproved": an equivalence ProVerif
-# cannot prove, as expected when the sender is sent in clear).
+# checks, for the fork of history_link, for history_link_rejoin, which is
+# why history links are rejected, for a server that draws the tree's
+# secrets and a member it removed, for two servers that both collude, and
+# for the cheaper dispute of wrap_dispute_replay; in wrap_dispute_report,
+# "false" means that a hostile committer can be convicted, as intended;
+# "unproved": an equivalence ProVerif cannot prove, as expected when the
+# sender is sent in clear).
 EXPECTED=(
   "batch_authorization: true"
   "batch_authorization_unsigned: false"
@@ -25,6 +29,15 @@ EXPECTED=(
   "history_link_rejoin: false"
   "sender_hidden: true"
   "sender_visible: unproved"
+  "server_rekey: true true"
+  "server_rekey_removed: false false"
+  "member_rekey_removed: true true"
+  "split_rekey: true"
+  "split_rekey_unsigned: false"
+  "split_rekey_collude: false"
+  "wrap_dispute: true"
+  "wrap_dispute_report: true true false"
+  "wrap_dispute_replay: false"
 )
 
 for line in "${EXPECTED[@]}"; do
