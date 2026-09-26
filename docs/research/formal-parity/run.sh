@@ -17,8 +17,9 @@ FAILED=0
 # for the cheaper dispute of wrap_dispute_replay, for an îlot that the
 # window removing one of its members does not re-key, for a relay that the
 # member does not check against the sealed tag, for stable îlot keys
-# without the init chain, and for an init secret sealed to an îlot instead
-# of welcomes; in wrap_dispute_report,
+# without the init chain, for an init secret sealed to an îlot instead of
+# welcomes, and for a lone entrant that applies a removal without renewing
+# the top; in wrap_dispute_report,
 # "false" means that a hostile committer can be convicted, as intended;
 # "unproved": an equivalence ProVerif cannot prove, as expected when the
 # sender is sent in clear).
@@ -49,6 +50,9 @@ EXPECTED=(
   "ilot_forward_secrecy: true"
   "ilot_forward_secrecy_without_init: false"
   "ilot_init_by_ilot: false"
+  "ilot_entrant_join: true true"
+  "ilot_entrant_removal_without_top: false"
+  "ilot_entrant_removal: true"
 )
 
 for line in "${EXPECTED[@]}"; do

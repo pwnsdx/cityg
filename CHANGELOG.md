@@ -86,9 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - following a group of 2^20 members costs 94 KB a day with relays and
     415 KB without, instead of 1.8 MB, and no longer grows with the group;
   - a cheaper welcome, the init secret sealed to the îlots of joiners, is
-    rejected: it would open past epochs to a later compromise.
+    rejected: it would open past epochs to a later compromise;
+  - with nobody online, a joiner seals the window alone with an external
+    init, as in v0.4: with no removal waiting, the top is not renewed and
+    the joiner sends 24 KB; with a removal waiting, it renews the top, which
+    costs 4.8 MB at a million members (the price of a flat top in a sparse
+    window, which the îlot size trades against following).
 - Its cost model, [`docs/research/ilots_sim.py`](docs/research/ilots_sim.py); the parity symbolic model
-  gains 7 scenarios (26 in all).
+  gains 10 scenarios (29 in all).
 
 ## [0.4.0] — initial version
 

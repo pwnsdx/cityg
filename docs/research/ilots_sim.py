@@ -22,7 +22,9 @@ seals under the îlot's secret. Joiners take the leaves that removals empty
   4. the îlot tasks and the welcomes of a window;
   5. a burst of 100,000 joins and 100,000 departures;
   6. repairing a cut îlot through its members' leaves, and a joiner's entry;
-  7. larger groups, up to 2^24 members.
+  7. larger groups, up to 2^24 members;
+  8. nobody online: a joiner who enters alone and seals the window, with
+     no removal waiting or with one.
 
 Coming back after an absence costs what following costs over that time
 (replay), with every missed epoch read. Sizes in bytes, CPU in microseconds
@@ -34,8 +36,8 @@ Run: python3 docs/research/ilots_sim.py
 import math
 import random
 
-from rekey_sim import (CPU_US, HEADER, KEM_PK, SIG, WRAP, changed_leaves, commit_bytes, commit_cpu_us, human,
-                       mark_levels, member_window_bytes, rekey_cost, simulate)
+from rekey_sim import (CPU_US, HEADER, JOIN_RECORD, KEM_PK, SIG, WRAP, changed_leaves, commit_bytes, commit_cpu_us,
+                       human, mark_levels, member_window_bytes, rekey_cost, simulate)
 
 H = 20
 N = 1 << H
@@ -53,6 +55,7 @@ LEAF = 32 + KEM_PK + 897 + 58   # device id, leaf key, FN-DSA-512 card, since, a
 LEVEL = 64
 WELCOME = 1120 + 48 + 100
 CHECKPOINT = SIG + 300
+EXT_INIT = 1120                 # the X-Wing ciphertext of the external init
 
 
 def ilot_window(c, joins, removals, seed=11, h=H):
@@ -240,6 +243,41 @@ def report_larger():
     print()
 
 
+def lone_entrant(h, c, removal, mode):
+    """What a joiner that seals a window alone sends and fetches. `c` is
+    the îlot height (or the tree height for the profile, with no top);
+    `mode` is the top's encryption, or None for no top."""
+    seal = HEADER + SIG + EXT_INIT
+    send = c * (WRAP + KEM_PK) + seal               # its own path
+    fetch = c * KEM_PK + CHECKPOINT + KEM_PK         # its copath keys, its anchor, the external key
+    if removal:
+        send += c * (WRAP + KEM_PK)                  # the path of the removed member
+        fetch += c * KEM_PK
+        if mode is not None:
+            ilots = 1 << (h - c)
+            send += ilots * WRAP if mode == "xwing" else MKEM_SHARED + ilots * MKEM_PART
+            fetch += ilots * (KEM_PK if mode == "xwing" else ILOT_PK)
+    return send, fetch
+
+
+def report_lone_entrant():
+    print("8. Nobody online: a joiner enters alone and seals the window (external init)")
+    print(f"   {'members':>8} {'structure':>20} {'no removal: sends':>18} {'fetches':>9}"
+          f" {'a removal waits: sends':>23} {'fetches':>9}")
+    for h in (8, 14, 20, 24):
+        c = min(8, h)
+        rows = [("profile", h, None), ("îlots, X-Wing top", c, "xwing"), ("îlots, multi-recipient", c, "mkem")]
+        for name, height, mode in rows:
+            send0, fetch0 = lone_entrant(h, height, False, None)
+            send1, fetch1 = lone_entrant(h, height, True, mode)
+            print(f"   {'2^' + str(h):>8} {name:>20} {human(send0):>18} {human(fetch0):>9}"
+                  f" {human(send1):>23} {human(fetch1):>9}")
+    evidence = EXT_INIT + JOIN_RECORD + 2 * H * 32 + HEADER
+    print(f"   each member, when it comes back, downloads about {human(evidence)} for that window: the external init,")
+    print("   the entrant's request and admission, two registry proofs; with no removal, the top is not renewed")
+    print()
+
+
 def main():
     print("Cost model of îlots under a flat top.")
     print()
@@ -250,6 +288,7 @@ def main():
     report_burst()
     report_repair_and_entry()
     report_larger()
+    report_lone_entrant()
 
 
 if __name__ == "__main__":

@@ -66,6 +66,9 @@ creates.
 | [`ilot_relay_unchecked.pv`](ilot_relay_unchecked.pv) | B does not check the tag. | Attack: the relay leads B into an epoch nobody sealed. |
 | [`ilot_forward_secrecy.pv`](ilot_forward_secrecy.pv) | Îlot j keeps its root through windows 1 to 3, whose epoch secrets the top seals to it; member A is compromised in epoch 3 and had erased the secrets of epochs 1 and 2. | Proved: the attacker opens the epoch secrets of the three windows, but the init chain keeps epoch 2 from it. |
 | [`ilot_forward_secrecy_without_init.pv`](ilot_forward_secrecy_without_init.pv) | The same compromise with a key schedule that does not chain the init secret. | Attack: stable îlot keys need the init chain. |
+| [`ilot_entrant_join.pv`](ilot_entrant_join.pv) | Nobody is online. Entrant J, admitted by an admin, seals window 2 alone with an external init, in a window with no removal, and does not renew the top: epoch 2 comes from the external init alone. D, removed before epoch 1, helps the server. Member A, back online, checks J's admission and signature. | Proved: what J and A send in epoch 2 stays secret. |
+| [`ilot_entrant_removal_without_top.pv`](ilot_entrant_removal_without_top.pv) | A removal waits: M knows the secrets of epoch 1. J seals the same way. | Attack: M opens the external init with the external key it holds. |
+| [`ilot_entrant_removal.pv`](ilot_entrant_removal.pv) | The same removal; J re-keys M's îlot and renews the top. | Proved: M opens the external init, not the window secret. |
 | [`ilot_init_by_ilot.pv`](ilot_init_by_ilot.pv) | A cheaper welcome: the init secret of epoch 1 is sealed to the root of the îlot that receives a joiner, instead of a welcome to each joiner's one-time init key; a member of that îlot is compromised in epoch 3. | Attack: the îlot's root opens the init secret and the epoch secret of window 2, hence epoch 2. Welcomes stay sealed to one-time init keys. |
 
 ## Abstractions and limits
