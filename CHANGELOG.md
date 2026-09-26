@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- The README presents City-G 0.4: why it exists, its key ideas, a
+  comparison with MLS (design and guarantees, from RFC 9420 and RFC 9750),
+  how a window works, measured and modelled costs, including the cost of
+  following a group of a million members with 5-second windows, its limits,
+  and the research notes beyond 0.4.
+- The sequence diagrams of [`docs/workflows.md`](docs/workflows.md) no longer
+  put semicolons in messages, which Mermaid reads as line breaks.
+
 ### Research
 
 - A message plane for very large groups, proposed in

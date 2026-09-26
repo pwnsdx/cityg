@@ -13,7 +13,7 @@ sequenceDiagram
     participant DS
     A->>A: device key, nonce, gid = H_L("group-id", [pk_A, nonce])
     A->>A: tree of height 1: A at leaf 0, root keyed from a fresh secret
-    A->>A: registry: A admin; group policy if the group is open
+    A->>A: registry: A admin, and a group policy if the group is open
     A->>A: epoch-0 secrets, confirmation tag, external key
     A->>DS: genesis seal (kind 0), signed by A
     DS->>DS: rebuild the state, check gid, hashes, policy and signature
@@ -36,9 +36,9 @@ sequenceDiagram
     J->>DS: checkpoint, registry header and external key of that epoch
     J->>J: check them against the admin key (anchor)
     J->>DS: join request (leaf key, one-time init key, admission)
-    DS->>DS: check the request; queue it
+    DS->>DS: check the request, then queue it
     Note over DS: window due (WINDOW_MAX)
-    DS->>DS: place J (a freed leaf, else the lowest free leaf); assign roles
+    DS->>DS: place J (a freed leaf, else the lowest free leaf), assign roles
     DS->>C: window task, district state
     C->>C: check the entries, re-key the district, sign
     C->>DS: district commit
@@ -68,7 +68,7 @@ sequenceDiagram
     participant S as Sealer
     participant M as Members
     R->>DS: removal proposal (admin or self) / update / re-entry
-    DS->>DS: record it; a removal is enforced at once (no delivery to the target)
+    DS->>DS: record it: a removal is enforced at once (no delivery to the target)
     Note over DS: window due (WINDOW_REMOVAL when a removal waits)
     DS->>C: tasks: changes, forced nodes (taints of affected members)
     par each district
@@ -97,7 +97,7 @@ sequenceDiagram
     E->>DS: join or re-entry request
     Note over DS: window due, no volunteer
     DS->>E: every role: all districts, the seal, the welcomes
-    E->>DS: seal links from its anchor; the public state
+    E->>DS: seal links from its anchor, and the public state
     E->>E: check the chain of seals and the state
     E->>E: external init to the current external key
     E->>E: commit every district, seal (kind 2), welcome the others
@@ -146,7 +146,7 @@ sequenceDiagram
     participant M as Member
     participant DS
     M->>DS: seal, district commits and join requests of a window
-    M->>M: seal hash = the one it accepted; body hash; commits listed
+    M->>M: seal hash = the one it accepted, then the body hash and the commits listed
     M->>M: each join request hashes to its change's reference
     M->>M: list the devices and occupancies the window let in
 ```
