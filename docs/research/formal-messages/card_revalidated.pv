@@ -1,0 +1,40 @@
+(* Scenario CARD_REVALIDATED: a reader checks a sender card against the
+   roster of the message's epoch.
+
+   S and T are members of epoch 1; window 2 removes S. The roster root of
+   each epoch is bound into the transcript, which the reader checked (here,
+   the roots are given). S keeps its card key and colludes with a member of
+   epoch 2, who builds the envelope: the attacker can sign anything with
+   S's card and encrypt it for epoch 2. The reader accepts a message of
+   epoch n signed by card pk only if pk is in the roster of epoch n. *)
+
+free skS: skey.
+free skT: skey [private].
+
+event Member(spkey, bitstring).
+event Accepted(spkey, bitstring, bitstring).
+query pk: spkey, n: bitstring, m: bitstring;
+  event(Accepted(pk, n, m)) ==> event(Member(pk, n)).
+
+process
+  event Member(spk(skS), N1);
+  event Member(spk(skT), N1);
+  event Member(spk(skT), N2);
+  let root1 = hash((N1, spk(skS), spk(skT))) in
+  let root2 = hash((N2, spk(skT))) in
+  out(c, (spk(skT), root1, root2));
+  (
+    (* T sends messages in both epochs. *)
+    !
+    new m: bitstring;
+    out(c, (N1, m, sign(skT, (L_card, N1, m))));
+    out(c, (N2, m, sign(skT, (L_card, N2, m))))
+  ) | (
+    (* The reader: a proof of the card in the roster of the epoch. *)
+    !
+    in(c, (n: bitstring, pk: spkey, m: bitstring, s: bitstring, sib: spkey));
+    if checksign(pk, (L_card, n, m), s) = true then
+    if (n = N1 && hash((N1, pk, sib)) = root1) || (n = N1 && hash((N1, sib, pk)) = root1)
+       || (n = N2 && hash((N2, pk)) = root2) then
+    event Accepted(pk, n, m)
+  )

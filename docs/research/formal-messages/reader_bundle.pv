@@ -1,0 +1,56 @@
+(* Scenario READER_BUNDLE: a reader gets the reader secret of the next epoch
+   in a key bundle.
+
+   R is a reader: it holds the reader secret rs1 of epoch 1 and the interim
+   transcript hash of epoch 1, and no epoch secret. K is a keeper: it
+   followed window 2 and holds its reader secret rs2. The seal of epoch 2
+   carries the chained reader tag, keyed by rs1, over the confirmed
+   transcript hash of epoch 2 and a commitment to rs2; the delivery service
+   publishes it with the seal hash.
+
+   R draws a one-time key and signs a request with its device key. K checks
+   the signature against R's roster leaf and seals rs2 to the one-time key,
+   with the hash of the request as associated data. R accepts a secret only
+   if the reader tag checks. The attacker is the delivery service: it sees
+   every request and bundle and can send R any bundle, tag or seal hash. *)
+
+free skR: skey [private].
+
+(* A message R sends in epoch 2. *)
+free MR: bitstring [private].
+query attacker(MR).
+
+(* R accepts only the reader secret of the real epoch 2. *)
+event Epoch2(key).
+event ReaderAccepts(key).
+query rs: key; event(ReaderAccepts(rs)) ==> event(Epoch2(rs)).
+
+process
+  new es1: key; new r2: key; new interim1: bitstring;
+  let rs1 = reader_secret(es1) in
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r2, gc2)) in
+  let rs2 = reader_secret(es2) in
+  new seal_hash2: bitstring;
+  let cth2 = hash((interim1, seal_hash2)) in
+  event Epoch2(rs2);
+  out(c, (spk(skR), interim1, gc2, seal_hash2, reader_tag(rs1, cth2, rs2)));
+  (
+    (* Keeper K: a bundle for any request R signed. *)
+    !
+    in(c, (req: bitstring, sg: bitstring));
+    if checksign(spk(skR), req, sg) = true then
+    let (=L_request, =N2, otpk: kpk) = req in
+    new rk: key;
+    out(c, seal(otpk, rk, hash(req), rs2))
+  ) | (
+    (* Reader R. *)
+    new otk: key;
+    let req = (L_request, N2, kempk(otk)) in
+    out(c, (req, sign(skR, req)));
+    in(c, (b: bitstring, sh: bitstring, rt: bitstring));
+    let rs = open(otk, hash(req), b) in
+    if rt = reader_tag(rs1, hash((interim1, sh)), rs) then
+    event ReaderAccepts(rs);
+    out(c, aenc(msg_key(rs), MR))
+  )

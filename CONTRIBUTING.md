@@ -36,7 +36,7 @@ docs/formal/run.sh /path/to/proverif       # symbolic model
 | `crates/cityg-core/tests/scenarios.rs` | Whole groups on the in-memory delivery service. |
 | `crates/cityg-core/tests/scale.rs` | A large window on a full group, against the cost model (release, `--ignored`). |
 | `docs/formal/` | Symbolic model of the security choices. |
-| `docs/research/` | Research note (in French), cost model, benchmarks. |
+| `docs/research/` | Research notes (in French), cost models, benchmarks, and a symbolic model of the proposed message plane. |
 
 ## Workflow
 
@@ -98,8 +98,9 @@ We are especially interested in:
 
 - a model of the whole specification and computational proofs of the taint
   rule, the init chain and anchored joins;
-- a message plane for millions of members (per-sender ratchets derived on
-  demand);
+- a message plane for millions of members: the proposal of
+  [`docs/research/plan-de-messages-2026-09-26.md`](docs/research/plan-de-messages-2026-09-26.md)
+  needs a specification, computational proofs and an implementation;
 - cryptanalysis of the construction and of its parameter choices;
 - side-channel analysis of the ML-KEM and ML-DSA backends;
 - reducing what members download and what committers send.

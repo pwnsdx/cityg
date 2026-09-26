@@ -5,6 +5,35 @@ All notable changes to the City-G project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Research
+
+- A message plane for very large groups, proposed in
+  [`docs/research/plan-de-messages-2026-09-26.md`](docs/research/plan-de-messages-2026-09-26.md)
+  (in French) and not part of profile `city-g/v0.4`:
+  - keepers and readers: only keepers stay in the tree; readers get the
+    reader secrets of the epochs they missed in key bundles, sealed to a
+    one-time key they sign and checked against a chained reader tag in the
+    seal. Removing a reader needs no re-key, and a reader recovers from a
+    compromise at its next session;
+  - sender cards: a compact message key per member (FN-DSA, and the
+    round-3 candidates for reference), checked against the roster of the
+    message's epoch;
+  - burst chains: one signature per burst of messages;
+  - committing messages and verifiable reports;
+  - a sealed message log in the next seal, for transcript consistency;
+  - checkpoints and signed bundles against forks of readers.
+- Its cost model, [`docs/research/msg_sim.py`](docs/research/msg_sim.py): for a reader of a group
+  of 2^20 members, 6 times fewer bytes per message and 32 times less
+  traffic to stay able to read. With 16,384 keepers, a burst of 100,000
+  joins and 100,000 departures takes 64 times fewer wraps.
+- Its symbolic model, [`docs/research/formal-messages/`](docs/research/formal-messages/README.md):
+  11 ProVerif scenarios, which the formal-model CI job and the local CI now
+  run.
+- The benchmarks measure FN-DSA-512 and FN-DSA-1024, the derivation of a
+  sender's chain, and ChaCha20-Poly1305.
+
 ## [0.4.0] — initial version
 
 Profile `city-g/v0.4`, for end-to-end encrypted groups of millions of

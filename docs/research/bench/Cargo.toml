@@ -3,11 +3,13 @@ name = "cityg-bench"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "Micro-benchmarks behind the CPU figures of docs/research/grands-groupes-2026-09-25.md"
+description = "Micro-benchmarks behind the CPU figures of the research notes in docs/research"
 
 [dependencies]
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 cityg-core = { path = "../../../crates/cityg-core" }
 cityg-pqc = { path = "../../../crates/cityg-pqc" }
+fn-dsa = "0.4"
 rand_chacha = "0.3"
 rand_core = "0.6"
 

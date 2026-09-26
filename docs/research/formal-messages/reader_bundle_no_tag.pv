@@ -1,0 +1,38 @@
+(* Scenario READER_BUNDLE_NO_TAG (sanity check): the same bundle, but the
+   reader does not check the reader tag, as a client that accepts forwarded
+   keys without verifying them.
+
+   The one-time key is public: anyone can seal a secret to it. *)
+
+free skR: skey [private].
+
+free MR: bitstring [private].
+query attacker(MR).
+
+event Epoch2(key).
+event ReaderAccepts(key).
+query rs: key; event(ReaderAccepts(rs)) ==> event(Epoch2(rs)).
+
+process
+  new es1: key; new r2: key;
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r2, gc2)) in
+  let rs2 = reader_secret(es2) in
+  event Epoch2(rs2);
+  out(c, (spk(skR), gc2));
+  (
+    !
+    in(c, (req: bitstring, sg: bitstring));
+    if checksign(spk(skR), req, sg) = true then
+    let (=L_request, =N2, otpk: kpk) = req in
+    new rk: key;
+    out(c, seal(otpk, rk, hash(req), rs2))
+  ) | (
+    new otk: key;
+    let req = (L_request, N2, kempk(otk)) in
+    out(c, (req, sign(skR, req)));
+    in(c, b: bitstring);
+    let rs = open(otk, hash(req), b) in
+    event ReaderAccepts(rs);
+    out(c, aenc(msg_key(rs), MR))
+  )

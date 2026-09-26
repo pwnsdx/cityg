@@ -1,19 +1,34 @@
-//! Micro-benchmarks of the primitives behind the CPU figures of
-//! `docs/research/grands-groupes-2026-09-25.md`, through the code paths of
-//! `cityg-core`: one BLAKE3 derivation; the X-Wing key of a tree node from
-//! its secret, encapsulation and decapsulation; the wrap of a node secret
-//! to a child and its opening; ML-DSA-65 signing and verification.
+//! Micro-benchmarks of the primitives behind the CPU figures of the research
+//! notes in `docs/research`, through the code paths of `cityg-core`:
+//!
+//! * re-key (`grands-groupes-2026-09-25.md`): one BLAKE3 derivation; the
+//!   X-Wing key of a tree node from its secret, encapsulation and
+//!   decapsulation; the wrap of a node secret to a child and its opening;
+//!   ML-DSA-65 signing and verification;
+//! * message plane (`plan-de-messages-2026-09-26.md`): FN-DSA-512 and
+//!   FN-DSA-1024 (the `fn-dsa` crate) signing and verification, the
+//!   derivation of a sender's chain in a secret tree of 2^24 leaves,
+//!   ChaCha20-Poly1305 over a short message, and the hash of an envelope.
 //!
 //! Run: `cargo run --release --manifest-path docs/research/bench/Cargo.toml`
 
 use std::hint::black_box;
 use std::time::Instant;
 
-use cityg_core::crypto::{expand_label_into, node_key, unwrap, wrap};
+use chacha20poly1305::ChaCha20Poly1305;
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use cityg_core::crypto::{
+    derive_secret, expand_label_into, expand_label32, h, node_key, unwrap, wrap,
+};
 use cityg_core::identity::{DeviceIdentity, verify_signature};
 use cityg_core::kem::encapsulate;
 use cityg_core::tree::NodeId;
 use cityg_pqc::SignatureContext;
+use fn_dsa::{
+    DOMAIN_NONE, FN_DSA_LOGN_512, FN_DSA_LOGN_1024, HASH_ID_RAW, KeyPairGenerator,
+    KeyPairGeneratorStandard, SigningKey, SigningKeyStandard, VerifyingKey, VerifyingKeyStandard,
+    sign_key_size, signature_size, vrfy_key_size,
+};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
 
@@ -116,4 +131,84 @@ fn main() {
          \"decaps\": {decaps:.1}, \"wrap\": {wrap_us:.1}, \"unwrap\": {unwrap_us:.1}, \
          \"sign\": {sign:.1}, \"verify\": {verify:.1}}}"
     );
+
+    println!("\nMessage plane (one core, release build)");
+    let (fn512_sign, fn512_verify, fn512_sig, fn512_pk) =
+        fn_dsa_costs(FN_DSA_LOGN_512, "FN-DSA-512", &mut rng);
+    let (fn1024_sign, fn1024_verify, fn1024_sig, fn1024_pk) =
+        fn_dsa_costs(FN_DSA_LOGN_1024, "FN-DSA-1024", &mut rng);
+    let chain = time(
+        "sender chain in a secret tree of 2^24 leaves",
+        20_000,
+        || {
+            let mut node = derive_secret(black_box(&secret), "msg tree").expect("derive");
+            for level in 0..24u8 {
+                let label = if level % 2 == 0 {
+                    "msg left"
+                } else {
+                    "msg right"
+                };
+                node = derive_secret(&node, label).expect("derive");
+            }
+            black_box(expand_label32(&node, "msg sender", &[0; 12]).expect("derive"));
+        },
+    );
+    let key = [7u8; 32];
+    let nonce = [9u8; 12];
+    let text = vec![0x41_u8; 150];
+    let aad = [0x11_u8; 64];
+    let aead = time("ChaCha20-Poly1305, 150-byte message", 200_000, || {
+        let cipher = ChaCha20Poly1305::new((&key).into());
+        black_box(
+            cipher
+                .encrypt(
+                    (&nonce).into(),
+                    Payload {
+                        msg: black_box(&text),
+                        aad: &aad,
+                    },
+                )
+                .expect("seal"),
+        );
+    });
+    let envelope = vec![0x5a_u8; 300];
+    let hash = time("BLAKE3 of a 300-byte envelope", 200_000, || {
+        black_box(h(black_box(&envelope)));
+    });
+    println!(
+        "\nMSG_US = {{\"fndsa512_sign\": {fn512_sign:.1}, \"fndsa512_verify\": {fn512_verify:.1}, \
+         \"fndsa1024_sign\": {fn1024_sign:.1}, \"fndsa1024_verify\": {fn1024_verify:.1}, \
+         \"chain24\": {chain:.2}, \"aead150\": {aead:.2}, \"hash300\": {hash:.2}}}"
+    );
+    println!(
+        "MSG_BYTES = {{\"fndsa512_sig\": {fn512_sig}, \"fndsa512_pk\": {fn512_pk}, \
+         \"fndsa1024_sig\": {fn1024_sig}, \"fndsa1024_pk\": {fn1024_pk}}}"
+    );
+}
+
+/// Mean signing and verification times of FN-DSA with `2^logn`, and the
+/// sizes of its signature and verifying key.
+fn fn_dsa_costs(logn: u32, name: &str, rng: &mut ChaCha20Rng) -> (f64, f64, usize, usize) {
+    let mut generator = KeyPairGeneratorStandard::default();
+    let mut signing = vec![0u8; sign_key_size(logn)];
+    let mut verifying = vec![0u8; vrfy_key_size(logn)];
+    generator.keygen(logn, rng, &mut signing, &mut verifying);
+    let mut key = SigningKeyStandard::decode(&signing).expect("signing key");
+    let public = VerifyingKeyStandard::decode(&verifying).expect("verifying key");
+    let message = vec![0x5a_u8; 1024];
+    let mut signature = vec![0u8; signature_size(logn)];
+    let sign = time(&format!("{name} signature, 1 KiB"), 500, || {
+        key.sign(
+            rng,
+            &DOMAIN_NONE,
+            &HASH_ID_RAW,
+            black_box(&message),
+            &mut signature,
+        );
+    });
+    key.sign(rng, &DOMAIN_NONE, &HASH_ID_RAW, &message, &mut signature);
+    let verify = time(&format!("{name} verification, 1 KiB"), 2_000, || {
+        assert!(public.verify(black_box(&signature), &DOMAIN_NONE, &HASH_ID_RAW, &message));
+    });
+    (sign, verify, signature.len(), verifying.len())
 }

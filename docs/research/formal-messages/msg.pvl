@@ -1,0 +1,75 @@
+(* City-G message plane: shared definitions of the symbolic model.
+
+   Symbolic (Dolev-Yao) model of the mechanisms proposed by the research
+   note docs/research/plan-de-messages-2026-09-26.md for the message plane
+   of very large groups:
+
+   * keepers and readers: readers are not in the ratchet tree; they get the
+     reader secret of each epoch in a key bundle from a keeper, sealed to a
+     one-time key they sign, and check it against a chained reader tag;
+   * burst chains: one signature of the sender's card covers a chain of
+     envelopes;
+   * sender cards checked against the roster of the message's epoch.
+
+   Primitives are ideal: the X-Wing encapsulation and the AEAD of a bundle
+   are one ideal public-key encryption with associated data, the signatures
+   (ML-DSA-65 device keys, FN-DSA cards) are unforgeable, BLAKE3 and its
+   keyed modes are one-way functions. The key schedule is the one of
+   docs/formal/cityg.pvl, with the reader secret added. *)
+
+type key.      (* 32-byte secrets *)
+type skey.     (* signature key: a device key or a sender card *)
+type spkey.    (* its public key *)
+type kpk.      (* X-Wing encapsulation key *)
+
+free c: channel.
+
+const N1, N2: bitstring.          (* epochs *)
+const ZERO: bitstring.
+const L_node, L_epoch, L_init, L_reader, L_reader_next, L_reader_ratchet, L_msg: bitstring.
+const L_request, L_bundle, L_card, L_chain, L_chain_mac: bitstring.
+
+(* ---------- BLAKE3 ---------- *)
+
+fun hash(bitstring): bitstring.
+fun hk(key): bitstring.                    (* hash of a secret, a commitment *)
+fun kdf(key, bitstring): key.              (* ExpandLabel(secret, label) *)
+fun kdf2(key, key, bitstring): key.        (* Extract(init, root), then ExpandLabel with the context *)
+fun mac(key, bitstring): bitstring.
+
+(* ---------- X-Wing to a one-time key, then ChaCha20-Poly1305 ---------- *)
+
+fun kempk(key): kpk.
+fun seal(kpk, key, bitstring, key): bitstring.     (* recipient key, randomness, associated data, secret *)
+reduc forall sk: key, r: key, ad: bitstring, m: key;
+  open(sk, ad, seal(kempk(sk), r, ad, m)) = m.
+
+fun aenc(key, bitstring): bitstring.
+reduc forall k: key, m: bitstring; adec(k, aenc(k, m)) = m.
+
+(* ---------- Signatures ---------- *)
+
+fun spk(skey): spkey.
+fun sign(skey, bitstring): bitstring.
+reduc forall sk: skey, m: bitstring; checksign(spk(sk), m, sign(sk, m)) = true.
+
+(* ---------- Key schedule ---------- *)
+
+letfun node_pk(s: key) = kempk(kdf(s, L_node)).
+letfun joiner_secret(init_prev: key, root: key, gc: bitstring) = kdf2(init_prev, root, gc).
+letfun epoch_secret(js: key) = kdf(js, L_epoch).
+letfun init_secret(es: key) = kdf(es, L_init).
+
+(* The reader secret of an epoch: what readers get, instead of the epoch
+   secret. The message plane of the epoch derives from it. *)
+letfun reader_secret(es: key) = kdf(es, L_reader).
+letfun msg_key(rs: key) = kdf(rs, L_msg).
+
+(* Chained reader tag of epoch n: keyed by the reader secret of epoch n - 1,
+   over the confirmed transcript hash of epoch n and a commitment to the
+   reader secret of epoch n. Keepers check it when they follow the window. *)
+letfun reader_tag(rs_prev: key, cth: bitstring, rs: key) =
+  mac(kdf(rs_prev, L_reader_next), (cth, hk(rs))).
+
+(* A burst chain: the chain value after envelope e. *)
+letfun chain(prev: bitstring, e: bitstring) = hash((L_chain, prev, e)).

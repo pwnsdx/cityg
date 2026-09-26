@@ -7,7 +7,7 @@
 | Implementation | [`crates/cityg-core`](../crates/cityg-core): protocol core and an in-memory delivery service, no I/O |
 | Design | [design.md](design.md) (decisions E-1 to E-14) |
 | Formal model | [`formal/`](formal/README.md) (ProVerif) |
-| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py) |
+| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md) (in French) |
 | Conformance | None yet: no test vectors (section 19) |
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
@@ -1417,7 +1417,9 @@ This version does not yet specify or implement:
   arrive after the next epoch remain to be specified. With millions of
   members, per-sender chains must be derived on demand (for instance from a
   secret tree over the leaves, as in MLS), not one per member at every
-  epoch.
+  epoch. The research note
+  [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md)
+  proposes one; none of it is part of this profile.
 * test vectors, an independent verifier and a conformance manifest;
 * the encodings of packets, seal links, entries, audit records and fraud
   proofs, and district views with proofs for committers (section 12.3);

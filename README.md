@@ -20,7 +20,9 @@ everything without holding any group secret.
 > [symbolic model](docs/formal/) and the protocol core
 > [`cityg-core`](crates/cityg-core) with an in-memory delivery service. The
 > message plane, the networked delivery service and the clients are not
-> there yet ([specification, section 19](docs/specs.md#19-open-items)).
+> there yet ([specification, section 19](docs/specs.md#19-open-items)); a
+> [research note](docs/research/plan-de-messages-2026-09-26.md) (in French)
+> proposes a message plane.
 > There are no test vectors and no independent human cryptographic review:
 > prefer MLS implementations for production.
 
@@ -110,6 +112,7 @@ cargo test -p cityg-core --release --test scale -- --ignored --nocapture   # a l
 docs/formal/run.sh /path/to/proverif                              # symbolic model (ProVerif 2.05)
 cargo run --release --manifest-path docs/research/bench/Cargo.toml   # primitive costs
 python3 docs/research/rekey_sim.py                                # cost model
+python3 docs/research/msg_sim.py                                  # cost model of the proposed message plane
 ```
 
 The scenario tests of `crates/cityg-core/tests/scenarios.rs` run whole
