@@ -1,5 +1,5 @@
-//! Public tree of profile v0.4-draft: sparse, split into districts under a
-//! city (docs/specs-v0.4-draft.md section 5).
+//! The public tree: sparse, split into districts under a city
+//! (docs/specs.md section 5).
 //!
 //! A node is addressed by `(level, index)`: leaves are level 0, and node
 //! `(k, i)` is the ancestor at level `k` of leaves `i·2^k .. (i+1)·2^k`.
@@ -27,7 +27,9 @@ use std::ops::Range;
 
 use ciborium::value::Value;
 
-use crate::cbor::{array, bytes, expect_array, expect_bytes, expect_u32, expect_uint, uint};
+use crate::cbor::{
+    array, bytes, encode, expect_array, expect_bytes, expect_u32, expect_uint, uint,
+};
 use crate::crypto::{Digest, h_l};
 use crate::error::{CoreError, CoreResult};
 
@@ -815,7 +817,7 @@ impl LeafProof {
     /// encoding plus 64 bytes per level).
     pub fn encoded_len(&self) -> CoreResult<usize> {
         let leaf = self.leaf.as_ref().map_or(Value::Null, LeafNode::value);
-        Ok(crate::cbor::encode(&leaf)?.len() + 64 * self.steps.len())
+        Ok(encode(&leaf)?.len() + 64 * self.steps.len())
     }
 }
 

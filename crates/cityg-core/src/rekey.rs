@@ -1,5 +1,4 @@
-//! Multi-path re-key of a district or of the city
-//! (docs/specs-v0.4-draft.md section 7).
+//! Multi-path re-key of a district or of the city (docs/specs.md section 7).
 //!
 //! A window re-keys every ancestor of a changed base node, and every node
 //! tainted by a member the window removes or updates, with its ancestors.
@@ -30,7 +29,7 @@ use crate::crypto::{
     Digest, SEALED_SECRET_BYTES, Secret, Wrap, chain, fresh_secret, node_key, unwrap, wrap,
 };
 use crate::error::{CoreError, CoreResult};
-use crate::kem::{KemSecret, validate_public_key};
+use crate::kem::{KEM_CIPHERTEXT_BYTES, KemSecret, validate_public_key};
 use crate::tree::{LeafNode, NodeId, ParentNode, PublicTree, Shape};
 
 /// New state of the leaves a window changes: `None` blanks a leaf.
@@ -372,7 +371,7 @@ pub fn check(plan: &Plan, updates: &[NodeUpdate], wraps: &[Wrap]) -> CoreResult<
             if wrapped.node != planned.node
                 || wrapped.target != *target
                 || wrapped.sealed.len() != SEALED_SECRET_BYTES
-                || wrapped.kem_ciphertext.len() != crate::kem::KEM_CIPHERTEXT_BYTES
+                || wrapped.kem_ciphertext.len() != KEM_CIPHERTEXT_BYTES
             {
                 return Err(CoreError::Invalid("wrap does not follow its plan"));
             }
@@ -810,7 +809,6 @@ mod tests {
     fn a_window_excludes_the_removed_member_and_reaches_everyone_else() {
         let mut rng = ChaCha20Rng::seed_from_u64(11);
         let mut fixture = fixture(4, 2, &mut rng);
-        let committer = Occupancy { leaf: 1, since: 0 };
         // Remove leaf 5; leaf 9 updates its key.
         let new_key = KemSecret::generate(&mut rng);
         let mut leaves_1 = LeafChanges::new();
@@ -888,7 +886,6 @@ mod tests {
                 assert!(unwrap(&GID, 1, wrapped, &key, &pk).is_err());
             }
         }
-        let _ = committer;
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! What a window asks of its committers and its sealer
-//! (docs/specs-v0.4-draft.md section 12.4), shared by members and entrants.
+//! What a window asks of its committers and its sealer (docs/specs.md
+//! sections 12.4, 12.5 and 12.7), shared by members and entrants.
 
 use std::collections::BTreeMap;
 

@@ -151,6 +151,7 @@ dependencies = [
  "hex",
  "rand_chacha",
  "rand_core 0.6.4",
+ "subtle",
  "thiserror",
  "x-wing",
  "zeroize",

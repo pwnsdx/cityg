@@ -1,13 +1,13 @@
-//! A wave on a full group, checked against the cost model of
-//! `docs/research/rekey_sim.py` (ignored by default; run in release):
+//! A window of many changes on a full group, checked against the cost model
+//! of `docs/research/rekey_sim.py` (ignored by default; run in release):
 //!
 //! ```text
 //! cargo test -p cityg-core --release --test scale -- --ignored --nocapture
-//! CITE_SCALE_HEIGHT=16 CITE_SCALE_BITS=12 CITE_SCALE_CHANGES=4000 cargo test ...
+//! CITYG_SCALE_HEIGHT=16 CITYG_SCALE_BITS=12 CITYG_SCALE_CHANGES=4000 cargo test ...
 //! ```
 //!
 //! The group is built directly (every leaf occupied, keyed by one
-//! committer); the wave goes through the protocol's functions: entries
+//! committer); the window goes through the protocol's functions: entries
 //! checked by the committers, district commits, the city re-key and the
 //! seal, the delivery service's full check, and one packet per member.
 
@@ -214,10 +214,10 @@ fn human(bytes: f64) -> String {
 
 #[test]
 #[ignore = "builds a full group; run in release with --ignored --nocapture"]
-fn a_wave_on_a_full_group_matches_the_model() {
-    let height = u8::try_from(env("CITE_SCALE_HEIGHT", 14)).unwrap();
-    let bits = u8::try_from(env("CITE_SCALE_BITS", 10)).unwrap();
-    let changes = usize::try_from(env("CITE_SCALE_CHANGES", 2000)).unwrap();
+fn a_large_window_on_a_full_group_matches_the_model() {
+    let height = u8::try_from(env("CITYG_SCALE_HEIGHT", 14)).unwrap();
+    let bits = u8::try_from(env("CITYG_SCALE_BITS", 10)).unwrap();
+    let changes = usize::try_from(env("CITYG_SCALE_CHANGES", 2000)).unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(7);
     let start = Instant::now();
     let group = full_group(height, bits, &mut rng);
@@ -299,7 +299,7 @@ fn a_wave_on_a_full_group_matches_the_model() {
     }
     list.sort();
     println!(
-        "wave: {removals} removals and {joins} paired joins, requests signed in {:.1?}",
+        "window: {removals} removals and {joins} paired joins, requests signed in {:.1?}",
         start.elapsed()
     );
     let shape = state.tree.shape();

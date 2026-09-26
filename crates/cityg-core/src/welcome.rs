@@ -1,4 +1,4 @@
-//! Welcomes (docs/specs-v0.4-draft.md section 11).
+//! Welcomes (docs/specs.md section 11).
 //!
 //! ```text
 //! Welcome := ["city-g/welcome/v4", gid, epoch, request_ref, kem_ciphertext, sealed]

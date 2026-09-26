@@ -1,4 +1,4 @@
-//! Scenarios of profile v0.4-draft on the in-memory delivery service, with
+//! Scenarios on the in-memory delivery service, with
 //! districts of four leaves (L = 2).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -718,8 +718,7 @@ fn a_failed_committer_is_replaced() {
     sim.request_joins(7);
     sim.run_window();
     sim.request_joins(2);
-    sim.now += 60_000;
-    let task = sim.ds.open_window(sim.now).unwrap().unwrap();
+    let task = sim.open_window();
     let (district, failed) = task
         .committers
         .iter()
@@ -743,20 +742,138 @@ fn a_failed_committer_is_replaced() {
         &mut sim.rng,
     );
     assert!(late.is_err());
-    for (district, committer) in &task.committers {
-        let commit = sim.members[committer]
-            .commit_district(sim.ds.state(), &task, *district, &requests, &mut sim.rng)
-            .unwrap();
-        sim.ds.submit_district_commit(commit).unwrap();
-    }
-    let commits = sim.ds.open_commits();
-    let seal = sim.members[&task.sealer]
-        .seal(sim.ds.state(), &task, &commits, &requests, &mut sim.rng)
-        .unwrap();
-    let epoch = sim.ds.submit_seal(seal).unwrap();
-    sim.follow(epoch);
+    let epoch = sim.complete_window(&task);
     sim.welcome_and_enter(epoch);
     assert_eq!(sim.members.len(), 10);
+    sim.assert_agreement();
+}
+
+#[test]
+fn failed_committers_are_replaced_while_the_tree_grows() {
+    use cityg_core::roles::WelcomeKind;
+    use cityg_core::tree::Occupancy;
+
+    // Four members fill a tree of one district; the next window grows it,
+    // and numbers its districts in the grown tree.
+    let mut sim = Sim::new(2, 25);
+    sim.request_joins(3);
+    sim.run_window();
+    assert_eq!(sim.ds.state().tree.height(), 2);
+    let members: Vec<Occupancy> = sim.members.keys().copied().collect();
+    // One member away asks to jump, another updates its leaf key, and two
+    // devices join.
+    let jumper = sim.take(members[3]);
+    let interim = sim.ds.state().interim;
+    let (returning, request) = jumper.catch_up(&interim, &mut sim.rng).unwrap();
+    let reference = sim.ds.submit_catch_up(request, sim.now).unwrap();
+    sim.returning.insert(reference, returning);
+    let update = sim
+        .members
+        .get_mut(&members[1])
+        .unwrap()
+        .update_request(&mut sim.rng)
+        .unwrap();
+    sim.ds.submit_update(update, sim.now).unwrap();
+    sim.request_joins(2);
+    let task = sim.open_window();
+    assert_eq!(task.height, 3);
+    assert_eq!(task.committers.keys().copied().collect::<Vec<_>>(), [0, 1]);
+    let failed = task.committers[&1];
+    assert!(task.welcomes.iter().all(|w| w.welcomer == failed));
+    assert!(task.welcomes.iter().any(|w| w.kind == WelcomeKind::CatchUp));
+    // Both districts go to another member, with every welcome they owe:
+    // the joins of district 1 and the jump of a member of district 0.
+    let replacement = members[2];
+    assert_ne!(replacement, failed);
+    sim.ds.reassign(0, replacement).unwrap();
+    let task = sim.ds.reassign(1, replacement).unwrap();
+    assert!(task.welcomes.iter().all(|w| w.welcomer == replacement));
+    let epoch = sim.complete_window(&task);
+    sim.welcome_and_enter(epoch);
+    assert!(sim.joiners.is_empty() && sim.returning.is_empty());
+    assert_eq!(sim.members.len(), 6);
+    sim.assert_agreement();
+}
+
+#[test]
+fn only_the_assigned_welcomer_delivers_a_welcome() {
+    use cityg_core::error::CoreError;
+    use cityg_core::objects::Request;
+    use cityg_core::welcome::Welcome;
+
+    let mut sim = Sim::new(2, 26);
+    sim.request_joins(3);
+    sim.run_window();
+    sim.request_joins(1);
+    let task = sim.open_window();
+    let epoch = sim.complete_window(&task);
+    let owed = task.welcomes[0];
+    let init_key = match sim.ds.window(epoch).unwrap().requests.get(&owed.request) {
+        Some(Request::Join(join)) => join.init_key.clone(),
+        _ => Vec::new(),
+    };
+    // Another member cannot put a welcome the joiner cannot open in place
+    // of the one it is owed.
+    let other = *sim
+        .members
+        .keys()
+        .find(|member| **member != owed.welcomer)
+        .unwrap();
+    let gid = *sim.member(other).gid();
+    let forged = Welcome::seal(
+        &gid,
+        epoch,
+        &owed.request,
+        &init_key,
+        &[0; 32],
+        &mut sim.rng,
+    )
+    .unwrap();
+    assert_eq!(
+        sim.ds.submit_welcome(other, forged).unwrap_err(),
+        CoreError::Unauthorized("not the welcomer of this request")
+    );
+    sim.welcome_and_enter(epoch);
+    assert!(sim.joiners.is_empty());
+    sim.assert_agreement();
+}
+
+#[test]
+fn a_policy_whose_signer_left_is_dropped() {
+    // The creator, the only admin, leaves; while the window that removes it
+    // is open, it signs a policy opening the group.
+    let mut sim = Sim::new(2, 27);
+    sim.request_joins(3);
+    sim.run_window();
+    let proposal = sim.members[&common::CREATOR]
+        .remove_proposal(common::CREATOR, &mut sim.rng)
+        .unwrap();
+    sim.ds.submit_removal(proposal, sim.now).unwrap();
+    let task = sim.open_window();
+    let policy = sim.members[&common::CREATOR]
+        .group_policy(true, None, &mut sim.rng)
+        .unwrap();
+    sim.ds.submit_policy(policy, sim.now).unwrap();
+    let epoch = sim.complete_window(&task);
+    sim.welcome_and_enter(epoch);
+    assert!(!sim.ds.state().tree.is_member(common::CREATOR));
+    assert_eq!(
+        sim.ds
+            .state()
+            .registry
+            .admins()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [task.sealer],
+        "the sealer is promoted"
+    );
+    // The next window leaves the policy out: its signer is not an admin
+    // any more, and the group stays closed.
+    sim.request_joins(1);
+    let task = sim.run_window();
+    assert!(task.policy.is_none());
+    assert!(!sim.ds.state().registry.is_open());
     sim.assert_agreement();
 }
 
@@ -1031,7 +1148,7 @@ fn an_open_group_admits_devices_without_any_admin_signature() {
             .values()
             .all(|request| matches!(request, Request::Join(join) if join.admission.is_none()))
     );
-    // A wave over several districts.
+    // A window over several districts.
     sim.request_open_joins(9);
     let task = sim.run_window();
     assert!(task.committers.len() >= 2);

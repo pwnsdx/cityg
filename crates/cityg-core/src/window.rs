@@ -1,17 +1,19 @@
 //! Public state of a group and the public transition of a window
-//! (docs/specs-v0.4-draft.md section 12).
+//! (docs/specs.md sections 10 and 14).
 //!
 //! Everything here depends on public data only: the delivery service runs
 //! it on every window, a sealer runs it on the district commits it seals,
 //! and an auditor on the entries it samples. The checks of the entries
 //! themselves (signatures and admissions) are optional, so that a sealer
-//! can check the structure of a wave without checking every entry (E-12).
+//! can check the structure of a window without checking every entry (E-12).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::commit::{Change, DistrictCommit, Seal, SealKind};
 use crate::crypto::{Digest, ZERO32, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
+use crate::identity::check_device_key;
+use crate::kem::validate_public_key;
 use crate::objects::{ChangeKind, GroupPolicy, Request, device_id, group_id};
 use crate::registry::{Registry, RegistryDelta, RegistryHeader};
 use crate::rekey::{self, LeafChanges, NodeUpdate, growth_nodes, plan_city, plan_district};
@@ -107,9 +109,9 @@ impl PublicState {
         {
             return Err(CoreError::Invalid("genesis seal"));
         }
-        crate::identity::check_device_key(&genesis.creator_pk, "creator key")?;
-        crate::kem::validate_public_key(&genesis.encryption_key)?;
-        crate::kem::validate_public_key(&genesis.root_pk)?;
+        check_device_key(&genesis.creator_pk, "creator key")?;
+        validate_public_key(&genesis.encryption_key)?;
+        validate_public_key(&genesis.root_pk)?;
         let policy = seal
             .body
             .policy

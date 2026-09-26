@@ -13,6 +13,7 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 ciborium = "0.2"
 cityg-pqc = { path = "../cityg-pqc" }
 rand_core = { version = "0.6", features = ["getrandom"] }
+subtle = "2"
 thiserror = "2"
 x-wing = { version = "0.1.0", features = ["hazmat", "zeroize"] }
 zeroize = { version = "1", features = ["derive"] }

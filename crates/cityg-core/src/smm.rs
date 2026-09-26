@@ -1,5 +1,5 @@
 //! Compact sparse Merkle maps from 32-byte keys to occupancies
-//! (docs/specs-v0.4-draft.md section 8).
+//! (docs/specs.md section 8).
 //!
 //! The map is a binary trie on the bits of the keys, most significant bit
 //! first, where a subtree holding one entry is replaced by that entry:

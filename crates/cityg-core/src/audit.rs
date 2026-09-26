@@ -1,5 +1,5 @@
 //! Audits of a window's entries and fraud proofs (E-12,
-//! docs/specs-v0.4-draft.md section 15).
+//! docs/specs.md section 15).
 //!
 //! The delivery service checks every request as it records it; each
 //! committer checks the entries of its district; the sealer checks the
@@ -163,8 +163,7 @@ pub fn check_record(previous: &EpochHeader, record: &AuditRecord) -> CoreResult<
             let leaf = subject()?;
             match &leaf.leaf {
                 None => Some(Verdict::Fraud("removal of a blank leaf")),
-                Some(node) if leaf.occupancy() != Some(proposal.target) => {
-                    let _ = node;
+                Some(_) if leaf.occupancy() != Some(proposal.target) => {
                     Some(Verdict::Fraud("removal of another member"))
                 }
                 Some(node) => fraud_if(

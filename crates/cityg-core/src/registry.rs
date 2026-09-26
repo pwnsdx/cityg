@@ -1,4 +1,4 @@
-//! Registry of profile v0.4-draft (docs/specs-v0.4-draft.md section 8).
+//! Registry (docs/specs.md section 8).
 //!
 //! ```text
 //! registry_hash := H_L("registry", [[[admin, admin_pk], ...], devices_root,

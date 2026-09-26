@@ -1,4 +1,4 @@
-//! An in-memory delivery service (docs/specs-v0.4-draft.md section 14).
+//! An in-memory delivery service (docs/specs.md section 14).
 //!
 //! It never draws a group secret and never signs a group object. It records
 //! requests after checking them, closes windows (E-1), places joins (E-11),
@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::audit::{AuditRecord, records};
 use crate::commit::{Change, DistrictCommit, Seal, SealKind};
-use crate::crypto::{Digest, Wrap, kem_pk_hash};
+use crate::crypto::{Digest, Wrap, ZERO32, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
 use crate::member::{CatchUps, PendingRemoval};
 use crate::objects::{
@@ -27,6 +27,7 @@ use crate::packet::{
 use crate::registry::RegistryHeader;
 use crate::rekey::{Step, WindowIndex};
 use crate::roles::{WelcomeKind, WelcomeTask, WindowTask};
+use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
 use crate::tree::{LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode};
 use crate::welcome::Welcome;
 use crate::window::{
@@ -405,6 +406,9 @@ impl DeliveryService {
             .ok_or(CoreError::Invalid("not a member"))?;
         request.verify(&self.state.gid, &self.state.interim, device_pk)?;
         let reference = request.reference();
+        self.queue
+            .catch_ups
+            .retain(|q| q.item.member != request.member);
         self.queue.catch_ups.push(Queued {
             item: request,
             recorded_ms: now_ms,
@@ -415,6 +419,9 @@ impl DeliveryService {
     /// Record a group policy after checking it.
     pub fn submit_policy(&mut self, policy: GroupPolicy, now_ms: u64) -> CoreResult<()> {
         policy.verify(&self.state.gid, self.state.registry.admins())?;
+        if self.state.registry.policy() == Some(&policy.hash()) {
+            return Err(CoreError::Invalid("policy already in force"));
+        }
         self.queue.policy = Some(Queued {
             item: policy,
             recorded_ms: now_ms,
@@ -666,6 +673,14 @@ impl DeliveryService {
                     && !subjects.contains(&request.member)
             })
             .collect();
+        if self
+            .queue
+            .policy
+            .as_ref()
+            .is_some_and(|q| !self.state.registry.is_admin(q.item.admin))
+        {
+            self.queue.policy = None;
+        }
         let policy = self.queue.policy.as_ref().map(|q| q.item.clone());
         if changes.is_empty() && catch_ups.is_empty() && policy.is_none() {
             return Ok(None);
@@ -828,12 +843,22 @@ impl DeliveryService {
             .committers
             .insert(district, committer)
             .ok_or(CoreError::Invalid("district not in the window"))?;
+        let shape = open.window.shape;
         for welcome in &mut open.task.welcomes {
+            let leaf = match welcome.kind {
+                WelcomeKind::CatchUp => open
+                    .catch_ups
+                    .get(&welcome.request)
+                    .map(|request| request.member.leaf),
+                WelcomeKind::Join | WelcomeKind::ReEntry => open
+                    .task
+                    .changes
+                    .iter()
+                    .find(|change| change.request == welcome.request)
+                    .map(|change| change.leaf),
+            };
             if welcome.welcomer == old
-                && open.task.changes.iter().any(|c| {
-                    c.request == welcome.request
-                        && self.state.tree.shape().district_of(c.leaf) == district
-                })
+                && leaf.is_some_and(|leaf| shape.district_of(leaf) == district)
             {
                 welcome.welcomer = committer;
             }
@@ -1069,8 +1094,11 @@ impl DeliveryService {
         }
     }
 
-    /// Keep a welcome of a sealed window.
-    pub fn submit_welcome(&mut self, welcome: Welcome) -> CoreResult<()> {
+    /// Keep a welcome of a sealed window from `welcomer`, the authenticated
+    /// sender, which the window must have assigned it. Welcomes are not
+    /// signed: without this check any member could replace a joiner's
+    /// welcome with one it cannot open.
+    pub fn submit_welcome(&mut self, welcomer: Occupancy, welcome: Welcome) -> CoreResult<()> {
         let stored = self
             .windows
             .iter_mut()
@@ -1078,6 +1106,14 @@ impl DeliveryService {
             .ok_or(CoreError::Invalid("welcome for an unknown window"))?;
         if !stored.entries.contains_key(&welcome.request) || welcome.gid != self.state.gid {
             return Err(CoreError::Invalid("welcome nobody asked for"));
+        }
+        if !stored
+            .task
+            .welcomes
+            .iter()
+            .any(|task| task.request == welcome.request && task.welcomer == welcomer)
+        {
+            return Err(CoreError::Unauthorized("not the welcomer of this request"));
         }
         stored.welcomes.insert(welcome.request, welcome);
         Ok(())
@@ -1223,20 +1259,15 @@ impl DeliveryService {
     }
 
     fn interim_of(&self, epoch: u64) -> CoreResult<Digest> {
-        let genesis_confirmed = crate::schedule::confirmed_transcript_hash(
-            &crate::crypto::ZERO32,
-            &self.genesis.header.hash()?,
-        )?;
-        let mut interim =
-            crate::schedule::interim_transcript_hash(&genesis_confirmed, &self.genesis.tag)?;
+        let genesis_confirmed = confirmed_transcript_hash(&ZERO32, &self.genesis.header.hash()?)?;
+        let mut interim = interim_transcript_hash(&genesis_confirmed, &self.genesis.tag)?;
         for stored in self
             .windows
             .iter()
             .take(usize::try_from(epoch).unwrap_or(0))
         {
-            let confirmed =
-                crate::schedule::confirmed_transcript_hash(&interim, &stored.seal.header.hash()?)?;
-            interim = crate::schedule::interim_transcript_hash(&confirmed, &stored.seal.tag)?;
+            let confirmed = confirmed_transcript_hash(&interim, &stored.seal.header.hash()?)?;
+            interim = interim_transcript_hash(&confirmed, &stored.seal.tag)?;
         }
         Ok(interim)
     }

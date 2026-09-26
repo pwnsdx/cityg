@@ -22,6 +22,7 @@ use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use ciborium::value::Value;
 use rand_core::CryptoRngCore;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::cbor::{array, bytes, encode, text, uint};
@@ -105,6 +106,12 @@ pub fn derive_secret(secret: &[u8; 32], label: &str) -> CoreResult<Secret> {
 pub fn mac(key: &[u8; 32], data: &[u8]) -> CoreResult<Digest> {
     let framed = encode(&array(vec![text(MAC_TAG), bytes(data)]))?;
     Ok(*blake3::keyed_hash(key, &framed).as_bytes())
+}
+
+/// Constant-time equality of two 32-byte values (MAC tags, secrets).
+#[must_use]
+pub fn digest_eq(left: &Digest, right: &Digest) -> bool {
+    left.ct_eq(right).into()
 }
 
 /// `H_L("kem-pk", [pk])`, the hash of an X-Wing public key bound into wraps
@@ -297,6 +304,10 @@ mod tests {
         assert_ne!(*extract(&[1; 32], b"ikm"), *extract(&[2; 32], b"ikm"));
         assert_ne!(mac(&[1; 32], b"m").unwrap(), mac(&[2; 32], b"m").unwrap());
         assert_ne!(mac(&[1; 32], b"m").unwrap(), mac(&[1; 32], b"n").unwrap());
+        assert!(digest_eq(&[3; 32], &[3; 32]));
+        let mut other = [3; 32];
+        other[31] = 4;
+        assert!(!digest_eq(&[3; 32], &other));
     }
 
     #[test]

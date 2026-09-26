@@ -1,4 +1,4 @@
-//! District commits and seals (docs/specs-v0.4-draft.md section 10).
+//! District commits and seals (docs/specs.md section 10).
 //!
 //! ```text
 //! DistrictCommit := ["city-g/district-commit/v4", gid, epoch, district, height,

@@ -23,18 +23,12 @@ pub enum CoreError {
     /// A signature does not verify under the expected key and context.
     #[error("bad signature on {0}")]
     BadSignature(&'static str),
-    /// A commit does not build on the current epoch.
+    /// A seal or packet does not build on the current epoch.
     #[error("epoch mismatch: expected {expected}, got {got}")]
     EpochMismatch { expected: u64, got: u64 },
-    /// A commit does not extend the current transcript.
-    #[error("transcript mismatch")]
-    TranscriptMismatch,
     /// Authenticated decryption failed.
     #[error("decryption failed: {0}")]
     Decrypt(&'static str),
-    /// A message was already received or falls outside the replay window.
-    #[error("replayed or expired message")]
-    Replay,
     /// An object exceeds a profile size bound.
     #[error("too large: {0}")]
     TooLarge(&'static str),

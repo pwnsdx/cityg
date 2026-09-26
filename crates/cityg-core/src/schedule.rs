@@ -1,12 +1,10 @@
-//! Key schedule of profile v0.4-draft (docs/specs-v0.4-draft.md section 9).
-//!
-//! The schedule of profile v0.3, one epoch per window, with the root secret
-//! of the window in place of a committer's path secret:
+//! Key schedule (docs/specs.md section 9): one epoch per window, keyed by
+//! the window's root secret and chained through the init secrets:
 //!
 //! ```text
 //! GroupContext_n := CBOR_det(["city-g/group-context/v4", gid, n, tree_hash_n,
 //!                             registry_hash_n, height_n, district_bits,
-//!                             "city-g/v0.4-draft", confirmed_transcript_hash_n])
+//!                             "city-g/v0.4", confirmed_transcript_hash_n])
 //! commit_secret_n := DeriveSecret(root_secret_n, "commit")
 //! joiner_secret_n := ExpandLabel(Extract(init_n-1, commit_secret_n),
 //!                                "joiner", H(GroupContext_n), 32)
@@ -30,9 +28,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::cbor::{array, bytes, encode, text, uint};
 use crate::crypto::{
-    Digest, PROFILE, Secret, ZERO32, derive_secret, expand_label32, extract, h, h_l, mac,
+    Digest, PROFILE, Secret, ZERO32, derive_secret, digest_eq, expand_label32, extract, h, h_l, mac,
 };
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::kem::{KemSecret, encapsulate};
 
 /// Public context of an epoch.
@@ -156,6 +154,15 @@ impl EpochSecrets {
         mac(&self.confirm_key, confirmed)
     }
 
+    /// Check a received confirmation tag, in constant time.
+    pub fn check_confirmation_tag(&self, confirmed: &Digest, tag: &Digest) -> CoreResult<()> {
+        if digest_eq(&self.confirmation_tag(confirmed)?, tag) {
+            Ok(())
+        } else {
+            Err(CoreError::Invalid("confirmation tag"))
+        }
+    }
+
     /// The external X-Wing key pair of the epoch.
     pub fn external_key(&self) -> CoreResult<KemSecret> {
         let seed = expand_label32(&self.external_secret, "external kem", &[])?;
@@ -255,6 +262,9 @@ mod tests {
             a.confirmation_tag(&[3; 32]).unwrap(),
             welcomed.confirmation_tag(&[3; 32]).unwrap()
         );
+        let tag = a.confirmation_tag(&[3; 32]).unwrap();
+        welcomed.check_confirmation_tag(&[3; 32], &tag).unwrap();
+        assert!(b.check_confirmation_tag(&[3; 32], &tag).is_err());
         assert_eq!(format!("{a:?}"), "EpochSecrets(..)");
     }
 

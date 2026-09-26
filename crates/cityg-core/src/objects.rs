@@ -1,4 +1,4 @@
-//! Signed objects of profile v0.4-draft (docs/specs-v0.4-draft.md section 6).
+//! Signed requests (docs/specs.md section 6).
 //!
 //! ```text
 //! Invite         := ["city-g/invite/v4", gid, invite_pk, expires_at_ms, max_uses,
@@ -43,7 +43,7 @@ use ciborium::value::Value;
 use cityg_pqc::SignatureContext;
 use rand_core::CryptoRngCore;
 
-use crate::cbor::{bytes, decode, encode, expect_list, text, uint};
+use crate::cbor::{array, bytes, decode, encode, expect_list, expect_uint, text, uint};
 use crate::codec::{Signed, open_signed, open_unsigned, sign_fields};
 use crate::crypto::{Digest, h, h_l, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
@@ -575,7 +575,7 @@ pub struct Eviction {
 impl Eviction {
     /// A new eviction.
     pub fn new(gid: &Digest, target: Occupancy, policy_hash: &Digest) -> CoreResult<Self> {
-        let encoded = encode(&crate::cbor::array(vec![
+        let encoded = encode(&array(vec![
             text(EVICTION_LABEL),
             bytes(gid),
             target.value(),
@@ -673,7 +673,7 @@ impl GroupPolicy {
         };
         let max_idle_epochs = fields
             .optional()?
-            .map(|value| crate::cbor::expect_uint(&value, "group policy"))
+            .map(|value| expect_uint(&value, "group policy"))
             .transpose()?;
         Ok(Self {
             gid,

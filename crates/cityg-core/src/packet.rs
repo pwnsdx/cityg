@@ -1,5 +1,5 @@
 //! What members, joiners and returning members download
-//! (docs/specs-v0.4-draft.md section 13).
+//! (docs/specs.md section 13).
 //!
 //! * A [`Packet`] per member and window (E-13): the seal header, the
 //!   confirmation tag, the registry roots, and the steps of the member's
@@ -41,10 +41,10 @@ pub struct RegistryUpdate {
 }
 
 /// Check a change of the registry's policy, from `before` to `policy` and
-/// `open`: a new policy must come with its object, signed by an admin of the
-/// previous epoch, and a group opens or closes only by a new policy. A
-/// member checks this itself, so that no sealer can open a closed group
-/// behind the admins' backs.
+/// `open`: a policy the window sets must come with its object, signed by an
+/// admin of the previous epoch, and a group opens or closes only by a new
+/// policy. A member checks this itself, so that no sealer can open a closed
+/// group behind the admins' backs.
 pub fn check_policy_change(
     gid: &Digest,
     before: &RegistryHeader,
@@ -52,8 +52,8 @@ pub fn check_policy_change(
     open: bool,
     object: Option<&GroupPolicy>,
 ) -> CoreResult<()> {
-    if policy == before.policy {
-        return if open == before.open && object.is_none() {
+    if policy == before.policy && object.is_none() {
+        return if open == before.open {
             Ok(())
         } else {
             Err(CoreError::Invalid(
@@ -226,7 +226,9 @@ pub struct SealLink {
 }
 
 impl SealLink {
-    /// Size in bytes as a deployment would send it.
+    /// Size in bytes as a deployment would send it: like a packet, a chain
+    /// of links carries the admins only when they change, which this
+    /// estimate assumes.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         let proof = self.proof.encode().map_or(0, |encoded| encoded.len());
@@ -422,5 +424,53 @@ impl Entry {
             + steps
             + self.leaf.encoded_len().unwrap_or_default()
             + nodes
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::identity::DeviceIdentity;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+
+    #[test]
+    fn the_admission_mode_changes_only_with_an_admin_policy() {
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let gid = [3; 32];
+        let admin = Occupancy { leaf: 0, since: 0 };
+        let admin_id = DeviceIdentity::from_seed(&[1; 32]);
+        let other = Occupancy { leaf: 1, since: 1 };
+        let other_id = DeviceIdentity::from_seed(&[2; 32]);
+        let before = RegistryHeader {
+            admins: BTreeMap::from([(admin, admin_id.public_key().to_vec())]),
+            devices_root: [0; 32],
+            admissions_root: [0; 32],
+            policy: None,
+            open: false,
+        };
+        check_policy_change(&gid, &before, None, false, None).unwrap();
+        assert!(check_policy_change(&gid, &before, None, true, None).is_err());
+        // A new policy comes with its object, which matches the hash and the
+        // mode and is signed by an admin.
+        let open = GroupPolicy::sign(&gid, true, None, admin, &admin_id, &mut rng).unwrap();
+        let hash = Some(open.hash());
+        assert!(check_policy_change(&gid, &before, hash, true, None).is_err());
+        assert!(check_policy_change(&gid, &before, hash, false, Some(&open)).is_err());
+        check_policy_change(&gid, &before, hash, true, Some(&open)).unwrap();
+        let posing = GroupPolicy::sign(&gid, true, None, other, &other_id, &mut rng).unwrap();
+        assert!(
+            check_policy_change(&gid, &before, Some(posing.hash()), true, Some(&posing)).is_err()
+        );
+        // The policy in force, with or without its object.
+        let after = RegistryHeader {
+            policy: hash,
+            open: true,
+            ..before
+        };
+        check_policy_change(&gid, &after, hash, true, Some(&open)).unwrap();
+        check_policy_change(&gid, &after, hash, true, None).unwrap();
+        assert!(check_policy_change(&gid, &after, hash, false, None).is_err());
     }
 }

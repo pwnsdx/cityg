@@ -1,5 +1,4 @@
-//! Members, joiners and returning members (docs/specs-v0.4-draft.md
-//! sections 12 to 14).
+//! Members, joiners and returning members (docs/specs.md section 12).
 //!
 //! A [`Member`] keeps its leaf key, the secrets of its path, the secrets of
 //! its epoch and the epoch's header: O(log N) state, whatever the size of
@@ -28,7 +27,7 @@ use crate::identity::DeviceIdentity;
 use crate::kem::KemSecret;
 use crate::objects::{
     Admission, CatchUpRequest, Checkpoint, CheckpointContent, GroupPolicy, Invite, JoinRequest,
-    ReEntryRequest, RemoveProposal, Request, UpdateRequest, group_id,
+    ReEntryRequest, RemoveProposal, Request, UpdateRequest, device_id, group_id,
 };
 use crate::packet::{Entry, Packet, SealLink};
 use crate::rekey::{MemberPath, WindowIndex};
@@ -38,10 +37,11 @@ use crate::roles::{
 use crate::schedule::{
     EpochSecrets, GroupContext, confirmed_transcript_hash, external_init, interim_transcript_hash,
 };
-use crate::tree::{Occupancy, Shape};
+use crate::tree::{LeafNode, Occupancy, Shape};
 use crate::welcome::Welcome;
 use crate::window::{
-    EpochHeader, PublicState, Requests, check_districts, check_sealer, district_roots, genesis_tree,
+    EpochHeader, PublicState, Requests, check_districts, check_sealer, district_roots,
+    genesis_tree, joins_of,
 };
 
 /// A removal the delivery service recorded and has not applied yet.
@@ -241,7 +241,7 @@ impl Member {
         if seal.header.hash()? != self.seal_hash {
             return Err(CoreError::Invalid("seal of another epoch"));
         }
-        crate::window::joins_of(seal, commits, requests)
+        joins_of(seal, commits, requests)
     }
 
     /// Follow one window.
@@ -303,9 +303,7 @@ impl Member {
         };
         let commit = commit_secret(root)?;
         let epoch_secrets = EpochSecrets::derive(&init_prev, &commit, &context)?;
-        if epoch_secrets.confirmation_tag(&confirmed)? != packet.tag {
-            return Err(CoreError::Invalid("confirmation tag"));
-        }
+        epoch_secrets.check_confirmation_tag(&confirmed, &packet.tag)?;
         let external_pk = epoch_secrets.external_key()?.public_key();
         if let Some(entrant) = &packet.entrant {
             // The external key is public: the tag alone does not show that the
@@ -385,7 +383,7 @@ impl Member {
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Admission> {
         self.require_admin()?;
-        let device = crate::objects::device_id(&self.header.gid, device_pk)?;
+        let device = device_id(&self.header.gid, device_pk)?;
         Admission::by_admin(
             &self.header.gid,
             &device,
@@ -965,7 +963,7 @@ struct EnterInput<'a> {
 
 fn enter_with(
     input: EnterInput<'_>,
-    expected_leaf: impl Fn(&crate::tree::LeafNode) -> bool,
+    expected_leaf: impl Fn(&LeafNode) -> bool,
 ) -> CoreResult<Member> {
     let entry = input.entry;
     let (last, before) = entry
@@ -1001,9 +999,10 @@ fn enter_with(
     let secrets_of_epoch = EpochSecrets::from_joiner_secret(&joiner)?;
     let seal_hash = last.proof.header.hash()?;
     let confirmed = confirmed_transcript_hash(&previous.interim, &seal_hash)?;
-    if secrets_of_epoch.confirmation_tag(&confirmed)? != last.proof.tag
-        || secrets_of_epoch.external_key()?.public_key() != last.proof.external_pk
-    {
+    secrets_of_epoch
+        .check_confirmation_tag(&confirmed, &last.proof.tag)
+        .map_err(|_| CoreError::Invalid("welcome does not match the seal"))?;
+    if secrets_of_epoch.external_key()?.public_key() != last.proof.external_pk {
         return Err(CoreError::Invalid("welcome does not match the seal"));
     }
     path.set_secrets(secrets);

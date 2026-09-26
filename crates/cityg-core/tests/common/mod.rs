@@ -1,4 +1,4 @@
-//! A small simulation of a v0.4 group: a delivery service, members that
+//! A small simulation of a group: a delivery service, members that
 //! follow every window, and joiners.
 
 #![allow(
@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use cityg_core::ds::{DeliveryService, DsConfig};
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::member::{Joiner, Member, Returning};
-use cityg_core::objects::device_id;
 use cityg_core::packet::SealLink;
 use cityg_core::roles::WindowTask;
 use cityg_core::tree::Occupancy;
@@ -127,7 +126,6 @@ impl Sim {
                 .ds
                 .submit_join(joiner.request().clone(), self.now)
                 .unwrap();
-            let _ = device_id;
             self.joiners.insert(reference, joiner);
             references.push(reference);
         }
@@ -156,25 +154,38 @@ impl Sim {
     /// Run one window with the online members in their roles; every member
     /// follows it and every welcomed joiner enters. Returns the task.
     pub fn run_window(&mut self) -> WindowTask {
+        let task = self.open_window();
+        let epoch = self.complete_window(&task);
+        self.welcome_and_enter(epoch);
+        task
+    }
+
+    /// Open the next window, with members online in its roles.
+    pub fn open_window(&mut self) -> WindowTask {
         self.now += 60_000;
         let task = self.ds.open_window(self.now).unwrap().expect("a window");
         assert!(task.entrant.is_none(), "use run_entrant_window");
+        task
+    }
+
+    /// The committers of the open window `task` commit, its sealer seals,
+    /// and every member follows it. Returns the new epoch.
+    pub fn complete_window(&mut self, task: &WindowTask) -> u64 {
         let (_, requests, _) = self.ds.open_window_data().unwrap();
         let requests = requests.clone();
         for (district, committer) in &task.committers {
             let commit = self.members[committer]
-                .commit_district(self.ds.state(), &task, *district, &requests, &mut self.rng)
+                .commit_district(self.ds.state(), task, *district, &requests, &mut self.rng)
                 .unwrap();
             self.ds.submit_district_commit(commit).unwrap();
         }
         let commits = self.ds.open_commits();
         let seal = self.members[&task.sealer]
-            .seal(self.ds.state(), &task, &commits, &requests, &mut self.rng)
+            .seal(self.ds.state(), task, &commits, &requests, &mut self.rng)
             .unwrap();
         let epoch = self.ds.submit_seal(seal).unwrap();
         self.follow(epoch);
-        self.welcome_and_enter(epoch);
-        task
+        epoch
     }
 
     /// Every member follows the window of `epoch`; members it removed leave.
@@ -228,7 +239,7 @@ impl Sim {
                 )
                 .unwrap();
             for welcome in welcomes {
-                self.ds.submit_welcome(welcome).unwrap();
+                self.ds.submit_welcome(welcomer, welcome).unwrap();
             }
         }
         self.enter_joiners();
@@ -260,8 +271,9 @@ impl Sim {
             self.ds.submit_district_commit(commit).unwrap();
         }
         let epoch = self.ds.submit_seal(sealed.seal).unwrap();
+        let welcomer = sealed.member.occupancy();
         for welcome in sealed.welcomes {
-            self.ds.submit_welcome(welcome).unwrap();
+            self.ds.submit_welcome(welcomer, welcome).unwrap();
         }
         self.absent.remove(&sealed.member.occupancy());
         self.members
