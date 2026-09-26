@@ -3,20 +3,27 @@
 A measurement of the proof a member gives when it cannot open an X-Wing
 wrap (specification, section 7.2). The research notes
 [`problemes-ouverts-2026-09-26.md`](../problemes-ouverts-2026-09-26.md),
-[`preuves-et-mesures-2026-09-26.md`](../preuves-et-mesures-2026-09-26.md)
-and [`litige-x25519-2026-09-26.md`](../litige-x25519-2026-09-26.md) (in
-French) propose that the member convicts a committer that sends a bad wrap
-with a zero-knowledge proof about the wrap, in its context, which reveals
-neither its node key nor what that key protected before. The proof has a
-designated verifier, the server, so it is an interactive
-[QuickSilver](https://eprint.iacr.org/2021/076) proof. None of it is part
-of profile `city-g/v0.4`.
+[`preuves-et-mesures-2026-09-26.md`](../preuves-et-mesures-2026-09-26.md),
+[`litige-x25519-2026-09-26.md`](../litige-x25519-2026-09-26.md) and
+[`litige-sans-mise-en-place-2026-09-26.md`](../litige-sans-mise-en-place-2026-09-26.md)
+(in French) propose that the member convicts a committer that sends a bad
+wrap with a zero-knowledge proof about the wrap, in its context, which
+reveals neither its node key nor what that key protected before. None of it
+is part of profile `city-g/v0.4`.
 
-Two libraries prove it here: [emp-zk](https://github.com/emp-toolkit/emp-zk)
-proves the hashing and the lattice part over authenticated bits, and
-[Diet Mac'n'Cheese](https://github.com/GaloisInc/swanky) proves the X25519
-half in the field of X25519, `F_{2^255-19}`, with conversions to and from
-bits.
+Three libraries prove parts of it here:
+
+* [emp-zk](https://github.com/emp-toolkit/emp-zk) proves the hashing and
+  the lattice part over authenticated bits;
+* [Diet Mac'n'Cheese](https://github.com/GaloisInc/swanky) proves the
+  X25519 half in the field of X25519, `F_{2^255-19}`, with conversions to
+  and from bits;
+* [Longfellow](https://github.com/google/longfellow-zk) proves the X25519
+  half in that field and the hashing in `GF(2^128)`, without any setup.
+
+The first two are interactive [QuickSilver](https://eprint.iacr.org/2021/076)
+proofs, whose designated verifier is the server; Longfellow's proofs, with
+sumcheck and Ligero, are single messages that anyone can verify.
 
 ## What it proves
 
@@ -27,6 +34,8 @@ bits.
 | Both | The two parts above in one proof. | `dispute_zk full` |
 | X25519 | From the 256 bits of `sk_X`, the two Montgomery ladders of RFC 7748 in `F_{2^255-19}`: `pk_X = X25519(sk_X, 9)`, checked against the public key, and `ss_X = X25519(sk_X, ct_X)`, output as 255 canonical bits for the SHA3-256 combiner. 5,048 multiplications in the field, 254 AND gates, and 507 bit conversions padded to 1,024. | [`x25519_ir.py`](x25519_ir.py), `dietmc` |
 | Pricing only | One multiplication modulo `2^255 - 19` over bits; `N` multiplications in emp-zk's field `F_{2^61-1}`; `N` multiplications in `F_{2^255-19}`. | `dispute_zk x25519mul N`, `dispute_zk arith N`, `x25519_ir.py chain` |
+| X25519, without setup | The same statement as a Longfellow circuit over `F_{2^255-19}`: the state after each step of both ladders is a witness, so that each step is checked on its own and the circuit is 9 layers deep. | [`longfellow/x25519_circuit.h`](longfellow/x25519_circuit.h), `x25519_circuit_test` |
+| Hashing, without setup | 26 chained Keccak-f[1600] permutations over `GF(2^128)`, with Longfellow's SHA-3 circuit, which takes the state every 6 rounds as a witness. | [`longfellow/keccak_chain_test.cc`](longfellow/keccak_chain_test.cc) |
 
 The emp-zk parts are measured side by side: the full statement wires the
 Keccak outputs into the lattice part's secret inputs and the BLAKE3 outputs
@@ -149,8 +158,41 @@ sleep 1
 EMP_PORT=5701 ./dispute_zk 2 full; wait
 ```
 
-CI builds neither prover: emp-toolkit and swanky are built from their
-sources.
+### Without setup (Longfellow)
+
+[`longfellow/`](longfellow/) holds a Longfellow test directory: the X25519
+circuit, its witness, their tests and benchmarks against OpenSSL and RFC
+7748, and the chain of Keccak permutations.
+[`longfellow.patch`](longfellow/longfellow.patch) adds the directory to
+Longfellow's build and makes its ML-DSA test use the same Ligero
+parameters as the others (rate 1/7, 132 queries) and print its proof size. Longfellow needs clang, CMake, OpenSSL, zstd, googletest and
+google-benchmark (`libzstd-dev libgtest-dev libbenchmark-dev` on Debian or
+Ubuntu); from the repository's root, with Longfellow outside it:
+
+```bash
+CITYG="$PWD"
+git clone https://github.com/google/longfellow-zk.git "$HOME/longfellow-zk"
+cd "$HOME/longfellow-zk"
+git checkout b762b93b4ebfc67f2df311d96dbca132390d3cd1
+git apply "$CITYG/docs/research/dispute-zk/longfellow/longfellow.patch"
+mkdir lib/circuits/tests/x25519
+cp "$CITYG"/docs/research/dispute-zk/longfellow/{*.h,*.cc,CMakeLists.txt} \
+  lib/circuits/tests/x25519/
+CXX=clang++ cmake -D CMAKE_BUILD_TYPE=Release -S lib -B build
+cmake --build build -j --target x25519_circuit_test keccak_chain_test \
+  ml_dsa_circuit_test verify_test
+cd build/circuits/tests/x25519
+./x25519_circuit_test                       # tests, sizes, a proof
+./x25519_circuit_test --gtest_filter=-* --benchmark_filter=BM_
+./keccak_chain_test --gtest_filter=-* --benchmark_filter=BM_
+```
+
+Each test prints its circuit's size and proof size; the ECDSA test of
+Longfellow (`circuits/ecdsa/verify_test --benchmark_filter=BM_ECDSAZK`)
+calibrates the machine against the published measurements.
+
+CI builds none of the provers: emp-toolkit, swanky and Longfellow are built
+from their sources.
 
 ## Results
 
@@ -215,6 +257,33 @@ phone is the prover, so its uplink carries what the prover sends.
 No phone was measured. The computation is about a second of CPU for each
 prover here; on a mobile link the uplink sets the time.
 
+### X25519 and hashing without setup (Longfellow)
+
+Rate 1/7 and 132 queries, about 109 bits of statistical security by
+Longfellow's own count, as in its ECDSA benchmarks; each proof is one
+message:
+
+| Proof | Field | Terms | Proof | Prover | Verifier |
+| --- | --- | ---: | ---: | ---: | ---: |
+| ECDSA P-256 verification, Longfellow's own (calibration) | `F_p256` | 49,646 | 143,980 B | 52 ms | 30 ms |
+| X25519 half | `F_{2^255-19}` | 35,511 | 162,060 B | 65 ms | 48 ms |
+| One Keccak-f[1600] | `GF(2^128)` | 1,186,043 | 128,936 B | 34 ms | 11 ms |
+| 26 chained Keccak-f[1600], the dispute's hashing | `GF(2^128)` | 30,716,943 | 565,064 B | 0.69 s | 0.27 s |
+| ML-DSA-65 verification, Longfellow's (a lattice anchor) | `F_{8380417^6}` | 8,009,000 | 808,696 B | 3.2 s | 1.85 s |
+
+* `2^255 - 19` has no large power-of-two root of unity, in its field or in
+  its quadratic extension: the Reed-Solomon code uses Longfellow's CRT
+  convolution, as for secp256k1.
+* Calibration: the paper of Longfellow measures its ECDSA prover and
+  verifier at 53.3 and 33.5 ms on a Pixel 9, 38.4 and 24.9 ms on a Xeon
+  Platinum 8581C core; this machine runs the same benchmark in 52 and
+  30 ms. The times above are thus close to what a Pixel 9 would take, as
+  long as the code has not changed much since the paper.
+* The lattice part of ML-KEM is not written for Longfellow. Its anchor, the
+  verification of an ML-DSA-65 signature, computes the same kind of
+  products by a public matrix, NTTs and roundings: in this system the
+  lattice part, not X25519, would dominate.
+
 ### The shortcut, priced
 
 [`x25519_dleq.py`](x25519_dleq.py) prices the shortcut that the notes
@@ -228,6 +297,8 @@ gives, convicts the committer without any proof; it checks this on the four
 points of small order, a point of mixed order, a point of the twist and a
 non-canonical encoding.
 
-A dispute with its X25519 half thus takes 25 MB with these two libraries,
-of which 21 MB are paid before the first gate, whatever the statement: a
-proof without setup, over the two fields, is the next thing to measure.
+A dispute with its X25519 half thus takes 25 MB with the two VOLE-based
+libraries, of which 21 MB are paid before the first gate, whatever the
+statement. Without setup, the X25519 half takes 158 KB and 65 ms, and the
+hashing 552 KB and 0.69 s; what remains to write is the lattice part, in
+its own field, and the links between the fields.

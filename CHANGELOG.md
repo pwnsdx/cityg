@@ -234,6 +234,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     subgroup convicts the committer without any proof;
   - the next step: a proof without setup over two fields, with sumcheck
     and Ligero, as Longfellow's.
+- A wrap dispute without setup, in
+  [`docs/research/litige-sans-mise-en-place-2026-09-26.md`](docs/research/litige-sans-mise-en-place-2026-09-26.md)
+  (in French), with Longfellow (sumcheck and Ligero), whose proofs are
+  single messages anyone can verify:
+  - the X25519 half as a Longfellow circuit over the field of X25519, in
+    [`docs/research/dispute-zk/longfellow/`](docs/research/dispute-zk/longfellow/),
+    checked against OpenSSL and RFC 7748: 158 KB, proved in 65 ms and
+    verified in 48 ms, instead of 23 MB and 178 flights with Diet
+    Mac'n'Cheese;
+  - the 26 Keccak-f permutations of the dispute over GF(2^128): 552 KB,
+    0.69 s;
+  - this machine runs Longfellow's ECDSA benchmark in the time the paper
+    measured on a Pixel 9, so these times are close to a Pixel 9's;
+  - the lattice part of ML-KEM is not written; its anchor, an ML-DSA-65
+    verification, takes 3.2 s and 790 KB, so it would dominate.
 
 ## [0.4.0] — initial version
 

@@ -362,7 +362,7 @@ Le coût reste de quelques microsecondes par fenêtre. La v0.4 garde BLAKE3 et l
 | Problème | État | Ce qui reste |
 | --- | --- | --- |
 | 1. Preuve calculatoire | 21 modèles, dont l'authentification ; plan de preuve de l'arbre écrit ; voie de l'oracle aléatoire retenue | Écrire la preuve de l'arbre ; les initiés |
-| 2. Preuves de litige | Mesuré : hors X25519, 2 Mo et moins d'une seconde ; X25519 dans son corps depuis (note [litige X25519](litige-x25519-2026-09-26.md)), 23 Mo | Une preuve sans mise en place ; mesurer sur téléphone |
+| 2. Preuves de litige | Mesuré : hors X25519, 2 Mo et moins d'une seconde ; X25519 dans son corps depuis (note [litige X25519](litige-x25519-2026-09-26.md)), 23 Mo ; sans mise en place (note [litige sans mise en place](litige-sans-mise-en-place-2026-09-26.md)), X25519 en 158 Ko et le hachage en 552 Ko | La partie réseau sans mise en place ; mesurer sur téléphone |
 | 3. Bifurcations | Quorum prouvé dans le modèle calculatoire | La confiance dans les témoins |
 | 4. Standards | Recommandation : `Extract` en HKDF-SHA-384 | La décision du mainteneur ; FN-DSA final |
 | 5. Cartes d'émetteur | Inchangé | Mesurer sur des traces |

@@ -122,9 +122,12 @@ We are especially interested in:
   measures the whole statement with VOLE-based proofs (2 MB without the
   X25519 half, 23 MB with it, most of it the setup of the field of X25519,
   see
-  [`docs/research/litige-x25519-2026-09-26.md`](docs/research/litige-x25519-2026-09-26.md));
-  the next step is a proof over two fields with sumcheck and Ligero, then a
-  measurement on a phone.
+  [`docs/research/litige-x25519-2026-09-26.md`](docs/research/litige-x25519-2026-09-26.md)),
+  and, without setup, the X25519 half and the hashing with Longfellow (158
+  and 552 KB, see
+  [`docs/research/litige-sans-mise-en-place-2026-09-26.md`](docs/research/litige-sans-mise-en-place-2026-09-26.md));
+  what remains is the lattice part of ML-KEM in its own field, the links
+  between the fields, and a measurement on a phone.
 
 ## Review
 
