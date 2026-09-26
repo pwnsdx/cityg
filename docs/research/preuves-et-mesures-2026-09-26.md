@@ -316,6 +316,9 @@ Côté symbolique, 18 + 17 + 34 scénarios ProVerif instancient le prédicat de 
 
 ### 4.5 Ce qui reste à écrire
 
+La note [preuve de l'arbre](preuve-arbre-2026-09-26.md) fait depuis le point 1, rend le prédicat exécutable, esquisse le point 2 pas à pas et ajoute les lemmes de la règle des taches et de la guérison. L'argument adaptatif du point 2 reste le gros du travail.
+
+
 1. **Le jeu et le prédicat de sûreté.** On les calque sur le prédicat *can-traverse* d'ETK, en y ajoutant les taches, les fenêtres à plusieurs committers, les entrants et les sauts.
 2. **La preuve hybride dans le modèle de l'oracle aléatoire.** On suit TTKEM : on range les secrets de nœud par ordre de création, on devine le chemin du défi, puis on remplace les secrets partagés des enveloppes un à un, sous IND-CCA2. Chaque lemme de la section 4.4 justifie un pas.
 3. **L'authentification** repose sur trois hypothèses :

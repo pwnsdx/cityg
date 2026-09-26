@@ -110,11 +110,10 @@ We are especially interested in:
 - a specification and an implementation of the îlots of
   [`docs/research/ilots-2026-09-26.md`](docs/research/ilots-2026-09-26.md),
   and an analysis of a multi-recipient KEM for their top;
-- a computational proof of the whole tree under adaptive corruptions,
-  with random oracles, following the plan of
-  [`docs/research/preuves-et-mesures-2026-09-26.md`](docs/research/preuves-et-mesures-2026-09-26.md)
-  (section 4), whose lemmas are the fixed configurations of
-  [`docs/research/formal-computational/`](docs/research/formal-computational/README.md);
+- the adaptive argument of the proof of the whole tree, with random
+  oracles: the game, the safety predicate and the steps, each with its
+  mechanized lemma, are in
+  [`docs/research/preuve-arbre-2026-09-26.md`](docs/research/preuve-arbre-2026-09-26.md);
   and an analysis of BLAKE3's keyed mode as a dual PRF;
 - the X25519 half of the zero-knowledge proof that an X-Wing wrap does not
   open in its context, for the disputes proposed in

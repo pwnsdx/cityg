@@ -10,14 +10,20 @@ it has missed one window, the window an entrant seals alone, the relays
 inside an îlot, the city maintained above the îlots, and the hedge of fresh
 node secrets. Two authentication properties follow: a relay cannot make a
 member accept another window secret than the sealed one, and witnesses that
-countersign checkpoints stop a fork while one of them lies. A last pair
-bears on profile `city-g/v0.4` itself: a catch-up signed with a stolen
-device key, and the fix, which the profile now has. The set is the first step of the first open problem
-of the note [`problemes-ouverts-2026-09-26.md`](../problemes-ouverts-2026-09-26.md),
+countersign checkpoints stop a fork while one of them lies. The last models
+bear on profile `city-g/v0.4` itself: a catch-up signed with a stolen
+device key and its fix, which the profile now has, the taint rule, and the
+healing of a leaked member by its update.
+
+The set is the first step of the first open problem of the note
+[`problemes-ouverts-2026-09-26.md`](../problemes-ouverts-2026-09-26.md),
 continued in [`preuves-et-mesures-2026-09-26.md`](../preuves-et-mesures-2026-09-26.md),
-which proposes that fix. The profile's own model, symbolic, is in
-[`docs/formal/`](../../formal/README.md); the symbolic counterparts of these
-models are in [`../formal-parity/`](../formal-parity/README.md).
+which proposed the fix, and in
+[`preuve-arbre-2026-09-26.md`](../preuve-arbre-2026-09-26.md), whose sketch
+of a proof of the whole tree takes these models as its lemmas. The
+profile's own model, symbolic, is in [`docs/formal/`](../../formal/README.md);
+the symbolic counterparts of the research models are in
+[`../formal-parity/`](../formal-parity/README.md).
 
 ## Running it
 
@@ -30,7 +36,7 @@ docs/research/formal-computational/run.sh /path/to/cryptoverif
 ```
 
 `run.sh` runs every model and compares each verdict with the expected one,
-in about 20 seconds. CryptoVerif's library `default.ocvl` must sit next to
+in about 25 seconds. CryptoVerif's library `default.ocvl` must sit next to
 its executable, as it does after `./build`. A single model runs with
 `cryptoverif -lib /path/to/default -lib dualprf <model>.ocv` from this
 directory.
@@ -84,12 +90,18 @@ without it.
 | [`witness_quorum_two_of_four.ocv`](witness_quorum_two_of_four.ocv) | A quorum of 2 out of 4, with one dishonest witness. | Not proved; the fork exists: two checkpoints, each signed by one honest witness and the dishonest one. |
 | [`catch_up_leaf_bound.ocv`](catch_up_leaf_bound.ocv) | The adversary holds M's device key, not its state, and has catch-ups of M welcomed with init keys of its own. The welcome key is `Extract(ss_init, ss_leaf)`: the welcomer also encapsulates to M's current leaf key, with which M decapsulates the adversary's encapsulations. | Proved: the joiner secret of epoch 2 stays secret, through the half of the dual PRF keyed by `ss_leaf`. |
 | [`catch_up_init_only.ocv`](catch_up_init_only.ocv) | The former rule of v0.4: a welcome key from the init key's shared secret alone. | Not proved; the attack exists (`formal-parity/catch_up_device_key.pv`). |
+| [`taint.ocv`](taint.ocv) | The taint rule: M, a malicious committer, drew and kept the secret of d1, a node off its path, and knows everything of epoch 1, the init secret included. Window 2 removes M, re-keys its path, re-keys d1 because M tainted it, and wraps a fresh root to both new district keys. | Proved: the message secret of epoch 2 stays secret. |
+| [`taint_without_rule.ocv`](taint_without_rule.ocv) | Without the taint rule: window 2 re-keys only M's path, and the root is wrapped to d1's key that M set. | Not proved; the attack exists (`docs/formal/taint_without_rule.pv`). |
+| [`post_compromise.ocv`](post_compromise.ocv) | The same tree, M honest but leaked while it committed d1; in window 2, M updates to a leaf key the adversary does not get. | Proved: epoch 2 stays secret. |
+| [`post_compromise_without_update.ocv`](post_compromise_without_update.ocv) | M does not update: its district is wrapped to its old leaf key. | Not proved. |
 
 The three city models are the computational counterparts of
 `ilot_city_maintained.pv`, `ilot_city_stale.pv` and `ilot_city_sticky.pv`,
-and reach the same verdicts; `relay_tag.ocv` is that of the tag check of
-`ilot_relay.pv`, and the two catch-up models those of
-`catch_up_leaf_bound.pv` and `catch_up_device_key.pv`. The quorum of the
+and reach the same verdicts. `relay_tag.ocv` is that of the tag check of
+`ilot_relay.pv`; the two catch-up models are those of
+`catch_up_leaf_bound.pv` and `catch_up_device_key.pv`; the taint and
+post-compromise models are those of `taint.pv`, `taint_without_rule.pv` and
+`post_compromise.pv`, in the profile's own model. The quorum of the
 witness models is the one of the note on open problems: with `n = 3f + 1`
 witnesses and `k = 2f + 1` signatures, `f` dishonest witnesses cannot fork
 the group, and `f + 1` can.
@@ -99,9 +111,10 @@ the group, and `f + 1` can.
 * **Small configurations.** Each model fixes the number of windows, nodes
   and members. The tree of a real group, with adaptive corruptions, needs
   a hybrid argument over the whole tree, with random oracles at a million
-  members; these models are its lemmas (plan in
-  [`preuves-et-mesures-2026-09-26.md`](../preuves-et-mesures-2026-09-26.md),
-  section 4).
+  members; these models are its lemmas, step by step (sketch in
+  [`preuve-arbre-2026-09-26.md`](../preuve-arbre-2026-09-26.md), whose
+  safety predicate [`../safety_predicate.py`](../safety_predicate.py)
+  checks against these verdicts).
 * **Authentication in part.** Two properties are authentication ones:
   the relay's tag, which rests on collision resistance since the relay
   knows every key of the chain, and the witnesses' quorum. The signatures

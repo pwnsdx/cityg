@@ -37,6 +37,10 @@ EXPECTED=(
   "witness_quorum_two_of_four: unproved"
   "catch_up_leaf_bound: proved"
   "catch_up_init_only: unproved"
+  "taint: proved"
+  "taint_without_rule: unproved"
+  "post_compromise: proved"
+  "post_compromise_without_update: unproved"
 )
 
 for line in "${EXPECTED[@]}"; do

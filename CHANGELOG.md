@@ -202,6 +202,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The computational model gains 7 models (21 in all), the parity symbolic
   model 2 scenarios (34 in all), and the cost model a report on the loss
   of adaptive proofs.
+- The proof of the whole tree, in
+  [`docs/research/preuve-arbre-2026-09-26.md`](docs/research/preuve-arbre-2026-09-26.md)
+  (in French): the security game of City-G under adaptive corruptions, a
+  CGKA by windows; its safety predicate over the graph of secrets, made
+  executable in
+  [`docs/research/safety_predicate.py`](docs/research/safety_predicate.py)
+  and checked against the verdicts of 24 formal models; the target theorem
+  with random oracles; and a sketch of the proof whose every step has a
+  mechanized lemma. The adaptive argument itself remains to be written.
+- The computational model gains the taint rule and the healing of a
+  leaked member by its update, with their controls (25 models in all).
 
 ## [0.4.0] — initial version
 
