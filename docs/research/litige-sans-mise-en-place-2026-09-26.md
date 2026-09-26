@@ -21,6 +21,7 @@
    - Son repère, la vérification d'une signature ML-DSA-65 dans Longfellow, se prouve en 3,2 s et se vérifie en 1,85 s ; la preuve fait 790 Ko.
    - Le circuit de ML-KEM reste à écrire. X25519, qui dominait avec les VOLE, devient ici le plus petit poste.
 5. **Le litige entier, projeté** : de l'ordre de 1,5 Mo et de 2 à 4 s sur un Pixel 9, en un seul message vérifiable par tous. Avec les VOLE, il fallait 25 Mo et près de 190 vols.
+   - Mesuré depuis (note [litige entier](litige-entier-2026-09-26.md)), dans le seul corps de X25519 et avec un énoncé révisé : 573 Ko, 1,49 s pour prouver et 0,97 s pour vérifier.
 
 ## 1. X25519 dans son corps, sans mise en place
 
@@ -80,6 +81,7 @@ Le circuit de ML-KEM-768 n'est pas écrit pour Longfellow. Son repère est la v�
 - **Le même genre de calcul.** Elle multiplie par une matrice publique dans le domaine de la NTT, vérifie des NTT et des arrondis, et hache avec SHAKE256, comme la décapsulation et le rechiffrement de ML-KEM.
 - **Un corps où l'arithmétique modulo `q` est native** : une extension de degré 6 du corps de ML-DSA, où `q = 8 380 417`. Pour ML-KEM, `q = 3 329` demanderait une extension de degré 11 ou 12 pour 128 bits. L'autre voie est F_{2^255−19}, avec un contrôle d'intervalle par réduction : 26 108 réductions en tout.
 - **La conséquence.** Dans ce système, la partie réseau coûterait plus que le hachage et X25519 réunis. Avec emp-zk, c'était l'inverse : sur des bits, elle prenait 1,2 Mo et une demi-seconde, et X25519 était hors de portée.
+- **Écrite depuis** (note [litige entier](litige-entier-2026-09-26.md)), elle coûte beaucoup moins que ce repère : chaque relation, vérifiée en un point tiré après l'engagement du témoin, ne demande que 109 000 à 184 000 termes.
 
 ## 4. Le téléphone, par étalonnage
 
@@ -115,7 +117,7 @@ Longfellow publie ses mesures ECDSA sur plusieurs appareils. Le même banc d'ess
 
 | Problème | État | Ce qui reste |
 | --- | --- | --- |
-| 2. Preuves de litige | Sans mise en place : X25519 en 158 Ko et 65 ms, le hachage en 552 Ko et 0,69 s, temps proches d'un Pixel 9 par étalonnage | La partie réseau de ML-KEM dans son corps ; les liens entre corps ; puis le litige entier, mesuré sur un vrai téléphone |
+| 2. Preuves de litige | Sans mise en place : X25519 en 158 Ko et 65 ms, le hachage en 552 Ko et 0,69 s, temps proches d'un Pixel 9 par étalonnage. Depuis (note [litige entier](litige-entier-2026-09-26.md)) : l'énoncé entier de la branche 1 dans un seul corps, en 573 Ko et 1,49 s | La branche 2 ; le taux d'échec du déchiffrement sous la borne de norme ; un vrai téléphone |
 
 L'ordre des problèmes ouverts ne change pas :
 1. la preuve de l'arbre ;

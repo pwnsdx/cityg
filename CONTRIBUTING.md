@@ -125,9 +125,11 @@ We are especially interested in:
   [`docs/research/litige-x25519-2026-09-26.md`](docs/research/litige-x25519-2026-09-26.md)),
   and, without setup, the X25519 half and the hashing with Longfellow (158
   and 552 KB, see
-  [`docs/research/litige-sans-mise-en-place-2026-09-26.md`](docs/research/litige-sans-mise-en-place-2026-09-26.md));
-  what remains is the lattice part of ML-KEM in its own field, the links
-  between the fields, and a measurement on a phone.
+  [`docs/research/litige-sans-mise-en-place-2026-09-26.md`](docs/research/litige-sans-mise-en-place-2026-09-26.md)),
+  then the whole first branch in one field (573 KB, 1.49 s to prove, see
+  [`docs/research/litige-entier-2026-09-26.md`](docs/research/litige-entier-2026-09-26.md));
+  what remains is the second branch, the decryption failure rate of keys
+  of bounded norm, and a measurement on a phone.
 
 ## Review
 

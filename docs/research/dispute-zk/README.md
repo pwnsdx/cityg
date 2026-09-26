@@ -4,8 +4,9 @@ A measurement of the proof a member gives when it cannot open an X-Wing
 wrap (specification, section 7.2). The research notes
 [`problemes-ouverts-2026-09-26.md`](../problemes-ouverts-2026-09-26.md),
 [`preuves-et-mesures-2026-09-26.md`](../preuves-et-mesures-2026-09-26.md),
-[`litige-x25519-2026-09-26.md`](../litige-x25519-2026-09-26.md) and
+[`litige-x25519-2026-09-26.md`](../litige-x25519-2026-09-26.md),
 [`litige-sans-mise-en-place-2026-09-26.md`](../litige-sans-mise-en-place-2026-09-26.md)
+and [`litige-entier-2026-09-26.md`](../litige-entier-2026-09-26.md)
 (in French) propose that the member convicts a committer that sends a bad
 wrap with a zero-knowledge proof about the wrap, in its context, which
 reveals neither its node key nor what that key protected before. None of it
@@ -18,8 +19,10 @@ Three libraries prove parts of it here:
 * [Diet Mac'n'Cheese](https://github.com/GaloisInc/swanky) proves the
   X25519 half in the field of X25519, `F_{2^255-19}`, with conversions to
   and from bits;
-* [Longfellow](https://github.com/google/longfellow-zk) proves the X25519
-  half in that field and the hashing in `GF(2^128)`, without any setup.
+* [Longfellow](https://github.com/google/longfellow-zk) proves, without any
+  setup, the X25519 half in that field and the hashing in `GF(2^128)`, then
+  the whole statement of a dispute in `F_{2^255-19}` alone: ML-KEM's
+  lattice part, X25519, the hashing, `ExpandLabel` and ChaCha20.
 
 The first two are interactive [QuickSilver](https://eprint.iacr.org/2021/076)
 proofs, whose designated verifier is the server; Longfellow's proofs, with
@@ -35,7 +38,9 @@ sumcheck and Ligero, are single messages that anyone can verify.
 | X25519 | From the 256 bits of `sk_X`, the two Montgomery ladders of RFC 7748 in `F_{2^255-19}`: `pk_X = X25519(sk_X, 9)`, checked against the public key, and `ss_X = X25519(sk_X, ct_X)`, output as 255 canonical bits for the SHA3-256 combiner. 5,048 multiplications in the field, 254 AND gates, and 507 bit conversions padded to 1,024. | [`x25519_ir.py`](x25519_ir.py), `dietmc` |
 | Pricing only | One multiplication modulo `2^255 - 19` over bits; `N` multiplications in emp-zk's field `F_{2^61-1}`; `N` multiplications in `F_{2^255-19}`. | `dispute_zk x25519mul N`, `dispute_zk arith N`, `x25519_ir.py chain` |
 | X25519, without setup | The same statement as a Longfellow circuit over `F_{2^255-19}`: the state after each step of both ladders is a witness, so that each step is checked on its own and the circuit is 9 layers deep. | [`longfellow/x25519_circuit.h`](longfellow/x25519_circuit.h), `x25519_circuit_test` |
-| Hashing, without setup | 26 chained Keccak-f[1600] permutations over `GF(2^128)`, with Longfellow's SHA-3 circuit, which takes the state every 6 rounds as a witness. | [`longfellow/keccak_chain_test.cc`](longfellow/keccak_chain_test.cc) |
+| Hashing, without setup | 26 chained Keccak-f[1600] permutations over `GF(2^128)`, with Longfellow's SHA-3 circuit, which takes the state every 6 rounds as a witness; one permutation over `F_{2^255-19}`. | [`longfellow/keccak_chain_test.cc`](longfellow/keccak_chain_test.cc) |
+| Lattice, without setup | ML-KEM-768 in the normal domain over `F_{2^255-19}`: the key binding `t = A s + e` with `s`, `e` small and of bounded norm, the decryption, and the re-encryption, each an identity between polynomials checked at a point `rho` that the verifier draws after the prover has committed to the witness; the prover supplies each quotient by `q`, each offset of `Compress` and each product's high half. | [`longfellow/lattice_circuit.h`](longfellow/lattice_circuit.h), `dispute_test` |
+| The whole dispute, without setup | Three statements over `F_{2^255-19}`, in one circuit each. *The wrap does not open*: the lattice part's key binding and decryption, `G`, X25519, the combiner, `ExpandLabel` (BLAKE3) and ChaCha20's first block, whose first 32 bytes, the wrap's Poly1305 key, are revealed so that the verifier computes the tag itself. *The re-encryption differs*: the re-encryption with the noise of the seven PRF calls differs from the ciphertext in a coefficient that the proof does not reveal. *The whole decapsulation*, as a reference: the first statement and a re-encryption that gives the ciphertext back. The member's seed stays out of every statement. | [`longfellow/dispute_circuit.h`](longfellow/dispute_circuit.h), `dispute_test` |
 
 The emp-zk parts are measured side by side: the full statement wires the
 Keccak outputs into the lattice part's secret inputs and the BLAKE3 outputs
@@ -162,7 +167,11 @@ EMP_PORT=5701 ./dispute_zk 2 full; wait
 
 [`longfellow/`](longfellow/) holds a Longfellow test directory: the X25519
 circuit, its witness, their tests and benchmarks against OpenSSL and RFC
-7748, and the chain of Keccak permutations.
+7748; the chain of Keccak permutations; a reference of ML-KEM-768 and
+X-Wing, checked against the X-Wing draft's vectors; the lattice part, the
+whole dispute and its end (BLAKE3 and ChaCha20, written once over a clear
+backend that records the witness and a circuit backend that checks it),
+with their witnesses, tests and benchmarks.
 [`longfellow.patch`](longfellow/longfellow.patch) adds the directory to
 Longfellow's build and makes its ML-DSA test use the same Ligero
 parameters as the others (rate 1/7, 132 queries) and print its proof size. Longfellow needs clang, CMake, OpenSSL, zstd, googletest and
@@ -180,16 +189,28 @@ cp "$CITYG"/docs/research/dispute-zk/longfellow/{*.h,*.cc,CMakeLists.txt} \
   lib/circuits/tests/x25519/
 CXX=clang++ cmake -D CMAKE_BUILD_TYPE=Release -S lib -B build
 cmake --build build -j --target x25519_circuit_test keccak_chain_test \
-  ml_dsa_circuit_test verify_test
+  dispute_test ml_dsa_circuit_test verify_test
 cd build/circuits/tests/x25519
 ./x25519_circuit_test                       # tests, sizes, a proof
 ./x25519_circuit_test --gtest_filter=-* --benchmark_filter=BM_
 ./keccak_chain_test --gtest_filter=-* --benchmark_filter=BM_
+./dispute_test                              # the whole dispute
+./dispute_test --gtest_filter=-* --benchmark_filter=BM_Dispute
+DISPUTE_MODE=0 ./dispute_test --gtest_also_run_disabled_tests \
+  --gtest_filter='Dispute.DISABLED_*'       # row lengths, memory
 ```
 
 Each test prints its circuit's size and proof size; the ECDSA test of
 Longfellow (`circuits/ecdsa/verify_test --benchmark_filter=BM_ECDSAZK`)
-calibrates the machine against the published measurements.
+calibrates the machine against the published measurements. The wrap that
+`dispute_test` checks the key schedule against was made by `cityg-core`;
+[`../bench/src/bin/wrap_vector.rs`](../bench/src/bin/wrap_vector.rs) prints
+it again:
+
+```bash
+cargo run --release --manifest-path docs/research/bench/Cargo.toml \
+  --bin wrap_vector
+```
 
 CI builds none of the provers: emp-toolkit, swanky and Longfellow are built
 from their sources.
@@ -279,10 +300,47 @@ message:
   Platinum 8581C core; this machine runs the same benchmark in 52 and
   30 ms. The times above are thus close to what a Pixel 9 would take, as
   long as the code has not changed much since the paper.
-* The lattice part of ML-KEM is not written for Longfellow. Its anchor, the
-  verification of an ML-DSA-65 signature, computes the same kind of
-  products by a public matrix, NTTs and roundings: in this system the
-  lattice part, not X25519, would dominate.
+* The anchor of the lattice part, the verification of an ML-DSA-65
+  signature, computes the same kind of products by a public matrix, NTTs
+  and roundings. Written for Longfellow and checked at a point, ML-KEM's
+  lattice part turns out much cheaper (next section).
+
+### The whole dispute in one field (Longfellow)
+
+The same parameters, one core, the mean of three runs:
+
+| Statement | Keccak-f | Inputs (public) | Terms | Proof | Prover | Verifier |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| The wrap does not open | 2 | 87,844 (1,181) | 1,716,241 | 586,284 B | 1.49 s | 0.97 s |
+| The re-encryption differs | 8 | 100,398 (1,555) | 4,161,071 | 629,324 B | 2.56 s | 1.55 s |
+| The whole decapsulation (reference) | 9 | 150,564 (2,209) | 5,227,015 | 753,836 B | 3.39 s | 2.01 s |
+| Lattice part alone: key binding and decryption | 0 | 28,442 (275) | 108,916 | 332,588 B | | |
+| Lattice part alone, with the re-encryption | 0 | 46,362 (1,303) | 184,232 | 411,948 B | | |
+| One Keccak-f[1600] over `F_{2^255-19}` | 1 | 8,001 | 532,756 | 290,668 B | 0.35 s | 0.20 s |
+
+* Checked at a point, the lattice part takes 8 to 9 times fewer terms than
+  its dense negacyclic products (about 1.57 million); its quotients by `q`
+  now dominate it. Alone, it takes as inputs the 7,168 bits of the PRF,
+  which the dispute gets from Keccak. A witness forged for a point known in advance passes at
+  that point and fails elsewhere: the point must come after the commitment.
+* `ExpandLabel` and ChaCha20 add 50,312 witness elements and 550,447 terms
+  to the first statement. The words that only xors change are witnessed
+  after each round: without that, the circuit is 60 layers deep instead of
+  38, and the copies between layers add 0.84 million terms.
+* The witness takes 2 ms. For the first statement, the prover spends
+  0.73 s on Ligero's commitment, 0.55 s on sumcheck and 0.14 s on Ligero's
+  proof; the verifier about 0.3 s on sumcheck and 0.66 s on Ligero, whose
+  Reed-Solomon code goes through the CRT convolution. Ligero's row length
+  does not help: from 4,096 to 32,768 elements a row, the verifier takes
+  0.92 to 1.16 s, and the default (16,384) gives the smallest proof.
+* The circuit does not depend on the dispute: it compiles once (2.5 s and
+  419 MB for the first statement) and can ship serialized, as Longfellow's
+  mdoc circuits do. With it loaded, the prover peaks at 315 MB and the
+  verifier at 289 MB; the two other statements need 585 to 740 MB.
+* The references agree with the three vectors of the X-Wing draft and with
+  a wrap made by `cityg-core`, whose seal OpenSSL redoes; the altered wrap
+  is convicted by the tag that the verifier computes from the revealed
+  Poly1305 key, and the original is not.
 
 ### The shortcut, priced
 
@@ -297,8 +355,11 @@ gives, convicts the committer without any proof; it checks this on the four
 points of small order, a point of mixed order, a point of the twist and a
 non-canonical encoding.
 
-A dispute with its X25519 half thus takes 25 MB with the two VOLE-based
-libraries, of which 21 MB are paid before the first gate, whatever the
-statement. Without setup, the X25519 half takes 158 KB and 65 ms, and the
-hashing 552 KB and 0.69 s; what remains to write is the lattice part, in
-its own field, and the links between the fields.
+A dispute with its X25519 half thus takes 25 MB and nearly 190 flights with
+the two VOLE-based libraries, of which 21 MB are paid before the first
+gate, whatever the statement. Without setup and in one field, the whole
+statement of a dispute's first branch takes 573 KB in one message, which
+anyone can verify: 1.49 s to prove and 0.97 s to verify, on a machine that
+runs Longfellow's ECDSA benchmark at a Pixel 9's speed. What remains is the
+second branch (the wrap opens to a wrong secret), the decryption failure
+rate of keys of bounded norm, and a measurement on a phone.

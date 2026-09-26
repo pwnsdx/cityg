@@ -249,6 +249,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     measured on a Pixel 9, so these times are close to a Pixel 9's;
   - the lattice part of ML-KEM is not written; its anchor, an ML-DSA-65
     verification, takes 3.2 s and 790 KB, so it would dominate.
+- The whole wrap dispute without setup, in
+  [`docs/research/litige-entier-2026-09-26.md`](docs/research/litige-entier-2026-09-26.md)
+  (in French), with Longfellow over the field of X25519 alone:
+  - ML-KEM-768's lattice part as polynomial identities checked at a point
+    drawn after the commitment: 109,000 to 184,000 terms instead of
+    1.57 million for dense products; a witness forged for a known point
+    fails elsewhere;
+  - a revised statement: the member's seed stays out (a norm bound keeps
+    the key close to honest ones), and so does the re-encryption check in
+    the usual case, 2 Keccak permutations instead of 26; a second
+    statement convicts a ciphertext whose re-encryption fails without
+    revealing which coefficient differs;
+  - the whole first branch, `ExpandLabel` (BLAKE3) and ChaCha20 included,
+    reveals only the wrap's Poly1305 key: 573 KB, 1.49 s to prove and
+    0.97 s to verify, at a Pixel 9's speed; the second statement takes
+    615 KB and 2.56 s;
+  - a C++ reference of ML-KEM-768 and X-Wing, checked against the X-Wing
+    draft's vectors, and a wrap made by `cityg-core`
+    ([`docs/research/bench/src/bin/wrap_vector.rs`](docs/research/bench/src/bin/wrap_vector.rs)),
+    whose altered version the proof convicts, in
+    [`docs/research/dispute-zk/longfellow/`](docs/research/dispute-zk/longfellow/).
 
 ## [0.4.0] — initial version
 
