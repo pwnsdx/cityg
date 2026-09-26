@@ -20,10 +20,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Extract` to be a dual PRF, pseudorandom when keyed by its input keying
   material under a known salt: post-compromise security, external inits and
   the exclusion of a removed member that missed a window rest on it.
-- The specification (section 2.2) and the README's limits say what a stolen
-  device key does through catch-ups: it gets the epoch of every window it
-  asks for, and the tree stays as it is, so nobody notices; its other
-  requests change the member's leaf, which the member notices.
+
+### Security
+
+- A catch-up's welcome is sealed to the member's leaf key as well as to the
+  request's one-time init key (specification, section 11). A catch-up is
+  signed with the device key alone and changes nothing in the tree:
+  welcomed to the init key alone, a device key stolen without the member's
+  state obtained the epoch of every window it asked for, and nobody could
+  see it. The member keeps its leaf key through a jump, or opens the welcome
+  with its pending leaf key if a window it missed applied its update.
+  Breaking: the welcome gains a field, `leaf_ciphertext` (`null` for joins
+  and re-entries), and its context the hash of the leaf key, so welcomes of
+  0.4.0 do not decode. A jump's welcome grows by 1,120 bytes.
+- A member whose packet names a leaf key it neither holds nor requested
+  gets `LEAF_TAKEN`: an update or a re-entry was signed with its device key
+  without it, and it treats the key as stolen (specification, section
+  12.2).
+- The symbolic model gains the stolen-key catch-up and the rule it replaces
+  (18 scenarios), and the scenario tests a thief that asks for a jump or
+  changes a member's leaf.
 
 ### Research
 
@@ -176,8 +192,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - a weakness of profile `city-g/v0.4`: whoever holds a member's device
     key, not its state, has catch-ups welcomed with init keys of its own
     and reads every window, unseen, like the external operations of MLS
-    that ETK (Eurocrypt 2026) analyses; the proposed fix, not applied,
-    also encapsulates a catch-up's welcome to the member's leaf key;
+    that ETK (Eurocrypt 2026) analyses; the fix, applied since (see
+    Security), also encapsulates a catch-up's welcome to the member's leaf
+    key;
   - the plan of a proof of the whole tree under adaptive corruptions, with
     random oracles, since the standard-model loss is beyond any security
     level at a million members; the recommendation to make `Extract`

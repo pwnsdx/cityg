@@ -48,8 +48,10 @@ window; the scenarios call its seal the city commit.
 | [`external_tag_only.pv`](external_tag_only.pv) | The delivery service forges a window "sealed by an entrant" for A, who checks only the confirmation tag. | Attack: the external key is public, so the service computes the tag. |
 | [`external_checked.pv`](external_checked.pv) | The same forgery, with a device the service controls, for a member that also checks the entrant's admission and its signature of the seal. | Proved. |
 | [`open_group.pv`](open_group.pv) | An open group: a join needs no admission. A accepts a window sealed by any new device that signed it, whose key the new epoch binds for every member to see. B sends signed messages. | Attack, as expected: the delivery service joins a device of its own and reads what A sends (an open group gives no confidentiality against whoever joins it). Proved: it cannot make A accept a message as B's. |
+| [`catch_up_stolen_key.pv`](catch_up_stolen_key.pv) | The attacker holds M's device key, not M's state. A welcomes any catch-up of M signed with that key for the epoch; the welcome is sealed to the request's init key and to M's leaf key, which A takes from the tree. The attacker records a catch-up with an init key of its own. M jumps too. | Proved: the message A sends in epoch 2 stays secret. Reachable, as intended: M's own jump. |
+| [`catch_up_init_only.pv`](catch_up_init_only.pv) | The same catch-ups, welcomed to the request's init key alone. | Attack: the attacker reads epoch 2, and could in every window, without changing the tree. Reachable: M's own jump. |
 
-The results bear on six decisions of the design note:
+The results bear on seven decisions of the design note:
 
 * **Taint rule (E-4).** Removing a member re-keys the nodes it tainted.
   Updating re-keys them too.
@@ -66,6 +68,10 @@ The results bear on six decisions of the design note:
   against the delivery service.
 * **Open groups (E-14).** Without admissions, anyone can join, the delivery
   service included; what it cannot do is speak as a member.
+* **Jumps (E-8).** A catch-up is signed with the device key alone and
+  changes nothing in the tree, so its welcome is sealed to the member's
+  leaf key too: a device key stolen without the member's state does not
+  jump.
 
 ## Abstractions and limits
 

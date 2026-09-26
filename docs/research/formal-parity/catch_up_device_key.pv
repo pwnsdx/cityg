@@ -1,5 +1,5 @@
-(* Scenario CATCH-UP UNDER A STOLEN DEVICE KEY, with the rule of profile
-   city-g/v0.4 (sections 11 and 12.10). The attacker holds M's device key,
+(* Scenario CATCH-UP UNDER A STOLEN DEVICE KEY, with the rule profile
+   city-g/v0.4 had before its fix (sections 11 and 12.10). The attacker holds M's device key,
    not M's state (adversary A6 of the specification). A and M are members of
    epoch 1. In window 2, A welcomes any catch-up of M that M's device key
    signed for epoch 1: the joiner secret of epoch 2, sealed to the request's

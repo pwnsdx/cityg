@@ -54,6 +54,13 @@ pub struct PendingRemoval {
 /// Catch-up requests of a window, by reference.
 pub type CatchUps = HashMap<Digest, CatchUpRequest>;
 
+/// What [`Member::process`] returns for a packet that names a leaf key the
+/// member neither holds nor requested: an update or a re-entry was signed
+/// with its device key without it. The member must treat that key as
+/// stolen, tell its user and propose its own removal (docs/specs.md section
+/// 12.2).
+pub const LEAF_TAKEN: CoreError = CoreError::Unauthorized("leaf key the member did not request");
+
 /// A member of the group.
 pub struct Member {
     identity: DeviceIdentity,
@@ -244,7 +251,8 @@ impl Member {
         joins_of(seal, commits, requests)
     }
 
-    /// Follow one window.
+    /// Follow one window. [`LEAF_TAKEN`] means that someone else changed the
+    /// member's leaf with its device key.
     pub fn process(&mut self, packet: &Packet) -> CoreResult<()> {
         let header = &packet.header;
         if header.gid != self.header.gid
@@ -276,12 +284,9 @@ impl Member {
         let mut path = self.path.clone();
         let mut leaf_changed = false;
         if packet.leaf_key != kem_pk_hash(path.leaf_public_key())? {
-            let pending = self
-                .pending_leaf
-                .as_ref()
-                .ok_or(CoreError::Invalid("packet names another leaf key"))?;
+            let pending = self.pending_leaf.as_ref().ok_or(LEAF_TAKEN)?;
             if packet.leaf_key != kem_pk_hash(&pending.public_key())? {
-                return Err(CoreError::Invalid("packet names another leaf key"));
+                return Err(LEAF_TAKEN);
             }
             path.set_leaf_key(pending.clone());
             leaf_changed = true;
@@ -561,8 +566,10 @@ impl Member {
     /// Seal the welcomes the window owes and assigned to this member (E-6),
     /// once the member follows the window. A join or a re-entry is welcomed
     /// only if it is in a district commit of this member that the seal
-    /// lists; a catch-up only if its member is still in the group and signed
-    /// it for this window.
+    /// lists; a catch-up only if its member is still in the group, with the
+    /// leaf the window did not change, and signed it for this window. A
+    /// catch-up's welcome is sealed to the member's leaf key too, taken from
+    /// the tree, so that its device key alone does not obtain the epoch.
     #[allow(clippy::too_many_arguments)]
     pub fn welcomes(
         &self,
@@ -584,17 +591,26 @@ impl Member {
             .iter()
             .filter(|w| w.welcomer == self.occupancy)
         {
-            let init_key = match welcome.kind {
+            let (init_key, leaf_key) = match welcome.kind {
                 WelcomeKind::CatchUp => {
                     let request = catch_ups
                         .get(&welcome.request)
                         .filter(|request| request.reference() == welcome.request)
                         .ok_or(CoreError::Invalid("missing catch-up request"))?;
-                    let device_pk = state
-                        .device_pk(request.member)
+                    let leaf = state
+                        .tree
+                        .member(request.member)
                         .ok_or(CoreError::Invalid("catch-up of a non-member"))?;
-                    request.verify(&self.header.gid, &seal.header.prev_interim, device_pk)?;
-                    request.init_key.as_slice()
+                    if leaf.updated == self.header.epoch {
+                        return Err(CoreError::Invalid(
+                            "catch-up of a member the window changed",
+                        ));
+                    }
+                    request.verify(&self.header.gid, &seal.header.prev_interim, &leaf.device_pk)?;
+                    (
+                        request.init_key.as_slice(),
+                        Some(leaf.encryption_key.as_slice()),
+                    )
                 }
                 WelcomeKind::Join | WelcomeKind::ReEntry => {
                     let listed = commits.iter().any(|commit| {
@@ -608,13 +624,14 @@ impl Member {
                     if !listed {
                         return Err(CoreError::Invalid("welcome for an entry not committed"));
                     }
-                    match (welcome.kind, requests.get(&welcome.request)) {
+                    let init_key = match (welcome.kind, requests.get(&welcome.request)) {
                         (WelcomeKind::Join, Some(Request::Join(join))) => join.init_key.as_slice(),
                         (WelcomeKind::ReEntry, Some(Request::ReEntry(re_entry))) => {
                             re_entry.init_key.as_slice()
                         }
                         _ => return Err(CoreError::Invalid("missing request to welcome")),
-                    }
+                    };
+                    (init_key, None)
                 }
             };
             welcomes.push(Welcome::seal(
@@ -622,6 +639,7 @@ impl Member {
                 self.header.epoch,
                 &welcome.request,
                 init_key,
+                leaf_key,
                 self.secrets.joiner_secret(),
                 rng,
             )?);
@@ -645,6 +663,9 @@ impl Member {
 
     /// Ask to jump to the present (E-8): a welcome into the window that
     /// follows the epoch whose interim transcript hash is `current_interim`.
+    /// The welcome is sealed to the new init key and to the member's leaf
+    /// key: the current one, or the pending one if a window the member
+    /// missed applied its update.
     pub fn catch_up(
         self,
         current_interim: &Digest,
@@ -661,6 +682,7 @@ impl Member {
         )?;
         let returning = Returning {
             leaf_key: self.path_leaf_key(),
+            pending_leaf: self.pending_leaf,
             identity: self.identity,
             occupancy: self.occupancy,
             init_key,
@@ -689,6 +711,7 @@ impl Member {
             identity: self.identity,
             occupancy: self.occupancy,
             leaf_key,
+            pending_leaf: None,
             init_key,
             request: request.reference(),
             anchor: self.header,
@@ -802,6 +825,7 @@ impl Joiner {
                 identity: self.identity,
                 occupancy,
                 leaf_key: self.leaf_key,
+                jump: false,
                 init_key: &self.init_key,
                 request: self.request.reference(),
                 anchor: &self.anchor,
@@ -853,6 +877,9 @@ pub struct Returning {
     identity: DeviceIdentity,
     occupancy: Occupancy,
     leaf_key: KemSecret,
+    /// For a jump, the leaf key of an update the member requested before it
+    /// left, which a window it missed may have applied.
+    pending_leaf: Option<KemSecret>,
     init_key: KemSecret,
     request: Digest,
     anchor: EpochHeader,
@@ -888,10 +915,10 @@ impl Returning {
         Ok(())
     }
 
-    /// Enter the present with a welcome: a jump (the leaf key is unchanged)
+    /// Enter the present with a welcome: a jump (the leaf key is unchanged,
+    /// or the pending one if a window the member missed applied its update)
     /// or a re-entry a member sealed (the new leaf key).
     pub fn enter(self, entry: &Entry) -> CoreResult<Member> {
-        let expected = self.leaf_key.public_key();
         let re_entry = self.re_entry;
         let entry_epoch = entry
             .links
@@ -900,11 +927,24 @@ impl Returning {
             .proof
             .header
             .epoch;
+        let in_tree = entry
+            .leaf
+            .leaf
+            .as_ref()
+            .map(|leaf| leaf.encryption_key.as_slice());
+        let leaf_key = match self.pending_leaf {
+            Some(pending) if !re_entry && in_tree == Some(pending.public_key().as_slice()) => {
+                pending
+            }
+            _ => self.leaf_key,
+        };
+        let expected = leaf_key.public_key();
         enter_with(
             EnterInput {
                 identity: self.identity,
                 occupancy: self.occupancy,
-                leaf_key: self.leaf_key,
+                leaf_key,
+                jump: !re_entry,
                 init_key: &self.init_key,
                 request: self.request,
                 anchor: &self.anchor,
@@ -955,6 +995,8 @@ struct EnterInput<'a> {
     identity: DeviceIdentity,
     occupancy: Occupancy,
     leaf_key: KemSecret,
+    /// A jump: the welcome is sealed to the leaf key too.
+    jump: bool,
     init_key: &'a KemSecret,
     request: Digest,
     anchor: &'a EpochHeader,
@@ -995,7 +1037,7 @@ fn enter_with(
     {
         return Err(CoreError::Invalid("welcome for another entry"));
     }
-    let joiner = welcome.open(input.init_key)?;
+    let joiner = welcome.open(input.init_key, input.jump.then(|| path.leaf_key()))?;
     let secrets_of_epoch = EpochSecrets::from_joiner_secret(&joiner)?;
     let seal_hash = last.proof.header.hash()?;
     let confirmed = confirmed_transcript_hash(&previous.interim, &seal_hash)?;
@@ -1106,24 +1148,34 @@ fn seal_as_entrant(
         if welcome.request == input.request {
             continue;
         }
-        let init_key = match (welcome.kind, requests.get(&welcome.request)) {
-            (WelcomeKind::Join, Some(Request::Join(join))) => join.init_key.as_slice(),
+        let (init_key, leaf_key) = match (welcome.kind, requests.get(&welcome.request)) {
+            (WelcomeKind::Join, Some(Request::Join(join))) => (join.init_key.as_slice(), None),
             (WelcomeKind::ReEntry, Some(Request::ReEntry(re_entry))) => {
-                re_entry.init_key.as_slice()
+                (re_entry.init_key.as_slice(), None)
             }
             (WelcomeKind::CatchUp, _) => {
                 let request = catch_ups
                     .get(&welcome.request)
                     .filter(|request| request.reference() == welcome.request)
                     .ok_or(CoreError::Invalid("missing catch-up request"))?;
-                if window.removed.contains(&request.member) {
-                    return Err(CoreError::Invalid("catch-up of a removed member"));
+                if window.removed.contains(&request.member)
+                    || window
+                        .all_changes()
+                        .any(|change| change.leaf == request.member.leaf)
+                {
+                    return Err(CoreError::Invalid(
+                        "catch-up of a member the window changes",
+                    ));
                 }
-                let device_pk = state
-                    .device_pk(request.member)
+                let leaf = state
+                    .tree
+                    .member(request.member)
                     .ok_or(CoreError::Invalid("catch-up of a non-member"))?;
-                request.verify(&state.gid, &state.interim, device_pk)?;
-                request.init_key.as_slice()
+                request.verify(&state.gid, &state.interim, &leaf.device_pk)?;
+                (
+                    request.init_key.as_slice(),
+                    Some(leaf.encryption_key.as_slice()),
+                )
             }
             _ => return Err(CoreError::Invalid("missing request to welcome")),
         };
@@ -1139,6 +1191,7 @@ fn seal_as_entrant(
             window.epoch,
             &welcome.request,
             init_key,
+            leaf_key,
             sealed.secrets.joiner_secret(),
             rng,
         )?);

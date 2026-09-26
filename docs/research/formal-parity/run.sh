@@ -21,7 +21,7 @@ FAILED=0
 # welcomes, for a lone entrant that applies a removal without renewing
 # the top, for a city above the îlots that a window does not re-key,
 # with two removed members, and for a catch-up signed with a stolen device
-# key under the rule of v0.4; in wrap_dispute_report, "false" means that a
+# key under the former rule of v0.4; in wrap_dispute_report, "false" means that a
 # hostile committer can be convicted, as intended, and in the catch_up
 # scenarios the second "false" means that the member's own jump completes;
 # "unproved": an equivalence ProVerif cannot prove, as expected when the

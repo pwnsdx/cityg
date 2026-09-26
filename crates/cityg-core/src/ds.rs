@@ -1107,13 +1107,16 @@ impl DeliveryService {
         if !stored.entries.contains_key(&welcome.request) || welcome.gid != self.state.gid {
             return Err(CoreError::Invalid("welcome nobody asked for"));
         }
-        if !stored
+        let task = stored
             .task
             .welcomes
             .iter()
-            .any(|task| task.request == welcome.request && task.welcomer == welcomer)
-        {
-            return Err(CoreError::Unauthorized("not the welcomer of this request"));
+            .find(|task| task.request == welcome.request && task.welcomer == welcomer)
+            .ok_or(CoreError::Unauthorized("not the welcomer of this request"))?;
+        // A catch-up's welcome is sealed to the member's leaf key too; a
+        // join's or a re-entry's is not.
+        if welcome.leaf_ciphertext.is_some() != (task.kind == WelcomeKind::CatchUp) {
+            return Err(CoreError::Invalid("welcome of another kind"));
         }
         stored.welcomes.insert(welcome.request, welcome);
         Ok(())

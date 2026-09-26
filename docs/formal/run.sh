@@ -29,6 +29,8 @@ EXPECTED=(
   "external_tag_only: false false"
   "external_checked: true false"
   "open_group: false true"
+  "catch_up_stolen_key: true false"
+  "catch_up_init_only: false false"
 )
 
 for line in "${EXPECTED[@]}"; do

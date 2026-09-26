@@ -201,16 +201,24 @@ copath subtrees, which no practical construction provides.
 * **Replay.** It processes every window it missed, about 7 KB each. It then
   reads everything sent meanwhile.
 * **Jump.** It records a signed catch-up request with a one-time init key.
-  The next window seals it a welcome, and the last wrap of each node of its
-  path gives it its path secrets back: at most H wraps whatever the
-  absence. The windows it skipped stay unreadable.
+  The next window seals it a welcome, to that init key and to its leaf key,
+  and the last wrap of each node of its path gives it its path secrets
+  back: at most H wraps whatever the absence. The windows it skipped stay
+  unreadable.
 * **Re-entry.** With no member online, it seals a window itself as an
   entrant, with a fresh leaf key (E-7).
 
 **Why.** Most members of a very large group are not online all the time.
+The welcome of a jump is sealed to the leaf key too because a catch-up
+changes nothing in the tree: welcomed to the request's init key alone, a
+device key stolen without the member's state would read every window
+unseen, much as [ETK (Eurocrypt 2026)](https://eprint.iacr.org/2025/229)
+found for the external operations of MLS. The member keeps its leaf key
+through a jump, so it loses nothing.
 
 **Cost.** The delivery service keeps the windows and an index of the
-latest wraps of every node.
+latest wraps of every node. A jump's welcome carries a second X-Wing
+ciphertext (1,120 bytes).
 
 <a id="e-9"></a>
 ### E-9 — Registry as sparse Merkle maps

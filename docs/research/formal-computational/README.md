@@ -12,7 +12,7 @@ node secrets. Two authentication properties follow: a relay cannot make a
 member accept another window secret than the sealed one, and witnesses that
 countersign checkpoints stop a fork while one of them lies. A last pair
 bears on profile `city-g/v0.4` itself: a catch-up signed with a stolen
-device key, and a fix. The set is the first step of the first open problem
+device key, and the fix, which the profile now has. The set is the first step of the first open problem
 of the note [`problemes-ouverts-2026-09-26.md`](../problemes-ouverts-2026-09-26.md),
 continued in [`preuves-et-mesures-2026-09-26.md`](../preuves-et-mesures-2026-09-26.md),
 which proposes that fix. The profile's own model, symbolic, is in
@@ -83,7 +83,7 @@ without it.
 | [`witness_quorum_two_dishonest.ocv`](witness_quorum_two_dishonest.ocv) | Witnesses 3 and 4 both give their keys. | Not proved; the fork exists: two checkpoints, each signed by one honest witness and the two dishonest ones. |
 | [`witness_quorum_two_of_four.ocv`](witness_quorum_two_of_four.ocv) | A quorum of 2 out of 4, with one dishonest witness. | Not proved; the fork exists: two checkpoints, each signed by one honest witness and the dishonest one. |
 | [`catch_up_leaf_bound.ocv`](catch_up_leaf_bound.ocv) | The adversary holds M's device key, not its state, and has catch-ups of M welcomed with init keys of its own. The welcome key is `Extract(ss_init, ss_leaf)`: the welcomer also encapsulates to M's current leaf key, with which M decapsulates the adversary's encapsulations. | Proved: the joiner secret of epoch 2 stays secret, through the half of the dual PRF keyed by `ss_leaf`. |
-| [`catch_up_init_only.ocv`](catch_up_init_only.ocv) | The rule of v0.4: a welcome key from the init key's shared secret alone. | Not proved; the attack exists (`formal-parity/catch_up_device_key.pv`). |
+| [`catch_up_init_only.ocv`](catch_up_init_only.ocv) | The former rule of v0.4: a welcome key from the init key's shared secret alone. | Not proved; the attack exists (`formal-parity/catch_up_device_key.pv`). |
 
 The three city models are the computational counterparts of
 `ilot_city_maintained.pv`, `ilot_city_stale.pv` and `ilot_city_sticky.pv`,

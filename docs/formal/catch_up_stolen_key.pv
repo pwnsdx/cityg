@@ -1,0 +1,47 @@
+(* Scenario CATCH-UP WITH A STOLEN DEVICE KEY: the attacker holds M's device
+   key, not M's state (adversary A6). A and M are members of epoch 1. In
+   window 2, A welcomes any catch-up of M that M's device key signed for
+   epoch 1: the joiner secret of epoch 2, under a key derived from an
+   encapsulation to the request's one-time init key and one to M's leaf
+   key, which A takes from the tree (docs/specs.md, section 11). The
+   attacker records a catch-up with an init key of its own. A catch-up
+   changes nothing in the tree. A then sends a message in epoch 2. M
+   records a catch-up of its own.
+   Queries: the message stays secret; M's own jump completes (sanity check:
+   the event is reachable). *)
+
+const L_catch_up: bitstring.
+free Msg2: bitstring [private].
+event Jumped.
+query attacker(Msg2).
+query event(Jumped).
+
+process
+  new skM: skey; new lsM: key; new init0: key; new r1: key; new r2: key;
+  out(c, (spk(skM), leaf_pk(lsM), skM));
+  let gc1 = (N1, node_pk(r1)) in
+  let es1 = epoch_secret(joiner_secret(init0, r1, gc1)) in
+  let gc2 = (N2, node_pk(r2)) in
+  let js2 = joiner_secret(init_secret(es1), r2, gc2) in
+  let es2 = epoch_secret(js2) in
+  out(c, (gc2, tag(es2, gc2)));
+  (
+    (* A, the welcomer: checks the member's signature and the epoch, takes
+       the init key from the request and the leaf key from the tree. *)
+    !in(c, (ik: kpk, sg: bitstring));
+    if checksign(spk(skM), (L_catch_up, N1, ik), sg) = true then
+    new q: key; new q2: key;
+    let wk = kdf2(kem_ss(ik, q), kem_ss(leaf_pk(lsM), q2), L_welcome) in
+    out(c, (kem_ct(ik, q), kem_ct(leaf_pk(lsM), q2), senc(wk, js2)))
+  ) | (
+    out(c, aenc(msg_key(es2), Msg2))
+  ) | (
+    (* M comes back with a jump, its leaf key unchanged. *)
+    new ikM: key;
+    out(c, (kempk(ikM), sign(skM, (L_catch_up, N1, kempk(ikM)))));
+    in(c, (ct: bitstring, ct2: bitstring, w: bitstring));
+    let wk = kdf2(decaps(ikM, ct), decaps(leaf_sk(lsM), ct2), L_welcome) in
+    let js = sdec(wk, w) in
+    if tag(epoch_secret(js), gc2) = tag(es2, gc2) then
+    event Jumped
+  )

@@ -127,9 +127,9 @@ sequenceDiagram
     else jump
         R->>DS: catch-up request (bound to the current interim, one-time init key)
         Note over DS: next window
-        W->>DS: welcome for R
+        W->>DS: welcome for R, to its init key and to its leaf key from the tree
         R->>DS: entry: seal links from its last epoch, welcome, last steps
-        R->>R: recover the path, check it against the tree, open the welcome
+        R->>R: recover the path, check it against the tree, open the welcome with both keys
     else re-entry
         R->>DS: re-entry request (new leaf key, one-time init key)
         Note over DS: next window re-keys R's path, or R seals it as entrant

@@ -180,14 +180,14 @@ Definitions (normative):
   requests, including a re-entry that gives the member a leaf key of its
   choice, district commits and seals if it is given the role, and
   admissions if the device is an admin. The repair is to remove the device,
-  together with any device it admitted, and to admit a new one. A re-entry
-  or an update signed by a thief changes the member's leaf, so the member
-  can no longer follow and notices; a catch-up leaves the tree as it is,
-  and gives the thief the epoch of every window it asks for, unseen
-  (research note
-  [`research/preuves-et-mesures-2026-09-26.md`](research/preuves-et-mesures-2026-09-26.md),
-  section 3, which proposes to bind a catch-up's welcome to the member's
-  leaf key).
+  together with any device it admitted, and to admit a new one. A catch-up
+  gives nothing to a thief that lacks the member's leaf key, since its
+  welcome is sealed to that key too (section 11; models
+  `catch_up_stolen_key.pv` and `catch_up_init_only.pv`). An update or a
+  re-entry signed by a thief changes the member's leaf: the member can no
+  longer follow, notices, and treats its device key as stolen (section
+  12.2). After the member's next update, a thief that also had its state
+  keeps reading only by changing its leaf in the same way.
 * **Visibility of joins.** Every join is a change of a district commit that
   the seal lists; a member that holds the seal of an epoch it accepted can
   list the devices that window let in (section 12.11). Nobody can take a
@@ -302,8 +302,9 @@ so `Extract` and `ExpandLabel` follow the HKDF structure with BLAKE3 in
 place of HMAC. The key schedule also needs `Extract` to be a dual PRF:
 pseudorandom when keyed by its input keying material under a known salt,
 as analyses of HKDF assume of HMAC. Post-compromise security and external
-inits rest on it, as does the exclusion of a removed member that missed a
-window (research model
+inits rest on it, as do the exclusion of a removed member that missed a
+window and the binding of a catch-up's welcome to the leaf key (research
+model
 [`research/formal-computational/`](research/formal-computational/README.md)).
 MAC tags MUST be compared in constant time.
 
@@ -839,11 +840,16 @@ time are those of the seal.
 ## 11. Welcomes
 
 ```text
-Welcome := ["city-g/welcome/v4", gid, epoch, request_ref, kem_ciphertext, sealed]
-context := CBOR_det([gid, epoch, request_ref, kem_pk_hash(init_key)])
-(ct, ss) := X-Wing.Encaps(init_key)
-sealed  := ChaCha20-Poly1305(ExpandLabel(ss, "welcome key", context, 32),
-                             ExpandLabel(ss, "welcome nonce", context, 12),
+Welcome := ["city-g/welcome/v4", gid, epoch, request_ref, kem_ciphertext,
+            leaf_ciphertext or null, sealed]
+context := CBOR_det([gid, epoch, request_ref, kem_pk_hash(init_key),
+                     kem_pk_hash(leaf_key) or null])
+(ct, ss)           := X-Wing.Encaps(init_key)
+(ct_leaf, ss_leaf) := X-Wing.Encaps(leaf_key)                    a catch-up only
+welcome_secret     := ss                        for a join or a re-entry
+                      Extract(ss, ss_leaf)       for a catch-up
+sealed  := ChaCha20-Poly1305(ExpandLabel(welcome_secret, "welcome key", context, 32),
+                             ExpandLabel(welcome_secret, "welcome nonce", context, 12),
                              aad = context, joiner_secret_n)
 ```
 
@@ -851,6 +857,15 @@ A welcome gives `joiner_secret_n` to the holder of a one-time init key: a
 joiner, a member re-entering its leaf, or a member that asked to jump
 (catch-up). It is not signed: the joiner secret must reproduce the
 confirmation tag the sealer signed.
+
+A catch-up's welcome is also sealed to the member's leaf key, which the
+member keeps through a jump (section 12.10): `leaf_ciphertext` is `ct_leaf`
+and the context names the leaf key. A catch-up is signed with the device
+key alone and changes nothing in the tree, so without this a device key,
+stolen without the member's state, would obtain the epoch of every window
+it asks for, unseen. The init key keeps the welcome closed if the leaf key
+leaks later. For a join or a re-entry, `leaf_ciphertext` and the last
+entry of the context are `null`.
 
 **Who welcomes.** In a member window, the committer of the district of the
 leaf welcomes joins and re-entries; the committer of the member's district
@@ -865,9 +880,11 @@ from the DS, and:
 * welcomes a join or a re-entry only if it is a change of a district commit
   of its own that the seal lists (so that no device learns an epoch without
   being in its tree);
-* welcomes a catch-up only if its member is in the tree of epoch `n`, the
-  request is signed with that member's device key, and its `prev_interim`
-  is the seal's (section 6).
+* welcomes a catch-up only if its member is in the tree of epoch `n` with a
+  leaf the window did not change, the request is signed with that member's
+  device key, and its `prev_interim` is the seal's (section 6). It takes the
+  leaf key from that tree, which it checked against its header (section
+  12.3), never from the request or the DS.
 
 <a id="12-members"></a>
 ## 12. Members
@@ -915,9 +932,14 @@ of epoch `n - 1`:
 7. only then replaces its state.
 
 A member that cannot derive its path (a blank ancestor, a wrap it cannot
-open) or whose tag does not check rejects the window. Members that follow
-the group do not check the sealer's signature of a member window: the init
-chain makes the tag sufficient (E-5; model `fabrication.pv`).
+open) or whose tag does not check rejects the window. A packet that names
+a leaf key the member neither holds nor requested means that an update or
+a re-entry was signed with its device key: the member MUST treat that key
+as stolen, SHOULD tell its user and propose its own removal (section 6),
+and comes back as a new device, admitted again in a closed group. Members
+that follow the group do not check the sealer's signature of a member
+window: the init chain makes the tag sufficient (E-5; model
+`fabrication.pv`).
 
 ### 12.3 Checking the state it is shown
 
@@ -1020,10 +1042,12 @@ A member that missed windows has three ways back (E-8):
 
 * **Replay.** It follows every packet it missed, in order.
 * **Jump.** It records a `CatchUpRequest` bound to the current interim
-  transcript hash, with a one-time init key. The next window welcomes it
-  (section 11). It follows the chain of seals from its own last epoch, and
-  recovers its path from the last step of each of its nodes (section 7.4),
-  its leaf key unchanged. The epochs it skipped stay unreadable to it.
+  transcript hash, with a one-time init key. The next window welcomes it,
+  to that init key and to its leaf key (section 11). It follows the chain
+  of seals from its own last epoch, and recovers its path from the last
+  step of each of its nodes (section 7.4) with its leaf key: the current
+  one, or the pending one if a window it missed applied its update. The
+  epochs it skipped stay unreadable to it.
 * **Re-entry.** It records a `ReEntryRequest` with a new leaf key and a
   one-time init key. A member window re-keys its path and welcomes it; with
   no member online, it seals the window itself as an entrant (section
@@ -1409,11 +1433,15 @@ context of its own.
   hash out of band.
 * **Replays.** A leaf-key request names the key it replaces; a catch-up is
   bound to one window; an admission admits once; occupancies are never
-  reused. A welcome is bound to its epoch, request and init key.
+  reused. A welcome is bound to its epoch, request and init key, and a
+  catch-up's welcome to the member's leaf key.
 * **Jumps.** A member that jumps checks every recovered path secret against
   the key of its node in the tree it enters, itself checked by its leaf
   proof against the tree hash of a seal it verified: stale or forged wraps
-  are detected.
+  are detected. Its welcome is sealed to its leaf key too, so a device key
+  stolen without the member's state does not jump
+  (`catch_up_stolen_key.pv`); welcomed to the request's init key alone, the
+  thief would read every window, unseen (`catch_up_init_only.pv`).
 * **Placement and roles** do not affect security: a bad placement costs
   bandwidth, a bad role assignment delays a window.
 * **Time.** `time_ms` of a seal is the sealer's clock, only required not to

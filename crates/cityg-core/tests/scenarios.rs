@@ -435,6 +435,150 @@ fn a_returning_member_re_enters_its_leaf() {
     sim.assert_agreement();
 }
 
+#[test]
+fn a_stolen_device_key_does_not_buy_a_jump() {
+    use cityg_core::error::CoreError;
+    use cityg_core::kem::KemSecret;
+    use cityg_core::objects::CatchUpRequest;
+
+    let mut sim = Sim::new(2, 30);
+    sim.request_joins(5);
+    sim.run_window();
+    // A thief holds a member's device key, not its state, and asks for a
+    // jump in the member's name with an init key of its own.
+    let victim = *sim.members.keys().nth(2).unwrap();
+    let stolen = sim.member(victim).identity().clone();
+    let gid = *sim.member(victim).gid();
+    let thief_init = KemSecret::generate(&mut sim.rng);
+    let anchor = sim.ds.epoch();
+    let request = CatchUpRequest::sign(
+        &gid,
+        victim,
+        &sim.ds.state().interim,
+        &thief_init.public_key(),
+        &stolen,
+        &mut sim.rng,
+    )
+    .unwrap();
+    let reference = sim.ds.submit_catch_up(request, sim.now).unwrap();
+    let task = sim.run_window();
+    assert!(task.welcomes.iter().any(|w| w.request == reference));
+    // The window welcomes the catch-up, sealed to the victim's leaf key as
+    // well as to the thief's init key: the thief cannot open it.
+    let entry = sim.ds.entry(&reference, anchor).unwrap();
+    assert!(entry.welcome.leaf_ciphertext.is_some());
+    assert_eq!(
+        entry.welcome.open(&thief_init, None).unwrap_err(),
+        CoreError::Invalid("welcome of another kind")
+    );
+    let guessed = KemSecret::generate(&mut sim.rng);
+    assert!(entry.welcome.open(&thief_init, Some(&guessed)).is_err());
+    // The victim keeps following the group.
+    assert_eq!(sim.member(victim).epoch(), sim.ds.epoch());
+    sim.assert_agreement();
+}
+
+#[test]
+fn a_member_whose_leaf_a_thief_changed_notices() {
+    use cityg_core::kem::KemSecret;
+    use cityg_core::member::LEAF_TAKEN;
+    use cityg_core::objects::UpdateRequest;
+
+    let mut sim = Sim::new(2, 33);
+    sim.request_joins(5);
+    sim.run_window();
+    // A thief with the member's device key signs an update to a leaf key of
+    // its own.
+    let victim = *sim.members.keys().nth(2).unwrap();
+    let stolen = sim.member(victim).identity().clone();
+    let gid = *sim.member(victim).gid();
+    let current = sim
+        .ds
+        .state()
+        .tree
+        .member(victim)
+        .unwrap()
+        .encryption_key
+        .clone();
+    let thief_leaf = KemSecret::generate(&mut sim.rng);
+    let update = UpdateRequest::sign(
+        &gid,
+        victim,
+        &current,
+        &thief_leaf.public_key(),
+        &stolen,
+        &mut sim.rng,
+    )
+    .unwrap();
+    sim.ds.submit_update(update, sim.now).unwrap();
+    sim.absent.insert(victim);
+    sim.run_window();
+    // The member cannot follow the window, and knows why.
+    let packet = sim.ds.packet(sim.ds.epoch(), victim).unwrap();
+    let mut member = sim.take(victim);
+    assert_eq!(member.process(&packet).unwrap_err(), LEAF_TAKEN);
+    sim.assert_agreement();
+}
+
+#[test]
+fn a_member_jumps_back_after_a_window_it_missed_applied_its_update() {
+    let mut sim = Sim::new(2, 31);
+    sim.request_joins(5);
+    sim.run_window();
+    let member = *sim.members.keys().nth(3).unwrap();
+    let update = sim
+        .members
+        .get_mut(&member)
+        .unwrap()
+        .update_request(&mut sim.rng)
+        .unwrap();
+    sim.ds.submit_update(update, sim.now).unwrap();
+    // The member leaves before the window that applies its update.
+    sim.absent.insert(member);
+    sim.ds.set_online(member, false);
+    sim.run_window();
+    sim.request_joins(2);
+    sim.run_window();
+    // Its jump is welcomed to the leaf key the tree now holds, the pending
+    // one, which it kept.
+    let away = sim.take(member);
+    let interim = sim.ds.state().interim;
+    let (returning, request) = away.catch_up(&interim, &mut sim.rng).unwrap();
+    let reference = sim.ds.submit_catch_up(request, sim.now).unwrap();
+    sim.returning.insert(reference, returning);
+    let task = sim.run_window();
+    assert!(task.changes.is_empty());
+    assert!(sim.members.contains_key(&member));
+    sim.assert_agreement();
+}
+
+#[test]
+fn a_joiner_sealing_alone_welcomes_a_jump() {
+    let mut sim = Sim::new(2, 32);
+    sim.request_joins(3);
+    sim.run_window();
+    let member = *sim.members.keys().nth(2).unwrap();
+    let away = sim.take(member);
+    sim.request_joins(1);
+    sim.run_window();
+    // Nobody is online: a joiner seals the window and welcomes the jump,
+    // to the returning member's init key and leaf key.
+    sim.set_all_online(false);
+    sim.request_joins(1);
+    let interim = sim.ds.state().interim;
+    let (returning, request) = away.catch_up(&interim, &mut sim.rng).unwrap();
+    let reference = sim.ds.submit_catch_up(request, sim.now).unwrap();
+    sim.returning.insert(reference, returning);
+    let task = sim.run_entrant_window();
+    assert!(
+        task.welcomes
+            .iter()
+            .any(|w| w.request == reference && w.welcomer == task.sealer)
+    );
+    assert!(sim.members.contains_key(&member));
+    sim.assert_agreement();
+}
+
 /// Run the open window with `committer` committing every district while
 /// keeping the secrets it draws (a dishonest committer), sealed by `sealer`.
 fn run_window_keeping_secrets(
@@ -825,6 +969,7 @@ fn only_the_assigned_welcomer_delivers_a_welcome() {
         epoch,
         &owed.request,
         &init_key,
+        None,
         &[0; 32],
         &mut sim.rng,
     )

@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Date | 2026-09-26 |
-| Nature | Note de recherche. Elle poursuit la note [problèmes ouverts](problemes-ouverts-2026-09-26.md) dans l'ordre de sa section 7. Elle mesure la preuve de litige, ajoute l'authentification au modèle calculatoire, trouve dans la v0.4 une faille du saut sous clé d'appareil volée et la corrige, écrit le plan de preuve de l'arbre sous corruptions adaptatives et recommande une dérivation de clés. Le correctif du saut n'est encore ni dans la spécification ni dans le code. |
+| Nature | Note de recherche. Elle poursuit la note [problèmes ouverts](problemes-ouverts-2026-09-26.md) dans l'ordre de sa section 7. Elle mesure la preuve de litige, ajoute l'authentification au modèle calculatoire, trouve dans la v0.4 une faille du saut sous clé d'appareil volée et la corrige, écrit le plan de preuve de l'arbre sous corruptions adaptatives et recommande une dérivation de clés. Le correctif du saut est depuis appliqué à la v0.4 : spécification (section 11), modèle symbolique et code. |
 | Question | Que coûte vraiment un litige, que peut-on prouver de plus, et que faut-il pour prouver l'arbre entier ? |
 | Compagnons | [`dispute-zk/`](dispute-zk/README.md) : le prouveur du litige, en C++ avec emp-zk. [`formal-computational/`](formal-computational/README.md) : 21 modèles CryptoVerif, dont 7 nouveaux. [`formal-parity/`](formal-parity/README.md) : 34 scénarios ProVerif, dont 2 nouveaux. [`open_problems_sim.py`](open_problems_sim.py) : rapport 4. |
 | Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Les mesures viennent d'une machine virtuelle à 4 vCPU, prouveur et vérifieur sur la même machine ; les preuves calculatoires portent sur des configurations fixées. Une relecture cryptographique humaine reste nécessaire. |
@@ -26,6 +26,7 @@
    - C'est l'équivalent, dans City-G, de ce qu'[ETK (Eurocrypt 2026)](https://eprint.iacr.org/2025/229) montre sur les opérations externes de MLS.
    - **Correctif** : le welcome d'un saut est aussi encapsulé vers la clé de feuille du membre, que le membre qui saute détient toujours. Il coûte 1 120 octets par saut. Les deux modèles le prouvent (`catch_up_leaf_bound.pv`, `catch_up_leaf_bound.ocv`).
    - Avec lui, la clé d'appareil seule ne donne plus accès aux époques sans changer la feuille du membre. Le membre est alors exclu et s'en aperçoit.
+   - La v0.4 l'a adopté depuis (section 3.6).
 4. **Le plan de preuve de l'arbre.**
    - Dans le modèle standard, la perte des preuves connues est `Q^log n`, soit 2^600 pour un million de membres et 2^30 opérations. La borne ne garantit plus rien, et aucune réduction qui ne rembobine pas l'adversaire ne peut être polynomiale ([Kamath et al.](https://eprint.iacr.org/2021/059)).
    - Avec des oracles aléatoires, TTKEM perd `(Qn)^2` : 100 bits sur les 192 de ML-KEM-768, il en reste 92. ETK prouve MLS de la même façon. C'est donc la voie retenue.
@@ -42,7 +43,7 @@
 6. **Ce qui reste** :
    - écrire la preuve de l'arbre ;
    - prouver X25519 dans son corps, puis mesurer sur téléphone ;
-   - mettre à jour la spécification, avec le correctif du saut.
+   - la spécification du profil candidat.
 
 ## 1. Le litige, mesuré
 
@@ -232,15 +233,17 @@ ETK^PSK lierait aussi la ré-entrée à un secret passé. Dans City-G, la ré-en
 
 Le gain ne justifie pas ce coût : une ré-entrée volée remplace la feuille du membre, qui s'en aperçoit. La règle à ajouter est côté client. Un membre qui trouve sa feuille changée par une requête qu'il n'a pas faite traite sa clé d'appareil comme volée et demande son retrait.
 
-### 3.6 Ce qu'il faudrait changer, sur « Procède »
+### 3.6 Le correctif, appliqué
+
+Le mainteneur a donné son accord, et la v0.4 a changé en conséquence :
 
 - **La spécification** :
-  - section 11 : le welcome d'un saut, avec la seconde encapsulation et le nouveau contexte ;
+  - section 11 : le welcome d'un saut, avec la seconde encapsulation et le nouveau contexte ; le welcome gagne un champ, nul pour les entrées et les ré-entrées ;
   - section 12.10 : le membre ouvre le welcome avec sa clé de feuille, l'actuelle ou celle en attente si une mise à jour à lui a été appliquée ;
-  - section 2.2 : la ligne A6 et le paragraphe sur les clés d'appareil ;
+  - section 2.2 : le paragraphe sur les clés d'appareil ;
   - section 12.2 : la règle du membre dont la feuille a changé sans lui.
-- **Le modèle symbolique de la v0.4** (`docs/formal/`) : les deux scénarios.
-- **`cityg-core`** : le welcome des sauts, ses tests et ses vecteurs.
+- **Le modèle symbolique de la v0.4** (`docs/formal/`) : `catch_up_stolen_key.pv` (prouvé) et `catch_up_init_only.pv` (attaque, l'ancienne règle).
+- **`cityg-core`** : le welcome des sauts, l'erreur `LEAF_TAKEN` du membre dont la feuille a changé sans lui, et quatre scénarios : le voleur qui demande un saut, le voleur qui change la feuille, le saut après une mise à jour appliquée en l'absence du membre, et le saut accueilli par un entrant.
 
 ## 4. Le plan de preuve de l'arbre
 
@@ -309,7 +312,7 @@ Les 21 modèles CryptoVerif sont les lemmes d'une fenêtre, dans le modèle stan
 - **Bifurcations** : `witness_quorum`.
 - **Contrôles** : onze modèles, dont l'échec vérifie que chaque hypothèse sert.
 
-Côté symbolique, 16 + 17 + 34 scénarios ProVerif instancient le prédicat de sûreté sur de petits arbres.
+Côté symbolique, 18 + 17 + 34 scénarios ProVerif instancient le prédicat de sûreté sur de petits arbres.
 
 ### 4.5 Ce qui reste à écrire
 
@@ -358,19 +361,20 @@ Le coût reste de quelques microsecondes par fenêtre. La v0.4 garde BLAKE3 et l
 | 4. Standards | Recommandation : `Extract` en HKDF-SHA-384 | La décision du mainteneur ; FN-DSA final |
 | 5. Cartes d'émetteur | Inchangé | Mesurer sur des traces |
 | 6. Métadonnées | Ramené aux limites de MLS | Le transport |
-| 7. Spécification et implémentation | Correctif du saut prêt | L'accord du mainteneur |
+| 7. Spécification et implémentation | Correctif du saut appliqué à la v0.4 | Le profil candidat, sur l'accord du mainteneur |
 
 Le nouvel ordre :
-1. le correctif du saut, qui touche la v0.4 elle-même ;
-2. la preuve de l'arbre ;
-3. X25519 dans le litige ;
-4. la spécification du profil candidat.
+1. la preuve de l'arbre ;
+2. X25519 dans le litige ;
+3. la spécification du profil candidat.
+
+Le correctif du saut, qui venait en tête, est appliqué.
 
 ## 7. Modèles et reproductibilité
 
 - **Le litige.** Construire emp-toolkit, puis le prouveur, comme l'indique [`dispute-zk/README.md`](dispute-zk/README.md). La mesure se lance avec `./dispute_zk 1 full & ./dispute_zk 2 full`, et les autres modes avec `setup`, `dispute`, `mlkem`, `x25519mul N` et `arith N`.
 - **CryptoVerif.** `docs/research/formal-computational/run.sh [chemin/de/cryptoverif]` lance les 21 modèles en une vingtaine de secondes. La CI les lance aussi.
-- **ProVerif.** `docs/research/formal-parity/run.sh` lance les 34 scénarios, dont `catch_up_device_key` (attaque) et `catch_up_leaf_bound` (prouvé). Les modèles de `docs/formal/` (16) et `formal-messages/` (17) sont inchangés.
+- **ProVerif.** `docs/research/formal-parity/run.sh` lance les 34 scénarios, dont `catch_up_device_key` (attaque) et `catch_up_leaf_bound` (prouvé). Le modèle de la v0.4, `docs/formal/`, reçoit depuis la même paire (18 scénarios) ; `formal-messages/` (17) est inchangé.
 - **Le modèle de coût.** `python3 docs/research/open_problems_sim.py` produit les quatre rapports, dont celui de la section 4.2.
 
 ## 8. Sources

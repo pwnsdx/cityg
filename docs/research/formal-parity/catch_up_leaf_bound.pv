@@ -1,5 +1,6 @@
 (* Scenario CATCH-UP BOUND TO THE LEAF KEY: the fix of catch_up_device_key.pv
-   proposed in docs/research/preuves-et-mesures-2026-09-26.md. The welcomer
+   proposed in docs/research/preuves-et-mesures-2026-09-26.md, now the rule
+   of profile city-g/v0.4 (docs/specs.md, section 11). The welcomer
    of a catch-up encapsulates to the request's one-time init key and to the
    member's current leaf key, which it takes from the tree, never from the
    request; the welcome key derives from both shared secrets. A member that

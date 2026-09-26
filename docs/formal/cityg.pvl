@@ -73,3 +73,15 @@ letfun external_pk(es: key) = kempk(external_sk(es)).
 letfun confirm_key(es: key) = kdf(es, L_confirm).
 letfun msg_key(es: key) = kdf(es, L_msg).
 letfun tag(es: key, gc: bitstring) = mac(confirm_key(es), hash(gc)).
+
+(* ---------- X-Wing as a KEM, for the welcome of a catch-up ---------- *)
+
+(* A catch-up's welcome is sealed under a key derived from two
+   encapsulations, to the request's one-time init key and to the member's
+   leaf key (docs/specs.md, section 11). *)
+const L_welcome: bitstring.
+fun kem_ct(kpk, key): bitstring.           (* recipient key, coins *)
+fun kem_ss(kpk, key): key.
+reduc forall sk: key, r: key; decaps(sk, kem_ct(kempk(sk), r)) = kem_ss(kempk(sk), r).
+fun senc(key, key): bitstring.             (* ChaCha20-Poly1305 of a secret *)
+reduc forall k: key, m: key; sdec(k, senc(k, m)) = m.
