@@ -30,10 +30,10 @@ Related to #(issue number)
 
 Describe how you tested your changes:
 
-- [ ] All existing tests pass (`cargo test --workspace`, `cargo test -p cityg-gui --features native-app`)
+- [ ] All existing tests pass (`cargo test --workspace`)
 - [ ] Added new tests for new functionality
-- [ ] Manual testing performed (describe scenarios)
-- [ ] Server-blindness verification passed (`./scripts/verify_no_secrets.sh`)
+- [ ] Scale test run if the tree, the re-key or the delivery service changed (`cargo test -p cityg-core --release --test scale -- --ignored`)
+- [ ] Delivery-service blindness verification passed (`./scripts/verify_no_secrets.sh`)
 
 ## Documentation
 
@@ -55,10 +55,9 @@ Describe how you tested your changes:
 ## Protocol Changes
 
 - [ ] No protocol changes
-- [ ] Specification updated first (`docs/specs.md`); new labels and contexts registered (section 16)
-- [ ] Vectors regenerated and reviewed (`CITYG_WRITE_VECTORS=1 cargo test -p cityg-core --test vectors`), independent verifier updated (`kat/v0.2/verify_vectors.py`)
-- [ ] Requirements mapped in `kat/kat-v0.2-conformance-manifest.json`
-- [ ] Formal model updated if the key schedule, tree, removal or admission changed (`docs/formal/`)
+- [ ] Specification updated first (`docs/specs.md`); new labels and contexts registered (section 17)
+- [ ] Design decision recorded in `docs/design.md` if the change affects one
+- [ ] Formal model updated if the key schedule, taints, removals, joins or entrants changed (`docs/formal/`)
 - [ ] New profile version (any change to an encoding, label, context, algorithm or parameter)
 
 ## Performance Impact

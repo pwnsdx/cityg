@@ -1,10 +1,11 @@
 [package]
 name = "cityg-core"
-version = "0.3.0"
+version = "0.4.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
-description = "City-G v0.3 protocol core: ratchet tree, key schedule, commits, batched joins, admission and message plane (no I/O)"
+description = "City-G protocol core: a tree split into districts under a city, district commits and seals per window, welcomes, zero-online operation, and an in-memory delivery service (no I/O)"
+publish = false
 
 [dependencies]
 blake3 = "1"
@@ -12,7 +13,6 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 ciborium = "0.2"
 cityg-pqc = { path = "../cityg-pqc" }
 rand_core = { version = "0.6", features = ["getrandom"] }
-serde = { version = "1.0", features = ["derive"] }
 thiserror = "2"
 x-wing = { version = "0.1.0", features = ["hazmat", "zeroize"] }
 zeroize = { version = "1", features = ["derive"] }
@@ -20,4 +20,3 @@ zeroize = { version = "1", features = ["derive"] }
 [dev-dependencies]
 hex = "0.4"
 rand_chacha = "0.3"
-serde_json = "1"

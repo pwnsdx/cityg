@@ -1,14 +1,13 @@
 #![forbid(unsafe_code)]
 //! FIPS 204 ML-DSA-65 signatures for City-G.
 //!
-//! Every City-G v0.3 signature (commits and key rotations, group
-//! information, join requests, admissions, invitations and their
-//! revocations, removal proposals, cover-failure reports, framed messages,
-//! alias bindings, session requests, policy documents) uses FIPS 204
-//! ML-DSA-65 through this crate. ML-DSA-65 is NIST security category 3, the
-//! category of the ML-KEM-768 half of the X-Wing KEM the protocol pairs it
-//! with. The same pure-Rust backend (`fips204`) runs on native and wasm32
-//! targets, so signatures produced by one build verify on every other build.
+//! Every City-G signature (district commits and seals, join, update,
+//! catch-up and re-entry requests, admissions and invites, removal
+//! proposals, checkpoints and group policies) uses FIPS 204 ML-DSA-65
+//! through this crate. ML-DSA-65 is NIST security category 3, the category
+//! of the ML-KEM-768 half of the X-Wing KEM the protocol pairs it with. The
+//! backend (`fips204`) is pure Rust, so signatures produced by one build
+//! verify on every other build.
 //!
 //! Each signed object type has its own FIPS 204 context string
 //! ([`SignatureContext`]). A signature produced for one usage therefore never
@@ -39,47 +38,28 @@ pub const SIGNATURE_BYTES: usize = ml_dsa_65::SIG_LEN;
 pub struct SignatureContext(&'static [u8]);
 
 impl SignatureContext {
-    /// Commit, signed by its author over `anchor_tbs` (header key 109).
-    pub const ANCHOR: Self = Self(b"city-g/anchor/v3");
-    /// Commit, signed by the author's new device key when the commit rotates
-    /// it (header key 111).
-    pub const KEY_ROTATION: Self = Self(b"city-g/key-rotation/v1");
-    /// Alias to device-key identity bindings.
-    pub const IDENTITY_BINDING: Self = Self(b"city-g/identity-binding/v1");
-    /// Removal proposal (voluntary leave or admin removal).
-    pub const REMOVE_PROPOSAL: Self = Self(b"city-g/remove/v3");
-    /// Request of a device to join a group.
-    pub const JOIN_REQUEST: Self = Self(b"city-g/join-request/v1");
-    /// Group information published with an epoch.
-    pub const GROUP_INFO: Self = Self(b"city-g/group-info/v3");
-    /// Admission of a joining device.
-    pub const ADMISSION: Self = Self(b"city-g/admission/v2");
-    /// Report that a commit could not be processed.
-    pub const COVER_FAILURE: Self = Self(b"city-g/cover-failure/v2");
-    /// Signed deployment policy documents.
-    pub const POLICY: Self = Self(b"city-g/policy/v1");
-    /// Framed message content (message plane v4).
-    pub const MESSAGE: Self = Self(b"city-g/msg/v4");
-    /// Invitation delegating admission to an invite key.
-    pub const INVITE: Self = Self(b"city-g/invite/v2");
-    /// Revocation of an invitation by an admin.
-    pub const INVITE_REVOCATION: Self = Self(b"city-g/invite-revocation/v1");
-    /// Request for a delivery-service session token (deployment binding).
-    pub const SESSION_AUTH: Self = Self(b"city-g/session-auth/v1");
-    /// Draft profile v0.4: district commit, signed by its committer.
+    /// District commit, signed by its committer.
     pub const DISTRICT_COMMIT: Self = Self(b"city-g/district-commit/v4");
-    /// Draft profile v0.4: seal of a window, signed by its sealer.
+    /// Seal of a window, signed by its sealer.
     pub const SEAL: Self = Self(b"city-g/seal/v4");
-    /// Draft profile v0.4: request of a member to replace its leaf key.
+    /// Request of a device to join a group.
+    pub const JOIN_REQUEST: Self = Self(b"city-g/join-request/v4");
+    /// Admission of a joining device, by an admin or an invite key.
+    pub const ADMISSION: Self = Self(b"city-g/admission/v4");
+    /// Invite delegating admissions to an invite key.
+    pub const INVITE: Self = Self(b"city-g/invite/v4");
+    /// Removal proposal (voluntary leave or removal by an admin).
+    pub const REMOVE_PROPOSAL: Self = Self(b"city-g/remove/v4");
+    /// Request of a member to replace its leaf key.
     pub const UPDATE_REQUEST: Self = Self(b"city-g/update/v4");
-    /// Draft profile v0.4: request of a member to jump to the present.
+    /// Request of a member to jump to the present.
     pub const CATCH_UP: Self = Self(b"city-g/catch-up/v4");
-    /// Draft profile v0.4: request of a member to re-enter its own leaf.
+    /// Request of a member to re-enter its own leaf.
     pub const RE_ENTRY: Self = Self(b"city-g/re-entry/v4");
-    /// Draft profile v0.4: checkpoint of an epoch, signed by an admin.
+    /// Checkpoint of an epoch, signed by an admin.
     pub const CHECKPOINT: Self = Self(b"city-g/checkpoint/v4");
-    /// Draft profile v0.4: policy of a group (open or closed admission,
-    /// eviction of idle members), signed by an admin.
+    /// Policy of a group (open or closed admission, eviction of idle
+    /// members), signed by an admin.
     pub const GROUP_POLICY: Self = Self(b"city-g/group-policy/v4");
 
     /// Context bytes passed to FIPS 204 as `ctx`.
@@ -267,22 +247,13 @@ mod tests {
 
     use super::*;
 
-    const ALL_CONTEXTS: [SignatureContext; 20] = [
-        SignatureContext::ANCHOR,
-        SignatureContext::KEY_ROTATION,
-        SignatureContext::IDENTITY_BINDING,
-        SignatureContext::REMOVE_PROPOSAL,
-        SignatureContext::JOIN_REQUEST,
-        SignatureContext::GROUP_INFO,
-        SignatureContext::ADMISSION,
-        SignatureContext::COVER_FAILURE,
-        SignatureContext::POLICY,
-        SignatureContext::MESSAGE,
-        SignatureContext::INVITE,
-        SignatureContext::INVITE_REVOCATION,
-        SignatureContext::SESSION_AUTH,
+    const ALL_CONTEXTS: [SignatureContext; 11] = [
         SignatureContext::DISTRICT_COMMIT,
         SignatureContext::SEAL,
+        SignatureContext::JOIN_REQUEST,
+        SignatureContext::ADMISSION,
+        SignatureContext::INVITE,
+        SignatureContext::REMOVE_PROPOSAL,
         SignatureContext::UPDATE_REQUEST,
         SignatureContext::CATCH_UP,
         SignatureContext::RE_ENTRY,
@@ -302,11 +273,11 @@ mod tests {
     fn sign_and_verify_round_trip() {
         let (public_key, secret_key) = keypair().expect("keypair");
         assert_eq!(secret_key.public_key(), public_key);
-        let signature = sign(&secret_key, SignatureContext::MESSAGE, b"hello").expect("sign");
+        let signature = sign(&secret_key, SignatureContext::SEAL, b"hello").expect("sign");
         assert_eq!(signature.len(), SIGNATURE_BYTES);
-        verify(&public_key, SignatureContext::MESSAGE, b"hello", &signature).expect("verify");
+        verify(&public_key, SignatureContext::SEAL, b"hello", &signature).expect("verify");
         assert_eq!(
-            verify(&public_key, SignatureContext::MESSAGE, b"hellp", &signature),
+            verify(&public_key, SignatureContext::SEAL, b"hellp", &signature),
             Err(VerifyError::VerificationFailed)
         );
     }
@@ -341,20 +312,23 @@ mod tests {
         let (pk_b, sk_b) = keypair_from_seed(&[1u8; 32]);
         assert_eq!(pk_a, pk_b);
         let sig_a =
-            sign_with_randomness(&sk_a, SignatureContext::ANCHOR, b"m", &[0u8; 32]).expect("sign");
+            sign_with_randomness(&sk_a, SignatureContext::DISTRICT_COMMIT, b"m", &[0u8; 32])
+                .expect("sign");
         let sig_b =
-            sign_with_randomness(&sk_b, SignatureContext::ANCHOR, b"m", &[0u8; 32]).expect("sign");
+            sign_with_randomness(&sk_b, SignatureContext::DISTRICT_COMMIT, b"m", &[0u8; 32])
+                .expect("sign");
         assert_eq!(sig_a, sig_b);
-        verify(&pk_a, SignatureContext::ANCHOR, b"m", &sig_a).expect("verify");
+        verify(&pk_a, SignatureContext::DISTRICT_COMMIT, b"m", &sig_a).expect("verify");
 
-        let hedged_a = sign(&sk_a, SignatureContext::ANCHOR, b"m").expect("sign");
-        let hedged_b = sign(&sk_a, SignatureContext::ANCHOR, b"m").expect("sign");
+        let hedged_a = sign(&sk_a, SignatureContext::DISTRICT_COMMIT, b"m").expect("sign");
+        let hedged_b = sign(&sk_a, SignatureContext::DISTRICT_COMMIT, b"m").expect("sign");
         assert_ne!(hedged_a, hedged_b, "hedged signatures use fresh randomness");
 
-        let with_rnd = sign_with_randomness(&sk_a, SignatureContext::ANCHOR, b"m", &[7u8; 32])
-            .expect("sign with randomness");
+        let with_rnd =
+            sign_with_randomness(&sk_a, SignatureContext::DISTRICT_COMMIT, b"m", &[7u8; 32])
+                .expect("sign with randomness");
         assert_ne!(with_rnd, sig_a);
-        verify(&pk_a, SignatureContext::ANCHOR, b"m", &with_rnd).expect("verify");
+        verify(&pk_a, SignatureContext::DISTRICT_COMMIT, b"m", &with_rnd).expect("verify");
     }
 
     #[test]
@@ -365,8 +339,14 @@ mod tests {
         assert_eq!(secret_key.as_bytes(), bytes.as_slice());
         let restored = SecretKey::from_bytes(&bytes).expect("parse");
         assert_eq!(restored.public_key(), public_key);
-        let signature = sign(&restored, SignatureContext::POLICY, b"x").expect("sign");
-        verify(&public_key, SignatureContext::POLICY, b"x", &signature).expect("verify");
+        let signature = sign(&restored, SignatureContext::GROUP_POLICY, b"x").expect("sign");
+        verify(
+            &public_key,
+            SignatureContext::GROUP_POLICY,
+            b"x",
+            &signature,
+        )
+        .expect("verify");
         assert_eq!(format!("{secret_key:?}"), "SecretKey(ML-DSA-65, redacted)");
     }
 
@@ -377,14 +357,14 @@ mod tests {
             Some(SecretKeyError::InvalidSecretKeyLength)
         );
         assert_eq!(
-            verify(&[], SignatureContext::MESSAGE, b"m", &[]),
+            verify(&[], SignatureContext::SEAL, b"m", &[]),
             Err(VerifyError::InvalidPublicKeyLength)
         );
         let (public_key, _) = keypair_from_seed(&[3u8; 32]);
         assert_eq!(
             verify(
                 &public_key,
-                SignatureContext::MESSAGE,
+                SignatureContext::SEAL,
                 b"m",
                 &[0u8; SIGNATURE_BYTES - 1]
             ),
@@ -393,7 +373,7 @@ mod tests {
         assert_eq!(
             verify(
                 &public_key,
-                SignatureContext::MESSAGE,
+                SignatureContext::SEAL,
                 b"m",
                 &[0u8; SIGNATURE_BYTES]
             ),
@@ -405,24 +385,24 @@ mod tests {
         assert!(!is_signature_length(&[0u8; 4]));
     }
 
-    /// FIPS 204 final and the pre-standard Dilithium are not interoperable
-    /// (audit H-05): pin one known-answer key and signature so a backend swap
-    /// is caught. Both values were cross-checked with an independent
-    /// implementation (dilithium-py, `ML_DSA_65.key_derive` and
+    /// FIPS 204 final and the pre-standard Dilithium are not interoperable:
+    /// pin one known-answer key and signature so that a backend swap is
+    /// caught. Both values were cross-checked with an independent
+    /// implementation (dilithium-py 1.4.0, `ML_DSA_65.key_derive` and
     /// `_sign_internal` with `rnd = 0^32` over `0 || len(ctx) || ctx || m`).
     #[test]
     fn deterministic_known_answer_is_stable() {
         let (public_key, secret_key) = keypair_from_seed(&[0x42u8; 32]);
         let signature = sign_with_randomness(
             &secret_key,
-            SignatureContext::ANCHOR,
+            SignatureContext::DISTRICT_COMMIT,
             b"city-g kat",
             &[0u8; 32],
         )
         .expect("sign");
         verify(
             &public_key,
-            SignatureContext::ANCHOR,
+            SignatureContext::DISTRICT_COMMIT,
             b"city-g kat",
             &signature,
         )
@@ -433,7 +413,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(blake3::hash(&signature).as_bytes()),
-            "096a177ffcc50e9619ed592a7bd689f08bd061f73b25acc683b34337a803d740"
+            "15a74756473477d449151647df6d9506ffeaccc2b630c6e212e2f96db2863cd0"
         );
     }
 

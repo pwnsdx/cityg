@@ -14,9 +14,7 @@ use x_wing::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::cbor::bytes;
 use crate::error::{CoreError, CoreResult};
-use crate::hash::{Digest, expand_label_into, h_l};
 
 /// Encoded X-Wing encapsulation key size (ML-KEM-768 key, then X25519 key).
 pub const KEM_PUBLIC_KEY_BYTES: usize = x_wing::ENCAPSULATION_KEY_SIZE;
@@ -36,15 +34,6 @@ impl KemSecret {
     #[must_use]
     pub fn from_seed(seed: [u8; KEM_SEED_BYTES]) -> Self {
         Self { seed }
-    }
-
-    /// Derive a key from a 32-byte secret: `ExpandLabel(secret, label, h'', 32)`.
-    pub fn derive(secret: &[u8; 32], label: &str) -> CoreResult<Self> {
-        let mut seed = [0u8; KEM_SEED_BYTES];
-        expand_label_into(secret, label, &[], &mut seed)?;
-        let key = Self { seed };
-        seed.zeroize();
-        Ok(key)
     }
 
     /// Sample a fresh key.
@@ -121,11 +110,6 @@ pub fn validate_public_key(public_key: &[u8]) -> CoreResult<()> {
     encapsulation_key(public_key).map(|_| ())
 }
 
-/// `H_pk(pk) := H_L("kem-pk", [pk])`.
-pub fn pk_hash(public_key: &[u8]) -> CoreResult<Digest> {
-    h_l("kem-pk", vec![bytes(public_key)])
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -134,15 +118,11 @@ mod tests {
     use rand_core::SeedableRng;
 
     #[test]
-    fn derived_keys_round_trip_and_are_deterministic() {
-        let secret = [5u8; 32];
-        let a = KemSecret::derive(&secret, "node").unwrap();
-        let b = KemSecret::derive(&secret, "node").unwrap();
+    fn seeded_keys_round_trip_and_are_deterministic() {
+        let a = KemSecret::from_seed([5u8; 32]);
+        let b = KemSecret::from_seed([5u8; 32]);
         assert_eq!(a.public_key(), b.public_key());
-        assert_ne!(
-            a.public_key(),
-            KemSecret::derive(&secret, "leaf").unwrap().public_key()
-        );
+        assert_ne!(a.public_key(), KemSecret::from_seed([6u8; 32]).public_key());
         let mut rng = ChaCha20Rng::seed_from_u64(1);
         let pk = a.public_key();
         assert_eq!(pk.len(), KEM_PUBLIC_KEY_BYTES);
@@ -172,7 +152,6 @@ mod tests {
             KemSecret::from_seed(*key.seed()).public_key(),
             key.public_key()
         );
-        assert_ne!(pk_hash(&key.public_key()).unwrap(), [0u8; 32]);
     }
 
     /// Randomness source that hands out fixed bytes, in order.

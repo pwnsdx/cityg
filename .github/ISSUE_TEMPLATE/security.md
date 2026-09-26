@@ -41,7 +41,7 @@ Provide details about your concern:
 
 ## Context
 
-- **Version:** [e.g., v0.1.0]
+- **Version:** [e.g., 0.4.0]
 - **Use case:** [e.g., production deployment, research, testing]
 
 ## Suggested Mitigation (Optional)

@@ -1,31 +1,16 @@
-//! Device identities (ML-DSA-65) and the identifiers derived from them.
+//! Device identities (ML-DSA-65).
 //!
-//! A device key signs everything its device does in one group. It names the
-//! device in admissions (`device_id`) and in the group tree, where a member
-//! is identified by its occupancy `[leaf, since]` rather than by its key: a
-//! member can rotate its device key without changing its occupancy.
+//! A device key signs everything its device does in one group: its join
+//! request, its update, catch-up and re-entry requests, and the district
+//! commits and seals it produces. Members are named by their occupancy
+//! `[leaf, since]` (see [`crate::tree::Occupancy`]); the registry maps each
+//! `device_id` to it.
 
 use cityg_pqc::{SecretKey, SignatureContext};
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
-use crate::cbor::bytes;
 use crate::error::{CoreError, CoreResult};
-use crate::hash::{Digest, h_l};
-
-/// `device_id := H_L("device-id", [gid, device_pk])`: the device an
-/// admission names.
-pub fn device_id(gid: &[u8; 32], device_pk: &[u8]) -> CoreResult<Digest> {
-    h_l("device-id", vec![bytes(gid), bytes(device_pk)])
-}
-
-/// `gid := H_L("group-id", [creator_device_pk, nonce])`.
-///
-/// Binding the creator key into the group identifier makes the creator the
-/// verifiable first admin of the group.
-pub fn group_id(creator_device_pk: &[u8], nonce: &[u8; 32]) -> CoreResult<Digest> {
-    h_l("group-id", vec![bytes(creator_device_pk), bytes(nonce)])
-}
 
 /// A device signing identity (ML-DSA-65).
 pub struct DeviceIdentity {
@@ -87,11 +72,6 @@ impl DeviceIdentity {
         cityg_pqc::sign_with_randomness(&self.secret_key, context, message, &rnd)
             .map_err(|_| CoreError::Crypto("ML-DSA-65 signing"))
     }
-
-    /// `device_id` of this device in group `gid`.
-    pub fn device_id(&self, gid: &[u8; 32]) -> CoreResult<Digest> {
-        device_id(gid, &self.public_key)
-    }
 }
 
 impl Clone for DeviceIdentity {
@@ -140,30 +120,17 @@ mod tests {
     use rand_core::SeedableRng;
 
     #[test]
-    fn identifiers_bind_group_and_key() {
-        let alice = DeviceIdentity::from_seed(&[1; 32]);
-        let bob = DeviceIdentity::from_seed(&[2; 32]);
-        let gid = group_id(alice.public_key(), &[9; 32]).unwrap();
-        assert_ne!(gid, group_id(bob.public_key(), &[9; 32]).unwrap());
-        assert_ne!(gid, group_id(alice.public_key(), &[8; 32]).unwrap());
-        let device = alice.device_id(&gid).unwrap();
-        assert_eq!(device, device_id(&gid, alice.public_key()).unwrap());
-        assert_ne!(device, bob.device_id(&gid).unwrap());
-        assert_ne!(device, alice.device_id(&[0; 32]).unwrap());
-    }
-
-    #[test]
     fn signatures_round_trip_through_serialized_keys() {
         let mut rng = ChaCha20Rng::seed_from_u64(1);
         let alice = DeviceIdentity::from_seed(&[3; 32]);
         let restored = DeviceIdentity::from_secret_key_bytes(alice.secret_key_bytes()).unwrap();
         assert_eq!(restored.public_key(), alice.public_key());
         let signature = restored
-            .sign(SignatureContext::ANCHOR, b"m", &mut rng)
+            .sign(SignatureContext::SEAL, b"m", &mut rng)
             .unwrap();
         verify_signature(
             alice.public_key(),
-            SignatureContext::ANCHOR,
+            SignatureContext::SEAL,
             b"m",
             &signature,
             "m",
@@ -172,7 +139,7 @@ mod tests {
         assert_eq!(
             verify_signature(
                 alice.public_key(),
-                SignatureContext::INVITE,
+                SignatureContext::DISTRICT_COMMIT,
                 b"m",
                 &signature,
                 "m"
@@ -194,7 +161,7 @@ mod tests {
         let sign = |seed| {
             alice
                 .sign(
-                    SignatureContext::ANCHOR,
+                    SignatureContext::SEAL,
                     b"m",
                     &mut ChaCha20Rng::seed_from_u64(seed),
                 )

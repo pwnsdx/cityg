@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Run every scenario of the City-G v0.3 symbolic model and compare ProVerif's
-# verdicts with the expected ones, query by query.
-# Usage: docs/formal/run.sh [path/to/proverif]    (default: proverif in PATH)
+# Run every scenario of the symbolic model and compare ProVerif's verdicts
+# with the expected ones, query by query.
+# Usage: docs/formal/run.sh [path/to/proverif]   (default: proverif in PATH)
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -9,22 +9,26 @@ PROVERIF="${1:-proverif}"
 LOGS="$(mktemp -d)"
 FAILED=0
 
-# scenario: expected verdict of each query, in order. "unproved": ProVerif
-# finds the expected derivation but cannot rebuild its trace through the
-# private channels that carry the members' state (a sanity check whose
-# property must not be provable).
+# scenario: expected verdict of each query, in order ("true": the property
+# is proved; "false": ProVerif finds an attack, as expected for sanity
+# checks, or reaches the event of a reachability query).
 EXPECTED=(
-  "key_schedule: true true true true"
-  "forward_secrecy: true unproved"
+  "taint: true false"
+  "taint_without_rule: false false"
   "post_compromise: true false"
-  "joins: true true true true true false false"
-  "join_secrecy: true false"
-  "joins_from_any_signer: false"
-  "removal: true true true true false false"
-  "removal_without_author_rule: false"
-  "removal_without_retired_rule: false"
-  "rotation: true true true false false"
-  "messages: true true false"
+  "forward_secrecy: true"
+  "forward_secrecy_without_init: false"
+  "fabrication: true false"
+  "fabrication_without_init: false false"
+  "fabrication_without_init_signed: true false"
+  "join: true false"
+  "anchored_join: true false"
+  "anchored_join_unsigned_tag: false"
+  "join_without_anchor: false"
+  "entrant_removal: true false"
+  "external_tag_only: false false"
+  "external_checked: true false"
+  "open_group: false true"
 )
 
 for line in "${EXPECTED[@]}"; do

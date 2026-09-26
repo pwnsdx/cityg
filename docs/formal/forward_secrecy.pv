@@ -1,20 +1,30 @@
-(* Forward secrecy (section 2.2): the whole state A holds after epoch 2
-   leaks: its leaf and root private keys, init_secret_2, external_secret_2
-   and msg_secret_2. The adversary may use it at any point of the run, which
-   is stronger than a compromise after epoch 2 (and faster to analyse than
-   a separate phase). The secrets of epochs 0 to 2 stay secret; what A keeps
-   for the next epoch leaks.
-   Run: proverif -lib cityg.pvl forward_secrecy.pv *)
+(* Scenario FS: a member's leaf key leaks after two windows, with the init
+   chain.
 
-(* Epoch secrets accepted before the compromise stay secret. *)
-query pk: spkey, n: bitstring, gc: bitstring, es: key;
-  event(Accepted(pk, n, gc, es)) && attacker(es) ==> false.
+   One district of two leaves, A and B, under the root. B commits windows 1
+   and 2, each time with a fresh root secret wrapped to both leaves (the
+   committer never knows the leaves' secrets). A sends a message in epoch 1,
+   and has not updated its leaf since. After window 2 its device leaks: the
+   leaf key it still holds and the secrets of epoch 2; it erased those of
+   epoch 1. The init secret of epoch 0 was never public. *)
 
-(* Sanity check, expected to be false: the leak is real, the secrets that
-   A keeps for epoch 3 are exposed. *)
-query gc: bitstring, es: key;
-  event(Accepted(spk(skA), N2, gc, es)) && attacker(expand_label(es, L_init, NONE)) ==> false.
+free M1: bitstring [private].
+query attacker(M1).
 
 process
-  out(c, (spk(skA), spk(skB)));
-  (KS | (in(leakA2, state: bitstring); out(c, state)))
+  new lsA: key; new lsB: key; new init0: key;
+  out(c, (leaf_pk(lsA), leaf_pk(lsB)));
+  (* Window 1 *)
+  new r1: key; new qa1: key; new qb1: key;
+  let gc1 = (N1, node_pk(r1)) in
+  let es1 = epoch_secret(joiner_secret(init0, r1, gc1)) in
+  out(c, (wrap(leaf_pk(lsA), qa1, r1), wrap(leaf_pk(lsB), qb1, r1), gc1, tag(es1, gc1)));
+  out(c, aenc(msg_key(es1), M1));
+  (* Window 2 *)
+  new r2: key; new qa2: key; new qb2: key;
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r2, gc2)) in
+  out(c, (wrap(leaf_pk(lsA), qa2, r2), wrap(leaf_pk(lsB), qb2, r2), gc2, tag(es2, gc2)));
+  (* A's device leaks. *)
+  phase 1;
+  out(c, (lsA, r2, es2, init_secret(es2)))

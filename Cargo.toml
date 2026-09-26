@@ -2,25 +2,8 @@
 members = [
     "crates/cityg-pqc",
     "crates/cityg-core",
-    "crates/cityg-cite",
-    "crates/cityg-proto",
-    "crates/cityg-server",
-    "crates/cityg-runtime",
-    "crates/cityg-api",
-    "crates/cityg-api-client",
-    "crates/cityg-config",
-    "crates/cityg-gui",
-    "crates/cityg-stress",
-    "crates/cityg-worker",
 ]
 resolver = "2"
-
-[patch.crates-io]
-# GPUI is now consumed from the maintained pwnsdx fork rather than the vendored
-# snapshot. This revision includes the semantic material surface layer, the
-# refined cross-platform fallback backend, and the first native macOS material
-# surface plumbing on top of the March 2026 backports.
-gpui = { git = "https://github.com/pwnsdx/gpui.git", rev = "1c3bf16a45aa62988aa3b184f0ca7cefef584120" }
 
 [workspace.package]
 edition = "2024"
@@ -30,7 +13,7 @@ repository = "https://github.com/pwnsdx/cityg"
 
 # Optimize the post-quantum and hash primitives even in dev/test builds:
 # unoptimized FIPS 203/204 code is ~40x slower, which makes the protocol
-# integration tests slow and timing-sensitive.
+# tests slow.
 [profile.dev.package.fips204]
 opt-level = 3
 
@@ -50,10 +33,3 @@ opt-level = 3
 lto = true              # Link-time optimization for better performance
 codegen-units = 1       # Single codegen unit for maximum optimization
 opt-level = 3           # Maximum speed optimization
-
-[profile.release-small]
-inherits = "release"
-lto = true
-codegen-units = 1
-opt-level = "z"         # Optimize for binary size
-strip = true            # Strip debug symbols

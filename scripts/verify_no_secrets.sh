@@ -1,60 +1,57 @@
 #!/bin/bash
 set -euo pipefail
 
-# verify_no_secrets.sh — syntactic guardrail: the delivery service must not
-# touch group secrets.
-# Usage: ./scripts/verify_no_secrets.sh [--no-build]
+# verify_no_secrets.sh — syntactic guardrail: the delivery service and the
+# public transition of a window never touch group secrets.
+# Usage: ./scripts/verify_no_secrets.sh
 #
-# The server-side crates (cityg-server, cityg-runtime, cityg-api,
-# cityg-worker) run cityg_core::ledger::GroupLedger, which verifies commits
-# against public state only. They must never use the member-side types that
-# hold secrets: GroupSession, DeviceIdentity, the key schedule, KEM
-# decapsulation or message decryption. Test code (tests.rs files and
-# everything after the first #[cfg(test)] of a file) builds members as
-# fixtures and is not scanned.
+# The modules of cityg-core that the delivery service and auditors run
+# (ds, window, audit, packet, registry, smm, tree) check windows against
+# public state only. Their production code (everything before the first
+# #[cfg(test)] of a file) must never name a device identity, an X-Wing
+# private key, an epoch secret, a member path, a node secret or a signing
+# operation. Test code builds members as fixtures and is not scanned.
 #
 # This is a grep-based check, not a proof: the protocol argument is in
-# docs/specs.md (server blindness) and docs/formal/.
+# docs/specs.md (section 18) and docs/formal/.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-BUILD=1
-if [[ "${1:-}" == "--no-build" ]]; then
-    BUILD=0
-fi
-
-SERVER_CRATES=(
-    crates/cityg-server/src
-    crates/cityg-runtime/src
-    crates/cityg-api/src
-    crates/cityg-worker/src
+PUBLIC_MODULES=(
+    crates/cityg-core/src/ds.rs
+    crates/cityg-core/src/window.rs
+    crates/cityg-core/src/audit.rs
+    crates/cityg-core/src/packet.rs
+    crates/cityg-core/src/registry.rs
+    crates/cityg-core/src/smm.rs
+    crates/cityg-core/src/tree.rs
 )
-FORBIDDEN='GroupSession|DeviceIdentity|key_schedule|KeySchedule|decapsulate|DecapsulationKey|SecretKey|\.decrypt\(|decrypt_|epoch_secret|init_secret|encryption_secret|export_secret'
+FORBIDDEN='DeviceIdentity|EpochSecrets|KemSecret|MemberPath|decapsulate|node_key|fresh_secret|commit_secret|joiner_secret|init_secret|msg_secret|external_init|external_key|\bSecret\b|\.sign\(|sign_fields|crypto::unwrap|unwrap\(&'
 
 echo "═══════════════════════════════════════════════════════════"
 echo "City-G guardrail — the delivery service holds no group secret"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
-FAILED=0
-
 # Production part of a Rust file: up to its first #[cfg(test)].
 production_lines() {
     awk '/^[[:space:]]*#\[cfg\(test\)\]/ { exit } { printf "%s:%d:%s\n", FILENAME, FNR, $0 }' "$1"
 }
 
-echo "Check 1: no secret-holding types in server-side production code..."
+FAILED=0
+echo "Check: no secret-holding type or derivation in the public modules..."
 HITS=""
-while IFS= read -r file; do
-    case "$file" in
-        */tests.rs | */tests/*) continue ;;
-    esac
+for file in "${PUBLIC_MODULES[@]}"; do
+    if [[ ! -f "$file" ]]; then
+        HITS+="$file: missing"$'\n'
+        continue
+    fi
     found="$(production_lines "$file" | grep -E "$FORBIDDEN" || true)"
     if [[ -n "$found" ]]; then
         HITS+="$found"$'\n'
     fi
-done < <(find "${SERVER_CRATES[@]}" -name '*.rs' | sort)
+done
 if [[ -n "$HITS" ]]; then
     echo "  FAILED:"
     printf '%s' "$HITS" | sed 's/^/    /'
@@ -63,46 +60,6 @@ else
     echo "  PASSED"
 fi
 echo ""
-
-echo "Check 2: the ledger verifies with public state only..."
-LEDGER=crates/cityg-core/src/ledger.rs
-found="$(production_lines "$LEDGER" | grep -E "$FORBIDDEN|use crate::(key_schedule|kem)" || true)"
-if [[ -n "$found" ]]; then
-    echo "  FAILED:"
-    printf '%s\n' "$found" | sed 's/^/    /'
-    FAILED=1
-else
-    echo "  PASSED"
-fi
-echo ""
-
-echo "Check 3: server-side crates do not depend on member-side crates..."
-for manifest in crates/cityg-server/Cargo.toml crates/cityg-runtime/Cargo.toml \
-    crates/cityg-api/Cargo.toml crates/cityg-worker/Cargo.toml; do
-    # Dev-dependencies (test fixtures) are allowed.
-    if sed '/^\[dev-dependencies\]/,$d' "$manifest" | grep -q "cityg-api-client"; then
-        echo "  FAILED: $manifest depends on cityg-api-client"
-        FAILED=1
-    fi
-done
-if [[ $FAILED -eq 0 ]]; then
-    echo "  PASSED"
-fi
-echo ""
-
-if [[ $BUILD -eq 1 ]]; then
-    echo "Check 4: the server-side crates build and their tests pass..."
-    LOG="$(mktemp)"
-    if cargo test --locked --quiet -p cityg-server -p cityg-runtime -p cityg-api -p cityg-worker > "$LOG" 2>&1; then
-        echo "  PASSED"
-    else
-        echo "  FAILED:"
-        tail -n 80 "$LOG"
-        FAILED=1
-    fi
-    rm -f "$LOG"
-    echo ""
-fi
 
 echo "═══════════════════════════════════════════════════════════"
 if [[ $FAILED -eq 0 ]]; then

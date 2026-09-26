@@ -13,7 +13,7 @@ Describe what's wrong or missing in the documentation.
 ## Location
 
 Where is the documentation issue?
-- **File/URL:** [e.g., `docs/protocol/01-overview.md`, README.md]
+- **File/URL:** [e.g., `docs/specs.md`, README.md]
 - **Section:** [e.g., "Client Operations", "FAQ"]
 - **Line number (if applicable):** [e.g., line 42]
 

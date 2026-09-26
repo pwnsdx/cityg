@@ -14,41 +14,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install wasm32 target
-        run: rustup target add wasm32-unknown-unknown
       - name: Install nextest
         uses: taiki-e/install-action@nextest
-      - name: Install ripgrep
-        uses: taiki-e/install-action@v2
-        with:
-          tool: ripgrep
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy (workspace)
-        run: cargo clippy --workspace --all-features --all-targets --no-deps -- -D warnings -A clippy::never_loop -D clippy::panic -D clippy::unwrap_used -D clippy::expect_used -D clippy::todo -D clippy::unimplemented
-      - name: Cargo check (workspace)
-        run: cargo check --workspace --all-targets
-      - name: Cargo check (cityg-worker cloudflare)
-        run: cargo check -p cityg-worker --features cloudflare --tests
-      - name: Cargo check (cityg-worker cloudflare wasm32)
-        run: cargo check -p cityg-worker --features cloudflare --target wasm32-unknown-unknown
+        run: cargo clippy --workspace --all-features --all-targets --no-deps --locked -- -D warnings -A clippy::never_loop -D clippy::panic -D clippy::unwrap_used -D clippy::expect_used -D clippy::todo -D clippy::unimplemented
       - name: Cargo nextest (workspace)
-        run: cargo nextest run --workspace --profile ci
-      - name: Security verification (server blindness)
-        run: ./scripts/verify_no_secrets.sh --no-build
+        run: cargo nextest run --workspace --profile ci --locked
+      - name: Doc tests
+        run: cargo test --workspace --doc --locked
+      - name: Security verification (delivery-service blindness)
+        run: ./scripts/verify_no_secrets.sh
 
-  conformance-vectors:
-    name: Independent conformance vectors
+  scale:
+    name: Scale test (release)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install BLAKE3, ML-KEM and ML-DSA implementations independent of the Rust code
-        run: python -m pip install --quiet blake3==1.0.9 kyber-py==1.2.0 dilithium-py==1.4.0
-      - name: Verify kat/v0.3/vectors.json from the specification
-        run: python kat/v0.3/verify_vectors.py
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Windows over a large tree
+        run: cargo test -p cityg-core --release --locked --test scale -- --ignored --nocapture
 
   formal-model:
     name: Symbolic model (ProVerif)
@@ -68,142 +55,3 @@ jobs:
           cd "$RUNNER_TEMP/proverif2.05" && (./build || test -x proverif)
       - name: Check the verdicts of every scenario
         run: docs/formal/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
-      - name: Check the verdicts of the research model (profile v0.4 design)
-        run: docs/research/formal/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
-
-  release-matrix:
-    name: Release Matrix (${{ matrix.name }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: cityg-core
-            command: cargo test -p cityg-core -p cityg-pqc && cargo test -p cityg-core --test vectors --test conformance_manifest
-            needs_ripgrep: false
-            needs_native_linux_deps: false
-          - name: delivery-service
-            command: cargo test -p cityg-server -p cityg-runtime -p cityg-api -p cityg-worker
-            needs_ripgrep: false
-            needs_native_linux_deps: false
-          - name: protocol-mutations
-            command: ./scripts/run_protocol_mutation_suite.sh
-            needs_ripgrep: false
-            needs_native_linux_deps: false
-          - name: cityg-gui-native
-            command: cargo test -p cityg-gui --features native-app
-            needs_ripgrep: false
-            needs_native_linux_deps: true
-          - name: client-state-hardening
-            command: ./scripts/verify_client_state_hardening.sh
-            needs_ripgrep: false
-            needs_native_linux_deps: true
-          - name: server-blindness
-            command: ./scripts/verify_no_secrets.sh
-            needs_ripgrep: true
-            needs_native_linux_deps: false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install ripgrep
-        if: matrix.needs_ripgrep
-        uses: taiki-e/install-action@v2
-        with:
-          tool: ripgrep
-      - name: Install GUI native deps
-        if: matrix.needs_native_linux_deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev
-      - name: Run ${{ matrix.name }}
-        run: ${{ matrix.command }}
-
-  nightly-chaos:
-    name: Nightly Chaos
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install GUI native deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev
-      - name: Build nightly chaos binaries
-        run: |
-          cargo build -p cityg-api
-          cargo build -p cityg-gui --features native-app --bin join_leave
-          cargo build -p cityg-stress
-      - name: Run nightly chaos campaign
-        run: |
-          artifact_dir="$RUNNER_TEMP/cityg-stress-nightly"
-          cargo run -p cityg-stress -- \
-            --server-bind 127.0.0.1:18080 \
-            --server-url http://127.0.0.1:18080 \
-            --workers 1 \
-            --rounds-per-worker 6 \
-            --min-count 2 \
-            --max-count 2 \
-            --leaves-per-room 2 \
-            --watch-percent 100 \
-            --jitter-max-secs 0 \
-            --round-delay-secs 2 \
-            --message-burst-count 2 \
-            --message-burst-interval-ms 25 \
-            --restart-every-secs 45 \
-            --client-restart-every-secs 20 \
-            --capture-client-state-artifacts \
-            --require-metrics \
-            --artifact-dir "$artifact_dir" \
-            --plain
-      - name: Upload nightly chaos artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cityg-nightly-chaos
-          path: ${{ runner.temp }}/cityg-stress-nightly
-
-  artifact-build:
-    name: Artifact Build (${{ matrix.name }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: cityg-api-release
-            command: cargo build --release -p cityg-api
-            setup_rust: true
-            needs_native_linux_deps: false
-          - name: cityg-gui-release
-            command: cargo build --release -p cityg-gui --features native-app
-            setup_rust: true
-            needs_native_linux_deps: true
-          - name: docker-image
-            command: docker build -f Dockerfile -t cityg-api:ci .
-            setup_rust: false
-            needs_native_linux_deps: false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.setup_rust
-      - name: Install GUI native deps
-        if: matrix.needs_native_linux_deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev
-      - name: Build ${{ matrix.name }}
-        run: ${{ matrix.command }}
