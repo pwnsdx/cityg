@@ -114,6 +114,7 @@ cargo run --release --manifest-path docs/research/bench/Cargo.toml   # primitive
 python3 docs/research/rekey_sim.py                                # cost model
 python3 docs/research/msg_sim.py                                  # cost model of the proposed message plane
 python3 docs/research/parity_sim.py                               # cost model of the profile at parity with MLS
+python3 docs/research/ilots_sim.py                                # cost model of îlots under a flat top
 ```
 
 The scenario tests of `crates/cityg-core/tests/scenarios.rs` run whole

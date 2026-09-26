@@ -24,6 +24,11 @@
      node key nor what that key protected before; a cheaper dispute, which
      reveals the shared secret of the encapsulation, is rejected.
 
+   And the îlots of docs/research/ilots-2026-09-26.md: the tree is cut into
+   îlots with no tree above them; every window sends the epoch secret to
+   every îlot root, and a member of an îlot may relay it to the others,
+   sealed under the îlot's secret.
+
    Primitives are ideal. The key schedule is the one of docs/formal/cityg.pvl,
    with commit secrets: joiner_n := kdf2(init_n-1, commit_n, context_n). *)
 
@@ -38,6 +43,8 @@ const N1, N2, N3: bitstring.       (* epochs, windows *)
 const L_node, L_leaf, L_commit, L_epoch, L_init, L_confirm, L_msg: bitstring.
 const L_join, L_batch, L_ckpt, L_hist, L_sender_data, L_card: bitstring.
 const L_ext, L_split, L_share, L_commit_sig: bitstring.
+const L_relay, L_seal: bitstring.
+const zero: key.                   (* a public constant secret *)
 const LA, LB: bitstring.           (* two leaves *)
 
 (* ---------- BLAKE3 ---------- *)
@@ -113,3 +120,9 @@ otherwise forall sk: key, ad: bitstring, w: bitstring;
 fun kem_ct(kpk, key): bitstring.              (* recipient key, coins *)
 fun kem_ss(kpk, key): key.
 reduc forall sk: key, r: key; decaps(sk, kem_ct(kempk(sk), r)) = kem_ss(kempk(sk), r).
+
+(* ---------- Îlots ---------- *)
+
+(* The key of a relay's blob: the epoch secret of a window, sealed under a
+   key derived from the îlot's root secret. *)
+letfun relay_key(s: key) = kdf(s, L_relay).

@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Date | 2026-09-26 |
-| Nature | Note de recherche. Elle examine la proposition de supprimer les committers et le scelleur, et de confier le re-key de l'arbre au serveur, éventuellement avec des preuves à divulgation nulle de connaissance (*zero knowledge*, ZK). Elle complète la note [parité MLS](parite-mls-2026-09-26.md). Rien de ce qu'elle décrit n'est encore dans la spécification ni dans le code. |
+| Nature | Note de recherche. Elle examine la proposition de supprimer les committers et le scelleur, et de confier le re-key de l'arbre au serveur, éventuellement avec des preuves à divulgation nulle de connaissance (*zero knowledge*, ZK). Elle complète la note [parité MLS](parite-mls-2026-09-26.md). La note [îlots](ilots-2026-09-26.md) va plus loin : les entrants y font l'essentiel du travail, et les tâches y deviennent petites et bornées. Rien de ce qu'elle décrit n'est encore dans la spécification ni dans le code. |
 | Question | Le serveur peut-il faire le re-key à la place des membres, éventuellement en zero knowledge, sans perdre les garanties de MLS ? |
 | Compagnons | [`parity_sim.py`](parity_sim.py), section 6 : coûts (`python3 docs/research/parity_sim.py`). [`formal-parity/`](formal-parity/README.md) : 9 scénarios ProVerif nouveaux (section 6). |
 | Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Le modèle symbolique couvre les choix clés ; il n'existe aucune preuve calculatoire. Une relecture cryptographique humaine reste nécessaire. |

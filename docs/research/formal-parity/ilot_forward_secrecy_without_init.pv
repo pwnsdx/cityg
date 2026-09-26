@@ -1,0 +1,22 @@
+(* Scenario ILOT_FORWARD_SECRECY_WITHOUT_INIT: the same compromise with a
+   key schedule that does not chain the init secret: every epoch comes from
+   its window's secret alone.
+
+   Expected: attack. The root of îlot j opens the epoch secret of window 2,
+   hence epoch 2. Stable îlot keys need the init chain. *)
+
+free M2: bitstring [private].
+query attacker(M2).
+
+process
+  new sj: key; new lsA: key;
+  new r1: key; new r2: key; new r3: key; new q1: key; new q2: key; new q3: key;
+  let g1 = (N1, node_pk(sj)) in
+  let g2 = (N2, node_pk(sj)) in
+  let g3 = (N3, node_pk(sj)) in
+  let es2 = epoch_secret(joiner_secret(zero, commit_secret(r2), g2)) in
+  let es3 = epoch_secret(joiner_secret(zero, commit_secret(r3), g3)) in
+  out(c, (seal(node_pk(sj), q1, N1, r1), seal(node_pk(sj), q2, N2, r2), seal(node_pk(sj), q3, N3, r3)));
+  out(c, (g1, g2, g3));
+  out(c, aenc(msg_key(es2), M2));
+  out(c, (sj, lsA, es3))

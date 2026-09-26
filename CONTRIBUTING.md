@@ -106,6 +106,9 @@ We are especially interested in:
 - cryptanalysis of the construction and of its parameter choices;
 - side-channel analysis of the ML-KEM and ML-DSA backends;
 - reducing what members download and what committers send;
+- a specification and an implementation of the îlots of
+  [`docs/research/ilots-2026-09-26.md`](docs/research/ilots-2026-09-26.md),
+  and an analysis of a multi-recipient KEM for their top;
 - a zero-knowledge proof that an X-Wing wrap does not open in its context,
   for the disputes proposed in
   [`docs/research/rekey-serveur-2026-09-26.md`](docs/research/rekey-serveur-2026-09-26.md):

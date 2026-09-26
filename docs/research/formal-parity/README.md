@@ -8,8 +8,11 @@ million members, bursts of joins and departures, and a membership that the
 service authorizes. It also models the options of the note
 [`rekey-serveur-2026-09-26.md`](../rekey-serveur-2026-09-26.md) (in French),
 which asks whether the server could re-key the tree instead of members, and
-the disputes it proposes against a committer that sends bad wraps. None of
-them is part of profile `city-g/v0.4`. The model of the protocol itself is
+the disputes it proposes against a committer that sends bad wraps; and the
+îlots of [`ilots-2026-09-26.md`](../ilots-2026-09-26.md) (in French): small
+subtrees with no tree above them, whose roots receive the epoch secret of
+every window, and relays that pass it on inside an îlot. None of them is
+part of profile `city-g/v0.4`. The model of the protocol itself is
 in [`docs/formal/`](../../formal/README.md); that of the message-plane note
 in [`../formal-messages/`](../formal-messages/README.md).
 
@@ -57,6 +60,13 @@ creates.
 | [`wrap_dispute.pv`](wrap_dispute.pv) | An honest committer wraps a node's secret to child u; a hostile member under u, which holds u's key, files disputes: a wrap from a signed commit and a proof of decryption in the wrap's context. The judge convicts if the wrap is not well formed or opens to a secret whose public key is not the node's. | Proved: the honest committer is never convicted. |
 | [`wrap_dispute_report.pv`](wrap_dispute_report.pv) | Member B, which holds u's key, files a dispute against a hostile committer, which may replay a wrap of epoch 1. | Proved: u's key and the secret wrapped to u in epoch 1 stay secret. Reachable, as intended: the hostile committer is convicted (third query false). |
 | [`wrap_dispute_replay.pv`](wrap_dispute_replay.pv) | A cheaper dispute reveals the shared secret of the wrap's encapsulation, which does not depend on the wrap's context; the hostile committer replays the encapsulation of a wrap of epoch 1. | Attack: the attacker reads the secret of epoch 1. A dispute proves the verdict in the wrap's context and never reveals the encapsulation's secret. |
+| [`ilot_removal.pv`](ilot_removal.pv) | Îlot j holds A and M, îlot i holds B; window 2 removes M. The îlot task re-keys j; the top seals the epoch secret to the new root of j and the unchanged root of i, with no tree above the îlots. M gives the server the secrets of epoch 1 and the old root of j. | Proved: the real epoch 2 stays secret. |
+| [`ilot_removal_unrekeyed.pv`](ilot_removal_unrekeyed.pv) | The window does not re-key îlot j. | Attack: the top seals the epoch secret to a root M knows. |
+| [`ilot_relay.pv`](ilot_relay.pv) | Member B takes the epoch secret from relay C, a hostile member of its îlot working with the server, in a blob under the îlot's relay key, and checks it against the tag the sealer signed. | Proved: B accepts only the real epoch. |
+| [`ilot_relay_unchecked.pv`](ilot_relay_unchecked.pv) | B does not check the tag. | Attack: the relay leads B into an epoch nobody sealed. |
+| [`ilot_forward_secrecy.pv`](ilot_forward_secrecy.pv) | Îlot j keeps its root through windows 1 to 3, whose epoch secrets the top seals to it; member A is compromised in epoch 3 and had erased the secrets of epochs 1 and 2. | Proved: the attacker opens the epoch secrets of the three windows, but the init chain keeps epoch 2 from it. |
+| [`ilot_forward_secrecy_without_init.pv`](ilot_forward_secrecy_without_init.pv) | The same compromise with a key schedule that does not chain the init secret. | Attack: stable îlot keys need the init chain. |
+| [`ilot_init_by_ilot.pv`](ilot_init_by_ilot.pv) | A cheaper welcome: the init secret of epoch 1 is sealed to the root of the îlot that receives a joiner, instead of a welcome to each joiner's one-time init key; a member of that îlot is compromised in epoch 3. | Attack: the îlot's root opens the init secret and the epoch secret of window 2, hence epoch 2. Welcomes stay sealed to one-time init keys. |
 
 ## Abstractions and limits
 

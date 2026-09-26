@@ -71,6 +71,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The parity cost model prints what members download and servers compute
   when one or k servers re-key the tree, and the size of the members'
   tasks; the parity symbolic model gains 9 scenarios (19 in all).
+- Îlots under a flat top, in
+  [`docs/research/ilots-2026-09-26.md`](docs/research/ilots-2026-09-26.md)
+  (in French), not part of the profile:
+  - with continuous churn at a million members, every subtree above about
+    2^14 leaves changes in almost every window, and the binary city makes
+    85 to 95 % of what a member downloads;
+  - the tree is cut into îlots of 2^8 leaves with no tree above them; every
+    window sends a fresh secret to every îlot root, with X-Wing or a
+    multi-recipient KEM; a member of an îlot may relay it to the others in
+    52 bytes, checked against the tag; joiners take the leaves removals
+    free and re-key their own paths, and share the top; a cut îlot is
+    repaired through its members' leaves;
+  - following a group of 2^20 members costs 94 KB a day with relays and
+    415 KB without, instead of 1.8 MB, and no longer grows with the group;
+  - a cheaper welcome, the init secret sealed to the îlots of joiners, is
+    rejected: it would open past epochs to a later compromise.
+- Its cost model, [`docs/research/ilots_sim.py`](docs/research/ilots_sim.py); the parity symbolic model
+  gains 7 scenarios (26 in all).
 
 ## [0.4.0] — initial version
 

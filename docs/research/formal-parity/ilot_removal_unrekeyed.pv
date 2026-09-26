@@ -1,0 +1,18 @@
+(* Scenario ILOT_REMOVAL_UNREKEYED: the same removal, but the îlot of the
+   removed member is not re-keyed in the window that removes it.
+
+   Expected: attack. The top seals the epoch secret to the old root of
+   îlot j, which M knows. The îlot of a removed member is re-keyed in the
+   window that removes it, before the top. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+process
+  new es1: key; new sj: key; new si: key; new r2: key; new q2: key; new q3: key;
+  out(c, (es1, sj, node_pk(si)));
+  out(c, (seal(node_pk(sj), q2, N2, r2), seal(node_pk(si), q3, N2, r2)));
+  let gc2 = (N2, node_pk(sj), node_pk(si)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), commit_secret(r2), gc2)) in
+  out(c, (gc2, tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), MA))
