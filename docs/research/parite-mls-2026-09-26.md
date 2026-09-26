@@ -45,7 +45,7 @@ Vocabulaire :
    - Les *liens d'historique*, qui auraient rendu le retour aussi économique qu'un saut : un retiré qui revient lit les époques où il n'était pas membre. Ils sont rejetés.
 6. **Ce qui reste comme dans MLS** :
    - les bifurcations par le DS, détectables par comparaison hors bande, sauf pour un membre qui vérifie les points de contrôle d'un autorisateur distinct du DS : il les refuse ;
-   - la fragmentation par un initié, plus large ici, car un committer re-keye un quartier entier et un scelleur la ville ;
+   - la fragmentation par un initié. Un scelleur hostile peut couper tout le groupe, comme un committer hostile dans MLS, et un committer de quartier son quartier. Mais chaque fenêtre donne ce pouvoir à plusieurs membres, un par quartier changé plus le scelleur, là où MLS le donne à un seul membre par époque ;
    - la compromission de l'autorisateur, qui fait entrer qui il veut, visiblement, comme un service d'authentification compromis.
 
 ## 1. La cible
@@ -215,7 +215,12 @@ MLS ne borne pas le délai d'un retrait : il vaut jusqu'au commit suivant. Le se
 ### 3.9 Ce que la parité ne change pas
 
 - **Bifurcations.** Comme dans MLS, le DS peut faire bifurquer le groupe. Avec l'aide d'un membre de l'époque précédente, il peut mener un membre qui ne vérifie que le tag dans une époque de son choix (spécification, section 2.3). Un membre qui vérifie les points de contrôle d'un autorisateur distinct du DS refuse cette époque (section 3.2).
-- **Fragmentation par un initié** (RFC 9420, §16.12). Un committer hostile peut chiffrer des secrets illisibles pour certains membres, comme un membre hostile dans MLS. Ici, un committer re-keye un quartier entier, et un scelleur la ville, pas seulement leur chemin : la portée d'une fraude est plus large. La parade reste celle de MLS, des rapports d'échec (spécification, section 19).
+- **Fragmentation par un initié** (RFC 9420, §16.12). Dans MLS, le committer chiffre un secret de son chemin vers chaque sous-arbre voisin (§7.5) : chaque autre membre reçoit un chiffré de lui. Un committer hostile peut donc couper n'importe quelle partie du groupe, jusqu'au groupe entier. Dans City-G :
+  - un committer de quartier ne chiffre que vers les membres de son quartier, dont il re-keye les chemins : il peut couper au plus ce quartier (4 096 membres avec `L = 12`), et les entrants dont il scelle les welcomes ;
+  - le scelleur re-keye la ville jusqu'à la racine et calcule le tag de confirmation que chaque membre vérifie : un tag faux, ou un chiffré faux près de la racine, coupe tout le groupe, comme un committer MLS ;
+  - un entrant qui scelle seul une fenêtre tient les deux rôles, comme un membre qui entre par un commit externe dans MLS.
+
+  La portée d'un rôle n'est donc pas plus large que dans MLS. Ce qui l'est, c'est le nombre de membres qui reçoivent un rôle à chaque fenêtre : jusqu'à un committer par quartier changé, plus le scelleur. La parade reste celle de MLS, des rapports d'échec (spécification, section 19) ; le DS peut aussi confier le sceau à des membres de confiance, les gardiens admis d'un groupe public par exemple.
 - **Métadonnées.** Le DS voit l'appartenance, puisqu'il valide les requêtes ; c'est la position d'un DS de MLS qui voit les messages de gestion en clair (RFC 9750, §6.4).
 
 ### 3.10 Ce qui sort du profil
@@ -317,7 +322,7 @@ Le modèle du protocole, [`docs/formal/`](../formal/README.md), couvre les tache
 | G9 | Politique au DS ou aux clients | Mode autorisé, groupes fermés ou ouverts. En option, chaque membre vérifie que l'autorisateur a validé chaque fenêtre. |
 | G10 | Chaque membre tient l'arbre entier | Chaque changement est engagé par le sceau ; la liste se lit à la demande. |
 | G11 | Chaque membre traite chaque commit | Rejeu, ou saut sans le manqué. |
-| G12 | Pas de déni, métadonnées visibles, rejeu par un initié possible, fragmentation | Pas de déni, métadonnées visibles, rejeu détecté par le journal, fragmentation plus large. |
+| G12 | Pas de déni, métadonnées visibles, rejeu par un initié possible, fragmentation | Pas de déni, métadonnées visibles, rejeu détecté par le journal ; fragmentation de même portée par rôle, mais plus de membres ont un rôle à chaque fenêtre. |
 | R1 | Dizaines de milliers de membres | 2^20, et jusqu'à 2^24. |
 | R2 | Un commit par membre qui change | Une fenêtre par vague, en parallèle, près de la borne inférieure. |
 | R3 | Par la politique | Mode autorisé ; tout membre sort seul. |
@@ -325,7 +330,7 @@ Le modèle du protocole, [`docs/formal/`](../formal/README.md), couvre les tache
 ## 7. Risques et questions ouvertes
 
 - **Le prix de la parité.** Un membre qui lit peu paie le suivi, de 1 à 7 Mo par jour selon la cadence des fenêtres. Une cadence plus lente retarde les retraits ordinaires, pas les urgents.
-- **La fragmentation par un committer hostile.** Elle couvre un quartier. Des accusés de réception par sous-arbre, que suggère MLS, coûteraient une signature par nœud re-keyé ; des rapports vérifiables sans révéler de secret restent à trouver.
+- **La fragmentation par un initié qui a un rôle.** Un committer de quartier peut couper son quartier, le scelleur tout le groupe, et une fenêtre compte jusqu'à un committer par quartier changé. Des accusés de réception par sous-arbre, que suggère MLS, coûteraient une signature par nœud re-keyé ; des rapports vérifiables sans révéler de secret restent à trouver.
 - **L'autorisateur.** Il signe un point de contrôle par fenêtre, et les membres qui les vérifient l'attendent : sa disponibilité devient celle du groupe. Pour valider une fenêtre, il tient l'état public du groupe. S'il se confond avec le DS, la confiance est celle d'un service d'authentification compromis. La transparence des clés d'appareil (RFC 9750, §8.4.3.1) le rendrait vérifiable.
 - **FN-DSA** n'est pas final, et sa signature en virgule flottante demande une implémentation soignée ; la carte peut aussi être une clé ML-DSA, au prix de la taille.
 - **Le délai des rafales** se voit dans l'interface.
