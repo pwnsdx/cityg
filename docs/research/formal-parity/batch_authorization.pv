@@ -1,0 +1,36 @@
+(* Scenario BATCH_AUTHORIZATION: joins authorized in a batch.
+
+   The authorizer signs, for window 2, one Merkle root over the join
+   requests it authorizes (here two, from devices it chose). A verifier (the
+   delivery service, a committer or an auditor) accepts a join only with its
+   inclusion proof in a batch root the authorizer signed for that window.
+   The attacker is the network and the delivery service, without the
+   authorizer's key: it has device keys of its own and can build any join
+   request. *)
+
+free skAuth: skey [private].
+
+event Authorized(spkey).
+event Accepted(spkey).
+query pk: spkey; event(Accepted(pk)) ==> event(Authorized(pk)).
+
+process
+  out(c, spk(skAuth));
+  (
+    (* The authorizer: a batch of two joins for window 2. *)
+    new skJ1: skey; new skJ2: skey; new ek1: key; new ek2: key;
+    let jr1 = (L_join, spk(skJ1), kempk(ek1)) in
+    let jr2 = (L_join, spk(skJ2), kempk(ek2)) in
+    event Authorized(spk(skJ1));
+    event Authorized(spk(skJ2));
+    let root = hash((L_batch, N2, hash(jr1), hash(jr2))) in
+    out(c, (jr1, jr2, root, sign(skAuth, (L_batch, N2, root))))
+  ) | (
+    (* A verifier: a join, the sibling hash, and the signed root. *)
+    !
+    in(c, (jr: bitstring, sib: bitstring, root: bitstring, sg: bitstring));
+    if checksign(spk(skAuth), (L_batch, N2, root), sg) = true then
+    if root = hash((L_batch, N2, hash(jr), sib)) || root = hash((L_batch, N2, sib, hash(jr))) then
+    let (=L_join, pk: spkey, ek: kpk) = jr in
+    event Accepted(pk)
+  )

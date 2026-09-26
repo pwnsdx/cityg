@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Date | 2026-09-26 |
-| Nature | Note de recherche. Elle propose un plan de messages pour City-G, que le profil `city-g/v0.4` ne spécifie pas encore ([spécification](../specs.md), section 19). Rien de ce qu'elle décrit n'est dans la spécification ni dans le code : ce serait un profil suivant. |
+| Nature | Note de recherche. Elle propose un plan de messages pour City-G, que le profil `city-g/v0.4` ne spécifie pas encore ([spécification](../specs.md), section 19). Rien de ce qu'elle décrit n'est dans la spécification ni dans le code : ce serait un profil suivant. **Révisée** par la note [parité avec MLS](parite-mls-2026-09-26.md) : les lecteurs hors de l'arbre, les lots, la chaîne publique et la rétention (sections 3.1 et 3.8) n'ont pas les garanties de MLS et sortent du profil visé ; les cartes, les rafales, les messages engageants et le journal scellé restent. |
 | Question | Comment faire lire et écrire des millions de membres dans un groupe post-quantique sans que chaque lecteur paie, par jour, des mégaoctets de signatures et de paquets de re-key ? |
 | Compagnons | [`msg_sim.py`](msg_sim.py) : modèle de coût (`python3 docs/research/msg_sim.py` redonne tous les chiffres de la section 4 en quelques secondes ; il réutilise [`rekey_sim.py`](rekey_sim.py)). [`formal-messages/`](formal-messages/README.md) : modèle ProVerif des mécanismes nouveaux (section 5). [`bench/`](bench/src/main.rs) : coût CPU de FN-DSA, de la dérivation d'une chaîne d'émetteur et de l'AEAD d'un message. |
 | Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Le modèle symbolique couvre les choix clés ; il n'existe aucune preuve calculatoire. Une relecture cryptographique humaine reste nécessaire. |

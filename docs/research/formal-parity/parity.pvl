@@ -1,0 +1,72 @@
+(* City-G at parity with MLS: shared definitions of the symbolic model.
+
+   Symbolic (Dolev-Yao) model of the mechanisms that the research note
+   docs/research/parite-mls-2026-09-26.md adds to City-G so that it keeps the
+   guarantees of MLS (RFC 9420) with a million members, bursts of joins and
+   departures, and a membership that the service authorizes:
+
+   * joins authorized in batches: the authorizer signs one Merkle root per
+     window over the join requests it authorizes;
+   * joiners anchored on the authorizer's checkpoint of the epoch they enter,
+     and members that check that checkpoint for every window they follow;
+   * sender data encrypted as in MLS, so that the delivery service does not
+     learn who sent a message;
+   * history links, studied and rejected: a removed member that joins again
+     would read the epochs it was out of.
+
+   Primitives are ideal. The key schedule is the one of docs/formal/cityg.pvl,
+   with commit secrets: joiner_n := kdf2(init_n-1, commit_n, context_n). *)
+
+type key.      (* 32-byte secrets *)
+type skey.     (* signature key *)
+type spkey.    (* its public key *)
+type kpk.      (* X-Wing encapsulation key *)
+
+free c: channel.
+
+const N1, N2, N3: bitstring.       (* epochs, windows *)
+const L_node, L_leaf, L_commit, L_epoch, L_init, L_confirm, L_msg: bitstring.
+const L_join, L_batch, L_ckpt, L_hist, L_sender_data, L_card: bitstring.
+const LA, LB: bitstring.           (* two leaves *)
+
+(* ---------- BLAKE3 ---------- *)
+
+fun hash(bitstring): bitstring.
+fun kdf(key, bitstring): key.
+fun kdf2(key, key, bitstring): key.
+fun mac(key, bitstring): bitstring.
+
+(* ---------- X-Wing to a public key, then ChaCha20-Poly1305 ---------- *)
+
+fun kempk(key): kpk.
+fun seal(kpk, key, bitstring, key): bitstring.     (* recipient key, randomness, associated data, secret *)
+reduc forall sk: key, r: key, ad: bitstring, m: key;
+  open(sk, ad, seal(kempk(sk), r, ad, m)) = m.
+
+(* ChaCha20-Poly1305, of a message or of a secret with associated data. *)
+fun aenc(key, bitstring): bitstring.
+reduc forall k: key, m: bitstring; adec(k, aenc(k, m)) = m.
+fun senc(key, bitstring, key): bitstring.
+reduc forall k: key, ad: bitstring, m: key; sdec(k, ad, senc(k, ad, m)) = m.
+
+(* ---------- Signatures ---------- *)
+
+fun spk(skey): spkey.
+fun sign(skey, bitstring): bitstring.
+reduc forall sk: skey, m: bitstring; checksign(spk(sk), m, sign(sk, m)) = true.
+
+(* ---------- Key schedule ---------- *)
+
+letfun node_pk(s: key) = kempk(kdf(s, L_node)).
+letfun leaf_sk(ls: key) = kdf(ls, L_leaf).
+letfun leaf_pk(ls: key) = kempk(leaf_sk(ls)).
+letfun commit_secret(root: key) = kdf(root, L_commit).
+letfun joiner_secret(init_prev: key, cs: key, gc: bitstring) = kdf2(init_prev, cs, gc).
+letfun epoch_secret(js: key) = kdf(js, L_epoch).
+letfun init_secret(es: key) = kdf(es, L_init).
+letfun msg_key(es: key) = kdf(es, L_msg).
+letfun tag(es: key, gc: bitstring) = mac(kdf(es, L_confirm), hash(gc)).
+
+(* History link of epoch n: the commit secret of epoch n - 1 under a key
+   derived from that of epoch n (rejected, see history_link_rejoin.pv). *)
+letfun history_link(cs: key, gc: bitstring, cs_prev: key) = senc(kdf(cs, L_hist), gc, cs_prev).

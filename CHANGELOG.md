@@ -38,6 +38,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run.
 - The benchmarks measure FN-DSA-512 and FN-DSA-1024, the derivation of a
   sender's chain, and ChaCha20-Poly1305.
+- The guarantees of MLS for a million members, in
+  [`docs/research/parite-mls-2026-09-26.md`](docs/research/parite-mls-2026-09-26.md)
+  (in French), not part of the profile:
+  - City-G compared with RFC 9420 and RFC 9750, guarantee by guarantee;
+  - an argument that members outside the tree cannot have them, which
+    takes the readers of the message-plane note out of the target profile;
+  - the proposed profile: every member in the tree; a mode where the
+    service authorizes joins, with batched authorizations and a checkpoint
+    per window that joiners anchor on and members may check; an MLS-style
+    message plane with encrypted sender data; unique leaf keys and cards; a
+    membership log; urgent and ordinary removals; exporter and epoch
+    authenticator;
+  - history links, studied and rejected: a removed member that joins again
+    would read the epochs it was out of.
+- Its cost model, [`docs/research/parity_sim.py`](docs/research/parity_sim.py), and its symbolic model,
+  [`docs/research/formal-parity/`](docs/research/formal-parity/README.md): 10 ProVerif scenarios, run by
+  the formal-model CI job and the local CI.
 
 ## [0.4.0] — initial version
 

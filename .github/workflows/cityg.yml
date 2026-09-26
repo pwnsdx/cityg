@@ -57,3 +57,5 @@ jobs:
         run: docs/formal/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
       - name: Check the verdicts of the message-plane research model
         run: docs/research/formal-messages/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
+      - name: Check the verdicts of the parity research model
+        run: docs/research/formal-parity/run.sh "$RUNNER_TEMP/proverif2.05/proverif"

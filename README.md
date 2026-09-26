@@ -113,6 +113,7 @@ docs/formal/run.sh /path/to/proverif                              # symbolic mod
 cargo run --release --manifest-path docs/research/bench/Cargo.toml   # primitive costs
 python3 docs/research/rekey_sim.py                                # cost model
 python3 docs/research/msg_sim.py                                  # cost model of the proposed message plane
+python3 docs/research/parity_sim.py                               # cost model of the profile at parity with MLS
 ```
 
 The scenario tests of `crates/cityg-core/tests/scenarios.rs` run whole

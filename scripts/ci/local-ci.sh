@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Local mirror of the CI checks: formatting, strict clippy, tests, the
 # delivery-service guardrail and, when ProVerif is installed, the symbolic
-# model and that of the message-plane research. Set CITYG_FAST=1 to stop
-# after the tests.
+# model and those of the research notes. Set CITYG_FAST=1 to stop after the
+# tests.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -56,6 +56,8 @@ if command -v proverif >/dev/null 2>&1; then
   docs/formal/run.sh
   log_step "docs/research/formal-messages/run.sh"
   docs/research/formal-messages/run.sh
+  log_step "docs/research/formal-parity/run.sh"
+  docs/research/formal-parity/run.sh
 else
   echo "Skipping the symbolic model (ProVerif 2.05 not in PATH)"
 fi

@@ -1,0 +1,33 @@
+(* Scenario AUTHORIZER_ANCHOR_UNSIGNED (sanity check): the joiner of
+   authorizer_anchor.pv accepts a checkpoint that nobody signed. *)
+
+free skAuth: skey [private].
+
+free MJ: bitstring [private].
+query attacker(MJ).
+
+event Epoch(key).
+event JoinerAccepts(key).
+query es: key; event(JoinerAccepts(es)) ==> event(Epoch(es)).
+
+process
+  new init1: key; new r2: key; new ikJ: key;
+  out(c, (spk(skAuth), kempk(ikJ)));
+  let gc2 = (N2, node_pk(r2)) in
+  let js2 = joiner_secret(init1, commit_secret(r2), gc2) in
+  let es2 = epoch_secret(js2) in
+  event Epoch(es2);
+  (
+    out(c, (gc2, tag(es2, gc2)))
+  ) | (
+    new rw: key;
+    out(c, seal(kempk(ikJ), rw, hash(gc2), js2))
+  ) | (
+    in(c, (gc: bitstring, tg: bitstring));
+    in(c, w: bitstring);
+    let js = open(ikJ, hash(gc), w) in
+    let es = epoch_secret(js) in
+    if tag(es, gc) = tg then
+    event JoinerAccepts(es);
+    out(c, aenc(msg_key(es), MJ))
+  )
