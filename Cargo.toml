@@ -2,6 +2,7 @@
 members = [
     "crates/cityg-pqc",
     "crates/cityg-core",
+    "crates/cityg-cite",
     "crates/cityg-proto",
     "crates/cityg-server",
     "crates/cityg-runtime",

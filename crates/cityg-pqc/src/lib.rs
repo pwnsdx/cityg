@@ -66,6 +66,18 @@ impl SignatureContext {
     pub const INVITE_REVOCATION: Self = Self(b"city-g/invite-revocation/v1");
     /// Request for a delivery-service session token (deployment binding).
     pub const SESSION_AUTH: Self = Self(b"city-g/session-auth/v1");
+    /// Draft profile v0.4: district commit, signed by its committer.
+    pub const DISTRICT_COMMIT: Self = Self(b"city-g/district-commit/v4");
+    /// Draft profile v0.4: seal of a window, signed by its sealer.
+    pub const SEAL: Self = Self(b"city-g/seal/v4");
+    /// Draft profile v0.4: request of a member to replace its leaf key.
+    pub const UPDATE_REQUEST: Self = Self(b"city-g/update/v4");
+    /// Draft profile v0.4: request of a member to jump to the present.
+    pub const CATCH_UP: Self = Self(b"city-g/catch-up/v4");
+    /// Draft profile v0.4: request of a member to re-enter its own leaf.
+    pub const RE_ENTRY: Self = Self(b"city-g/re-entry/v4");
+    /// Draft profile v0.4: checkpoint of an epoch, signed by an admin.
+    pub const CHECKPOINT: Self = Self(b"city-g/checkpoint/v4");
 
     /// Context bytes passed to FIPS 204 as `ctx`.
     #[must_use]
@@ -252,7 +264,7 @@ mod tests {
 
     use super::*;
 
-    const ALL_CONTEXTS: [SignatureContext; 13] = [
+    const ALL_CONTEXTS: [SignatureContext; 19] = [
         SignatureContext::ANCHOR,
         SignatureContext::KEY_ROTATION,
         SignatureContext::IDENTITY_BINDING,
@@ -266,6 +278,12 @@ mod tests {
         SignatureContext::INVITE,
         SignatureContext::INVITE_REVOCATION,
         SignatureContext::SESSION_AUTH,
+        SignatureContext::DISTRICT_COMMIT,
+        SignatureContext::SEAL,
+        SignatureContext::UPDATE_REQUEST,
+        SignatureContext::CATCH_UP,
+        SignatureContext::RE_ENTRY,
+        SignatureContext::CHECKPOINT,
     ];
 
     #[test]

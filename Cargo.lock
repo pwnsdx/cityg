@@ -1170,6 +1170,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cityg-cite"
+version = "0.4.0-draft.1"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "ciborium",
+ "cityg-core",
+ "cityg-pqc",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "zeroize",
+]
+
+[[package]]
 name = "cityg-config"
 version = "0.3.0"
 dependencies = [
