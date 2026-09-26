@@ -104,6 +104,7 @@ Sequence diagrams: [docs/workflows.md](docs/workflows.md).
 | --- | --- |
 | [`cityg-core`](crates/cityg-core) | Protocol core without I/O: encodings, KDF, X-Wing, tree and leaf proofs, key schedule, commits, admission, joins and welcomes, messages, full and light member sessions, delivery-service ledger. |
 | [`cityg-pqc`](crates/cityg-pqc) | FIPS 204 ML-DSA-65 with per-usage contexts. |
+| [`cityg-cite`](crates/cityg-cite) | Prototype of the draft profile v0.4 for groups of millions of members: districts, windows, taints, a group with no member online, and an in-memory delivery service. No I/O; not wired to the `/v3` stack. |
 | [`cityg-proto`](crates/cityg-proto) | Protobuf schema and routes of the `/v3` API. |
 | [`cityg-server`](crates/cityg-server), [`cityg-runtime`](crates/cityg-runtime) | Delivery-service rooms, journals and request handlers. |
 | [`cityg-api`](crates/cityg-api) | Native delivery service (HTTP, WebSocket, metrics). |
@@ -174,8 +175,10 @@ python3 kat/v0.3/verify_vectors.py           # independent check (pip install bl
   up to 1024 by default). The largest commit of an 8192-member group is
   under 10 MB and its tree about 35 MB, which is why such groups need light
   members. A [research note](docs/research/grands-groupes-2026-09-25.md)
-  (in French) studies how to reach groups of millions of members; nothing
-  in it is implemented yet.
+  (in French) studies how to reach groups of millions of members. A draft
+  profile v0.4 ([design note](docs/design-v0.4.md),
+  [draft specification](docs/specs-v0.4-draft.md)) and its prototype crate
+  `cityg-cite` follow it; they are not normative and not deployed.
 * A joiner cannot check the history before the epoch it enters: a malicious
   delivery service can show it a fabricated view of the group until it
   compares its security code with a member it knows.

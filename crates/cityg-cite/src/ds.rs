@@ -487,6 +487,48 @@ impl DeliveryService {
         by_age || by_removal
     }
 
+    /// Whether a queued entry is still valid for the window creating
+    /// `epoch`: what may have changed since it was checked (expiry, admins,
+    /// the policy, the member's key) is checked again; signatures are not.
+    fn still_valid(&self, request: &Request, epoch: u64) -> bool {
+        let admins = self.state.registry.admins();
+        match request {
+            Request::Join(join) => {
+                let admission = &join.admission;
+                let authorized = match &admission.authorizer {
+                    Authorizer::Admin(admin) => admins.get(admin) == Some(&admission.authorizer_pk),
+                    Authorizer::Invite(invite) => {
+                        admins.get(&invite.inviter) == Some(&invite.inviter_pk)
+                    }
+                };
+                authorized
+                    && epoch <= admission.not_after_epoch
+                    && join
+                        .device_id()
+                        .is_ok_and(|id| self.state.registry.device(&id).is_none())
+                    && self.state.registry.admission(&admission.hash()).is_none()
+            }
+            Request::Removal(proposal) => {
+                self.state.tree.is_member(proposal.target)
+                    && (proposal.proposer == proposal.target
+                        || admins.contains_key(&proposal.proposer))
+            }
+            Request::Eviction(eviction) => {
+                let policy = self.state.policy.as_ref();
+                self.state.registry.policy() == Some(&eviction.policy_hash)
+                    && self
+                        .state
+                        .tree
+                        .member(eviction.target)
+                        .zip(policy)
+                        .is_some_and(|(leaf, policy)| {
+                            epoch.saturating_sub(leaf.updated) > policy.max_idle_epochs
+                        })
+            }
+            Request::Update(_) | Request::ReEntry(_) => true,
+        }
+    }
+
     /// Leaves for `count` joins: the leaves the window empties first, then
     /// the lowest free leaves (E-11).
     fn place(&self, count: usize, emptied: &[u32]) -> Vec<u32> {
@@ -539,7 +581,7 @@ impl DeliveryService {
                     .map(|q| (q.item.target, Request::Eviction(q.item.clone()))),
             )
         {
-            if !tree.is_member(target) || !subjects.insert(target) {
+            if !self.still_valid(&request, epoch) || !subjects.insert(target) {
                 continue;
             }
             changes.push(Change {
@@ -590,15 +632,7 @@ impl DeliveryService {
             .joins
             .iter()
             .map(|q| q.item.clone())
-            .filter(|join| {
-                join.device_id()
-                    .is_ok_and(|id| self.state.registry.device(&id).is_none())
-                    && self
-                        .state
-                        .registry
-                        .admission(&join.admission.hash())
-                        .is_none()
-            })
+            .filter(|join| self.still_valid(&Request::Join(join.clone()), epoch))
             .collect();
         let slots = self.place(joins.len(), &emptied);
         for (join, leaf) in joins.into_iter().zip(slots) {
@@ -993,9 +1027,15 @@ impl DeliveryService {
     fn remove_applied(&mut self, open: &OpenWindow) {
         let applied: BTreeSet<Digest> = open.task.changes.iter().map(|c| c.request).collect();
         let tree = &self.state.tree;
-        self.queue
-            .joins
-            .retain(|q| !applied.contains(&q.item.reference()));
+        let next = self.state.epoch + 1;
+        let joins = core::mem::take(&mut self.queue.joins);
+        self.queue.joins = joins
+            .into_iter()
+            .filter(|q| {
+                !applied.contains(&q.item.reference())
+                    && self.still_valid(&Request::Join(q.item.clone()), next)
+            })
+            .collect();
         self.queue
             .removals
             .retain(|q| tree.is_member(q.item.target));
@@ -1009,9 +1049,10 @@ impl DeliveryService {
         self.queue
             .re_entries
             .retain(|q| !applied.contains(&q.item.reference()) && tree.is_member(q.item.member));
-        self.queue
-            .catch_ups
-            .retain(|q| !open.catch_ups.contains_key(&q.item.reference()));
+        let interim = self.state.interim;
+        self.queue.catch_ups.retain(|q| {
+            !open.catch_ups.contains_key(&q.item.reference()) && q.item.prev_interim == interim
+        });
         if open.task.policy.is_some() {
             self.queue.policy = None;
         }

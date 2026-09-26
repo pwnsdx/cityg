@@ -17,7 +17,8 @@ free c: channel.
 
 const N1, N2: bitstring.          (* epochs *)
 const D1, D2, CITY: bitstring.    (* commit scopes *)
-const L_path, L_node, L_leaf, L_epoch, L_init, L_confirm, L_msg: bitstring.
+const L_path, L_node, L_leaf, L_epoch, L_init, L_confirm, L_msg, L_external: bitstring.
+const ADMIT: bitstring.            (* label of an admission *)
 
 (* ---------- BLAKE3 ---------- *)
 
@@ -61,6 +62,12 @@ letfun init_secret(es: key) = kdf(es, L_init).
 
 (* Without the init chain: the epoch secret derives from the root alone. *)
 letfun epoch_secret_noinit(root: key, gc: bitstring) = kdf_root(root, gc).
+
+(* External init (a window sealed by an entrant): every member of the epoch
+   derives the external key pair from the epoch secret; the entrant wraps a
+   fresh init secret to its public key, in place of the init chain. *)
+letfun external_sk(es: key) = kdf(es, L_external).
+letfun external_pk(es: key) = kempk(external_sk(es)).
 
 letfun confirm_key(es: key) = kdf(es, L_confirm).
 letfun msg_key(es: key) = kdf(es, L_msg).

@@ -24,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A ProVerif model of the note's security choices
   (`docs/research/formal/`, twelve scenarios) and micro-benchmarks of the
   primitives through `cityg-core` (`docs/research/bench/`).
+- Draft profile `city-g/v0.4-draft` ("Cité"), not normative; profile v0.3
+  and its stack are unchanged:
+  - a design note (`docs/design-v0.4.md`, decisions E-1 to E-13) and a
+    draft specification (`docs/specs-v0.4-draft.md`), without test vectors;
+  - a group keeps working with no member online: a joiner or a returning
+    member seals the window itself with an external init, removals are
+    enforced at delivery until the first participant applies them, and the
+    delivery service evicts idle members only under an admin-signed policy;
+  - the prototype crate `cityg-cite`: sparse tree in districts with taints,
+    multi-path re-key, sparse Merkle registry, district commits and seals,
+    welcomes, members that follow, join, jump or re-enter, an in-memory
+    delivery service, and sampling audits with fraud proofs; 15 scenario
+    tests and a scale test that matches the research cost model;
+  - seven signature contexts in `cityg-pqc` for the new v0.4 objects;
+  - three ProVerif scenarios for windows sealed by an entrant
+    (`docs/research/formal/`, fifteen scenarios in all).
 
 ## [0.3.0] - 2026-09-25
 

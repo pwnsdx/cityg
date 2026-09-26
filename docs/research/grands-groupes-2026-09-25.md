@@ -3,10 +3,10 @@
 | | |
 | --- | --- |
 | Date | 2026-09-25, révision 2 |
-| Nature | Note de recherche. Rien de ce qui est proposé ici n'est implémenté ; le profil en vigueur reste [`city-g/v0.3`](../specs.md) ([note de conception](../design-v0.3.md)). |
+| Nature | Note de recherche. Le profil en vigueur reste [`city-g/v0.3`](../specs.md) ([note de conception](../design-v0.3.md)). Depuis le 2026-09-26, un brouillon de profil `city-g/v0.4-draft` suit cette architecture : [note de conception](../design-v0.4.md), [brouillon de spécification](../specs-v0.4-draft.md) et prototype [`crates/cityg-cite`](../../crates/cityg-cite) (section 8). |
 | Question | Comment City-G peut-il servir des groupes de millions de membres, où des centaines de milliers de personnes entrent et sortent en même temps, sans que les demandes en attente au service de distribution (DS) deviennent un goulot d'étranglement ? |
 | Compagnons | [`rekey_sim.py`](rekey_sim.py) : modèle de coût (`python3 docs/research/rekey_sim.py` redonne tous les chiffres de la section 4, graine fixe, en une minute et demie). [`formal/`](formal/README.md) : modèle ProVerif des choix de sécurité (section 5). [`bench/`](bench/src/main.rs) : mesure du coût CPU des primitives. |
-| Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Le modèle symbolique couvre les choix clés, mais il n'existe ni spécification ni preuve calculatoire (feuille de route, section 8). Une relecture cryptographique humaine reste nécessaire avant toute décision. |
+| Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Le modèle symbolique couvre les choix clés ; il n'existe qu'un brouillon de spécification et aucune preuve calculatoire (feuille de route, section 8). Une relecture cryptographique humaine reste nécessaire avant toute décision. |
 
 Vocabulaire :
 - une *enveloppe* est le secret d'un nœud de l'arbre chiffré vers la clé publique d'un enfant : un chiffré X-Wing (1120 octets) et le secret scellé (48 octets) ;
@@ -628,6 +628,12 @@ groupes v0.3.
 | R3 | Un prototype dans `cityg-core` : re-key multi-chemins d'un quartier, taches, welcomes de quartier, vérification d'un paquet | Les coûts de la section 4.4 retrouvés à ±20 % |
 | R4 | Côté DS : files par quartier, placement apparié, fenêtres, attribution et remplacement des committers, audits ; puis un test de charge | 2^20 membres simulés et 200 000 changements scellés en une fenêtre, en moins de Δ + 10 s |
 | R5 | Bande passante : FN-DSA quand FIPS 206 paraît ; suivi des UKEM ; KEM multi-destinataires limité aux clés de nœud, avec la vérification des clés de chemin | Décision documentée |
+
+**État au 2026-09-26.**
+* **R1 : fait, sans vecteurs.** [`design-v0.4.md`](../design-v0.4.md) (décisions E-1 à E-13) et [`specs-v0.4-draft.md`](../specs-v0.4-draft.md). Le brouillon ajoute ce que la note ne traitait pas : un groupe sans aucun membre en ligne (un entrant scelle lui-même la fenêtre, un retrait attend le premier participant et le DS l'applique à la livraison en attendant), la ré-entrée, et l'expulsion sous une politique signée par un admin.
+* **R2 : en partie.** Trois scénarios « personne en ligne » ont rejoint [`formal/`](formal/README.md) ; le modèle de la spécification elle-même reste à faire.
+* **R3 : fait**, dans une crate séparée, [`cityg-cite`](../../crates/cityg-cite), plutôt que dans `cityg-core`, pour ne pas toucher à la v0.3. Son test d'échelle retrouve exactement le décompte d'enveloppes et de clés du modèle de coût, et ses tailles à quelques pour cent.
+* **R4 : en partie.** Un DS en mémoire (files, placement apparié, fenêtres, rôles et remplacement, paquets, audits), sans files par quartier ni test de charge à 2^20 membres.
 
 ## 9. Sources
 

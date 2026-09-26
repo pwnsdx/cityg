@@ -3,12 +3,14 @@
 A [ProVerif](https://bblanche.gitlabpages.inria.fr/proverif/) model of the
 design choices of the research note
 [`grands-groupes-2026-09-25.md`](../grands-groupes-2026-09-25.md) (in
-French), which studies groups of millions of members. The design is not
-implemented and has no specification yet. The model checks the choices the
-note relies on, against the adversaries of
-[specs.md](../../specs.md) section 2.1. It does not replace a model of a
-future specification (step R2 of the note's roadmap). The model of the
-current profile, v0.3, is in [`../../formal/`](../../formal/README.md).
+French), which studies groups of millions of members. The draft profile
+v0.4 follows that design: see the [design note](../../design-v0.4.md), the
+[draft specification](../../specs-v0.4-draft.md) and the prototype
+[`crates/cityg-cite`](../../../crates/cityg-cite). The model checks the
+choices the design relies on, against the adversaries of
+[specs.md](../../specs.md) section 2.1. It is not a model of the draft
+specification itself. The model of the current profile, v0.3, is in
+[`../../formal/`](../../formal/README.md).
 
 ## Running it
 
@@ -44,8 +46,11 @@ expected for the sanity checks.
 | [`anchored_join.pv`](anchored_join.pv) | J's invite carries a checkpoint signed by an admin. J accepts only a commit signed by a member behind that checkpoint. The delivery service controls a device that is not a member. | Proved. |
 | [`anchored_join_unsigned_tag.pv`](anchored_join_unsigned_tag.pv) | The same join, with a confirmation tag the committer does not sign. | Attack: the service replaces both the welcome and the tag. |
 | [`join_without_anchor.pv`](join_without_anchor.pv) | J accepts a commit signed by any key it is shown, as a v0.3 joiner does (specification, section 2.3). | Attack. |
+| [`entrant_removal.pv`](entrant_removal.pv) | No member is online. M's removal is recorded; M had committed district 1 and knows everything of epoch 1, the external key included. J, admitted by an admin, seals window 2 as an entrant: it takes M's leaf, re-keys M's taints and seals with an external init that M can open. A checks J's admission and signature. | Proved: the removed M does not read epoch 2. |
+| [`external_tag_only.pv`](external_tag_only.pv) | The delivery service forges a window "sealed by an entrant" for A, who checks only the confirmation tag. | Attack: the external key is public, so the service computes the tag. |
+| [`external_checked.pv`](external_checked.pv) | The same forgery, with a device the service controls, for a member that also checks the entrant's admission and its signature of the seal. | Proved. |
 
-The results bear on four decisions of the note:
+The results bear on five decisions:
 
 * **Taint rule.** Removing a member re-keys the nodes it tainted. Updating re-keys them too.
 * **Init chain.** Keeping it gives forward secrecy of past epochs even when a
@@ -55,6 +60,10 @@ The results bear on four decisions of the note:
   because a welcome is not signed.
 * **Anchoring.** Anchoring joins on an admin checkpoint closes the forked
   entry of section 2.3.
+* **Zero online (E-7 of the design note).** An entrant can seal a window,
+  removals included, when no member is online. Members then check the
+  entrant's admission and signature: for such a window, the confirmation
+  tag alone proves nothing against the delivery service.
 
 ## Abstractions and limits
 
@@ -68,7 +77,8 @@ The results bear on four decisions of the note:
   [`../../formal/`](../../formal/README.md).
 * **Committer assignment.** It is given: a member accepts a district commit
   only from the committer the window assigned. The delivery service's
-  queues, windows, placement and sampling audits are not modelled.
+  queues, windows, placement, the enforcement of recorded removals at
+  delivery and the sampling audits are not modelled.
 * **Other districts.** Checking the entries of other districts, the sparse
   Merkle maps and the transcript chain behind a checkpoint are abstracted:
   a checkpoint binds its members' keys directly.

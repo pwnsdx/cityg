@@ -214,19 +214,21 @@ latest wraps of every node.
 ### E-9 — Registry as sparse Merkle maps
 
 **Decision.** The registry holds three things:
-* the admins, as occupancies;
-* two sparse Merkle maps: device ids to occupancies, and retired admission
-  hashes to their expiry;
+* the admins, as occupancies with their device keys;
+* two sparse Merkle maps: device ids to occupancies, and the hash of every
+  admission ever used to the occupancy it admitted;
 * the hash of the eviction policy, if any.
 
 The seal applies the map changes that follow from the window's changes,
-and the registry hash binds the map roots.
+and the registry hash binds the map roots. An admission is good for one
+join: it stays in its map for good.
 
 **Why.** No cap and no floor, whatever the churn: v0.3 kept at most 4096
 retired admissions, and a wave of removals pushed its floor up.
 
-**Cost.** Checking that a device is new or an admission is not retired
-takes a map proof instead of a list lookup.
+**Cost.** Checking that a device is new or an admission unused takes a map
+proof instead of a list lookup. The admission map only grows: 64 bytes per
+join ever made, at the delivery service and committers.
 
 <a id="e-10"></a>
 ### E-10 — Anchored joins
@@ -240,8 +242,9 @@ previous tree hash, or by an admitted entrant.
 **Why.** It closes the forked entry of v0.3 (specification section 2.3):
 `anchored_join.pv` is proved, and `join_without_anchor.pv` finds the attack.
 
-**Cost.** For an hourly checkpoint and `WINDOW_MAX` = 60 s: about 60 seals,
-270 KB and 13 ms of CPU for a joiner.
+**Cost.** For an hourly checkpoint and `WINDOW_MAX` = 60 s: about 60
+seals to check, each with its sealer's leaf proof, about 9 KB per window
+in the prototype: 0.55 MB and 13 ms of CPU for a joiner.
 
 <a id="e-11"></a>
 ### E-11 — Placement of joins

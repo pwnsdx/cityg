@@ -25,6 +25,9 @@ EXPECTED=(
   "anchored_join: true false"
   "anchored_join_unsigned_tag: false"
   "join_without_anchor: false"
+  "entrant_removal: true false"
+  "external_tag_only: false false"
+  "external_checked: true false"
 )
 
 for line in "${EXPECTED[@]}"; do

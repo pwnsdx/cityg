@@ -201,7 +201,8 @@ impl EpochHeader {
     /// The header of an epoch an admin checkpointed, for a joiner that
     /// trusts the admin key `admin_pk` (from its invite or admission).
     /// `registry` and `external_pk` come from the delivery service and are
-    /// checked against the checkpoint.
+    /// checked against the checkpoint, whose signer must be an admin of that
+    /// registry.
     pub fn from_checkpoint(
         gid: &Digest,
         checkpoint: &Checkpoint,
@@ -213,6 +214,7 @@ impl EpochHeader {
         let content = &checkpoint.content;
         if registry.hash()? != content.registry_hash
             || kem_pk_hash(&external_pk)? != content.external_pk_hash
+            || registry.admin_key(checkpoint.admin) != Some(admin_pk)
         {
             return Err(CoreError::Invalid("checkpoint registry or external key"));
         }

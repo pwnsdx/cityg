@@ -11,7 +11,7 @@
 //!                    init_key, admission]                         ctx JOIN_REQUEST, by the device
 //! RemoveProposal := ["city-g/remove/v4", gid, target, proposer]   ctx REMOVE_PROPOSAL
 //! Eviction       := ["city-g/eviction/v4", gid, target, policy_hash]   (unsigned)
-//! EvictionPolicy := ["city-g/eviction-policy/v4", gid, max_idle_epochs, admin]  ctx POLICY
+//! EvictionPolicy := ["city-g/eviction-policy/v4", gid, max_idle_epochs, admin]  ctx EVICTION_POLICY
 //! UpdateRequest  := ["city-g/update/v4", gid, member, replaces, encryption_key]  ctx UPDATE_REQUEST
 //! CatchUpRequest := ["city-g/catch-up/v4", gid, member, prev_interim, init_key]  ctx CATCH_UP
 //! ReEntryRequest := ["city-g/re-entry/v4", gid, member, replaces, encryption_key,
@@ -610,7 +610,7 @@ impl EvictionPolicy {
                 admin.value(),
             ],
             identity,
-            SignatureContext::POLICY,
+            SignatureContext::EVICTION_POLICY,
             rng,
         )?;
         Self::decode(&signed.encoded)
@@ -652,7 +652,7 @@ impl EvictionPolicy {
             .get(&self.admin)
             .ok_or(CoreError::Unauthorized("policy signer is not an admin"))?;
         self.signed
-            .verify(key, SignatureContext::POLICY, "eviction policy")
+            .verify(key, SignatureContext::EVICTION_POLICY, "eviction policy")
     }
 }
 

@@ -68,6 +68,8 @@ jobs:
           cd "$RUNNER_TEMP/proverif2.05" && (./build || test -x proverif)
       - name: Check the verdicts of every scenario
         run: docs/formal/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
+      - name: Check the verdicts of the research model (profile v0.4 design)
+        run: docs/research/formal/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
 
   release-matrix:
     name: Release Matrix (${{ matrix.name }})

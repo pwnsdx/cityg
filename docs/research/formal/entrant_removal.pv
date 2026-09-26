@@ -1,0 +1,59 @@
+(* Scenario ENTRANT: a removal applied by an entrant, with nobody online.
+
+   Four leaves in two districts of two leaves:
+     d1 = parent(A, B), d2 = parent(M, C), root = parent(d1, d2).
+   In epoch 1, M (malicious) had committed district 1 and kept its secret
+   s1. The attacker holds everything M knew in epoch 1: its leaf key, s1,
+   s2, the root, the init secret and the epoch secret, hence the external
+   key of epoch 1.
+
+   M's removal is recorded while no member is online. J, a device an admin
+   admitted, seals window 2 as an entrant: it takes M's leaf, re-keys
+   district 2, re-keys district 1 because its node is tainted by M, keys
+   the city, and seals with an external init wrapped to the external key of
+   epoch 1, which M can open. A checks the admin's admission of J and J's
+   signature of the seal, then the confirmation tag. *)
+
+free skAdmin: skey [private].
+
+free M2: bitstring [private].
+query attacker(M2).
+
+event AcceptedA(key).
+query es: key; event(AcceptedA(es)).
+
+process
+  new lsA: key; new lsB: key; new lsC: key; new lsM: key;
+  new s1: key; new s2: key; new r1: key; new init1: key; new es1: key;
+  out(c, (lsM, s1, s2, r1, init1, es1));
+  out(c, (spk(skAdmin), leaf_pk(lsA), leaf_pk(lsB), leaf_pk(lsC), leaf_pk(lsM)));
+  new skJ: skey;
+  out(c, (spk(skJ), sign(skAdmin, (ADMIT, spk(skJ)))));
+  (
+    (* J, the entrant: every district of the window, the city and the seal. *)
+    new t1: key; new t2: key; new r2: key; new init_ext: key;
+    new ra: key; new rb: key; new rc: key; new q1: key; new q2: key; new qx: key;
+    let ct = wrap(external_pk(es1), qx, init_ext) in
+    let gc2 = (N2, node_pk(t1), node_pk(t2), node_pk(r2), ct) in
+    let es2 = epoch_secret(joiner_secret(init_ext, r2, gc2)) in
+    out(c, (wrap(leaf_pk(lsA), ra, t1), wrap(leaf_pk(lsB), rb, t1), wrap(leaf_pk(lsC), rc, t2),
+            wrap(node_pk(t1), q1, r2), wrap(node_pk(t2), q2, r2), gc2, tag(es2, gc2),
+            sign(skJ, (N2, gc2, tag(es2, gc2)))))
+  ) | (
+    (* A: the entrant's admission and signature, its district, the city,
+       the external init, then the tag. *)
+    in(c, (pkJ: spkey, adm: bitstring));
+    if checksign(spk(skAdmin), (ADMIT, pkJ), adm) = true then
+    in(c, (w1: bitstring, wr: bitstring, gc2: bitstring, tg: bitstring, sg: bitstring));
+    if checksign(pkJ, (N2, gc2, tg), sg) = true then
+    let (=N2, pk1: kpk, pk2: kpk, pkr: kpk, ct: bitstring) = gc2 in
+    let t1 = unwrap(leaf_sk(lsA), w1) in
+    if node_pk(t1) = pk1 then
+    let r2 = unwrap(node_sk(t1), wr) in
+    if node_pk(r2) = pkr then
+    let init_ext = unwrap(external_sk(es1), ct) in
+    let es2 = epoch_secret(joiner_secret(init_ext, r2, gc2)) in
+    if tag(es2, gc2) = tg then
+    event AcceptedA(es2);
+    out(c, aenc(msg_key(es2), M2))
+  )
