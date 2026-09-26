@@ -1,0 +1,47 @@
+(* Scenario CATCH-UP UNDER A STOLEN DEVICE KEY, with the rule of profile
+   city-g/v0.4 (sections 11 and 12.10). The attacker holds M's device key,
+   not M's state (adversary A6 of the specification). A and M are members of
+   epoch 1. In window 2, A welcomes any catch-up of M that M's device key
+   signed for epoch 1: the joiner secret of epoch 2, sealed to the request's
+   one-time init key. The attacker records one with an init key of its own.
+   A catch-up is not a change: the tree stays the same, and nothing shows M
+   that it happened. A then sends a message in epoch 2. M records a catch-up
+   of its own.
+   Queries: the message stays secret (expected: attack, repeated window
+   after window, and M's updates do not stop it since they do not change
+   the device key); M's own jump completes (sanity check: the event is
+   reachable). *)
+
+const L_catch_up: bitstring.
+free Msg2: bitstring [private].
+event Jumped.
+query attacker(Msg2).
+query event(Jumped).
+
+process
+  new skM: skey; new lsM: key; new init0: key; new r1: key; new r2: key;
+  out(c, (spk(skM), leaf_pk(lsM), skM));
+  let gc1 = (N1, node_pk(r1)) in
+  let es1 = epoch_secret(joiner_secret(init0, commit_secret(r1), gc1)) in
+  let gc2 = (N2, node_pk(r2)) in
+  let js2 = joiner_secret(init_secret(es1), commit_secret(r2), gc2) in
+  let es2 = epoch_secret(js2) in
+  out(c, (gc2, tag(es2, gc2)));
+  (
+    (* A, the welcomer: checks the member's signature and the epoch, and
+       takes the init key from the request. *)
+    !in(c, (ik: kpk, sg: bitstring));
+    if checksign(spk(skM), (L_catch_up, N1, ik), sg) = true then
+    new q: key;
+    out(c, (kem_ct(ik, q), senc(kdf(kem_ss(ik, q), L_join), (N2, ik), js2)))
+  ) | (
+    out(c, aenc(msg_key(es2), Msg2))
+  ) | (
+    (* M comes back with a jump. *)
+    new ikM: key;
+    out(c, (kempk(ikM), sign(skM, (L_catch_up, N1, kempk(ikM)))));
+    in(c, (ct: bitstring, w: bitstring));
+    let js = sdec(kdf(decaps(ikM, ct), L_join), (N2, kempk(ikM)), w) in
+    if tag(epoch_secret(js), gc2) = tag(es2, gc2) then
+    event Jumped
+  )

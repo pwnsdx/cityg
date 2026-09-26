@@ -1,0 +1,60 @@
+(* Control for catch_up_leaf_bound.ocv: the rule of profile city-g/v0.4, a
+   welcome key derived from the shared secret of the one-time init key
+   alone. Expected: not proved; the adversary gives an init key of its own
+   and opens the welcome.
+   The adversary holds M's device key, not M's state, so the welcomer seals
+   the joiner secret of epoch 2 to any one-time init key the adversary
+   gives, key pairs of its own included. The adversary does not know epoch
+   1. Query: the joiner secret of epoch 2 stays secret. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+
+type nonce [large, fixed].
+fun to_nonce(key): nonce.
+equiv(to_nonce_random)
+  k <-R key; O() := return(to_nonce(k))
+<=(0)=>
+  n <-R nonce; O() := return(n).
+
+type ciphertext.
+proba Penc.
+proba Pencctxt.
+expand AEAD_nonce(key, key, ciphertext, hash, nonce, aead_enc, aead_dec, injbot, Z, Penc, Pencctxt).
+const Zkey: key.
+equation forall x: key; Z(x) = Zkey.
+
+type pkey [bounded].
+type skey [bounded].
+type kemct [fixed].
+type encapoutput [fixed].
+proba Pcca.
+proba Pkeycoll.
+proba Pctxtcoll.
+expand IND_CCA2_KEM(key, pkey, skey, key, kemct, encapoutput, pkgen, skgen, encap, pair, decap, injbot_kem, Pcca, Pkeycoll, Pctxtcoll).
+
+const l_welcome_key, l_welcome_nonce: label.
+(* The welcome's context: [gid, epoch, request_ref, kem_pk_hash(init_key)]. *)
+fun context(pkey): hash.
+
+query secret joiner2.
+
+param Nw.
+
+process
+  Ostart() :=
+    joiner2 <-R key;
+    return();
+    (* The welcomer, for any catch-up of M the adversary signed. *)
+    foreach iw <= Nw do
+    Owelcome(ik: pkey) :=
+      let pair(ss1: key, ct1: kemct) = encap(ik) in
+      let c = context(ik) in
+      return(ct1, aead_enc(joiner2, c, ExpandLabel(ss1, l_welcome_key, c),
+                           to_nonce(ExpandLabel(ss1, l_welcome_nonce, c))))

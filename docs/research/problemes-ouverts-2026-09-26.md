@@ -101,9 +101,9 @@ Pour les primitives : X-Wing est IND-CCA si X25519 (Diffie-Hellman fort) ou ML-K
 
 ### 1.4 Ce qui reste
 
-- **L'arbre entier sous corruptions adaptatives.** Les modèles fixent quelques nœuds et quelques fenêtres. Un groupe réel, où l'adversaire choisit qui corrompre au vu des échanges, relève de la *décryption sélective généralisée* sur un arbre. Elle se réduit à la sécurité du chiffrement avec une perte quasi polynomiale ([Fuchsbauer, Jafargholi et Pietrzak, Crypto 2015](https://eprint.iacr.org/2016/389)) ; c'est la voie de TTKEM. Il reste à écrire cette preuve pour les îlots, la ville et les tâches.
-- **L'authentification** : sceaux, admissions, points de contrôle restent au modèle symbolique.
-- **Le relais menteur.** Dans le modèle symbolique, il est trahi par le tag. Dans le modèle calculatoire, il connaît les clés : il faut que la chaîne qui va du secret de fenêtre au tag résiste aux secondes préimages, ce que BLAKE3 donne, mais que les modèles ne vérifient pas.
+- **L'arbre entier sous corruptions adaptatives.** Les modèles fixent quelques nœuds et quelques fenêtres. Un groupe réel, où l'adversaire choisit qui corrompre au vu des échanges, relève de la *décryption sélective généralisée* sur un arbre. Elle se réduit à la sécurité du chiffrement avec une perte quasi polynomiale ([Fuchsbauer, Jafargholi et Pietrzak, Crypto 2015](https://eprint.iacr.org/2016/389)) ; c'est la voie de TTKEM. Il reste à écrire cette preuve pour les îlots, la ville et les tâches. La note [preuves et mesures](preuves-et-mesures-2026-09-26.md) (section 4) en écrit le plan, avec des oracles aléatoires : à un million de membres, la perte quasi polynomiale ne laisse aucune garantie.
+- **L'authentification** : sceaux, admissions, points de contrôle restent au modèle symbolique. Le relais et le quorum des témoins sont depuis prouvés dans le modèle calculatoire (note [preuves et mesures](preuves-et-mesures-2026-09-26.md), section 2).
+- **Le relais menteur.** Dans le modèle symbolique, il est trahi par le tag. Dans le modèle calculatoire, il connaît les clés : il faut que la chaîne qui va du secret de fenêtre au tag résiste aux secondes préimages, ce que BLAKE3 donne, mais que les modèles ne vérifient pas. C'est depuis prouvé, sous la résistance aux collisions (`relay_tag.ocv`).
 
 ## 2. Les preuves de litige
 
@@ -163,7 +163,7 @@ Un litige coûte donc au plaignant ce que coûtent quelques fenêtres de suivi. 
 
 ### 2.4 Ce qui reste
 
-Écrire l'énoncé dans une bibliothèque de preuves à base de VOLE, puis mesurer le temps sur un téléphone et la taille, y compris la mise en place. Chiffrer la partie X25519 d'une preuve publique. En attendant, les parades de la note [îlots](ilots-2026-09-26.md) (section 3) restent :
+Écrire l'énoncé dans une bibliothèque de preuves à base de VOLE, puis mesurer le temps sur un téléphone et la taille, y compris la mise en place. C'est fait, hors X25519, dans la note [preuves et mesures](preuves-et-mesures-2026-09-26.md) (section 1) : moins d'une seconde et 2 Mo. Chiffrer la partie X25519 d'une preuve publique. En attendant, les parades de la note [îlots](ilots-2026-09-26.md) (section 3) restent :
 - le serveur réserve les tâches aux appareils présents depuis un certain temps ;
 - il limite le débit des entrées.
 
@@ -242,6 +242,8 @@ Le nouvel ordre :
 2. la mesure des litiges ;
 3. le choix entre BLAKE3 et HKDF, qui conditionne la première ;
 4. la spécification.
+
+La note [preuves et mesures](preuves-et-mesures-2026-09-26.md) reprend cet ordre : elle mesure le litige, prouve l'authentification du relais et des témoins, écrit le plan de preuve de l'arbre et recommande HKDF pour `Extract`. Elle trouve aussi une faille du saut de la v0.4 sous clé d'appareil volée, et la corrige.
 
 ## 8. Modèles et reproductibilité
 

@@ -1,0 +1,50 @@
+(* Scenario CATCH-UP BOUND TO THE LEAF KEY: the fix of catch_up_device_key.pv
+   proposed in docs/research/preuves-et-mesures-2026-09-26.md. The welcomer
+   of a catch-up encapsulates to the request's one-time init key and to the
+   member's current leaf key, which it takes from the tree, never from the
+   request; the welcome key derives from both shared secrets. A member that
+   jumps keeps its leaf key (section 12.10), so it opens the welcome; the
+   one-time init key keeps the welcome's forward secrecy if the leaf key
+   leaks later.
+   The attacker holds M's device key, not M's state. A and M are members of
+   epoch 1. In window 2, A welcomes any catch-up of M that M's device key
+   signed for epoch 1; the attacker records one with an init key of its own.
+   A then sends a message in epoch 2. M records a catch-up of its own.
+   Queries: the message stays secret (expected: proved); M's own jump
+   completes (sanity check: the event is reachable). *)
+
+const L_catch_up: bitstring.
+free Msg2: bitstring [private].
+event Jumped.
+query attacker(Msg2).
+query event(Jumped).
+
+process
+  new skM: skey; new lsM: key; new init0: key; new r1: key; new r2: key;
+  out(c, (spk(skM), leaf_pk(lsM), skM));
+  let gc1 = (N1, node_pk(r1)) in
+  let es1 = epoch_secret(joiner_secret(init0, commit_secret(r1), gc1)) in
+  let gc2 = (N2, node_pk(r2)) in
+  let js2 = joiner_secret(init_secret(es1), commit_secret(r2), gc2) in
+  let es2 = epoch_secret(js2) in
+  out(c, (gc2, tag(es2, gc2)));
+  (
+    (* A, the welcomer: checks the member's signature and the epoch, takes
+       the init key from the request and the leaf key from the tree. *)
+    !in(c, (ik: kpk, sg: bitstring));
+    if checksign(spk(skM), (L_catch_up, N1, ik), sg) = true then
+    new q: key; new q2: key;
+    let wk = kdf2(kem_ss(ik, q), kem_ss(leaf_pk(lsM), q2), L_join) in
+    out(c, (kem_ct(ik, q), kem_ct(leaf_pk(lsM), q2), senc(wk, (N2, ik), js2)))
+  ) | (
+    out(c, aenc(msg_key(es2), Msg2))
+  ) | (
+    (* M comes back with a jump. *)
+    new ikM: key;
+    out(c, (kempk(ikM), sign(skM, (L_catch_up, N1, kempk(ikM)))));
+    in(c, (ct: bitstring, ct2: bitstring, w: bitstring));
+    let wk = kdf2(decaps(ikM, ct), decaps(leaf_sk(lsM), ct2), L_join) in
+    let js = sdec(wk, (N2, kempk(ikM)), w) in
+    if tag(epoch_secret(js), gc2) = tag(es2, gc2) then
+    event Jumped
+  )

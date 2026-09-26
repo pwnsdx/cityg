@@ -13,7 +13,12 @@ It prints:
      scheme;
   3. sender cards kept in a cache from one day to the next, when cards
      change once a week (UPDATE_INTERVAL) and a share of a reader's senders
-     come back.
+     come back;
+  4. what the known proofs of TreeKEM-like trees against adaptive
+     corruptions lose, for a group of n members after Q operations: (Q n)^2
+     with random oracles, Q^log2(n) in the standard model (Tainted TreeKEM,
+     IEEE S&P 2021), and the bits of security a loss L leaves of the kappa a
+     primitive offers, kappa - log2(L).
 
 Keccak permutations are counted from the byte lengths of FIPS 203 and of
 X-Wing; the matrix A of ML-KEM is sampled from the public seed rho of the
@@ -206,12 +211,32 @@ def report_cards():
     print()
 
 
+def report_adaptive():
+    print("4. Adaptive corruptions: what the known proofs of TreeKEM-like trees lose (Tainted TreeKEM)")
+    print(f"   {'members':>9} {'operations':>10} {'loss, random oracles':>20} {'bits left, ML-KEM-768':>21}"
+          f" {'bits left, X25519':>17} {'loss, standard model':>20}")
+    for log_n in (10, 16, 20):
+        for log_q in (20, 30):
+            rom = 2 * (log_q + log_n)
+            std = log_q * log_n
+            x25519 = f"{128 - rom}" if rom < 128 else "none"
+            print(f"   {'2^%d' % log_n:>9} {'2^%d' % log_q:>10} {'2^%d' % rom:>20} {192 - rom:>21}"
+                  f" {x25519:>17} {'2^%d' % std:>20}")
+    print("   (a loss L leaves kappa - log2(L) of the kappa bits a primitive offers: 192 for ML-KEM-768, NIST")
+    print("   category 3, and 128 for X25519; X-Wing holds if either does. A million members with a change")
+    print("   every 0.1 s make about 2^28 operations a year. In the standard model the loss exceeds 2^192, so")
+    print("   the bound says nothing; no straight-line reduction is polynomial: each loses at least")
+    print("   n^Omega(log log n), Kamath et al.)")
+    print()
+
+
 def main():
     print("Cost model of the open problems beyond v0.4.")
     print()
     report_dispute()
     report_witnesses()
     report_cards()
+    report_adaptive()
 
 
 if __name__ == "__main__":

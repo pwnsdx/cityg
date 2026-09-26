@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Extract` to be a dual PRF, pseudorandom when keyed by its input keying
   material under a known salt: post-compromise security, external inits and
   the exclusion of a removed member that missed a window rest on it.
+- The specification (section 2.2) and the README's limits say what a stolen
+  device key does through catch-ups: it gets the epoch of every window it
+  asks for, and the tree stays as it is, so nobody notices; its other
+  requests change the member's leaf, which the member notices.
 
 ### Research
 
@@ -157,6 +161,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     MLS when the quorum does not answer; sender cards kept in a cache;
     what tasks and relays reveal to the server.
 - Its cost model, [`docs/research/open_problems_sim.py`](docs/research/open_problems_sim.py).
+- Proofs and measurements, in
+  [`docs/research/preuves-et-mesures-2026-09-26.md`](docs/research/preuves-et-mesures-2026-09-26.md)
+  (in French), not part of the profile:
+  - the zero-knowledge proof of a wrap dispute, measured with emp-zk
+    (QuickSilver) by [`docs/research/dispute-zk/`](docs/research/dispute-zk/README.md):
+    the hashing and the arithmetic of ML-KEM-768 take 9.7 million AND
+    gates, 2 MB (0.65 MB of setup) and under a second between a prover and
+    the server; the X25519 half would take 150 MB over bits and needs a
+    proof over its own field;
+  - authentication in the computational model: a lying relay is caught by
+    the tag under collision resistance, and three witnesses out of four
+    stop a fork with one of them dishonest;
+  - a weakness of profile `city-g/v0.4`: whoever holds a member's device
+    key, not its state, has catch-ups welcomed with init keys of its own
+    and reads every window, unseen, like the external operations of MLS
+    that ETK (Eurocrypt 2026) analyses; the proposed fix, not applied,
+    also encapsulates a catch-up's welcome to the member's leaf key;
+  - the plan of a proof of the whole tree under adaptive corruptions, with
+    random oracles, since the standard-model loss is beyond any security
+    level at a million members; the recommendation to make `Extract`
+    HKDF-Extract with SHA-384 in the next profile.
+- The computational model gains 7 models (21 in all), the parity symbolic
+  model 2 scenarios (34 in all), and the cost model a report on the loss
+  of adaptive proofs.
 
 ## [0.4.0] — initial version
 

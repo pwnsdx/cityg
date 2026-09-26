@@ -1,0 +1,79 @@
+(* A catch-up bound to the leaf key, in the computational model: the
+   counterpart of formal-parity/catch_up_leaf_bound.pv. The adversary holds
+   M's device key, not M's state, so the welcomer seals the joiner secret of
+   epoch 2 to any one-time init key the adversary gives, key pairs of its
+   own included. With the fix, the welcomer also encapsulates to M's current
+   leaf key, which it takes from the tree, and derives the welcome key from
+   both shared secrets, the init key's as salt: Extract(ss_init, ss_leaf).
+   M decapsulates the adversary's encapsulations to its leaf key, as it
+   opens path steps with it. The adversary does not know epoch 1. Query:
+   the joiner secret of epoch 2 stays secret. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+
+proba Psalt.
+proba Pikm.
+expand dual_PRF(key, key, Extract, Psalt, Pikm).
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+
+type nonce [large, fixed].
+fun to_nonce(key): nonce.
+equiv(to_nonce_random)
+  k <-R key; O() := return(to_nonce(k))
+<=(0)=>
+  n <-R nonce; O() := return(n).
+
+type ciphertext.
+proba Penc.
+proba Pencctxt.
+expand AEAD_nonce(key, key, ciphertext, hash, nonce, aead_enc, aead_dec, injbot, Z, Penc, Pencctxt).
+const Zkey: key.
+equation forall x: key; Z(x) = Zkey.
+
+type pkey [bounded].
+type skey [bounded].
+type kemct [fixed].
+type encapoutput [fixed].
+proba Pcca.
+proba Pkeycoll.
+proba Pctxtcoll.
+expand IND_CCA2_KEM(key, pkey, skey, key, kemct, encapoutput, pkgen, skgen, encap, pair, decap, injbot_kem, Pcca, Pkeycoll, Pctxtcoll).
+
+const l_welcome_key, l_welcome_nonce: label.
+(* The welcome's context: [gid, epoch, request_ref, kem_pk_hash(init_key)]. *)
+fun context(pkey): hash.
+
+query secret joiner2.
+
+param Nw, Nd.
+
+process
+  Ostart() :=
+    joiner2 <-R key;
+    leaf_seed <-R key;
+    let leaf_pk = pkgen(leaf_seed) in
+    return(leaf_pk);
+    ((
+      (* The welcomer, for any catch-up of M the adversary signed. *)
+      foreach iw <= Nw do
+      Owelcome(ik: pkey) :=
+        let pair(ss1: key, ct1: kemct) = encap(ik) in
+        let pair(ss2: key, ct2: kemct) = encap(leaf_pk) in
+        let wk = Extract(ss1, ss2) in
+        let c = context(ik) in
+        return(ct1, ct2, aead_enc(joiner2, c, ExpandLabel(wk, l_welcome_key, c),
+                                  to_nonce(ExpandLabel(wk, l_welcome_nonce, c))))
+    ) | (
+      (* M decapsulates with its leaf key. *)
+      foreach id <= Nd do
+      Odecap(ca: kemct) :=
+        find u <= Nw suchthat defined(ct2[u]) && ca = ct2[u] then yield else
+        let injbot_kem(ssa) = decap(ca, skgen(leaf_seed)) in
+        return(ssa)
+    ))

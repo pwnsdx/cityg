@@ -7,7 +7,7 @@
 | Implementation | [`crates/cityg-core`](../crates/cityg-core): protocol core and an in-memory delivery service, no I/O |
 | Design | [design.md](design.md) (decisions E-1 to E-14) |
 | Formal model | [`formal/`](formal/README.md) (ProVerif) |
-| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md), the guarantees of MLS at this scale, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md), who may re-key the tree, [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md), îlots under a flat top, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md), a synthesis beyond v0.4, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md), and its open problems, [`research/problemes-ouverts-2026-09-26.md`](research/problemes-ouverts-2026-09-26.md) (all in French); computational model [`research/formal-computational/`](research/formal-computational/README.md) |
+| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md), the guarantees of MLS at this scale, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md), who may re-key the tree, [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md), îlots under a flat top, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md), a synthesis beyond v0.4, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md), its open problems, [`research/problemes-ouverts-2026-09-26.md`](research/problemes-ouverts-2026-09-26.md), and proofs and measurements, [`research/preuves-et-mesures-2026-09-26.md`](research/preuves-et-mesures-2026-09-26.md) (all in French); computational model [`research/formal-computational/`](research/formal-computational/README.md) |
 | Conformance | None yet: no test vectors (section 19) |
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
@@ -180,7 +180,14 @@ Definitions (normative):
   requests, including a re-entry that gives the member a leaf key of its
   choice, district commits and seals if it is given the role, and
   admissions if the device is an admin. The repair is to remove the device,
-  together with any device it admitted, and to admit a new one.
+  together with any device it admitted, and to admit a new one. A re-entry
+  or an update signed by a thief changes the member's leaf, so the member
+  can no longer follow and notices; a catch-up leaves the tree as it is,
+  and gives the thief the epoch of every window it asks for, unseen
+  (research note
+  [`research/preuves-et-mesures-2026-09-26.md`](research/preuves-et-mesures-2026-09-26.md),
+  section 3, which proposes to bind a catch-up's welcome to the member's
+  leaf key).
 * **Visibility of joins.** Every join is a change of a district commit that
   the seal lists; a member that holds the seal of an epoch it accepted can
   list the devices that window let in (section 12.11). Nobody can take a

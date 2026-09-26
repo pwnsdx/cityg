@@ -13,8 +13,12 @@ the disputes it proposes against a committer that sends bad wraps; and the
 subtrees with no tree above them, whose roots receive the epoch secret of
 every window, relays that pass it on inside an îlot, and, in the note's
 revision, a binary city above the îlots that every window re-keys along
-the paths of the îlots it changes. None of them is
-part of profile `city-g/v0.4`. The model of the protocol itself is
+the paths of the îlots it changes. Two scenarios bear on profile
+`city-g/v0.4` itself: a catch-up that a stolen device key signs, and the
+fix that the note
+[`preuves-et-mesures-2026-09-26.md`](../preuves-et-mesures-2026-09-26.md)
+(in French) proposes, which is not part of the profile. None of the other
+mechanisms is part of it either. The model of the protocol itself is
 in [`docs/formal/`](../../formal/README.md); that of the message-plane note
 in [`../formal-messages/`](../formal-messages/README.md).
 
@@ -75,6 +79,8 @@ creates.
 | [`ilot_city_stale.pv`](ilot_city_stale.pv) | A binary city above the îlots: node P above îlots k and j, node Q above îlot l. Window 2 removes M1, of îlot k, and seals its epoch secret flat to every îlot root without re-keying the city; window 3 removes M2, of îlot l, through the city, and wraps its epoch secret to P. M1 and M2 work with the server. | Attack: M1 opens the epoch secret of window 3 with P's old secret, and M2, a member of epoch 2, brings the init secret. Every window re-keys the city along the paths of the îlots it changes. |
 | [`ilot_city_maintained.pv`](ilot_city_maintained.pv) | The same two removals; window 2 also re-keys P, along the path of îlot k. | Proved: what a member sends in epoch 3 stays secret. |
 | [`ilot_city_sticky.pv`](ilot_city_sticky.pv) | The city is not re-keyed, but M1 works with the server alone. | Proved: without the init secret of epoch 2, which M1 missed, the epoch secret of window 3 gives it nothing. |
+| [`catch_up_device_key.pv`](catch_up_device_key.pv) | The rule of v0.4 (sections 11 and 12.10). The attacker holds M's device key, not its state. A welcomes any catch-up of M signed with that key for the epoch, sealing the joiner secret of epoch 2 to the request's init key; the attacker records one with an init key of its own. M jumps too. | Attack: the attacker reads epoch 2, and can again in every window, without changing the tree. Reachable, as intended: M's own jump. |
+| [`catch_up_leaf_bound.pv`](catch_up_leaf_bound.pv) | The proposed fix: the welcome of a catch-up is also encapsulated to M's current leaf key, which A takes from the tree, and its key derives from both shared secrets. | Proved: the message A sends in epoch 2 stays secret. Reachable, as intended: M, which keeps its leaf key through a jump, still jumps. |
 
 ## Abstractions and limits
 
@@ -92,4 +98,6 @@ creates.
   context, or a verdict that the wrap is not well formed. It stands for a
   zero-knowledge proof over the decapsulation, the derivation of the AEAD
   key and the AEAD; its cost and its soundness are not modelled.
-* **No computational proof.**
+* **No computational proof here.** The computational counterparts of several
+  îlot and city scenarios, and of the relay's tag check, are in
+  [`../formal-computational/`](../formal-computational/README.md).

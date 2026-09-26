@@ -1,6 +1,7 @@
 # Build artifacts
 /target
 /docs/research/bench/target
+/docs/research/dispute-zk/build
 /artifacts
 
 # IDE / Editor

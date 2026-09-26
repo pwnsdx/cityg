@@ -15,7 +15,8 @@ help newcomers, and report concerning behavior to the maintainers.
 
 Prerequisites: a recent stable Rust toolchain (the workspace uses edition
 2024) and Git. ProVerif 2.05 runs the symbolic model; CryptoVerif 2.13
-runs the computational research model; Python 3 runs the cost models.
+runs the computational research model; Python 3 runs the cost models;
+emp-toolkit and CMake build the research prover of wrap disputes.
 
 ```bash
 git clone https://github.com/pwnsdx/cityg.git
@@ -36,7 +37,7 @@ docs/formal/run.sh /path/to/proverif       # symbolic model
 | `crates/cityg-core/tests/scenarios.rs` | Whole groups on the in-memory delivery service. |
 | `crates/cityg-core/tests/scale.rs` | A large window on a full group, against the cost model (release, `--ignored`). |
 | `docs/formal/` | Symbolic model of the security choices. |
-| `docs/research/` | Research notes (in French), cost models, benchmarks, and symbolic and computational models of the proposals. |
+| `docs/research/` | Research notes (in French), cost models, benchmarks, a zero-knowledge prover, and symbolic and computational models of the proposals. |
 
 ## Workflow
 
@@ -110,15 +111,18 @@ We are especially interested in:
   [`docs/research/ilots-2026-09-26.md`](docs/research/ilots-2026-09-26.md),
   and an analysis of a multi-recipient KEM for their top;
 - a computational proof of the whole tree under adaptive corruptions,
-  beyond the fixed configurations of
-  [`docs/research/formal-computational/`](docs/research/formal-computational/README.md),
-  and an analysis of BLAKE3's keyed mode as a dual PRF (see
-  [`docs/research/problemes-ouverts-2026-09-26.md`](docs/research/problemes-ouverts-2026-09-26.md));
-- a zero-knowledge proof that an X-Wing wrap does not open in its context,
-  for the disputes proposed in
+  with random oracles, following the plan of
+  [`docs/research/preuves-et-mesures-2026-09-26.md`](docs/research/preuves-et-mesures-2026-09-26.md)
+  (section 4), whose lemmas are the fixed configurations of
+  [`docs/research/formal-computational/`](docs/research/formal-computational/README.md);
+  and an analysis of BLAKE3's keyed mode as a dual PRF;
+- the X25519 half of the zero-knowledge proof that an X-Wing wrap does not
+  open in its context, for the disputes proposed in
   [`docs/research/rekey-serveur-2026-09-26.md`](docs/research/rekey-serveur-2026-09-26.md):
-  the note on open problems counts its statement (about 1.1 million AND
-  gates); an implementation would measure its proving time on a phone.
+  the rest is measured by
+  [`docs/research/dispute-zk/`](docs/research/dispute-zk/README.md) (under
+  a second and 2 MB); X25519 needs a proof over its own field, then a
+  measurement on a phone.
 
 ## Review
 

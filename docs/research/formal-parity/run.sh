@@ -19,9 +19,11 @@ FAILED=0
 # member does not check against the sealed tag, for stable îlot keys
 # without the init chain, for an init secret sealed to an îlot instead of
 # welcomes, for a lone entrant that applies a removal without renewing
-# the top, and for a city above the îlots that a window does not re-key,
-# with two removed members; in wrap_dispute_report,
-# "false" means that a hostile committer can be convicted, as intended;
+# the top, for a city above the îlots that a window does not re-key,
+# with two removed members, and for a catch-up signed with a stolen device
+# key under the rule of v0.4; in wrap_dispute_report, "false" means that a
+# hostile committer can be convicted, as intended, and in the catch_up
+# scenarios the second "false" means that the member's own jump completes;
 # "unproved": an equivalence ProVerif cannot prove, as expected when the
 # sender is sent in clear).
 EXPECTED=(
@@ -57,6 +59,8 @@ EXPECTED=(
   "ilot_city_stale: false"
   "ilot_city_maintained: true"
   "ilot_city_sticky: true"
+  "catch_up_device_key: false false"
+  "catch_up_leaf_bound: true false"
 )
 
 for line in "${EXPECTED[@]}"; do

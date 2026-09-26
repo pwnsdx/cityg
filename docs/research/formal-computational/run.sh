@@ -30,6 +30,13 @@ EXPECTED=(
   "city_sticky: proved"
   "weak_rng: proved"
   "weak_rng_unhedged: unproved"
+  "relay_tag: proved"
+  "relay_tag_unbound: unproved"
+  "witness_quorum: proved"
+  "witness_quorum_two_dishonest: unproved"
+  "witness_quorum_two_of_four: unproved"
+  "catch_up_leaf_bound: proved"
+  "catch_up_init_only: unproved"
 )
 
 for line in "${EXPECTED[@]}"; do

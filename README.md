@@ -198,15 +198,19 @@ and half joins:
   open item.
 * Members that follow the group check tags, not the history: comparing the
   interim transcript hash out of band detects a fork.
+* A stolen device key reads every window through catch-ups, which leave the
+  tree as it is, so nobody notices; the other requests it can sign change
+  the member's leaf, and the member notices. A fix is proposed in the
+  research notes.
 * Research code: side channels of the dependencies have not been assessed.
 
 ## Research beyond 0.4
 
 The architecture of 0.4 comes from a first research note,
 [Groupes de millions de membres](docs/research/grands-groupes-2026-09-25.md).
-Six more, in French, look at what comes next; the fifth gathers them into
-a candidate profile for the next version, and the sixth works on its open
-problems. None of them is part of the profile.
+Seven more, in French, look at what comes next; the fifth gathers them
+into a candidate profile for the next version, and the last two work on its
+open problems. None of them is part of the profile.
 
 | Note | Question | What it finds |
 | --- | --- | --- |
@@ -216,6 +220,7 @@ problems. None of them is part of the profile.
 | [Îlots under a flat top](docs/research/ilots-2026-09-26.md) | What is the best re-key technique at this scale? | Small subtrees, relays and joiners that do the work: following costs 94 KB a day with relays and 415 KB without, instead of 1.8 MB for the profile of the previous note, whatever the group's size. A city maintained above the îlots keeps a window that changes one îlot at 30 KB. |
 | [Beyond 0.4](docs/research/au-dela-0.4-2026-09-26.md) | What would the next version be, and what is still open? | The 0.4 tree read through relays and re-keyed by small tasks that joiners take on, with the parity profile's authorized mode and message plane: a member who reads 100 messages a day downloads 213 KB instead of 2.1 MB. It can follow 0.4 in three steps. Open, in order: a computational proof, dispute proofs for X-Wing, forks, standards. |
 | [Open problems](docs/research/problemes-ouverts-2026-09-26.md) | Which of those open problems can be solved now? | First computational proofs with CryptoVerif, and an assumption the key schedule needs: `Extract` must be a dual PRF. A wrap dispute is about 1.1 million AND gates, about 0.4 MB to prove to the server. Three witnesses out of four against forks, a cache for sender cards. |
+| [Proofs and measurements](docs/research/preuves-et-mesures-2026-09-26.md) | What does a dispute really cost, and what would prove the whole tree? | A wrap dispute measured with emp-zk: under a second and 2 MB without its X25519 half, which needs a proof over its own field. Authentication in the computational model. A weakness of 0.4: a stolen device key reads every window through catch-ups, unseen; binding the catch-up's welcome to the member's leaf key closes it. A proof plan for the whole tree, with random oracles, and `Extract` as HKDF for the next profile. |
 
 ## Repository
 
