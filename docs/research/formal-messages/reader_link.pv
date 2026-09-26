@@ -1,0 +1,31 @@
+(* Scenario READER_LINK: a reader follows the public chain of reader
+   secrets, with no member online.
+
+   R is a reader: it holds the reader secret rs1 of epoch 1 and the interim
+   transcript hash of epoch 1. The seal of epoch 2 carries the link: rs2
+   encrypted under a key derived from rs1, with the confirmed transcript
+   hash of epoch 2 as associated data. The delivery service stores the seal
+   and can send R anything instead. *)
+
+free MR: bitstring [private].
+query attacker(MR).
+
+event Epoch2(key).
+event ReaderAccepts(key).
+query rs: key; event(ReaderAccepts(rs)) ==> event(Epoch2(rs)).
+
+process
+  new es1: key; new r2: key; new interim1: bitstring;
+  let rs1 = reader_secret(es1) in
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r2, gc2)) in
+  let rs2 = reader_secret(es2) in
+  new seal_hash2: bitstring;
+  let cth2 = hash((interim1, seal_hash2)) in
+  event Epoch2(rs2);
+  out(c, (interim1, gc2, seal_hash2, reader_link(rs1, cth2, rs2)));
+  (* Reader R: the seal hash and the link, from the delivery service. *)
+  in(c, (sh: bitstring, lk: bitstring));
+  let rs = sdec(kdf(rs1, L_reader_link), hash((interim1, sh)), lk) in
+  event ReaderAccepts(rs);
+  out(c, aenc(msg_key(rs), MR))

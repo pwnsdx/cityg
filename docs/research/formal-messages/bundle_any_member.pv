@@ -1,0 +1,39 @@
+(* Scenario BUNDLE_ANY_MEMBER: after a break, a bundle served by any
+   member, possibly hostile.
+
+   H is a hostile member of epoch 1: it holds rs1 and serves bundles. The
+   delivery service is honest here: it hands Q the seal of epoch 2, with its
+   chained tag, unchanged (a private channel). Bundles come over the
+   network, from H or from anyone. Q accepts only the real reader secret of
+   epoch 2: the server's identity does not matter. (With a dishonest
+   delivery service, H could fork Q: reader_removed.pv.) *)
+
+free ds: channel [private].
+free skQ: skey [private].
+
+event Epoch2(key).
+event ReaderAccepts(key).
+query rs: key; event(ReaderAccepts(rs)) ==> event(Epoch2(rs)).
+
+process
+  new es1: key; new r2: key; new interim1: bitstring;
+  let rs1 = reader_secret(es1) in
+  out(c, (rs1, interim1, spk(skQ)));
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r2, gc2)) in
+  let rs2 = reader_secret(es2) in
+  new seal_hash2: bitstring;
+  let cth2 = hash((interim1, seal_hash2)) in
+  event Epoch2(rs2);
+  (
+    out(ds, (seal_hash2, reader_tag(rs1, cth2, rs2)))
+  ) | (
+    new otk: key;
+    let req = (L_request, N2, kempk(otk)) in
+    out(c, (req, sign(skQ, req)));
+    in(ds, (sh: bitstring, rt: bitstring));
+    in(c, b: bitstring);
+    let rs = open(otk, hash(req), b) in
+    if rt = reader_tag(rs1, hash((interim1, sh)), rs) then
+    event ReaderAccepts(rs)
+  )

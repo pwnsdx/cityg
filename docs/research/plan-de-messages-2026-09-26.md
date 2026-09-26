@@ -30,7 +30,7 @@ Vocabulaire :
 2. **Six techniques, qui se composent :**
    - **Gardiens et lecteurs** (section 3.1). Seuls les gardiens sont dans l'arbre, soit quelques milliers d'appareils souvent en ligne. Les lecteurs reçoivent à chaque session un lot de clés, qui porte les secrets de lecteur des époques manquées :
      - le lot est scellé à une clé X-Wing à usage unique, signée par l'appareil du lecteur ;
-     - chaque secret est vérifié contre un *tag de lecteur chaîné*, calculé avec une clé tirée du secret de l'époque précédente et porté par le sceau ; ni le DS seul ni un gardien seul ne peut donc imposer un secret, contrairement aux demandes de clés de Matrix.
+     - chaque secret est vérifié contre un *tag de lecteur chaîné*, calculé avec une clé tirée du secret de l'époque précédente et porté par le sceau ; ni le DS seul ni le membre qui sert le lot ne peut donc imposer un secret, contrairement aux demandes de clés de Matrix.
 
      Retirer un lecteur ne demande aucun re-key : il n'a jamais tenu de secret dont les époques suivantes dérivent. Un lecteur dont l'état a fuité, sa clé d'appareil intacte, guérit à la session suivante, sans mise à jour.
    - **Cartes d'émetteur** (section 3.2). Les messages sont signés avec une clé compacte, inscrite dans l'annuaire et changée sans re-key : FN-DSA-512 aujourd'hui (666 octets). La clé d'appareil ML-DSA-65 reste l'identité. L'algorithme se choisit par carte, ce qui permet de suivre le troisième tour des signatures additionnelles du NIST.
@@ -44,20 +44,27 @@ Vocabulaire :
    - **Journée d'un lecteur :** ×24 pour 100 messages lus, ×5 pour 86 400. Le trafic du DS passe de 8,3 To à 345 Go par jour pour 2^20 lecteurs de 100 messages.
    - **Vague de 100 000 entrées et 100 000 départs :** avec 16 384 gardiens, 10 100 enveloppes au lieu de 648 420 (×64). Les changements de lecteurs ne coûtent que 40 octets d'enregistrement chacun.
    - **Gardiens :** chacun sert 640 lots par jour (0,3 s de CPU) quand 16 384 gardiens servent 2^20 lecteurs.
-4. **Sécurité** (sections 5 et 6 ; 11 scénarios ProVerif, tous au verdict attendu) :
+4. **Sécurité** (sections 5 et 6 ; 17 scénarios ProVerif, tous au verdict attendu) :
    - **Lots.** Leur secret et leur authenticité sont prouvés contre le DS. Sans vérification du tag, ou si le gardien ne vérifie pas la signature de la requête, le modèle trouve l'attaque.
    - **Retrait d'un lecteur.** Le lecteur retiré ne lit pas l'époque suivante, même sans re-key. Les variantes naïves sont attaquées : lecteurs qui tiennent la racine de l'arbre, ou secrets de lecteur en cliquet à la Megolm.
-   - **Bifurcation.** Un membre de l'époque précédente, allié au DS, peut faire bifurquer un lecteur qui ne vérifie que le tag chaîné, comme n'importe quel membre qui ne vérifie que des tags dans la v0.4. Un lot signé par un gardien réserve cette bifurcation aux gardiens, et les points de contrôle la bornent.
+   - **Bifurcation.** Un membre de l'époque précédente peut faire accepter à un lecteur un faux secret, allié au DS ou en scellant lui-même la fenêtre. C'est la limite de n'importe quel membre de la v0.4 qui ne vérifie que des tags. Des lots signés et des sceaux confiés aux gardiens la réservent aux gardiens ; les points de contrôle la bornent.
    - **Chaînes et cartes.** La chaîne de rafale signée résiste à un initié, le MAC seul non. Une carte vérifiée contre l'annuaire de l'époque du message ne laisse pas parler un membre retiré, une carte gardée en cache si.
-5. **Ce qui reste à faire :**
-   - le profil suivant (annuaire, secret et tag de lecteur, objets de lot, messages, journal) ;
+5. **Groupes publics, membres hostiles ou hors ligne** (section 3.8). Si chaque lot passait par un gardien, les gardiens seraient un point faible : ils peuvent être hors ligne, refuser de servir, épier qui lit, et, si le rôle était ouvert, être inscrits en masse. D'où quatre ajustements :
+   - une *chaîne publique* : chaque sceau porte le secret de lecteur de l'époque chiffré sous celui de l'époque précédente. Un lecteur n'a alors besoin que du DS, sauf après une *rupture*, qu'un bannissement impose ;
+   - après une rupture, n'importe quel membre en ligne sert le lot ;
+   - n'importe quel membre, lecteur compris, peut sceller une fenêtre avec une init externe ;
+   - dans un groupe public, les gardiens sont admis par un admin, et le DS leur confie les sceaux.
+
+   Les lecteurs y gagnent sur la v0.4 : leurs entrées et départs ne coûtent aucune enveloppe. Il reste deux limites : le DS peut entrer et faire bifurquer un lecteur jusqu'au point de contrôle suivant, et un scelleur hostile peut empoisonner une époque pour les lecteurs.
+6. **Ce qui reste à faire :**
+   - le profil suivant (annuaire, secret, tag et lien de lecteur, ruptures, objets de lot, messages, journal) ;
    - l'implémentation et les tests ;
    - des preuves calculatoires du tag chaîné ;
    - le choix de l'algorithme des cartes quand FIPS 206 paraîtra, puis à la fin du troisième tour (section 8).
 
    Deux coûts sont à accepter :
    - les gardiens retiennent les secrets de lecteur pendant `RETENTION`, ce qui retarde la confidentialité persistante face à un gardien compromis ;
-   - un gardien apprend quand un lecteur se connecte.
+   - le membre qui sert un lot apprend quand un lecteur se connecte : à chaque session avec des lots, une fois par rupture avec la chaîne publique.
 
 ## 1. Ce que coûterait un plan de messages classique
 
@@ -173,7 +180,7 @@ Un lecteur ne tient jamais `epoch_secret`, `init`, `joiner_secret`, `external_se
 interim_transcript_hash_n := H_L("interim-transcript", [confirmed_transcript_hash_n, confirmation_tag_n, reader_tag_n])
 ```
 
-Chaque gardien qui suit la fenêtre le vérifie comme le tag de confirmation, et un tag faux fait rejeter la fenêtre : il n'y a qu'un tag par époque. Il prouve que le secret de lecteur de l'époque `n` est celui qu'a engagé quelqu'un qui connaissait celui de l'époque `n - 1`, donc un membre de l'époque `n - 1`. Le DS seul ne le peut pas. Le gardien qui sert un lot non plus, puisque le tag vient du sceau et non de lui. C'est la garantie que le tag de confirmation donne aux membres de la v0.4, et qui repose sur `init_n-1`.
+Chaque gardien qui suit la fenêtre le vérifie comme le tag de confirmation, et un tag faux fait rejeter la fenêtre : il n'y a qu'un tag par époque. Il prouve que le secret de lecteur de l'époque `n` est celui qu'a engagé quelqu'un qui connaissait celui de l'époque `n - 1`, donc un membre de l'époque `n - 1`. Le DS seul ne le peut pas. Le gardien qui sert un lot non plus, puisque le tag vient du sceau et non de lui ; le scelleur, lui, le peut (section 3.8). C'est la garantie que le tag de confirmation donne aux membres de la v0.4, et qui repose sur `init_n-1`.
 
 Une fenêtre scellée par un entrant (kind 2) n'a pas de tag chaîné, car l'entrant ne connaît pas `reader_secret_n-1`. Le lecteur vérifie alors la preuve d'entrant (section 13.2 de la spécification : admission et signature du sceau), comme les gardiens. Ces fenêtres n'ont lieu que sans gardien en ligne.
 
@@ -212,8 +219,8 @@ Un secret faux ou une époque inventée par le DS échoue au premier tag. Le lot
 **Ce que l'on paie :**
 - **Rétention.** Les gardiens retiennent les secrets de lecteur pendant `RETENTION` (7 jours proposés) pour servir les lecteurs absents. La confidentialité persistante face à un gardien compromis ne vaut qu'au-delà. Un déploiement peut réserver la rétention à quelques gardiens.
 - **Présence.** Un gardien apprend quand un lecteur demande un lot. Il doit vérifier la signature lui-même : un DS qui vérifierait à sa place pourrait demander un lot avec sa propre clé (modèle `reader_bundle_unsigned_request.pv`).
-- **Disponibilité.** Sans gardien en ligne, aucune fenêtre n'est scellée, et les lecteurs restent dans l'époque courante, dont ils ont le secret. Les retraits attendent, et le DS les applique à la livraison, comme dans la v0.4 (section 14.6). Un lecteur peut aussi devenir gardien : il entre dans l'arbre par une fenêtre qu'il scelle lui-même, comme un entrant.
-- **Bifurcation.** Un membre de l'époque précédente, allié au DS, peut faire bifurquer un lecteur (section 3.6).
+- **Disponibilité.** Sans gardien en ligne, un lecteur ne reçoit plus de lot et personne ne scelle. La section 3.8 lève cette dépendance : chaîne publique, lots servis et sceaux posés par n'importe quel membre.
+- **Bifurcation.** Un membre de l'époque précédente, allié au DS ou scelleur de la fenêtre, peut faire accepter à un lecteur un faux secret (sections 3.6 et 3.8).
 
 ### 3.2 Cartes d'émetteur et annuaire
 
@@ -291,7 +298,7 @@ Un lecteur qui lit une époque entière recalcule la racine lui-même, sans preu
 
 ### 3.6 Points de contrôle et témoins
 
-**Le risque.** Un lecteur qui ne vérifie que des tags chaînés peut être mené sur une branche. Il suffit d'un membre de l'époque précédente, qui connaît le secret de lecteur, et du DS. Le membre choisit un faux secret, calcule le tag chaîné et le scelle à la clé à usage unique du lecteur (trace de `reader_removed.pv`). C'est la même limite que la v0.4 pour les membres qui ne vérifient que le tag de confirmation (spécification, section 2.3). Mais comme les lecteurs sont nombreux, beaucoup d'anciens membres ont cette possibilité.
+**Le risque.** Un lecteur qui ne vérifie que des tags chaînés peut être mené sur une branche. Il suffit d'un membre de l'époque précédente, qui connaît le secret de lecteur, et du DS ; ou que ce membre scelle lui-même la fenêtre (section 3.8). Le membre choisit un faux secret, calcule le tag chaîné et le scelle à la clé à usage unique du lecteur (trace de `reader_removed.pv`). C'est la même limite que la v0.4 pour les membres qui ne vérifient que le tag de confirmation (spécification, section 2.3). Mais comme les lecteurs sont nombreux, beaucoup d'anciens membres ont cette possibilité.
 
 **Trois parades :**
 - **Points de contrôle.** À chaque session, le lecteur vérifie le dernier point de contrôle signé par un admin, qui porte l'époque et le haché intérimaire (3,5 Ko ; `CHECKPOINT_INTERVAL` = 1 heure). Une bifurcation se découvre au plus un intervalle plus tard, et un DS qui retient les points de contrôle se voit à leur âge.
@@ -304,12 +311,73 @@ Un lecteur qui lit une époque entière recalcule la racine lui-même, sans preu
 
 **Vérifier un long historique.** Cela veut dire vérifier des milliers de signatures : 6,7 Mo pour 10 000 signatures FN-DSA-512. Une agrégation LaBRADOR les ramènerait à environ 74 Ko, qu'un gardien archiviste produirait par époque. La preuve reste lente à produire et à vérifier : c'est une piste, pas une proposition.
 
-### 3.8 Pistes écartées
+### 3.8 Groupes publics : membres hostiles ou hors ligne
+
+Dans un groupe public (un groupe ouvert, décision E-14), n'importe quel appareil entre sans admission, celui du DS compris : il n'y a pas de confidentialité face à qui entre. Ce qu'un tel groupe garde :
+- personne ne parle pour un autre ;
+- les entrées restent visibles ;
+- les retraits et les bannissements gardent leurs règles ;
+- les époques d'avant une entrée restent fermées à l'entrant.
+
+Chaque membre peut y être hostile, et l'activité varie : la nuit, il se peut que personne ne réponde. Les gardiens de la section 3.1 y posent six problèmes :
+
+| Problème | Détail |
+| --- | --- |
+| Vivacité | Un lecteur dépend d'un gardien en ligne pour chaque lot. La v0.4 ne demande qu'un DS. |
+| Gardiens hostiles | Le gardien qui sert un lot ne peut ni imposer un faux secret (le tag vient du sceau) ni parler pour un autre (cartes). Mais il peut refuser de servir, et il apprend quand le lecteur se connecte. |
+| Sybil | Si le rôle est ouvert, un attaquant inscrit des milliers de gardiens. L'arbre regrossit, et leurs entrées et départs forcent des re-keys. |
+| Scelleur hostile | Le scelleur calcule le tag (ou le lien, ci-dessous) avec le secret de lecteur de l'époque précédente, qu'il connaît. Il peut donc faire accepter aux lecteurs un secret de son choix. Les gardiens, qui dérivent le vrai, rejettent la fenêtre, et lecteurs et gardiens se séparent. C'est la forme « lecteurs » d'un problème ouvert de la v0.4 : un committer hostile y coupe déjà des membres (spécification, section 19). |
+| Bifurcations | Le DS peut entrer, donc être membre de l'époque précédente, voire gardien. Il fait alors bifurquer un lecteur seul, lot signé ou non. Il le peut déjà face aux membres de la v0.4 dans un groupe ouvert. |
+| Fenêtres d'entrant | Quand aucun gardien n'est en ligne, les entrants scellent eux-mêmes. Ces fenêtres n'ont pas de tag chaîné : le lecteur doit vérifier la preuve d'entrant, environ 10 Ko. Dans un groupe ouvert, elle ne prouve que l'entrée d'un nouvel appareil. |
+
+**Les parades :**
+
+1. **Chaîne publique des secrets de lecteur.** Le sceau porte, au lieu du tag chaîné, un *lien* :
+
+   ```text
+   reader_link_n := AEAD(DeriveSecret(reader_secret_n-1, "reader link"), reader_secret_n,
+                         ad = confirmed_transcript_hash_n)                      (48 octets)
+   ```
+
+   Comme le tag, le lien est couvert par la signature du sceau et le haché intérimaire, et chaque gardien le vérifie. Un lecteur qui tient le secret de l'époque `n - 1` ouvre le lien et obtient celui de l'époque `n`, authentifié par une clé que seuls les membres de l'époque `n - 1` connaissent : c'est la garantie du tag chaîné (`reader_link.pv`). Entre deux ruptures, le lecteur ne dépend de personne d'autre que du DS, et aucun membre n'apprend quand il lit.
+2. **Ruptures.** Un lien donne l'époque `n` à tous les membres de l'époque `n - 1`, y compris ceux que la fenêtre retire (`reader_link_no_break.pv`). Le scelleur l'omet donc quand la politique veut couper la lecture : c'est une *rupture*. Le sceau porte alors le tag chaîné, et les lecteurs demandent un lot pour cette seule époque. Après elle, les liens reprennent, et un lecteur banni ne les ouvre plus (`reader_link_ban.pv`).
+   - Dans un groupe fermé, toute fenêtre qui retire un membre rompt la chaîne : c'est le schéma de la section 3.1.
+   - Dans un groupe public, les départs volontaires ne la rompent pas : qui part peut revenir, visiblement. Les bannissements la rompent, regroupés à `BREAK_INTERVAL` (un jour proposé), ou tout de suite si un admin le demande. Un banni ne peut plus écrire dès la fenêtre qui le bannit : sa carte sort de l'annuaire.
+   - Une rupture périodique sert aussi de guérison (PCS) : un état de lecteur volé ne suit la chaîne que jusqu'à la rupture suivante.
+3. **Tout membre sert un lot.** Le tag du sceau vérifie le secret ; l'identité du serveur ne compte pas (`bundle_any_member.pv`). Après une rupture, n'importe quel membre en ligne qui en tient le secret le sert, lecteurs compris. Un serveur n'apprend une session qu'à chaque rupture. Dans un groupe dont la politique d'historique ouvre déjà le passé aux entrants, le DS peut même relayer les requêtes sans l'identité du lecteur : on n'y perd, face au DS, que la visibilité des lecteurs.
+4. **Tout membre scelle.** Tout membre de l'époque `n - 1`, lecteur compris, peut sceller une fenêtre :
+   - il prend une *init externe* à la place de `init_n-1` : un secret frais scellé à la clé externe de l'époque `n - 1`, que seuls les gardiens tiennent ;
+   - il tire une nouvelle racine, et re-keye depuis l'état public les chemins des gardiens que la fenêtre retire ;
+   - il signe, et les gardiens vérifient qu'il était dans l'annuaire de l'époque `n - 1`, comme pour une ré-entrée (`reader_seal.pv`). Sans cette vérification, le DS scelle à sa place (`reader_seal_unchecked.pv`).
+
+   Il connaît le secret de lecteur de l'époque `n - 1` : il produit le lien ou le tag. Ce qu'il tire le tache, comme un committer. Les fenêtres d'entrant ne servent plus que dans un groupe où personne n'est en ligne.
+5. **Gardiens sur admission, et scelleurs gardiens par défaut.** La politique d'un groupe public ouvre la lecture à tous et réserve la garde aux appareils qu'un admin admet : pas de Sybil dans l'arbre.
+   - Les gardiens deviennent l'ossature durable du groupe : ils reçoivent les secrets frais par l'arbre, même hors ligne, et gardent l'époque en vie quand son scelleur disparaît. Ils ne sont plus un passage obligé.
+   - Le DS confie les sceaux aux gardiens, et à un autre membre seulement quand aucun gardien n'est en ligne.
+   - Un lecteur peut tenir pour provisoire une époque scellée par un non-gardien jusqu'à ce qu'un gardien scelle par-dessus. Il le vérifie par la signature de ce sceau, environ 6 Ko.
+   - Un scelleur hostile garde alors le pouvoir de séparer les lecteurs des gardiens pour une fenêtre. Il est identifié par sa signature, et ses victimes le voient : elles n'ouvrent plus les messages des gardiens.
+6. **Bifurcations.** Elles restent bornées par les points de contrôle des admins et par les témoins (section 3.6). Si les admins restent longtemps hors ligne, il ne reste que les témoins.
+
+**Ce que l'on gagne sur la v0.4.** Dans un groupe ouvert de la v0.4, tout membre est dans l'arbre :
+- un attaquant qui fait entrer et sortir des milliers d'appareils force des re-keys de tout le groupe ;
+- tout membre peut être désigné committer, et couper d'autres membres avec des enveloppes illisibles.
+
+Ici, les lecteurs entrent et sortent sans aucune enveloppe. Un lecteur ne scelle que faute de gardien, et ne commite que ce que sa fenêtre demande.
+
+**Ce qui reste :**
+- dans un groupe ouvert, le DS peut entrer et faire bifurquer un lecteur, jusqu'au point de contrôle suivant ;
+- un scelleur hostile peut empoisonner une époque pour les lecteurs, sans pouvoir parler pour un autre ;
+- un banni lit jusqu'à la rupture suivante ;
+- une fenêtre scellée par un entrant, quand personne n'est en ligne, reste le cas faible.
+
+Le coût ne bouge presque pas : 112 octets par époque, soit 198 Ko par jour avec une rupture par jour, contre 231 Ko avec un lot à chaque session (section 4.3). Ce qui change, c'est qu'un lecteur n'a besoin d'un membre en ligne qu'une fois par rupture. Avec une rupture par jour, 10 % des membres en ligne servent chacun une dizaine de lots par jour (section 4.6).
+
+### 3.9 Pistes écartées
 
 | Piste | Pourquoi |
 | --- | --- |
 | Donner aux lecteurs la racine de l'arbre, ou le secret d'époque avec elle, pour qu'ils dérivent les époques eux-mêmes | Un retrait sans re-key laisse alors le lecteur retiré lire la suite (`reader_removed_with_root.pv`). |
-| Faire avancer les secrets de lecteur en cliquet d'une époque à l'autre, à la Megolm, pour se passer de lots | Même attaque (`reader_removed_ratchet.pv`). |
+| Faire avancer les secrets de lecteur en cliquet, sans secret frais ni rupture, à la Megolm | Même attaque (`reader_removed_ratchet.pv`). La chaîne publique de la section 3.8, elle, porte des secrets frais de l'arbre et se rompt quand il faut couper un membre. |
 | Clés d'émetteur distribuées deux à deux (sender keys) | O(N) par émetteur et par rotation, et un retrait fait tourner toutes les clés. |
 | Accepter un lot sans le vérifier, comme les premières demandes de clés de Matrix | Le DS injecte le secret de son choix (`reader_bundle_no_tag.pv`). |
 | Signer chaque message avec la clé d'appareil | C'est le portage direct de la section 1 : 3,3 Ko par message. |
@@ -379,8 +447,10 @@ Par lecteur et par jour :
 | Lots et points de contrôle, 1 session par jour | 189 Ko |
 | Lots et points de contrôle, 10 sessions par jour | 231 Ko |
 | Lots et points de contrôle, 48 sessions par jour | 410 Ko |
+| Chaîne publique, une rupture par jour, 10 sessions | 198 Ko |
+| Chaîne publique, une rupture par heure, 10 sessions | 209 Ko |
 
-Un lot pèse 1,2 Ko, plus 128 octets par époque ; un point de contrôle, 3,5 Ko. Le coût ne dépend presque plus du rythme des changements : c'est le nombre d'époques qui compte, pas leur contenu.
+Un lot pèse 1,2 Ko, plus 128 octets par époque ; un point de contrôle, 3,5 Ko ; la chaîne publique, 112 octets par époque. Le coût ne dépend presque plus du rythme des changements : c'est le nombre d'époques qui compte, pas leur contenu. La chaîne publique coûte à peu près autant que les lots ; elle change la dépendance, pas le volume.
 
 ### 4.4 La journée d'un lecteur
 
@@ -420,6 +490,8 @@ Chaque lecteur demande un lot à chaque session. Une requête coûte une vérifi
 
 Quelques milliers de gardiens suffisent à servir un million de lecteurs. Ce qui limite leur nombre vers le bas, c'est la disponibilité et la confiance, pas la charge.
 
+Avec la chaîne publique (section 3.8), un lecteur ne demande un lot qu'après une rupture, à n'importe quel membre en ligne. Si 10 % des 2^20 membres sont en ligne, chacun sert une dizaine de requêtes par jour avec une rupture par jour, une centaine avec une rupture par heure.
+
 ### 4.7 Historique
 
 | | Rejouer chaque fenêtre | Un lot et un point de contrôle | Gain |
@@ -432,7 +504,7 @@ Quelques milliers de gardiens suffisent à servir un million de lecteurs. Ce qui
 
 ## 5. Modèle formel
 
-[`formal-messages/`](formal-messages/README.md) : 11 scénarios ProVerif 2.05, lancés par `docs/research/formal-messages/run.sh` et par le job du modèle formel de la CI, en une seconde environ. L'adversaire est le réseau, donc le DS. Les primitives sont idéales. Chaque scénario a deux époques ; la chaîne sur plusieurs époques, les hachés de transcript, le journal et les points de contrôle ne sont pas modélisés.
+[`formal-messages/`](formal-messages/README.md) : 17 scénarios ProVerif 2.05, lancés par `docs/research/formal-messages/run.sh` et par le job du modèle formel de la CI, en une seconde environ. L'adversaire est le réseau, donc le DS. Les primitives sont idéales. Les scénarios ont deux à quatre époques ; les chaînes plus longues, les hachés de transcript, le journal et les points de contrôle ne sont pas modélisés.
 
 | Scénario | Ce qu'il vérifie | Verdict |
 | --- | --- | --- |
@@ -443,6 +515,12 @@ Quelques milliers de gardiens suffisent à servir un million de lecteurs. Ce qui
 | `reader_removed_signed_bundle` | La même chose, avec des lots signés par un gardien. | Prouvé, les deux propriétés. |
 | `reader_removed_with_root` | Les lecteurs tiennent la racine de l'arbre et le secret d'époque. | Attaque : R lit l'époque 2. |
 | `reader_removed_ratchet` | Les secrets de lecteur avancent en cliquet, à la Megolm. | Attaque. |
+| `reader_link` | Un lecteur ouvre le lien du sceau de l'époque 2 avec le secret de l'époque 1, sans aucun membre en ligne. | Prouvé : ce qu'il envoie reste secret, et il n'accepte que le vrai secret. |
+| `reader_link_ban` | La chaîne publique sur trois fenêtres : un lien, une rupture qui bannit R, un lien. L'attaquant est R avec le DS. | Attendu : R lit l'époque 2, où il était membre. Prouvé : il ne lit ni l'époque 3 ni l'époque 4. |
+| `reader_link_no_break` | La fenêtre 3 retire R sans rompre la chaîne, comme un départ volontaire dans un groupe public. | Attaque, attendue : R lit l'époque 3 ; c'est ce que la politique accepte. |
+| `bundle_any_member` | Après une rupture, un membre hostile de l'époque 1 sert le lot ; le DS livre le sceau intact. | Prouvé : le lecteur n'accepte que le vrai secret. |
+| `reader_seal` | Un lecteur scelle la fenêtre 2, qui bannit un autre lecteur : nouvelle racine, init externe, signature vérifiée par le gardien. L'attaquant est le banni avec le DS. | Prouvé : le banni ne lit pas l'époque 2. |
+| `reader_seal_unchecked` | Le gardien ne vérifie pas qui a scellé. | Attaque : le DS scelle à sa place. |
 | `burst_chain` | Une rafale de deux messages, une signature de carte sur la chaîne ; l'attaquant est un membre. | Prouvé : un lecteur n'attribue à l'émetteur que ce qu'il a envoyé. |
 | `burst_chain_mac_only` | La chaîne est authentifiée par un MAC sous une clé de l'époque. | Attaque : tout membre parle comme l'émetteur. |
 | `card_revalidated` | Un membre retiré garde sa clé de carte et s'allie à un initié ; le lecteur vérifie la carte contre l'annuaire de l'époque du message. | Prouvé. |
@@ -460,12 +538,14 @@ Pour un lecteur, face aux adversaires de la spécification (section 2.1). Un gar
 | Propriété | A1, A2 : DS | A3 : membre malveillant | A4 : membre retiré | A5 : état compromis | A6 : clé d'appareil volée |
 | --- | --- | --- | --- | --- | --- |
 | Confidentialité des secrets de lecteur | garantie en groupe fermé : lot scellé à une clé à usage unique signée | non (initié) | garantie dès la fenêtre qui applique le retrait, sans re-key, sur la branche où il est appliqué | hors des fenêtres FS et PCS ; FS retardée par la rétention des gardiens ; PCS à la session suivante, sans mise à jour | non, jusqu'au retrait |
-| Authenticité des secrets reçus | garantie : tag chaîné | un membre de l'époque précédente, avec le DS, peut faire bifurquer le lecteur, au plus pour un intervalle de points de contrôle ; avec des lots signés, il faut un gardien | comme A3 | garantie | comme A3 |
+| Authenticité des secrets reçus | garantie : tag chaîné ou lien | un membre de l'époque précédente peut faire accepter un faux secret au lecteur, en scellant la fenêtre (les gardiens la rejettent) ou avec le DS (bifurcation), au plus pour un intervalle de points de contrôle ; avec des lots signés et des sceaux confiés aux gardiens, il faut un gardien | comme A3 | garantie | comme A3 |
 | Authenticité des messages | garantie : carte | garantie : il ne parle pas pour un autre | garantie si la carte est vérifiée contre l'annuaire de l'époque du message | non jusqu'à la rotation de la carte, si elle n'est pas dans un coffre | non, jusqu'au retrait |
 | Cohérence des messages d'une époque | garantie : journal scellé ; une vue divergente est une bifurcation | garantie : pas d'envoi divergent | garantie | garantie | garantie |
 | Authentification d'un message non signé d'une rafale | du groupe seulement, pendant `T_AUTH` au plus | idem | idem | idem | idem |
 | Visibilité des entrées | à la demande : le lecteur liste les entrées d'une fenêtre à partir de son sceau (spécification, section 12.11) | idem | idem | idem | idem |
-| Métadonnées | non : le DS et le gardien du lot voient les sessions | non | non | non | non |
+| Métadonnées | non : le DS voit les sessions, et le membre qui sert un lot aussi, une fois par rupture avec la chaîne publique | non | non | non | non |
+
+Dans un groupe public (section 3.8), la confidentialité ne vaut que face à qui n'est pas entré : le DS et quiconque entre lisent. Ce qui compte y est l'authenticité des messages, la cohérence du transcript, la visibilité des entrées et la vivacité. Avec la chaîne publique, les lecteurs ne dépendent que du DS entre deux ruptures.
 
 ## 7. Risques et questions ouvertes
 
@@ -476,10 +556,12 @@ Pour un lecteur, face aux adversaires de la spécification (section 2.1). Un gar
   L'agilité des cartes limite le risque, mais le remplacement d'un algorithme cassé demande une requête par membre.
 - **Retrait de HAWK.** Il rappelle que les schémas compacts récents peuvent tomber. Les cartes ne protègent pas l'identité, qui reste ML-DSA-65, mais une carte cassée permet d'usurper des messages jusqu'à son remplacement.
 - **Clé de carte hors coffre.** C'est un recul face à A5 pour l'authenticité des messages. La rotation quotidienne le borne à un jour.
-- **Bifurcation des lecteurs.** Elle est bornée par les points de contrôle, ce qui suppose des admins qui en signent. Un DS peut les retenir ; le lecteur doit alors avertir.
+- **Bifurcation des lecteurs.** Elle est bornée par les points de contrôle, ce qui suppose des admins qui en signent. Un DS peut les retenir ; le lecteur doit alors avertir. Dans un groupe ouvert, le DS peut entrer et la provoquer seul.
+- **Scelleur hostile.** Il peut faire accepter aux lecteurs un faux secret de lecteur pour une fenêtre. Sa signature l'identifie, et ses victimes le voient, puisqu'elles n'ouvrent plus les messages des gardiens. Mais aucune preuve de fraude ne le montre sans révéler de secret. C'est, pour les lecteurs, le problème ouvert des committers hostiles de la v0.4.
 - **Rétention.** C'est un compromis entre servir les lecteurs absents et la confidentialité persistante face aux gardiens. Il faut mesurer ce que les lecteurs demandent vraiment.
-- **Présence.** Le gardien d'un lot apprend l'identité du lecteur et l'heure de sa session. Des justificatifs anonymes post-quantiques d'appartenance à l'annuaire l'éviteraient, mais leur coût est inconnu.
-- **Disponibilité et incitations.** Qui fait tourner les gardiens, et combien en faut-il en ligne pour qu'un lecteur trouve toujours un lot ? La charge est faible (section 4.6), la question est sociale.
+- **Présence.** Le membre qui sert un lot apprend l'identité du lecteur et l'heure de sa session : à chaque session avec des lots, une fois par rupture avec la chaîne publique. Des justificatifs anonymes post-quantiques d'appartenance à l'annuaire l'éviteraient, mais leur coût est inconnu.
+- **Bannis.** Avec la chaîne publique, un banni lit jusqu'à la rupture suivante, et un état de lecteur volé aussi : `BREAK_INTERVAL` règle ce délai.
+- **Disponibilité et incitations.** Avec la chaîne publique, il ne faut un membre en ligne qu'aux ruptures, et n'importe lequel convient. Qui fait tourner les gardiens admis d'un groupe public reste une question sociale : la charge est faible (section 4.6).
 - **Retard d'authentification des rafales.** Il se voit dans l'interface ; `T_AUTH` est à régler par usage.
 - **Rejeu entre époques et réordonnancement.** Les messages sont liés à leur époque, à leur génération et au journal. Un modèle de la chaîne sur plusieurs époques reste à faire.
 - **Pas de preuve calculatoire.** Le tag chaîné, le lot et la chaîne de rafale n'ont qu'un modèle symbolique.
@@ -488,10 +570,10 @@ Pour un lecteur, face aux adversaires de la spécification (section 2.1). Un gar
 
 | Étape | Contenu | Critère |
 | --- | --- | --- |
-| 1 | Profil suivant, brouillon : annuaire et rôles, carte et identifiant d'algorithme, secret et tags de lecteur, `BundleRequest` et `Bundle`, messages, chaînes de rafale, engagement, journal scellé dans le sceau, politique d'historique, paramètres (`RETENTION`, `T_BURST`, `T_AUTH`) | Spécification relue, labels et contextes enregistrés |
-| 2 | `cityg-core` : calendrier de clés, annuaire, lots, messages et chaînes, journal du DS | Tests de scénarios : vague de lecteurs sans enveloppe, lecteur retiré qui ne lit plus, lot faux refusé, bifurcation détectée au point de contrôle, rafale falsifiée écartée |
+| 1 | Profil suivant, brouillon : annuaire et rôles, carte et identifiant d'algorithme, secret, tag et lien de lecteur, ruptures, sceau par tout membre avec une init externe, politique de garde (gardiens sur admission), `BundleRequest` et `Bundle`, messages, chaînes de rafale, engagement, journal scellé dans le sceau, politique d'historique, paramètres (`RETENTION`, `BREAK_INTERVAL`, `T_BURST`, `T_AUTH`) | Spécification relue, labels et contextes enregistrés |
+| 2 | `cityg-core` : calendrier de clés, annuaire, liens et lots, sceau par un lecteur, messages et chaînes, journal du DS | Tests de scénarios : vague de lecteurs sans enveloppe, lecteur qui suit la chaîne sans aucun gardien en ligne, banni coupé à la rupture, sceau d'un lecteur accepté par les gardiens, lien faux rejeté par les gardiens, lot faux refusé, bifurcation détectée au point de contrôle, rafale falsifiée écartée |
 | 3 | Test d'échelle : 2^20 membres dont 2^14 gardiens | Chiffres de la section 4 retrouvés |
-| 4 | Modèle formel étendu : chaîne de tags sur plusieurs époques, journal, points de contrôle ; preuve calculatoire du tag chaîné | Verdicts attendus, preuve relue |
+| 4 | Modèle formel étendu : chaîne de liens et de tags sur plusieurs époques, journal, points de contrôle ; preuve calculatoire du tag et du lien ; preuve de fraude d'un scelleur hostile qui ne révèle pas de secret | Verdicts attendus, preuve relue |
 | 5 | Algorithme des cartes : FN-DSA-512 à la parution de FIPS 206 ; réévaluation à la fin du troisième tour (MAYO, SQIsign, UOV) | Décision documentée |
 
 ## 9. Sources

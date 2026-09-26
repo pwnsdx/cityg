@@ -23,13 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - burst chains: one signature per burst of messages;
   - committing messages and verifiable reports;
   - a sealed message log in the next seal, for transcript consistency;
-  - checkpoints and signed bundles against forks of readers.
+  - checkpoints and signed bundles against forks of readers;
+  - for public groups, where any member may be hostile or offline: a public
+    chain of reader secrets in the seals, broken at bans, so that readers
+    need no member online between breaks; bundles served by any member;
+    windows sealed by any member, readers included, with an external init;
+    keepers admitted by an admin.
 - Its cost model, [`docs/research/msg_sim.py`](docs/research/msg_sim.py): for a reader of a group
   of 2^20 members, 6 times fewer bytes per message and 32 times less
   traffic to stay able to read. With 16,384 keepers, a burst of 100,000
   joins and 100,000 departures takes 64 times fewer wraps.
 - Its symbolic model, [`docs/research/formal-messages/`](docs/research/formal-messages/README.md):
-  11 ProVerif scenarios, which the formal-model CI job and the local CI now
+  17 ProVerif scenarios, which the formal-model CI job and the local CI now
   run.
 - The benchmarks measure FN-DSA-512 and FN-DSA-1024, the derivation of a
   sender's chain, and ChaCha20-Poly1305.

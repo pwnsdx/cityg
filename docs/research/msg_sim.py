@@ -16,18 +16,22 @@ techniques of the note:
     the reader secrets of the epochs it missed in one key bundle from a
     keeper, checked against chained reader tags, instead of following every
     window;
+  * the public chain of reader secrets: each seal carries the reader secret
+    of its epoch encrypted under that of the previous epoch, so that a
+    reader needs no member online, except after a break of the chain (a
+    ban), when any online member serves it a bundle;
   * the sealed message log and admin checkpoints (their cost only).
 
 The script prints:
   1. the bytes a reader downloads per message read, by signature scheme and
      burst size, and the CPU to check it;
   2. what a sender's key costs a reader: once, then at every session;
-  3. what staying able to read costs per day: every window's packet, or key
-     bundles;
+  3. what staying able to read costs per day: every window's packet, key
+     bundles, or the public chain with its breaks;
   4. a reader's day, and the delivery service's egress;
   5. the re-key of a burst with every member in the tree, and with keepers
      only (through rekey_sim.py);
-  6. the keepers' load;
+  6. the load of the members that serve bundles;
   7. history: coming back after a day or a week, aggregated signatures.
 
 Sizes in bytes. CPU in microseconds on one core: MSG_US and CPU_US of a run
@@ -89,6 +93,8 @@ BUNDLE_FRAMING = 16 + 64    # AEAD tag, request reference, range
 EPOCH_PUBLIC = 3 * HASH     # seal hash, confirmation tag, reader tag
 EPOCH_SECRET = 32           # the epoch's reader secret
 CHECKPOINT = SIG + 200      # an admin checkpoint: epoch, interim hash, registry roots
+EPOCH_LINK = 32 + 16        # the epoch's reader secret under the previous one, AEAD tag
+LINK_EPOCH = 2 * HASH + EPOCH_LINK      # seal hash, confirmation tag, link
 KEEPER_HEIGHT = 14
 KEEPER_PROOF = TREE_LEAF + KEEPER_HEIGHT * TREE_LEVEL
 SIGNED_BUNDLE = SIG + KEEPER_PROOF      # option: the keeper signs, with its leaf proof
@@ -163,6 +169,14 @@ def bundles_per_day(sessions, checkpoints=True):
     return sessions * per_session + EPOCHS_PER_DAY * (EPOCH_PUBLIC + EPOCH_SECRET)
 
 
+def links_per_day(sessions, breaks, checkpoints=True):
+    """The public chain: a link per epoch, except the epochs that break the
+    chain, whose reader secrets come in bundles, at most one per session."""
+    bundles = min(sessions, breaks)
+    return ((EPOCHS_PER_DAY - breaks) * LINK_EPOCH + breaks * (EPOCH_PUBLIC + EPOCH_SECRET)
+            + bundles * (XWING_CT + BUNDLE_FRAMING) + (sessions * CHECKPOINT if checkpoints else 0))
+
+
 # ---------------------------------------------------------------- reports
 
 
@@ -205,9 +219,14 @@ def report_following():
         print(f"   following every window, {rate:>4} changes/s            : {human(packets_per_day(rate))}")
     for sessions in (1, 10, 48):
         print(f"   key bundles and checkpoints, {sessions:>2} sessions a day  : {human(bundles_per_day(sessions))}")
+    for label, breaks in (("a break a day,", 1), ("a break an hour,", 24)):
+        bundles = min(SESSIONS, breaks)
+        print(f"   public chain, {label:<16} {SESSIONS} sessions : {human(links_per_day(SESSIONS, breaks))}"
+              f" ({bundles} bundle{'s' if bundles > 1 else ''} a day)")
     print(f"   one bundle: {human(XWING_CT + BUNDLE_FRAMING)} and {EPOCH_PUBLIC + EPOCH_SECRET} bytes per epoch"
           f" ({EPOCH_PUBLIC} public, {EPOCH_SECRET} secret); a checkpoint {human(CHECKPOINT)};"
-          f" a bundle signed by its keeper, {human(SIGNED_BUNDLE)} more")
+          f" a bundle signed by its keeper, {human(SIGNED_BUNDLE)} more;"
+          f" the public chain, {LINK_EPOCH} bytes per epoch")
     print()
 
 
@@ -268,6 +287,11 @@ def report_keepers():
                   f" {requests * per_request_us / 1e6:>5.1f} s of CPU, {human(served)} sent")
     print("   (a request: the reader's signature, its roster leaf, an encapsulation;"
           " the public part of a bundle comes from the delivery service)")
+    online = (1 << H) // 10
+    for breaks in (1, 24):
+        requests = (1 << H) * min(SESSIONS, breaks)
+        print(f"   public chain, {breaks:>2} break{'s' if breaks > 1 else ''} a day, any of the {online:,} members online"
+              f" (10 %) serves: {requests / online:,.0f} requests a day each")
     print()
 
 

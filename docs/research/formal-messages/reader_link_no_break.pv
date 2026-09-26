@@ -1,0 +1,25 @@
+(* Scenario READER_LINK_NO_BREAK (policy check): the public chain of
+   reader_link_ban.pv, where window 3 removes R without breaking the chain,
+   as a public group may do for a member that leaves of its own accord. *)
+
+free M3: bitstring [private].
+query attacker(M3).
+
+process
+  new es1: key; new r: key; new interim1: bitstring;
+  let rs1 = reader_secret(es1) in
+  out(c, (rs1, interim1));
+  let gc2 = (N2, node_pk(r)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r, gc2)) in
+  let rs2 = reader_secret(es2) in
+  new sh2: bitstring;
+  let cth2 = hash((interim1, sh2)) in
+  out(c, (gc2, sh2, reader_link(rs1, cth2, rs2)));
+  (* Window 3 removes R, and still carries a link. *)
+  let gc3 = (N3, node_pk(r)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), r, gc3)) in
+  let rs3 = reader_secret(es3) in
+  new sh3: bitstring;
+  let cth3 = hash((hash((cth2, L_interim)), sh3)) in
+  out(c, (gc3, sh3, reader_link(rs2, cth3, rs3)));
+  out(c, aenc(msg_key(rs3), M3))

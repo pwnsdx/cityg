@@ -11,7 +11,8 @@ FAILED=0
 
 # scenario: expected verdict of each query, in order ("true": the property
 # is proved; "false": ProVerif finds an attack, as expected for sanity
-# checks and for the fork of reader_removed).
+# checks, for the fork of reader_removed, for what reader_link_ban's R still
+# reads before its ban, and for the policy of reader_link_no_break).
 EXPECTED=(
   "reader_bundle: true true"
   "reader_bundle_no_tag: false false"
@@ -20,6 +21,12 @@ EXPECTED=(
   "reader_removed_signed_bundle: true true"
   "reader_removed_with_root: false"
   "reader_removed_ratchet: false"
+  "reader_link: true true"
+  "reader_link_ban: false true true"
+  "reader_link_no_break: false"
+  "bundle_any_member: true"
+  "reader_seal: true"
+  "reader_seal_unchecked: false"
   "burst_chain: true"
   "burst_chain_mac_only: false"
   "card_revalidated: true"

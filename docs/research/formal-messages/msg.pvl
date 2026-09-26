@@ -5,8 +5,10 @@
    of very large groups:
 
    * keepers and readers: readers are not in the ratchet tree; they get the
-     reader secret of each epoch in a key bundle from a keeper, sealed to a
-     one-time key they sign, and check it against a chained reader tag;
+     reader secret of each epoch from the public link of the seal, or, after
+     a break of the chain, in a key bundle from any member, sealed to a
+     one-time key they sign and checked against a chained reader tag; any
+     member, a reader included, can seal a window with an external init;
    * burst chains: one signature of the sender's card covers a chain of
      envelopes;
    * sender cards checked against the roster of the message's epoch.
@@ -24,10 +26,11 @@ type kpk.      (* X-Wing encapsulation key *)
 
 free c: channel.
 
-const N1, N2: bitstring.          (* epochs *)
+const N1, N2, N3, N4: bitstring.  (* epochs *)
 const ZERO: bitstring.
-const L_node, L_epoch, L_init, L_reader, L_reader_next, L_reader_ratchet, L_msg: bitstring.
-const L_request, L_bundle, L_card, L_chain, L_chain_mac: bitstring.
+const L_node, L_leaf, L_epoch, L_init, L_external, L_msg: bitstring.
+const L_reader, L_reader_next, L_reader_link, L_reader_ratchet: bitstring.
+const L_request, L_bundle, L_seal, L_interim, L_card, L_chain, L_chain_mac: bitstring.
 
 (* ---------- BLAKE3 ---------- *)
 
@@ -47,6 +50,10 @@ reduc forall sk: key, r: key, ad: bitstring, m: key;
 fun aenc(key, bitstring): bitstring.
 reduc forall k: key, m: bitstring; adec(k, aenc(k, m)) = m.
 
+(* ChaCha20-Poly1305 of a secret, with associated data. *)
+fun senc(key, bitstring, key): bitstring.          (* key, associated data, secret *)
+reduc forall k: key, ad: bitstring, m: key; sdec(k, ad, senc(k, ad, m)) = m.
+
 (* ---------- Signatures ---------- *)
 
 fun spk(skey): spkey.
@@ -56,9 +63,16 @@ reduc forall sk: skey, m: bitstring; checksign(spk(sk), m, sign(sk, m)) = true.
 (* ---------- Key schedule ---------- *)
 
 letfun node_pk(s: key) = kempk(kdf(s, L_node)).
+letfun leaf_sk(ls: key) = kdf(ls, L_leaf).
+letfun leaf_pk(ls: key) = kempk(leaf_sk(ls)).
 letfun joiner_secret(init_prev: key, root: key, gc: bitstring) = kdf2(init_prev, root, gc).
 letfun epoch_secret(js: key) = kdf(js, L_epoch).
 letfun init_secret(es: key) = kdf(es, L_init).
+
+(* The external key pair of an epoch: only keepers hold the epoch secret, so
+   only keepers can open an external init. *)
+letfun external_sk(es: key) = kdf(es, L_external).
+letfun external_pk(es: key) = kempk(external_sk(es)).
 
 (* The reader secret of an epoch: what readers get, instead of the epoch
    secret. The message plane of the epoch derives from it. *)
@@ -70,6 +84,13 @@ letfun msg_key(rs: key) = kdf(rs, L_msg).
    reader secret of epoch n. Keepers check it when they follow the window. *)
 letfun reader_tag(rs_prev: key, cth: bitstring, rs: key) =
   mac(kdf(rs_prev, L_reader_next), (cth, hk(rs))).
+
+(* Link of the public chain of reader secrets: the reader secret of epoch n
+   encrypted under a key derived from that of epoch n - 1, with the confirmed
+   transcript hash of epoch n as associated data. A seal carries it unless
+   the window breaks the chain; it then carries the chained tag. *)
+letfun reader_link(rs_prev: key, cth: bitstring, rs: key) =
+  senc(kdf(rs_prev, L_reader_link), cth, rs).
 
 (* A burst chain: the chain value after envelope e. *)
 letfun chain(prev: bitstring, e: bitstring) = hash((L_chain, prev, e)).

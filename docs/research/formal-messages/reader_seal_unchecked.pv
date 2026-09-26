@@ -1,0 +1,29 @@
+(* Scenario READER_SEAL_UNCHECKED (sanity check): the window of
+   reader_seal.pv, with a keeper that does not check who sealed it.
+
+   The external key and the keepers' leaf keys are public: the delivery
+   service seals a window of its own. *)
+
+free skS: skey [private].
+
+free MK: bitstring [private].
+query attacker(MK).
+
+process
+  new es1: key; new lsK: key;
+  let rs1 = reader_secret(es1) in
+  out(c, (rs1, spk(skS), external_pk(es1), leaf_pk(lsK)));
+  (
+    new root2: key; new q: key; new ext_init: key; new re: key;
+    let ct = seal(external_pk(es1), re, N2, ext_init) in
+    let gc2 = (N2, node_pk(root2), ct) in
+    out(c, (seal(leaf_pk(lsK), q, N2, root2), gc2, sign(skS, (L_seal, gc2))))
+  ) | (
+    in(c, (w: bitstring, gc2: bitstring, sg: bitstring));
+    let (=N2, pkr: kpk, ct: bitstring) = gc2 in
+    let root2 = open(leaf_sk(lsK), N2, w) in
+    if node_pk(root2) = pkr then
+    let ext_init = open(external_sk(es1), N2, ct) in
+    let es2 = epoch_secret(joiner_secret(ext_init, root2, gc2)) in
+    out(c, aenc(msg_key(reader_secret(es2)), MK))
+  )

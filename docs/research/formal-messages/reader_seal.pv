@@ -1,0 +1,38 @@
+(* Scenario READER_SEAL: a reader seals a window, with no keeper online.
+
+   S is a reader of epoch 1: it holds rs1, but neither the epoch secret nor
+   any secret of the keepers' tree. It seals window 2, which bans reader B:
+   it draws a fresh root and wraps it to the keepers' tree (here, keeper K's
+   leaf), and in place of the init secret it takes an external init, a
+   fresh secret sealed to the external key of epoch 1, which only keepers
+   hold. It signs the seal with its device key. K accepts a window sealed by
+   a reader only if the sealer's device key, from the roster of epoch 1,
+   signed it. The attacker is B with the delivery service: it knows rs1 and
+   every public value. K sends a message in epoch 2. *)
+
+free skS: skey [private].
+
+free MK: bitstring [private].
+query attacker(MK).
+
+process
+  new es1: key; new lsK: key;
+  let rs1 = reader_secret(es1) in
+  out(c, (rs1, spk(skS), external_pk(es1), leaf_pk(lsK)));
+  (
+    (* Reader S seals window 2. *)
+    new root2: key; new q: key; new ext_init: key; new re: key;
+    let ct = seal(external_pk(es1), re, N2, ext_init) in
+    let gc2 = (N2, node_pk(root2), ct) in
+    out(c, (seal(leaf_pk(lsK), q, N2, root2), gc2, sign(skS, (L_seal, gc2))))
+  ) | (
+    (* Keeper K. *)
+    in(c, (w: bitstring, gc2: bitstring, sg: bitstring));
+    if checksign(spk(skS), (L_seal, gc2), sg) = true then
+    let (=N2, pkr: kpk, ct: bitstring) = gc2 in
+    let root2 = open(leaf_sk(lsK), N2, w) in
+    if node_pk(root2) = pkr then
+    let ext_init = open(external_sk(es1), N2, ct) in
+    let es2 = epoch_secret(joiner_secret(ext_init, root2, gc2)) in
+    out(c, aenc(msg_key(reader_secret(es2)), MK))
+  )
