@@ -7,7 +7,7 @@
 | Implementation | [`crates/cityg-core`](../crates/cityg-core): protocol core and an in-memory delivery service, no I/O |
 | Design | [design.md](design.md) (decisions E-1 to E-14) |
 | Formal model | [`formal/`](formal/README.md) (ProVerif) |
-| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md), the guarantees of MLS at this scale, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md), who may re-key the tree, [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md), and îlots under a flat top, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (all in French) |
+| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md), the guarantees of MLS at this scale, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md), who may re-key the tree, [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md), îlots under a flat top, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md), and a synthesis beyond v0.4, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (all in French) |
 | Conformance | None yet: no test vectors (section 19) |
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
@@ -1442,7 +1442,10 @@ This version does not yet specify or implement:
   îlots of 2^8 leaves under a flat top that sends each window's secret to
   every îlot root, relays inside îlots, and joiners that re-key their own
   paths; following the group then costs about 19 times less at a million
-  members;
+  members. The synthesis
+  [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md)
+  keeps this profile's tree, read through relays, and ranks what is still
+  open;
 * fraud proofs that also bind the district commit to the seal that listed
   it, so that a proof holds on its own across forks (section 15);
 * shrinking the tree; pruning the admission map;

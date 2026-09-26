@@ -36,7 +36,7 @@ docs/formal/run.sh /path/to/proverif       # symbolic model
 | `crates/cityg-core/tests/scenarios.rs` | Whole groups on the in-memory delivery service. |
 | `crates/cityg-core/tests/scale.rs` | A large window on a full group, against the cost model (release, `--ignored`). |
 | `docs/formal/` | Symbolic model of the security choices. |
-| `docs/research/` | Research notes (in French), cost models, benchmarks, and a symbolic model of the proposed message plane. |
+| `docs/research/` | Research notes (in French), cost models, benchmarks, and symbolic models of the proposals. |
 
 ## Workflow
 
@@ -109,6 +109,9 @@ We are especially interested in:
 - a specification and an implementation of the îlots of
   [`docs/research/ilots-2026-09-26.md`](docs/research/ilots-2026-09-26.md),
   and an analysis of a multi-recipient KEM for their top;
+- a computational proof of the key schedule with tree keys that stay the
+  same across windows, the first open problem of
+  [`docs/research/au-dela-0.4-2026-09-26.md`](docs/research/au-dela-0.4-2026-09-26.md);
 - a zero-knowledge proof that an X-Wing wrap does not open in its context,
   for the disputes proposed in
   [`docs/research/rekey-serveur-2026-09-26.md`](docs/research/rekey-serveur-2026-09-26.md):

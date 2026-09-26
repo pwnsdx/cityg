@@ -1,0 +1,35 @@
+(* Scenario ILOT_CITY_MAINTAINED: the same two removals, with a city that
+   every window re-keys along the paths of the îlots it changes.
+
+   Window 2 removes M1 and delivers its window secret flat, as in
+   ilot_city_stale.pv, but also re-keys the city along the path of îlot k:
+   P gets a fresh secret, wrapped to the new root of îlot k and to the root
+   of îlot j. Window 3 removes M2 in tree mode, and wraps its window secret
+   to P's current key. M1 and M2 work with the server.
+
+   Expected: proved. Neither M1 nor M2 knows P's new secret, nor the new
+   roots of îlots k and l. *)
+
+free M3: bitstring [private].
+query attacker(M3).
+
+process
+  new es1: key; new sk: key; new sj: key; new sl: key; new p1: key; new q1: key;
+  new sk2: key; new p2: key; new r2: key; new sl3: key; new q3: key; new r3: key;
+  new a1: key; new a2: key; new a3: key; new a4: key; new a5: key; new a6: key;
+  new b1: key; new b2: key;
+  out(c, (es1, sk, p1));
+  (* Window 2: îlot k re-keyed, P re-keyed along its path, the window
+     secret flat to every îlot root. *)
+  out(c, (seal(node_pk(sk2), b1, N2, p2), seal(node_pk(sj), b2, N2, p2)));
+  out(c, (seal(node_pk(sk2), a1, N2, r2), seal(node_pk(sj), a2, N2, r2), seal(node_pk(sl), a3, N2, r2)));
+  let g2 = (N2, node_pk(sk2), node_pk(p2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), commit_secret(r2), g2)) in
+  out(c, es2);
+  (* Window 3, tree mode. *)
+  out(c, (seal(node_pk(sl3), a4, N3, q3), seal(node_pk(q3), a5, N3, r3), seal(node_pk(p2), a6, N3, r3)));
+  let g3 = (N3, node_pk(sl3), node_pk(q3)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), commit_secret(r3), g3)) in
+  (* The group contexts are public. *)
+  out(c, (g2, g3));
+  out(c, aenc(msg_key(es3), M3))

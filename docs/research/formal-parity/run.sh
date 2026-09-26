@@ -18,8 +18,9 @@ FAILED=0
 # window removing one of its members does not re-key, for a relay that the
 # member does not check against the sealed tag, for stable îlot keys
 # without the init chain, for an init secret sealed to an îlot instead of
-# welcomes, and for a lone entrant that applies a removal without renewing
-# the top; in wrap_dispute_report,
+# welcomes, for a lone entrant that applies a removal without renewing
+# the top, and for a city above the îlots that a window does not re-key,
+# with two removed members; in wrap_dispute_report,
 # "false" means that a hostile committer can be convicted, as intended;
 # "unproved": an equivalence ProVerif cannot prove, as expected when the
 # sender is sent in clear).
@@ -53,6 +54,9 @@ EXPECTED=(
   "ilot_entrant_join: true true"
   "ilot_entrant_removal_without_top: false"
   "ilot_entrant_removal: true"
+  "ilot_city_stale: false"
+  "ilot_city_maintained: true"
+  "ilot_city_sticky: true"
 )
 
 for line in "${EXPECTED[@]}"; do

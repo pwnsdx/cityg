@@ -204,7 +204,8 @@ and half joins:
 
 The architecture of 0.4 comes from a first research note,
 [Groupes de millions de membres](docs/research/grands-groupes-2026-09-25.md).
-Four more, in French, look at what comes next. None of them is part of the
+Five more, in French, look at what comes next; the last one gathers them
+into a candidate profile for the next version. None of them is part of the
 profile.
 
 | Note | Question | What it finds |
@@ -212,7 +213,8 @@ profile.
 | [A message plane](docs/research/plan-de-messages-2026-09-26.md) | How do a million members send and read messages? | Sender cards with compact signatures, burst chains, committing messages, a sealed message log. |
 | [The guarantees of MLS](docs/research/parite-mls-2026-09-26.md) | What must change for every guarantee of MLS at a million members? | An MLS-style message plane with the sender hidden from the DS, unique keys, a mode where the service authorizes joins, a membership log, urgent and ordinary removals: following costs 2.0 MB a day with 5-minute windows. |
 | [Re-keying by the server](docs/research/rekey-serveur-2026-09-26.md) | Could the server re-key the tree, with zero-knowledge proofs? | Not without knowing the keys: one that draws them reads every later epoch with one member it removed. Proposes disputes proved in zero knowledge. |
-| [Îlots under a flat top](docs/research/ilots-2026-09-26.md) | What is the best re-key technique at this scale? | Small subtrees with no tree above them, relays and joiners that do the work: following costs 94 KB a day with relays and 415 KB without, instead of 1.8 MB for the profile of the previous note, whatever the group's size. |
+| [Îlots under a flat top](docs/research/ilots-2026-09-26.md) | What is the best re-key technique at this scale? | Small subtrees, relays and joiners that do the work: following costs 94 KB a day with relays and 415 KB without, instead of 1.8 MB for the profile of the previous note, whatever the group's size. A city maintained above the îlots keeps a window that changes one îlot at 30 KB. |
+| [Beyond 0.4](docs/research/au-dela-0.4-2026-09-26.md) | What would the next version be, and what is still open? | The 0.4 tree read through relays and re-keyed by small tasks that joiners take on, with the parity profile's authorized mode and message plane: a member who reads 100 messages a day downloads 213 KB instead of 2.1 MB. It can follow 0.4 in three steps. Open, in order: a computational proof, dispute proofs for X-Wing, forks, standards. |
 
 ## Repository
 
@@ -234,7 +236,7 @@ cargo run --release --manifest-path docs/research/bench/Cargo.toml   # primitive
 python3 docs/research/rekey_sim.py                                # cost model
 python3 docs/research/msg_sim.py                                  # cost model of the proposed message plane
 python3 docs/research/parity_sim.py                               # cost model of the profile at parity with MLS
-python3 docs/research/ilots_sim.py                                # cost model of îlots under a flat top
+python3 docs/research/ilots_sim.py                                # cost model of îlots and of the candidate profile
 ```
 
 The scenario tests of `crates/cityg-core/tests/scenarios.rs` run whole

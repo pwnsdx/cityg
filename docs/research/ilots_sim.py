@@ -24,7 +24,16 @@ seals under the îlot's secret. Joiners take the leaves that removals empty
   6. repairing a cut îlot through its members' leaves, and a joiner's entry;
   7. larger groups, up to 2^24 members;
   8. nobody online: a joiner who enters alone and seals the window, with
-     no removal waiting or with one.
+     no removal waiting or with one;
+  9. a city maintained above the îlots: every window re-keys a binary city
+     along the paths of the îlots it changes; relays take the window secret
+     from their city path, the flat top becomes a fallback for îlots with no
+     relay in dense windows, and sparse windows need no flat top at all;
+ 10. a member's day at the candidate profile: following, messages and
+     senders' cards, against the profile of the parity note; with a leaf
+     whose hash keeps the leaf key apart, so that readers fetch the card
+     part only; and the authorizer's checkpoints, checked by their
+     signature alone.
 
 Coming back after an absence costs what following costs over that time
 (replay), with every missed epoch read. Sizes in bytes, CPU in microseconds
@@ -278,6 +287,135 @@ def report_lone_entrant():
     print()
 
 
+def city_window(city_h, changed_ilots, seed=11):
+    """Re-key of a binary city of height `city_h` over the îlot roots along
+    the paths of the changed îlots (whose new roots the top does not know):
+    the top's wraps and new keys, the mean wraps a member of a random îlot
+    downloads to follow its city path, and the keys the top fetches (the
+    children of re-keyed nodes that it does not re-key itself)."""
+    rng = random.Random(seed)
+    levels = mark_levels(city_h, list(changed_ilots))
+    cost, _ = rekey_cost(city_h, city_h, levels, set())
+    wraps = sum(v[1] for v in cost.values())
+    nodes = sum(v[2] for v in cost.values())
+    fetched = sum(1 for k in range(1, city_h + 1) for node in levels[k]
+                  for child in (2 * node, 2 * node + 1) if k == 1 or child not in levels[k - 1])
+
+    def chain_source(k, node):
+        if k == 1:
+            return None
+        fresh = [x for x in (2 * node, 2 * node + 1) if x in levels[k - 1]]
+        return fresh[0] if fresh else None
+
+    total = 0
+    for _ in range(SAMPLE):
+        i = rng.randrange(1 << city_h)
+        for k in range(1, city_h + 1):
+            node = i >> k
+            if node in levels[k] and chain_source(k, node) != (i >> (k - 1)):
+                total += 1
+    return wraps, nodes, total / SAMPLE, fetched
+
+
+def changed_ilots(c, joins, removals, seed=11, h=H):
+    rng = random.Random(seed)
+    changed, _ = changed_leaves(1 << h, c, joins, removals, "paired", rng)
+    return {leaf >> c for leaf in changed}
+
+
+def city_top(c, city_h, rate, window, flat_share):
+    """The top of one window with a maintained city: îlots changed, city
+    wraps, city path, the upkeep, the upkeep with flat items to a share of
+    the îlots when the window is dense, and the keys that costs to fetch."""
+    joins, removals = changes(rate, window)
+    changed = changed_ilots(c, joins, removals)
+    wraps, nodes, path, fetched = city_window(city_h, changed)
+    upkeep = wraps * WRAP + nodes * KEM_PK
+    flat = round(flat_share * (1 << city_h)) if path > 1.5 else 0
+    return len(changed), wraps, path, upkeep, upkeep + flat * WRAP, (fetched + flat) * KEM_PK
+
+
+def report_city():
+    c = 8
+    city_h = H - c
+    ilots = 1 << city_h
+    print(f"9. A city maintained above the îlots (îlots of 2^{c}, a binary city of height {city_h})")
+    print(f"   {'changes/s':>9} {'window':>7} {'îlots changed':>13} {'city wraps':>10} {'city path':>9}"
+          f" {'upkeep':>9} {'+ flat, 10%':>11} {'keys read':>9} {'+ flat, all':>11} {'flat only':>9}")
+    for rate in (0.1, 1.7, 12.0):
+        for window in (60, 300):
+            changed, wraps, path, upkeep, fallback, read = city_top(c, city_h, rate, window, 0.1)
+            flat_all = city_top(c, city_h, rate, window, 1.0)[4]
+            print(f"   {rate:>9} {window:>6}s {changed:>13} {wraps:>10} {path:>8.2f}w"
+                  f" {human(upkeep):>9} {human(fallback):>11} {human(read):>9} {human(flat_all):>11}"
+                  f" {human(ilots * WRAP):>9}")
+    print("   (city path: wraps a relay, or a member with neither relay nor flat item, downloads per window;")
+    print("   in dense windows, a path above 1.5 wraps, flat items go to the îlots with no relay, 10% of them")
+    print("   here, or to all îlots, and then a relay reads one item; keys read: what the top fetches with")
+    print(f"   flat items for 10%. A flat top only fetches {human(ilots * ILOT_PK)} of îlot keys in every window,")
+    print(f"   sparse or dense, and sends {human(ilots * WRAP)} with X-Wing or"
+          f" {human(MKEM_SHARED + ilots * MKEM_PART)} with the multi-recipient KEM, as in report 3)")
+    rate = 1.0
+    while city_top(c, city_h, rate + 0.5, 300, 0.1)[4] < ilots * WRAP:
+        rate += 0.5
+    print(f"   with windows of 5 minutes, the city with flat items for 10% costs less than a flat top up to"
+          f" about {rate:g} changes/s; with windows of 60 s, at every rate above")
+    wraps, nodes, _, _ = city_window(city_h, range(ilots))
+    print(f"   switching from a flat top only to a maintained city rebuilds it whole: {wraps} wraps and {nodes} keys,"
+          f" {human(wraps * WRAP + nodes * KEM_PK)}")
+    path = city_top(c, city_h, 1.7, 300, 0.1)[2]
+    duties = DAY / 300 * ilots / (1 << H)
+    print(f"   at 1.7 changes/s and 5 minutes, a relay reads {human(path * WRAP)} a window; relaying spread"
+          f" over the members is {duties:.1f} duty per member a day")
+    for k in (1, 2):
+        wraps, nodes, path, _ = city_window(city_h, random.Random(3).sample(range(ilots), k))
+        print(f"   a sparse window changing {k} îlot{'s' if k > 1 else ''}: {wraps} city wraps"
+              f" ({human(wraps * WRAP + nodes * KEM_PK)}), {path:.2f} wraps per member, no flat top")
+    wraps, nodes, path, _ = city_window(city_h, random.Random(5).sample(range(ilots), 2))
+    own = 2 * c * (WRAP + KEM_PK)
+    send = own + wraps * WRAP + nodes * KEM_PK + HEADER + SIG + EXT_INIT
+    fetch = 2 * c * KEM_PK + 2 * city_h * KEM_PK + CHECKPOINT + KEM_PK
+    print(f"   nobody online, a joiner applies a waiting removal: sends {human(send)} and fetches {human(fetch)},"
+          f" instead of 4.8 MB and 5.0 MB with a flat top only")
+    print()
+
+
+def report_day():
+    import msg_sim
+    import parity_sim
+    rate, window = 1.7, 300
+    joins, removals = changes(rate, window)
+    r = ilot_window(8, joins, removals)
+    windows = DAY / window
+    relays = ilot_member_window(r, "relay") * windows
+    flat = ilot_member_window(r, "mkem") * windows
+    print(f"10. A member's day at the candidate profile (îlots of 2^8, windows of 5 minutes, {rate} changes/s,")
+    print("    FN-DSA-512 cards, bursts of 2, encrypted sender data)")
+    # A leaf whose hash keeps the leaf key apart, H(leaf key) in place of
+    # the key: a reader fetches the card part of a sender's leaf only.
+    card_part = parity_sim.LEAF - KEM_PK + 32
+    print(f"   {'messages read':>13} {'messages':>9} {'senders':>9} {'with relays':>12} {'without':>9}"
+          f" {'parity profile':>15} {'split leaf, relays':>18}")
+    for read in (100, 1_000, 10_000):
+        parity_following, messages, senders = parity_sim.member_day(read, rate, window)
+        senders_day = min(read // 5 + 1, 20_000)  # as in parity_sim.member_day
+        split = senders - senders_day * (parity_sim.LEAF - card_part)
+        print(f"   {read:>13,} {human(messages):>9} {human(senders):>9} {human(relays + messages + senders):>12}"
+              f" {human(flat + messages + senders):>9} {human(parity_following + messages + senders):>15}"
+              f" {human(relays + messages + split):>18}")
+    print(f"   (split leaf: a reader fetches {card_part:,} bytes of a sender's leaf instead of {parity_sim.LEAF:,})")
+    card = msg_sim.SCHEMES["FN-DSA-512"][0]
+    checkpoint = CHECKPOINT - SIG + card
+    print(f"   checking the authorizer's checkpoint of every window adds {human(windows * checkpoint)} a day;"
+          f" of every hour, {human(24 * checkpoint)}")
+    # The member already has what the checkpoint signs: the header's hashes
+    # and the tag it computes. It fetches the signature alone.
+    uov_sig, uov_pk = msg_sim.SCHEMES["UOV-Is-pkc"][:2]
+    print(f"   the signature alone, over what the member already has: FN-DSA-512 {human(windows * card)} a day,"
+          f" UOV-Is-pkc {human(windows * uov_sig)} a day and its {human(uov_pk)} key once")
+    print()
+
+
 def main():
     print("Cost model of îlots under a flat top.")
     print()
@@ -289,6 +427,8 @@ def main():
     report_repair_and_entry()
     report_larger()
     report_lone_entrant()
+    report_city()
+    report_day()
 
 
 if __name__ == "__main__":

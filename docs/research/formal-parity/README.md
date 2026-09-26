@@ -11,7 +11,9 @@ which asks whether the server could re-key the tree instead of members, and
 the disputes it proposes against a committer that sends bad wraps; and the
 îlots of [`ilots-2026-09-26.md`](../ilots-2026-09-26.md) (in French): small
 subtrees with no tree above them, whose roots receive the epoch secret of
-every window, and relays that pass it on inside an îlot. None of them is
+every window, relays that pass it on inside an îlot, and, in the note's
+revision, a binary city above the îlots that every window re-keys along
+the paths of the îlots it changes. None of them is
 part of profile `city-g/v0.4`. The model of the protocol itself is
 in [`docs/formal/`](../../formal/README.md); that of the message-plane note
 in [`../formal-messages/`](../formal-messages/README.md).
@@ -70,6 +72,9 @@ creates.
 | [`ilot_entrant_removal_without_top.pv`](ilot_entrant_removal_without_top.pv) | A removal waits: M knows the secrets of epoch 1. J seals the same way. | Attack: M opens the external init with the external key it holds. |
 | [`ilot_entrant_removal.pv`](ilot_entrant_removal.pv) | The same removal; J re-keys M's îlot and renews the top. | Proved: M opens the external init, not the window secret. |
 | [`ilot_init_by_ilot.pv`](ilot_init_by_ilot.pv) | A cheaper welcome: the init secret of epoch 1 is sealed to the root of the îlot that receives a joiner, instead of a welcome to each joiner's one-time init key; a member of that îlot is compromised in epoch 3. | Attack: the îlot's root opens the init secret and the epoch secret of window 2, hence epoch 2. Welcomes stay sealed to one-time init keys. |
+| [`ilot_city_stale.pv`](ilot_city_stale.pv) | A binary city above the îlots: node P above îlots k and j, node Q above îlot l. Window 2 removes M1, of îlot k, and seals its epoch secret flat to every îlot root without re-keying the city; window 3 removes M2, of îlot l, through the city, and wraps its epoch secret to P. M1 and M2 work with the server. | Attack: M1 opens the epoch secret of window 3 with P's old secret, and M2, a member of epoch 2, brings the init secret. Every window re-keys the city along the paths of the îlots it changes. |
+| [`ilot_city_maintained.pv`](ilot_city_maintained.pv) | The same two removals; window 2 also re-keys P, along the path of îlot k. | Proved: what a member sends in epoch 3 stays secret. |
+| [`ilot_city_sticky.pv`](ilot_city_sticky.pv) | The city is not re-keyed, but M1 works with the server alone. | Proved: without the init secret of epoch 2, which M1 missed, the epoch secret of window 3 gives it nothing. |
 
 ## Abstractions and limits
 

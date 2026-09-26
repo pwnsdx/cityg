@@ -104,6 +104,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     window, which the îlot size trades against following).
 - Its cost model, [`docs/research/ilots_sim.py`](docs/research/ilots_sim.py); the parity symbolic model
   gains 10 scenarios (29 in all).
+- A synthesis beyond v0.4, in
+  [`docs/research/au-dela-0.4-2026-09-26.md`](docs/research/au-dela-0.4-2026-09-26.md)
+  (in French), not part of the profile:
+  - a candidate profile for the next version: the v0.4 tree read through
+    relays at îlots of 2^8 and re-keyed by small tasks given first to
+    joiners, with the authorized mode and the MLS-style message plane of
+    the parity note; it can follow v0.4 in three steps, relays first;
+  - what each research note kept and rejected, the guarantees of MLS with
+    the scenarios behind each, costs, and the open problems ranked: a
+    computational proof, dispute proofs for X-Wing, forks, standards,
+    sender cards, metadata;
+  - a leaf hash that keeps the leaf key apart, so that readers fetch only
+    the card part of a sender's leaf (39 % less for senders), and the
+    authorizer's checkpoints checked by their signature alone: 192 KB a day
+    with FN-DSA-512 instead of 278 KB, or 28 KB with a UOV key kept for
+    following.
+- The îlots note gains a city maintained above the îlots: every window
+  re-keys it along the paths of the îlots it changes, relays read it, and
+  the flat top becomes a fallback. A window that changes one îlot costs
+  30 KB instead of 4.8 MB, and a joiner alone that applies a removal 95 KB
+  instead of 4.8 MB. A city that a window does not re-key lets two removed
+  members read the epoch, while one alone stays out through the init
+  chain.
+- The îlots cost model gains reports 9 (the maintained city) and 10 (a
+  member's day at the candidate profile); the parity symbolic model gains
+  3 scenarios (32 in all).
 
 ## [0.4.0] — initial version
 
