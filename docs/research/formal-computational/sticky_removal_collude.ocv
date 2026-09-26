@@ -1,0 +1,48 @@
+(* Control for sticky_removal.ocv: a second removed member, a member of
+   epoch 2, gives the server the init secret of epoch 2, as in
+   formal-parity/ilot_city_stale.pv. Expected: not proved. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+type tag [fixed].
+
+proba Psalt.
+proba Pikm.
+expand dual_PRF(key, key, Extract, Psalt, Pikm).
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+const empty: hash.
+letfun DeriveSecret(s: key, l: label) = ExpandLabel(s, l, empty).
+
+proba Pmac.
+expand PRF(key, hash, tag, MAC, Pmac).
+
+const l_commit, l_joiner, l_epoch, l_init, l_msg, l_confirm: label.
+
+query secret msg3.
+
+process
+  Ostart() :=
+    init1 <-R key;
+    (* The root secret of window 2, drawn by an honest member of epoch 2. *)
+    root2 <-R key;
+    (* M gives the server the init secret of epoch 1. *)
+    return(init1);
+    O2(gc2: hash, th2: hash) :=
+      let commit2 = DeriveSecret(root2, l_commit) in
+      let joiner2 = ExpandLabel(Extract(init1, commit2), l_joiner, gc2) in
+      let epoch2 = DeriveSecret(joiner2, l_epoch) in
+      let init2 = DeriveSecret(epoch2, l_init) in
+      let confirm2 = DeriveSecret(epoch2, l_confirm) in
+      return(MAC(confirm2, th2), init2);
+      (* The commit secret of window 3 is known to M: the adversary chooses it. *)
+      O3(commit3: key, gc3: hash, th3: hash) :=
+        let joiner3 = ExpandLabel(Extract(init2, commit3), l_joiner, gc3) in
+        let epoch3 = DeriveSecret(joiner3, l_epoch) in
+        let msg3: key = DeriveSecret(epoch3, l_msg) in
+        let confirm3 = DeriveSecret(epoch3, l_confirm) in
+        return(MAC(confirm3, th3))

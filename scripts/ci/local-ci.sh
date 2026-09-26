@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Local mirror of the CI checks: formatting, strict clippy, tests, the
 # delivery-service guardrail and, when ProVerif is installed, the symbolic
-# model and those of the research notes. Set CITYG_FAST=1 to stop after the
-# tests.
+# model and those of the research notes, and, when CryptoVerif is
+# installed, the computational research model. Set CITYG_FAST=1 to stop
+# after the tests.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -60,6 +61,13 @@ if command -v proverif >/dev/null 2>&1; then
   docs/research/formal-parity/run.sh
 else
   echo "Skipping the symbolic model (ProVerif 2.05 not in PATH)"
+fi
+
+if command -v cryptoverif >/dev/null 2>&1; then
+  log_step "docs/research/formal-computational/run.sh"
+  docs/research/formal-computational/run.sh
+else
+  echo "Skipping the computational model (CryptoVerif 2.13 not in PATH)"
 fi
 
 printf '\nAll local CI checks passed.\n'

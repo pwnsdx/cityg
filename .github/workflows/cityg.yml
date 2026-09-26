@@ -38,7 +38,7 @@ jobs:
         run: cargo test -p cityg-core --release --locked --test scale -- --ignored --nocapture
 
   formal-model:
-    name: Symbolic model (ProVerif)
+    name: Formal models (ProVerif, CryptoVerif)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -59,3 +59,11 @@ jobs:
         run: docs/research/formal-messages/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
       - name: Check the verdicts of the parity research model
         run: docs/research/formal-parity/run.sh "$RUNNER_TEMP/proverif2.05/proverif"
+      - name: Build CryptoVerif 2.13
+        run: |
+          curl -fsSL https://bblanche.gitlabpages.inria.fr/CryptoVerif/cryptoverif2.13.tar.gz -o "$RUNNER_TEMP/cryptoverif.tar.gz"
+          echo "e6edb422a065bd7d59a452110c1b200104b74d87418eb3e5113a3ff18ec538f5  $RUNNER_TEMP/cryptoverif.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/cryptoverif.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/cryptoverif2.13" && ./build
+      - name: Check the verdicts of the computational research model
+        run: docs/research/formal-computational/run.sh "$RUNNER_TEMP/cryptoverif2.13/cryptoverif"

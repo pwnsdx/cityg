@@ -72,9 +72,9 @@ else ([specification, section 20](docs/specs.md#20-mls)).
 
 | | MLS (RFC 9420) | City‑G 0.4 |
 | --- | --- | --- |
-| Maturity | IETF standard (2023), independent implementations, years of analysis | Research profile, one implementation (this repository), symbolic model only, no independent review |
+| Maturity | IETF standard (2023), independent implementations, years of analysis | Research profile, one implementation (this repository), symbolic model and first computational proofs of its key schedule, no independent review |
 | Target size | "Two to thousands" (RFC 9420); tens of thousands (RFC 9750) | Up to `2^24` leaves; modelled for `2^20` |
-| Cryptography | Classical cipher suites; post-quantum suites in draft | X-Wing (ML-KEM-768 with X25519), ML-DSA-65, BLAKE3, ChaCha20-Poly1305 |
+| Cryptography | Classical cipher suites; post-quantum suites in draft, whose hybrid KEM is X-Wing's | X-Wing (ML-KEM-768 with X25519), ML-DSA-65, BLAKE3, ChaCha20-Poly1305 |
 | An epoch | One commit by one member | One window of requests, of any size |
 | Concurrent changes | Concurrent commits conflict; one is kept | Districts committed in parallel by different members, then one seal |
 | Re-key | The committer's own path, encrypted to the resolution of its copath | Every changed path of the window, chained where possible |
@@ -204,9 +204,9 @@ and half joins:
 
 The architecture of 0.4 comes from a first research note,
 [Groupes de millions de membres](docs/research/grands-groupes-2026-09-25.md).
-Five more, in French, look at what comes next; the last one gathers them
-into a candidate profile for the next version. None of them is part of the
-profile.
+Six more, in French, look at what comes next; the fifth gathers them into
+a candidate profile for the next version, and the sixth works on its open
+problems. None of them is part of the profile.
 
 | Note | Question | What it finds |
 | --- | --- | --- |
@@ -215,6 +215,7 @@ profile.
 | [Re-keying by the server](docs/research/rekey-serveur-2026-09-26.md) | Could the server re-key the tree, with zero-knowledge proofs? | Not without knowing the keys: one that draws them reads every later epoch with one member it removed. Proposes disputes proved in zero knowledge. |
 | [Îlots under a flat top](docs/research/ilots-2026-09-26.md) | What is the best re-key technique at this scale? | Small subtrees, relays and joiners that do the work: following costs 94 KB a day with relays and 415 KB without, instead of 1.8 MB for the profile of the previous note, whatever the group's size. A city maintained above the îlots keeps a window that changes one îlot at 30 KB. |
 | [Beyond 0.4](docs/research/au-dela-0.4-2026-09-26.md) | What would the next version be, and what is still open? | The 0.4 tree read through relays and re-keyed by small tasks that joiners take on, with the parity profile's authorized mode and message plane: a member who reads 100 messages a day downloads 213 KB instead of 2.1 MB. It can follow 0.4 in three steps. Open, in order: a computational proof, dispute proofs for X-Wing, forks, standards. |
+| [Open problems](docs/research/problemes-ouverts-2026-09-26.md) | Which of those open problems can be solved now? | First computational proofs with CryptoVerif, and an assumption the key schedule needs: `Extract` must be a dual PRF. A wrap dispute is about 1.1 million AND gates, about 0.4 MB to prove to the server. Three witnesses out of four against forks, a cache for sender cards. |
 
 ## Repository
 
@@ -237,6 +238,8 @@ python3 docs/research/rekey_sim.py                                # cost model
 python3 docs/research/msg_sim.py                                  # cost model of the proposed message plane
 python3 docs/research/parity_sim.py                               # cost model of the profile at parity with MLS
 python3 docs/research/ilots_sim.py                                # cost model of îlots and of the candidate profile
+python3 docs/research/open_problems_sim.py                        # cost model of the open problems
+docs/research/formal-computational/run.sh /path/to/cryptoverif   # computational model (CryptoVerif 2.13)
 ```
 
 The scenario tests of `crates/cityg-core/tests/scenarios.rs` run whole

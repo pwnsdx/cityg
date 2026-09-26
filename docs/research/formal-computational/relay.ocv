@@ -1,0 +1,72 @@
+(* A relay and a flat item carry the same window secret r to the members of
+   îlot j. Both use keys derived from the secret s of the îlot's root: the
+   relay's AEAD key and nonce, and the X-Wing key pair to which the flat
+   item is sealed, under distinct labels. The adversary is the server; it
+   sees the relay items and the flat items of several windows, and the
+   îlot's public key. Query: the window secret stays secret. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+const empty: hash.
+
+(* The 12-byte nonce, as a truncation of an ExpandLabel output. *)
+type nonce [large, fixed].
+fun to_nonce(key): nonce.
+equiv(to_nonce_random)
+  k <-R key; O() := return(to_nonce(k))
+<=(0)=>
+  n <-R nonce; O() := return(n).
+
+(* ChaCha20-Poly1305: IND-CPA and INT-CTXT, with nonces. *)
+type ciphertext.
+proba Penc.
+proba Pencctxt.
+expand AEAD_nonce(key, key, ciphertext, hash, nonce, aead_enc, aead_dec, injbot, Z, Penc, Pencctxt).
+(* A secret has a fixed length. *)
+const Zkey: key.
+equation forall x: key; Z(x) = Zkey.
+
+(* X-Wing, IND-CCA2, key pair from a seed. *)
+type pkey [bounded].
+type skey [bounded].
+type kemct [fixed].
+type encapoutput [fixed].
+proba Pcca.
+proba Pkeycoll.
+proba Pctxtcoll.
+expand IND_CCA2_KEM(key, pkey, skey, key, kemct, encapoutput, pkgen, skgen, encap, pair, decap, injbot_kem, Pcca, Pkeycoll, Pctxtcoll).
+
+fun ctx(nonce): hash [data].
+fun wrap_ctx(kemct): hash [data].
+
+const l_node, l_relay_key, l_relay_nonce, l_wrap_key, l_wrap_nonce: label.
+
+param Nw.
+
+query secret r.
+
+process
+  Ostart() :=
+    s <-R key;
+    let seed = ExpandLabel(s, l_node, empty) in
+    return(pkgen(seed));
+    foreach iw <= Nw do
+    Owindow(n: nonce) :=
+      (* One window secret per window: every relay of the îlot encrypts the
+         same secret under the same key and nonce. *)
+      find u <= Nw suchthat defined(n[u], r[u]) && n = n[u] then yield else
+      r <-R key;
+      (* The relay item. *)
+      let relay = aead_enc(r, ctx(n), ExpandLabel(s, l_relay_key, ctx(n)),
+                           to_nonce(ExpandLabel(s, l_relay_nonce, ctx(n)))) in
+      (* The flat item, sealed to the îlot's root. *)
+      let pair(ss: key, ct: kemct) = encap(pkgen(seed)) in
+      let flat = aead_enc(r, wrap_ctx(ct), ExpandLabel(ss, l_wrap_key, wrap_ctx(ct)),
+                          to_nonce(ExpandLabel(ss, l_wrap_nonce, wrap_ctx(ct)))) in
+      return(relay, ct, flat)

@@ -7,7 +7,7 @@
 | Implementation | [`crates/cityg-core`](../crates/cityg-core): protocol core and an in-memory delivery service, no I/O |
 | Design | [design.md](design.md) (decisions E-1 to E-14) |
 | Formal model | [`formal/`](formal/README.md) (ProVerif) |
-| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md), the guarantees of MLS at this scale, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md), who may re-key the tree, [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md), îlots under a flat top, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md), and a synthesis beyond v0.4, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (all in French) |
+| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md), the guarantees of MLS at this scale, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md), who may re-key the tree, [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md), îlots under a flat top, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md), a synthesis beyond v0.4, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md), and its open problems, [`research/problemes-ouverts-2026-09-26.md`](research/problemes-ouverts-2026-09-26.md) (all in French); computational model [`research/formal-computational/`](research/formal-computational/README.md) |
 | Conformance | None yet: no test vectors (section 19) |
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
@@ -292,7 +292,13 @@ the argument list (the labels are listed in section 17.1). `salt`, `secret`
 and `key` are 32 bytes, `ctx` is a byte string and `L` an unsigned integer.
 BLAKE3 in keyed mode is a PRF and its XOF output a PRF output of any length,
 so `Extract` and `ExpandLabel` follow the HKDF structure with BLAKE3 in
-place of HMAC. MAC tags MUST be compared in constant time.
+place of HMAC. The key schedule also needs `Extract` to be a dual PRF:
+pseudorandom when keyed by its input keying material under a known salt,
+as analyses of HKDF assume of HMAC. Post-compromise security and external
+inits rest on it, as does the exclusion of a removed member that missed a
+window (research model
+[`research/formal-computational/`](research/formal-computational/README.md)).
+MAC tags MUST be compared in constant time.
 
 ### 3.4 Signed arrays
 

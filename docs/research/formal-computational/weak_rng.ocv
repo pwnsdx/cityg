@@ -1,0 +1,38 @@
+(* A fresh node secret drawn with a weak generator. The committer's
+   generator is broken: the adversary knows its output r. The committer
+   hedges it with its init secret of the previous epoch (specification,
+   section 7.1): fresh = DeriveSecret(Extract(init, r), "fresh node").
+   Query: the fresh node secret stays secret from an outsider, who does not
+   know the init secret. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+
+proba Psalt.
+proba Pikm.
+expand dual_PRF(key, key, Extract, Psalt, Pikm).
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+const empty: hash.
+letfun DeriveSecret(s: key, l: label) = ExpandLabel(s, l, empty).
+
+const l_fresh: label.
+
+param Nf.
+
+query secret fresh.
+
+process
+  Ostart() :=
+    init <-R key;
+    return();
+    foreach i <= Nf do
+    (* The adversary chooses the generator's output. *)
+    Ofresh(r: key) :=
+      find u <= Nf suchthat defined(r[u], fresh[u]) && r = r[u] then yield else
+      let fresh: key = DeriveSecret(Extract(init, r), l_fresh) in
+      return()

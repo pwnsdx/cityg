@@ -14,8 +14,8 @@ help newcomers, and report concerning behavior to the maintainers.
 ## Getting started
 
 Prerequisites: a recent stable Rust toolchain (the workspace uses edition
-2024) and Git. ProVerif 2.05 runs the symbolic model; Python 3 runs the
-cost model.
+2024) and Git. ProVerif 2.05 runs the symbolic model; CryptoVerif 2.13
+runs the computational research model; Python 3 runs the cost models.
 
 ```bash
 git clone https://github.com/pwnsdx/cityg.git
@@ -36,7 +36,7 @@ docs/formal/run.sh /path/to/proverif       # symbolic model
 | `crates/cityg-core/tests/scenarios.rs` | Whole groups on the in-memory delivery service. |
 | `crates/cityg-core/tests/scale.rs` | A large window on a full group, against the cost model (release, `--ignored`). |
 | `docs/formal/` | Symbolic model of the security choices. |
-| `docs/research/` | Research notes (in French), cost models, benchmarks, and symbolic models of the proposals. |
+| `docs/research/` | Research notes (in French), cost models, benchmarks, and symbolic and computational models of the proposals. |
 
 ## Workflow
 
@@ -109,13 +109,16 @@ We are especially interested in:
 - a specification and an implementation of the îlots of
   [`docs/research/ilots-2026-09-26.md`](docs/research/ilots-2026-09-26.md),
   and an analysis of a multi-recipient KEM for their top;
-- a computational proof of the key schedule with tree keys that stay the
-  same across windows, the first open problem of
-  [`docs/research/au-dela-0.4-2026-09-26.md`](docs/research/au-dela-0.4-2026-09-26.md);
+- a computational proof of the whole tree under adaptive corruptions,
+  beyond the fixed configurations of
+  [`docs/research/formal-computational/`](docs/research/formal-computational/README.md),
+  and an analysis of BLAKE3's keyed mode as a dual PRF (see
+  [`docs/research/problemes-ouverts-2026-09-26.md`](docs/research/problemes-ouverts-2026-09-26.md));
 - a zero-knowledge proof that an X-Wing wrap does not open in its context,
   for the disputes proposed in
   [`docs/research/rekey-serveur-2026-09-26.md`](docs/research/rekey-serveur-2026-09-26.md):
-  its size and proving time decide whether a phone can file one.
+  the note on open problems counts its statement (about 1.1 million AND
+  gates); an implementation would measure its proving time on a phone.
 
 ## Review
 

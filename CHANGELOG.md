@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the research notes beyond 0.4.
 - The sequence diagrams of [`docs/workflows.md`](docs/workflows.md) no longer
   put semicolons in messages, which Mermaid reads as line breaks.
+- The specification (section 3.3) states that the key schedule needs
+  `Extract` to be a dual PRF, pseudorandom when keyed by its input keying
+  material under a known salt: post-compromise security, external inits and
+  the exclusion of a removed member that missed a window rest on it.
 
 ### Research
 
@@ -130,6 +134,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The îlots cost model gains reports 9 (the maintained city) and 10 (a
   member's day at the candidate profile); the parity symbolic model gains
   3 scenarios (32 in all).
+- The open problems of that note, in
+  [`docs/research/problemes-ouverts-2026-09-26.md`](docs/research/problemes-ouverts-2026-09-26.md)
+  (in French), not part of the profile:
+  - a computational model,
+    [`docs/research/formal-computational/`](docs/research/formal-computational/README.md):
+    14 CryptoVerif models, 7 properties proved (forward secrecy with stable
+    tree keys, a removed member that stays out once it missed a window, a
+    window sealed by an entrant, relays and flat items, the maintained
+    city, fresh secrets hedged against a weak generator) and 7 controls;
+    the formal-model CI job now builds CryptoVerif 2.13 and runs them, and
+    the local CI runs them when CryptoVerif is installed;
+  - the assumption those proofs need and the specification did not state:
+    `Extract` as a dual PRF;
+  - the statement of a wrap dispute and its size, about 1.1 million AND
+    gates and 6,140 multiplications in the field of X25519 (the matrix of
+    ML-KEM is public and its arithmetic linear); about 0.4 MB to prove to
+    the server as designated verifier, 1.5 to 2.2 MB for the boolean part
+    of a public post-quantum proof;
+  - witnesses against forks, three signatures out of four per window,
+    which tolerate one absent and one dishonest witness, falling back to
+    MLS when the quorum does not answer; sender cards kept in a cache;
+    what tasks and relays reveal to the server.
+- Its cost model, [`docs/research/open_problems_sim.py`](docs/research/open_problems_sim.py).
 
 ## [0.4.0] — initial version
 

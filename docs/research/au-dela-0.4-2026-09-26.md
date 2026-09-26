@@ -179,6 +179,8 @@ Deux garanties reposent sur des règles sans scénario, G5 et G10 ; le journal s
 
 ## 6. Problèmes ouverts, par ordre d'importance
 
+La note [problèmes ouverts](problemes-ouverts-2026-09-26.md) les reprend dans cet ordre, en résout une partie et donne leur état (section 7).
+
 1. **Une preuve calculatoire.**
    - *Pourquoi.* Toutes les garanties de la section 4 reposent sur un modèle symbolique à primitives idéales. Trois points n'ont pas d'équivalent dans les analyses de MLS : des clés d'arbre stables pendant des fenêtres, protégées par la seule chaîne d'init ; des fenêtres d'entrant dont le secret de commit est une constante publique ; des secrets tirés par des entrants, que la règle des taches suit.
    - *Prochain pas.* Un modèle [CryptoVerif](https://bblanche.gitlabpages.inria.fr/CryptoVerif/) du calendrier de clés d'une fenêtre (init, secret de commit, joiner secret, tag), puis une preuve par jeux de la règle des taches, dans le cadre des analyses de TreeKEM ([Alwen et al., Crypto 2020](https://eprint.iacr.org/2019/1189)).
@@ -217,6 +219,7 @@ Deux garanties reposent sur des règles sans scénario, G5 et G10 ; le journal s
 
 - **65 scénarios ProVerif 2.05, tous au verdict attendu** : 16 pour le protocole de la v0.4 ([`docs/formal/`](../formal/README.md)), 17 pour le plan de messages ([`formal-messages/`](formal-messages/README.md)), 32 pour la parité, le re-key par le serveur, les litiges et les îlots ([`formal-parity/`](formal-parity/README.md)). Chaque dossier a son `run.sh`, lancé aussi par la CI.
 - **Nouveaux dans cette note** : `ilot_city_stale` (attaque), `ilot_city_maintained` et `ilot_city_sticky` (prouvés), décrits dans la note îlots (section 6).
+- **Modèle calculatoire** : la note [problèmes ouverts](problemes-ouverts-2026-09-26.md) ajoute 14 modèles CryptoVerif dans [`formal-computational/`](formal-computational/README.md).
 - **Non modélisé** : le profil entier en un seul modèle ; les réparations ; l'aléa partagé du KEM multi-destinataires ; la feuille scindée, qui ne change qu'un haché ; les signatures réelles, toutes idéales ; les métadonnées ; la sécurité calculatoire.
 
 ## 9. Sources
