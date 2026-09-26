@@ -222,6 +222,7 @@ its open problems. None of them is part of the profile.
 | [Open problems](docs/research/problemes-ouverts-2026-09-26.md) | Which of those open problems can be solved now? | First computational proofs with CryptoVerif, and an assumption the key schedule needs: `Extract` must be a dual PRF. A wrap dispute is about 1.1 million AND gates, about 0.4 MB to prove to the server. Three witnesses out of four against forks, a cache for sender cards. |
 | [Proofs and measurements](docs/research/preuves-et-mesures-2026-09-26.md) | What does a dispute really cost, and what would prove the whole tree? | A wrap dispute measured with emp-zk: under a second and 2 MB without its X25519 half, which needs a proof over its own field. Authentication in the computational model. A weakness of 0.4: a stolen device key read every window through catch-ups, unseen; 0.4 now binds the catch-up's welcome to the member's leaf key. A proof plan for the whole tree, with random oracles, and `Extract` as HKDF for the next profile. |
 | [The proof of the tree](docs/research/preuve-arbre-2026-09-26.md) | What must be proved for the whole tree, and what already is? | The security game under adaptive corruptions and its safety predicate, executable and checked against 24 formal models; a proof sketch with random oracles whose every step has a mechanized lemma, the taint rule and post-compromise healing among them. The adaptive argument itself remains to be written. |
+| [The X25519 half of a dispute](docs/research/litige-x25519-2026-09-26.md) | What does the X25519 half of a dispute cost in its own field, and can a phone produce it? | Proved with Diet Mac'n'Cheese in the field of X25519: 5,048 multiplications, but 23 MB, most of it the setup of a 255-bit field. Over an emulated 4G link, 1.8 s without the X25519 half and 21.6 s for it; no phone measured. Revealing `ss_X` instead stays rejected. Next: a proof without setup over two fields, as Longfellow's. |
 
 ## Repository
 
@@ -246,6 +247,8 @@ python3 docs/research/parity_sim.py                               # cost model o
 python3 docs/research/ilots_sim.py                                # cost model of îlots and of the candidate profile
 python3 docs/research/open_problems_sim.py                        # cost model of the open problems
 python3 docs/research/safety_predicate.py                         # safety predicate of the tree proof
+python3 docs/research/dispute-zk/x25519_ir.py check               # the X25519 half of a dispute, checked
+python3 docs/research/dispute-zk/x25519_dleq.py                   # the rejected shortcut, priced
 docs/research/formal-computational/run.sh /path/to/cryptoverif   # computational model (CryptoVerif 2.13)
 ```
 

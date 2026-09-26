@@ -115,12 +115,15 @@ We are especially interested in:
   mechanized lemma, are in
   [`docs/research/preuve-arbre-2026-09-26.md`](docs/research/preuve-arbre-2026-09-26.md);
   and an analysis of BLAKE3's keyed mode as a dual PRF;
-- the X25519 half of the zero-knowledge proof that an X-Wing wrap does not
-  open in its context, for the disputes proposed in
+- a zero-knowledge proof without setup that an X-Wing wrap does not open
+  in its context, for the disputes proposed in
   [`docs/research/rekey-serveur-2026-09-26.md`](docs/research/rekey-serveur-2026-09-26.md):
-  the rest is measured by
-  [`docs/research/dispute-zk/`](docs/research/dispute-zk/README.md) (under
-  a second and 2 MB); X25519 needs a proof over its own field, then a
+  [`docs/research/dispute-zk/`](docs/research/dispute-zk/README.md)
+  measures the whole statement with VOLE-based proofs (2 MB without the
+  X25519 half, 23 MB with it, most of it the setup of the field of X25519,
+  see
+  [`docs/research/litige-x25519-2026-09-26.md`](docs/research/litige-x25519-2026-09-26.md));
+  the next step is a proof over two fields with sumcheck and Ligero, then a
   measurement on a phone.
 
 ## Review

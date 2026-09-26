@@ -163,7 +163,7 @@ Un litige coûte donc au plaignant ce que coûtent quelques fenêtres de suivi. 
 
 ### 2.4 Ce qui reste
 
-Écrire l'énoncé dans une bibliothèque de preuves à base de VOLE, puis mesurer le temps sur un téléphone et la taille, y compris la mise en place. C'est fait, hors X25519, dans la note [preuves et mesures](preuves-et-mesures-2026-09-26.md) (section 1) : moins d'une seconde et 2 Mo. Chiffrer la partie X25519 d'une preuve publique. En attendant, les parades de la note [îlots](ilots-2026-09-26.md) (section 3) restent :
+Écrire l'énoncé dans une bibliothèque de preuves à base de VOLE, puis mesurer le temps sur un téléphone et la taille, y compris la mise en place. C'est fait, hors X25519, dans la note [preuves et mesures](preuves-et-mesures-2026-09-26.md) (section 1) : moins d'une seconde et 2 Mo. La moitié X25519, prouvée dans son corps, est mesurée dans la note [litige X25519](litige-x25519-2026-09-26.md) : 23 Mo, dont 20,6 Mo de mise en place ; une preuve publique sans mise en place y devient la voie suivante. En attendant, les parades de la note [îlots](ilots-2026-09-26.md) (section 3) restent :
 - le serveur réserve les tâches aux appareils présents depuis un certain temps ;
 - il limite le débit des entrées.
 

@@ -15,6 +15,7 @@
    - l'arithmétique de ML-KEM-768, sur des bits : 8,7 millions de portes ;
    - les deux ensemble : 9,7 millions de portes, 0,85 s et 1,98 Mo, dont 0,65 Mo de mise en place.
    - La moitié X25519 coûterait en bits 150 Mo et 90 s. Il lui faut une preuve dans son propre corps, soit environ 0,2 Mo plus une mise en place.
+   - Mesurée depuis dans son corps (note [litige X25519](litige-x25519-2026-09-26.md)) : 23 Mo, dont 20,6 Mo de mise en place.
    - L'estimation de la note précédente, 0,4 Mo, supposait chaque partie dans son corps. L'écart vient de ML-KEM prouvé en bits et de la mise en place.
 2. **L'authentification entre dans le modèle calculatoire.**
    - Un relais menteur est trahi par le tag, même s'il connaît toutes les clés de la chaîne. Il suffit que BLAKE3 résiste aux collisions (`relay_tag.ocv`).
@@ -42,7 +43,7 @@
    - Recommandation pour le prochain profil : passer `Extract` seul en HKDF-Extract avec SHA-384, comme la suite MLS la plus proche.
 6. **Ce qui reste** :
    - écrire la preuve de l'arbre ;
-   - prouver X25519 dans son corps, puis mesurer sur téléphone ;
+   - prouver X25519 dans son corps, puis mesurer sur téléphone ; X25519 est fait depuis, mesuré sur des liaisons mobiles émulées, pas sur un téléphone (note [litige X25519](litige-x25519-2026-09-26.md)) ;
    - la spécification du profil candidat.
 
 ## 1. Le litige, mesuré
@@ -96,6 +97,7 @@ Intel Xeon à 2,10 GHz, 4 vCPU, prouveur et vérifieur sur la même machine :
 - **X25519 en bits** coûterait 1,2 milliard de portes, soit environ 150 Mo et 90 s : hors de portée d'un téléphone.
   - Dans une preuve à base de VOLE sur F_{2^255−19}, QuickSilver envoie un élément du corps par multiplication : 6 140 × 32 octets, environ 0,2 Mo.
   - S'y ajoute une mise en place à dimensionner pour si peu de multiplications. Celle d'emp-zk pour F_{2^61−1}, faite pour des millions, envoie 32,9 Mo.
+  - Mesuré depuis avec Diet Mac'n'Cheese (note [litige X25519](litige-x25519-2026-09-26.md)) : les deux échelles tiennent en 5 048 multiplications et 0,16 Mo, mais la mise en place du corps de 255 bits envoie 20,6 Mo.
 - **ML-KEM dans F_q** ramènerait sa partie de 1,2 Mo à presque rien. Il faudrait en échange convertir les bits secrets en éléments de F_q : les échantillons, 4 bits par coefficient, et les arrondis. Les conversions de [Mystique](https://eprint.iacr.org/2021/730) s'en chargent.
 - **Au total**, avec les trois corps, on revient à l'estimation : environ 0,4 Mo, plus les mises en place.
   - Avec emp-zk tel quel et sans X25519, c'est déjà 2 Mo et moins d'une seconde.
@@ -109,6 +111,7 @@ On pourrait éviter de prouver X25519 ou ML-KEM en révélant un morceau du secr
   - Le membre devient alors un oracle Diffie-Hellman statique pour la clé du nœud.
   - Un adversaire recopie le `ct_X` d'une enveloppe honnête vers le même nœud dans une enveloppe fausse. Le membre qui la conteste lui livre la moitié X25519 du secret de l'enveloppe honnête.
   - Ce secret ne repose alors plus que sur ML-KEM, et l'hybride perd sa raison d'être.
+  - Chiffré depuis (note [litige X25519](litige-x25519-2026-09-26.md), section 3) : 97 octets. Une règle de fraîcheur ne le sauve pas, car un serveur complice livre la copie avant l'enveloppe honnête.
 - **Révéler `m'`, le message que rend le déchiffrement de ML-KEM.**
   - C'est un oracle de déchiffrement sur des chiffrés invalides.
   - Un tel oracle suffit à retrouver la clé secrète : c'est ce que la transformation de Fujisaki-Okamoto sert à empêcher.
@@ -359,7 +362,7 @@ Le coût reste de quelques microsecondes par fenêtre. La v0.4 garde BLAKE3 et l
 | Problème | État | Ce qui reste |
 | --- | --- | --- |
 | 1. Preuve calculatoire | 21 modèles, dont l'authentification ; plan de preuve de l'arbre écrit ; voie de l'oracle aléatoire retenue | Écrire la preuve de l'arbre ; les initiés |
-| 2. Preuves de litige | Mesuré : hors X25519, 2 Mo et moins d'une seconde | Prouver X25519 dans son corps ; mesurer sur téléphone |
+| 2. Preuves de litige | Mesuré : hors X25519, 2 Mo et moins d'une seconde ; X25519 dans son corps depuis (note [litige X25519](litige-x25519-2026-09-26.md)), 23 Mo | Une preuve sans mise en place ; mesurer sur téléphone |
 | 3. Bifurcations | Quorum prouvé dans le modèle calculatoire | La confiance dans les témoins |
 | 4. Standards | Recommandation : `Extract` en HKDF-SHA-384 | La décision du mainteneur ; FN-DSA final |
 | 5. Cartes d'émetteur | Inchangé | Mesurer sur des traces |

@@ -213,6 +213,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mechanized lemma. The adaptive argument itself remains to be written.
 - The computational model gains the taint rule and the healing of a
   leaked member by its update, with their controls (25 models in all).
+- The X25519 half of the wrap dispute, in
+  [`docs/research/litige-x25519-2026-09-26.md`](docs/research/litige-x25519-2026-09-26.md)
+  (in French):
+  - proved in the field of X25519 with Diet Mac'n'Cheese, from a SIEVE IR
+    relation that
+    [`docs/research/dispute-zk/x25519_ir.py`](docs/research/dispute-zk/x25519_ir.py)
+    generates and checks against RFC 7748: 5,048 multiplications and 1,024
+    bit conversions, 18.5 MB and 4.6 MB in under 3 s, of which 20.6 MB
+    before the first gate, for the setup of a 255-bit field; two patches
+    add that field to swanky;
+  - the dispute over emulated mobile links, with
+    [`docs/research/dispute-zk/link.py`](docs/research/dispute-zk/link.py):
+    1.8 s without the X25519 half and 21.6 s for it on a 4G-like link; no
+    phone was measured;
+  - revealing `ss_X` with a Chaum-Pedersen proof, priced at 97 bytes by
+    [`docs/research/dispute-zk/x25519_dleq.py`](docs/research/dispute-zk/x25519_dleq.py),
+    stays rejected: a server allied with a copier delivers the copied
+    `ct_X` before the honest wrap; a `ct_X` outside the prime-order
+    subgroup convicts the committer without any proof;
+  - the next step: a proof without setup over two fields, with sumcheck
+    and Ligero, as Longfellow's.
 
 ## [0.4.0] — initial version
 
