@@ -8,10 +8,12 @@
 //!   kind 0: signed by admin `admin`, whose key is authorizer_pk
 //!   kind 1: signed by the invite key authorizer_pk of the enclosed invite
 //! JoinRequest    := ["city-g/join-request/v4", gid, device_pk, encryption_key,
-//!                    init_key, admission]                         ctx JOIN_REQUEST, by the device
+//!                    init_key, not_after_epoch, admission or null] ctx JOIN_REQUEST, by the device
 //! RemoveProposal := ["city-g/remove/v4", gid, target, proposer]   ctx REMOVE_PROPOSAL
 //! Eviction       := ["city-g/eviction/v4", gid, target, policy_hash]   (unsigned)
-//! EvictionPolicy := ["city-g/eviction-policy/v4", gid, max_idle_epochs, admin]  ctx EVICTION_POLICY
+//! GroupPolicy    := ["city-g/group-policy/v4", gid, admission, max_idle_epochs or null,
+//!                    admin]                                       ctx GROUP_POLICY
+//!   admission 0: closed (a join needs an admission), 1: open (any device)
 //! UpdateRequest  := ["city-g/update/v4", gid, member, replaces, encryption_key]  ctx UPDATE_REQUEST
 //! CatchUpRequest := ["city-g/catch-up/v4", gid, member, prev_interim, init_key]  ctx CATCH_UP
 //! ReEntryRequest := ["city-g/re-entry/v4", gid, member, replaces, encryption_key,
@@ -20,6 +22,12 @@
 //!                    registry_hash, height, district_bits, external_pk_hash,
 //!                    time_ms, admin]                              ctx CHECKPOINT
 //! ```
+//!
+//! A group is *closed* unless the policy in force opens it. In a closed
+//! group every join carries an admission signed by an admin or an invite;
+//! in an open group a join may carry none: the device's own signature of
+//! its request is enough, and the device is visible as a member like any
+//! other.
 //!
 //! Members, admins and inviters are named by occupancy. `replaces` is
 //! `H_L("kem-pk", [key])` of the leaf key an update or a re-entry replaces:
@@ -58,7 +66,7 @@ pub const ADMISSION_LABEL: &str = "city-g/admission/v4";
 pub const JOIN_REQUEST_LABEL: &str = "city-g/join-request/v4";
 pub const REMOVE_LABEL: &str = "city-g/remove/v4";
 pub const EVICTION_LABEL: &str = "city-g/eviction/v4";
-pub const POLICY_LABEL: &str = "city-g/eviction-policy/v4";
+pub const POLICY_LABEL: &str = "city-g/group-policy/v4";
 pub const UPDATE_LABEL: &str = "city-g/update/v4";
 pub const CATCH_UP_LABEL: &str = "city-g/catch-up/v4";
 pub const RE_ENTRY_LABEL: &str = "city-g/re-entry/v4";
@@ -357,18 +365,23 @@ pub struct JoinRequest {
     pub device_pk: Vec<u8>,
     pub encryption_key: Vec<u8>,
     pub init_key: Vec<u8>,
-    pub admission: Admission,
+    /// Last epoch the request may enter.
+    pub not_after_epoch: u64,
+    /// The admission; `None` for a join into an open group.
+    pub admission: Option<Admission>,
     signed: Signed,
 }
 
 impl JoinRequest {
-    /// Sign a join request.
+    /// Sign a join request, with an admission, or without one for an open
+    /// group.
     pub fn sign(
         gid: &Digest,
         identity: &DeviceIdentity,
         encryption_key: &[u8],
         init_key: &[u8],
-        admission: &Admission,
+        not_after_epoch: u64,
+        admission: Option<&Admission>,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Self> {
         let signed = sign_fields(
@@ -378,7 +391,8 @@ impl JoinRequest {
                 bytes(identity.public_key()),
                 bytes(encryption_key),
                 bytes(init_key),
-                bytes(admission.encoded()),
+                uint(not_after_epoch),
+                admission.map_or(Value::Null, |admission| bytes(admission.encoded())),
             ],
             identity,
             SignatureContext::JOIN_REQUEST,
@@ -392,7 +406,7 @@ impl JoinRequest {
         let (mut fields, signed) = open_signed(
             encoded,
             JOIN_REQUEST_LABEL,
-            6,
+            7,
             MAX_REQUEST_BYTES,
             "join request",
         )?;
@@ -401,7 +415,11 @@ impl JoinRequest {
             device_pk: fields.bytes()?,
             encryption_key: fields.bytes()?,
             init_key: fields.bytes()?,
-            admission: Admission::decode(&fields.bytes()?)?,
+            not_after_epoch: fields.uint()?,
+            admission: fields
+                .optional_bytes()?
+                .map(|admission| Admission::decode(&admission))
+                .transpose()?,
             signed,
         };
         check_device_key(&request.device_pk, "join request device key")?;
@@ -425,27 +443,48 @@ impl JoinRequest {
         h(&self.signed.encoded)
     }
 
+    /// What the admission map records for this join, so that it applies
+    /// once: the admission's hash, or the request's own for an open join.
+    #[must_use]
+    pub fn token(&self) -> Digest {
+        self.admission
+            .as_ref()
+            .map_or_else(|| self.reference(), Admission::hash)
+    }
+
     /// `device_id` of the joining device.
     pub fn device_id(&self) -> CoreResult<Digest> {
         device_id(&self.gid, &self.device_pk)
     }
 
-    /// Check the device's signature and its admission for a join at `epoch`
-    /// under the admins of the previous epoch.
+    /// Check the device's signature and, for a join at `epoch`, the request's
+    /// validity and its admission under the admins of the previous epoch. A
+    /// join without admission is valid only if the group is `open`.
     pub fn verify(
         &self,
         gid: &Digest,
         epoch: u64,
         admins: &BTreeMap<Occupancy, Vec<u8>>,
+        open: bool,
     ) -> CoreResult<()> {
         check_gid(&self.gid, gid, "join request group")?;
+        if epoch > self.not_after_epoch
+            || self.not_after_epoch > epoch.saturating_add(MAX_ADMISSION_EPOCHS)
+        {
+            return Err(CoreError::Invalid("join request expired or too long"));
+        }
         self.signed.verify(
             &self.device_pk,
             SignatureContext::JOIN_REQUEST,
             "join request",
         )?;
-        self.admission
-            .verify(gid, &self.device_id()?, epoch, admins)
+        match &self.admission {
+            Some(admission) => admission.verify(gid, &self.device_id()?, epoch, admins),
+            None if open => Ok(()),
+            None => Err(CoreError::Unauthorized(
+                "join without admission in a closed group",
+            )),
+        }
     }
 }
 
@@ -525,7 +564,7 @@ impl RemoveProposal {
     }
 }
 
-/// An eviction by the delivery service under the eviction policy.
+/// An eviction by the delivery service under the group policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Eviction {
     pub gid: Digest,
@@ -568,7 +607,7 @@ impl Eviction {
     pub fn verify(
         &self,
         gid: &Digest,
-        policy: &EvictionPolicy,
+        policy: &GroupPolicy,
         updated: u64,
         epoch: u64,
     ) -> CoreResult<()> {
@@ -576,28 +615,34 @@ impl Eviction {
         if policy.hash() != self.policy_hash {
             return Err(CoreError::Invalid("eviction policy"));
         }
-        if epoch.saturating_sub(updated) <= policy.max_idle_epochs {
+        let max_idle = policy
+            .max_idle_epochs
+            .ok_or(CoreError::Invalid("the policy evicts nobody"))?;
+        if epoch.saturating_sub(updated) <= max_idle {
             return Err(CoreError::Invalid("member not idle long enough"));
         }
         Ok(())
     }
 }
 
-/// The eviction policy an admin sets: members whose leaf key has not
-/// changed for more than `max_idle_epochs` may be evicted.
+/// The policy of a group, which an admin signs: whether the group is open
+/// (a join needs no admission) and, if set, how long a member's leaf key
+/// may stay unchanged before the delivery service may evict it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EvictionPolicy {
+pub struct GroupPolicy {
     pub gid: Digest,
-    pub max_idle_epochs: u64,
+    pub open: bool,
+    pub max_idle_epochs: Option<u64>,
     pub admin: Occupancy,
     signed: Signed,
 }
 
-impl EvictionPolicy {
+impl GroupPolicy {
     /// Sign a policy.
     pub fn sign(
         gid: &Digest,
-        max_idle_epochs: u64,
+        open: bool,
+        max_idle_epochs: Option<u64>,
         admin: Occupancy,
         identity: &DeviceIdentity,
         rng: &mut impl CryptoRngCore,
@@ -606,11 +651,12 @@ impl EvictionPolicy {
             vec![
                 text(POLICY_LABEL),
                 bytes(gid),
-                uint(max_idle_epochs),
+                uint(u64::from(open)),
+                max_idle_epochs.map_or(Value::Null, uint),
                 admin.value(),
             ],
             identity,
-            SignatureContext::EVICTION_POLICY,
+            SignatureContext::GROUP_POLICY,
             rng,
         )?;
         Self::decode(&signed.encoded)
@@ -618,16 +664,22 @@ impl EvictionPolicy {
 
     /// Parse a policy.
     pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
-        let (mut fields, signed) = open_signed(
-            encoded,
-            POLICY_LABEL,
-            4,
-            MAX_REQUEST_BYTES,
-            "eviction policy",
-        )?;
+        let (mut fields, signed) =
+            open_signed(encoded, POLICY_LABEL, 5, MAX_REQUEST_BYTES, "group policy")?;
+        let gid = fields.digest()?;
+        let open = match fields.uint()? {
+            0 => false,
+            1 => true,
+            _ => return Err(CoreError::Malformed("group policy admission")),
+        };
+        let max_idle_epochs = fields
+            .optional()?
+            .map(|value| cityg_core::cbor::expect_uint(&value, "group policy"))
+            .transpose()?;
         Ok(Self {
-            gid: fields.digest()?,
-            max_idle_epochs: fields.uint()?,
+            gid,
+            open,
+            max_idle_epochs,
             admin: fields.occupancy()?,
             signed,
         })
@@ -639,20 +691,25 @@ impl EvictionPolicy {
         &self.signed.encoded
     }
 
-    /// `H(SignedEvictionPolicy)`.
+    /// `H(SignedGroupPolicy)`.
     #[must_use]
     pub fn hash(&self) -> Digest {
         h(&self.signed.encoded)
     }
 
+    /// Check the signature under `admin_pk` (the creator's key at genesis).
+    pub fn verify_signature(&self, gid: &Digest, admin_pk: &[u8]) -> CoreResult<()> {
+        check_gid(&self.gid, gid, "group policy group")?;
+        self.signed
+            .verify(admin_pk, SignatureContext::GROUP_POLICY, "group policy")
+    }
+
     /// Check that an admin of the previous epoch signed the policy.
     pub fn verify(&self, gid: &Digest, admins: &BTreeMap<Occupancy, Vec<u8>>) -> CoreResult<()> {
-        check_gid(&self.gid, gid, "eviction policy group")?;
         let key = admins
             .get(&self.admin)
             .ok_or(CoreError::Unauthorized("policy signer is not an admin"))?;
-        self.signed
-            .verify(key, SignatureContext::EVICTION_POLICY, "eviction policy")
+        self.verify_signature(gid, key)
     }
 }
 
@@ -1137,24 +1194,51 @@ mod tests {
         let init = KemSecret::generate(&mut rng).public_key();
         let admission =
             Admission::by_admin(&s.gid, &id, 10, s.admin, &s.admin_id, &mut rng).unwrap();
-        let request =
-            JoinRequest::sign(&s.gid, &device, &leaf, &init, &admission, &mut rng).unwrap();
+        let request = JoinRequest::sign(
+            &s.gid,
+            &device,
+            &leaf,
+            &init,
+            10,
+            Some(&admission),
+            &mut rng,
+        )
+        .unwrap();
         let decoded = JoinRequest::decode(request.encoded()).unwrap();
-        decoded.verify(&s.gid, 3, &s.admins).unwrap();
-        assert!(decoded.verify(&s.gid, 11, &s.admins).is_err(), "expired");
+        decoded.verify(&s.gid, 3, &s.admins, false).unwrap();
         assert!(
-            decoded.verify(&s.gid, 3, &BTreeMap::new()).is_err(),
+            decoded.verify(&s.gid, 11, &s.admins, false).is_err(),
+            "expired"
+        );
+        assert!(
+            decoded.verify(&s.gid, 3, &BTreeMap::new(), false).is_err(),
             "no admin"
         );
+        assert_eq!(decoded.token(), admission.hash());
         assert!(matches!(
             Request::decode(request.encoded()).unwrap(),
             Request::Join(_)
         ));
         // An admission for another device does not pass.
         let other = DeviceIdentity::from_seed(&[4; 32]);
-        let stolen = JoinRequest::sign(&s.gid, &other, &leaf, &init, &admission, &mut rng).unwrap();
-        assert!(stolen.verify(&s.gid, 3, &s.admins).is_err());
+        let stolen =
+            JoinRequest::sign(&s.gid, &other, &leaf, &init, 10, Some(&admission), &mut rng)
+                .unwrap();
+        assert!(stolen.verify(&s.gid, 3, &s.admins, false).is_err());
         assert_eq!(admission.anchor_key(), s.admin_id.public_key());
+        // Without admission: only in an open group, and only while valid.
+        let open = JoinRequest::sign(&s.gid, &other, &leaf, &init, 10, None, &mut rng).unwrap();
+        let open = JoinRequest::decode(open.encoded()).unwrap();
+        open.verify(&s.gid, 3, &s.admins, true).unwrap();
+        assert_eq!(
+            open.verify(&s.gid, 3, &s.admins, false).unwrap_err(),
+            CoreError::Unauthorized("join without admission in a closed group")
+        );
+        assert!(open.verify(&s.gid, 11, &s.admins, true).is_err(), "expired");
+        assert_eq!(open.token(), open.reference());
+        let late = 3 + MAX_ADMISSION_EPOCHS + 1;
+        let late = JoinRequest::sign(&s.gid, &other, &leaf, &init, late, None, &mut rng).unwrap();
+        assert!(late.verify(&s.gid, 3, &s.admins, true).is_err(), "too long");
     }
 
     #[test]
@@ -1234,11 +1318,22 @@ mod tests {
                 .is_err()
         );
 
-        let policy = EvictionPolicy::sign(&s.gid, 100, s.admin, &s.admin_id, &mut rng).unwrap();
-        policy.verify(&s.gid, &s.admins).unwrap();
+        let policy =
+            GroupPolicy::sign(&s.gid, false, Some(100), s.admin, &s.admin_id, &mut rng).unwrap();
+        let decoded = GroupPolicy::decode(policy.encoded()).unwrap();
+        decoded.verify(&s.gid, &s.admins).unwrap();
+        assert!(!decoded.open && decoded.max_idle_epochs == Some(100));
+        assert!(decoded.verify(&s.gid, &BTreeMap::new()).is_err());
         let eviction = Eviction::new(&s.gid, member, &policy.hash()).unwrap();
         eviction.verify(&s.gid, &policy, 5, 106).unwrap();
         assert!(eviction.verify(&s.gid, &policy, 5, 105).is_err());
+        let open = GroupPolicy::sign(&s.gid, true, None, s.admin, &s.admin_id, &mut rng).unwrap();
+        assert!(GroupPolicy::decode(open.encoded()).unwrap().open);
+        let under_open = Eviction::new(&s.gid, member, &open.hash()).unwrap();
+        assert!(
+            under_open.verify(&s.gid, &open, 5, 1_000).is_err(),
+            "this policy evicts nobody"
+        );
         assert_eq!(
             Request::decode(eviction.encoded()).unwrap().kind(),
             ChangeKind::Eviction

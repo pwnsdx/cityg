@@ -13,7 +13,7 @@ use crate::commit::{
     SealKind,
 };
 use crate::crypto::commit_secret;
-use crate::objects::EvictionPolicy;
+use crate::objects::GroupPolicy;
 use crate::rekey::{self, KeySource, Rekeyed, generate, plan_city, plan_district};
 use crate::schedule::{
     EpochSecrets, GroupContext, confirmed_transcript_hash, interim_transcript_hash,
@@ -54,7 +54,7 @@ pub struct WindowTask {
     pub sealer: Occupancy,
     /// The entrant's request, when an entrant seals the window.
     pub entrant: Option<Digest>,
-    /// An eviction policy the window sets.
+    /// A group policy the window sets.
     pub policy: Option<Vec<u8>>,
     pub welcomes: Vec<WelcomeTask>,
     pub time_ms: u64,
@@ -75,12 +75,9 @@ impl WindowTask {
         Ok(window)
     }
 
-    /// The eviction policy the window sets.
-    pub fn policy(&self) -> CoreResult<Option<EvictionPolicy>> {
-        self.policy
-            .as_deref()
-            .map(EvictionPolicy::decode)
-            .transpose()
+    /// The group policy the window sets.
+    pub fn policy(&self) -> CoreResult<Option<GroupPolicy>> {
+        self.policy.as_deref().map(GroupPolicy::decode).transpose()
     }
 }
 
@@ -169,7 +166,7 @@ pub struct SealDraft<'a> {
     /// The districts' delta and the city's parents.
     pub delta: TreeDelta,
     pub city: &'a Rekeyed,
-    pub policy: Option<EvictionPolicy>,
+    pub policy: Option<GroupPolicy>,
     pub time_ms: u64,
     /// `init_secret` of the previous epoch, or the external init secret.
     pub init_prev: &'a [u8; 32],

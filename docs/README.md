@@ -13,7 +13,7 @@ profile v0.1.4 in [`legacy/v0.1.4/`](legacy/v0.1.4/README.md).
 | [specs.md](specs.md) | Normative specification: threat model and security properties, cryptographic suite, encodings, ratchet tree and leaf proofs, registry, key schedule, commits, admission, joins and welcomes, message plane, delivery-service rules, light members, parameters, registries. |
 | [design-v0.3.md](design-v0.3.md) | Why profile v0.3 changed what it changed (decisions D-1 to D-9), their costs, and what was left out. |
 | [formal/](formal/) | Symbolic model of the key schedule, joins and welcomes, removal, admission, key rotation and messages, with the security lemmas of specs.md section 2. |
-| [design-v0.4.md](design-v0.4.md) | Draft profile v0.4 ("Cité"), for groups of millions of members: windows, districts under a city, taints, district welcomes, anchored joins, a group with no member online, catch-up, sampling audits (decisions E-1 to E-13). Not normative. |
+| [design-v0.4.md](design-v0.4.md) | Draft profile v0.4 ("Cité"), for groups of millions of members: windows, districts under a city, taints, district welcomes, anchored joins, a group with no member online, catch-up, sampling audits, open groups (decisions E-1 to E-14). Not normative. |
 | [specs-v0.4-draft.md](specs-v0.4-draft.md) | Draft specification of profile `city-g/v0.4-draft`, aligned with the prototype crate [`cityg-cite`](../crates/cityg-cite). Not normative; no test vectors yet. |
 | [../kat/](../kat/README.md) | Conformance vectors, their independent verifier, and the requirement-to-test manifest. |
 | [workflows.md](workflows.md) | Sequence diagrams: create, invite and batched join, send, leave, remove, concurrent commits, resync, key rotation, light members. |
@@ -52,7 +52,7 @@ profile v0.1.4 in [`legacy/v0.1.4/`](legacy/v0.1.4/README.md).
 | --- | --- |
 | [research/grands-groupes-2026-09-25.md](research/grands-groupes-2026-09-25.md) | Groups of millions of members (in French): why profile v0.3 stops at 8192, the lower bounds and related work, and a proposed architecture ("Cité": districts re-keyed in parallel by committers that hold no state of their own, per-district delivery-service queues, taint tracking, district welcomes, anchored joins, sampling audits), with its costs, guarantees, risks and roadmap. The draft profile v0.4 follows it. |
 | [research/rekey_sim.py](research/rekey_sim.py) | Cost model behind the note's figures: waves, placement of joins, district size, CPU, steady-state traffic, audits. |
-| [research/formal/](research/formal/README.md) | ProVerif model of the design's security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins, windows sealed by an entrant when no member is online. |
+| [research/formal/](research/formal/README.md) | ProVerif model of the design's security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins, windows sealed by an entrant when no member is online, open groups. |
 | [research/bench/](research/bench/src/main.rs) | Micro-benchmarks of the primitives (X-Wing, ML-DSA-65, BLAKE3) through `cityg-core`, the source of the CPU figures. |
 
 ## Design notes

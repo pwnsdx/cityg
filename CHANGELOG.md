@@ -39,7 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     tests and a scale test that matches the research cost model;
   - seven signature contexts in `cityg-pqc` for the new v0.4 objects;
   - three ProVerif scenarios for windows sealed by an entrant
-    (`docs/research/formal/`, fifteen scenarios in all).
+    (`docs/research/formal/`, fifteen scenarios in all);
+  - open groups (decision E-14): a group policy, signed once by an admin,
+    lets any device join with its own request and no admission. Every join
+    stays visible and nobody can speak as a member; a closed group cannot be
+    opened without an admin, which members check themselves. A fourth
+    scenario (`open_group.pv`) states the trade-off: the delivery service can
+    join and read an open group, not impersonate a member.
 
 ## [0.3.0] - 2026-09-25
 

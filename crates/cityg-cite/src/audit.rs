@@ -15,7 +15,7 @@ use rand_core::CryptoRngCore;
 
 use crate::commit::{Change, DistrictCommit};
 use crate::crypto::kem_pk_hash;
-use crate::objects::{EvictionPolicy, Request};
+use crate::objects::{GroupPolicy, Request};
 use crate::smm::SmmProof;
 use crate::tree::{LeafProof, Occupancy};
 use crate::window::{EpochHeader, PublicState, Requests, WindowShape};
@@ -31,10 +31,11 @@ pub struct EntryProofs {
     pub subject: Option<LeafProof>,
     /// For a join: the device's absence from the device map.
     pub device: Option<SmmProof>,
-    /// For a join: the admission's absence from the admission map.
+    /// For a join: the absence of its admission (or, without admission, of
+    /// its request) from the admission map.
     pub admission: Option<SmmProof>,
     /// For an eviction: the policy in force.
-    pub policy: Option<EvictionPolicy>,
+    pub policy: Option<GroupPolicy>,
 }
 
 /// One entry of a window, with what it takes to audit it.
@@ -79,8 +80,7 @@ pub fn records(
             match &request {
                 Request::Join(join) => {
                     proofs.device = Some(state.registry.device_proof(&join.device_id()?)?);
-                    proofs.admission =
-                        Some(state.registry.admission_proof(&join.admission.hash())?);
+                    proofs.admission = Some(state.registry.admission_proof(&join.token())?);
                 }
                 Request::Eviction(_) => {
                     proofs.subject = Some(state.tree.leaf_proof(change.leaf)?);
@@ -147,14 +147,14 @@ pub fn check_record(previous: &EpochHeader, record: &AuditRecord) -> CoreResult<
                 .ok_or(CoreError::Invalid(
                     "audit record without the admission proof",
                 ))?
-                .verify(&previous.registry.admissions_root, &join.admission.hash())?;
+                .verify(&previous.registry.admissions_root, &join.token())?;
             if device.is_some() {
                 Some(Verdict::Fraud("device already a member"))
             } else if admission.is_some() {
                 Some(Verdict::Fraud("admission already used"))
             } else {
                 fraud_if(
-                    join.verify(gid, record.epoch, admins),
+                    join.verify(gid, record.epoch, admins, previous.registry.open),
                     "join request or admission",
                 )
             }

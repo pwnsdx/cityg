@@ -20,7 +20,7 @@ use cityg_core::hash::Digest;
 
 use crate::commit::{SealHeader, SealKind, SealProof};
 use crate::crypto::{KEM_WRAP_BYTES, kem_pk_hash};
-use crate::objects::{Checkpoint, JoinRequest, ReEntryRequest};
+use crate::objects::{Checkpoint, GroupPolicy, JoinRequest, ReEntryRequest};
 use crate::registry::RegistryHeader;
 use crate::rekey::Step;
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
@@ -30,36 +30,83 @@ use crate::welcome::Welcome;
 use crate::window::EpochHeader;
 
 /// The registry header after a window, as sent to members: the admins only
-/// when they changed.
+/// when they changed, and the group policy object when the window set it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistryUpdate {
     pub admins: Option<BTreeMap<Occupancy, Vec<u8>>>,
     pub devices_root: Digest,
     pub admissions_root: Digest,
     pub policy: Option<Digest>,
+    pub open: bool,
+    /// The policy the window set, if it changed.
+    pub policy_object: Option<GroupPolicy>,
+}
+
+/// Check a change of the registry's policy, from `before` to `policy` and
+/// `open`: a new policy must come with its object, signed by an admin of the
+/// previous epoch, and a group opens or closes only by a new policy. A
+/// member checks this itself, so that no sealer can open a closed group
+/// behind the admins' backs.
+pub fn check_policy_change(
+    gid: &Digest,
+    before: &RegistryHeader,
+    policy: Option<Digest>,
+    open: bool,
+    object: Option<&GroupPolicy>,
+) -> CoreResult<()> {
+    if policy == before.policy {
+        return if open == before.open && object.is_none() {
+            Ok(())
+        } else {
+            Err(CoreError::Invalid(
+                "admission mode changed without a policy",
+            ))
+        };
+    }
+    let object = object.ok_or(CoreError::Invalid("new policy without its object"))?;
+    if Some(object.hash()) != policy || object.open != open {
+        return Err(CoreError::Invalid("policy object"));
+    }
+    object.verify(gid, &before.admins)
 }
 
 impl RegistryUpdate {
-    /// The update from `before` to `after`.
+    /// The update from `before` to `after`; `policy` is the policy the window
+    /// set, if any.
     #[must_use]
-    pub fn between(before: &RegistryHeader, after: &RegistryHeader) -> Self {
+    pub fn between(
+        before: &RegistryHeader,
+        after: &RegistryHeader,
+        policy: Option<&GroupPolicy>,
+    ) -> Self {
         Self {
             admins: (before.admins != after.admins).then(|| after.admins.clone()),
             devices_root: after.devices_root,
             admissions_root: after.admissions_root,
             policy: after.policy,
+            open: after.open,
+            policy_object: (before.policy != after.policy)
+                .then(|| policy.cloned())
+                .flatten(),
         }
     }
 
-    /// The header after the window.
-    #[must_use]
-    pub fn apply(&self, before: &RegistryHeader) -> RegistryHeader {
-        RegistryHeader {
+    /// The header after the window, once a change of policy is checked.
+    pub fn apply(&self, gid: &Digest, before: &RegistryHeader) -> CoreResult<RegistryHeader> {
+        check_policy_change(
+            gid,
+            before,
+            self.policy,
+            self.open,
+            self.policy_object.as_ref(),
+        )?;
+        Ok(RegistryHeader {
             admins: self.admins.clone().unwrap_or_else(|| before.admins.clone()),
             devices_root: self.devices_root,
             admissions_root: self.admissions_root,
             policy: self.policy,
-        }
+            open: self.open,
+        })
     }
 
     fn encoded_len(&self) -> usize {
@@ -67,7 +114,11 @@ impl RegistryUpdate {
             .admins
             .as_ref()
             .map_or(1, |admins| admins.values().map(|key| key.len() + 16).sum());
-        admins + 2 * 33 + 34
+        let policy = self
+            .policy_object
+            .as_ref()
+            .map_or(1, |policy| policy.encoded().len());
+        admins + 2 * 33 + 36 + policy
     }
 }
 
@@ -75,9 +126,10 @@ impl RegistryUpdate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntrantEvidence {
     /// A joiner: its request, and proofs that its device is not a member
-    /// and its admission unused, against the previous registry.
+    /// and its admission (or, in an open group, its request) unused,
+    /// against the previous registry.
     Join {
-        request: JoinRequest,
+        request: Box<JoinRequest>,
         device: SmmProof,
         admission: SmmProof,
     },
@@ -106,13 +158,18 @@ impl EntrantEvidence {
                 if request.reference() != init.request || header.sealer.since != header.epoch {
                     return Err(CoreError::Invalid("entrant request"));
                 }
-                request.verify(&previous.gid, header.epoch, &previous.registry.admins)?;
+                request.verify(
+                    &previous.gid,
+                    header.epoch,
+                    &previous.registry.admins,
+                    previous.registry.open,
+                )?;
                 previous
                     .registry
                     .check_new_device(&request.device_id()?, device)?;
                 previous
                     .registry
-                    .check_unused_admission(&request.admission.hash(), admission)?;
+                    .check_unused_admission(&request.token(), admission)?;
                 proof.verify_signature(&request.device_pk)
             }
             Self::ReEntry { request, leaf } => {
@@ -166,6 +223,8 @@ pub struct SealLink {
     pub sealer: SealerEvidence,
     /// The registry header after the window.
     pub registry: RegistryHeader,
+    /// The group policy the window set, if it changed.
+    pub policy: Option<GroupPolicy>,
 }
 
 impl SealLink {
@@ -177,7 +236,14 @@ impl SealLink {
             SealerEvidence::Member(leaf) => leaf.encoded_len().unwrap_or_default(),
             SealerEvidence::Entrant(evidence) => evidence.encoded_len(),
         };
-        proof + sealer + RegistryUpdate::between(&self.registry, &self.registry).encoded_len()
+        let policy = self
+            .policy
+            .as_ref()
+            .map_or(0, |policy| policy.encoded().len());
+        proof
+            + sealer
+            + RegistryUpdate::between(&self.registry, &self.registry, None).encoded_len()
+            + policy
     }
 }
 
@@ -199,7 +265,8 @@ fn check_successor(previous: &EpochHeader, header: &SealHeader) -> CoreResult<Sh
 
 impl EpochHeader {
     /// The header of an epoch an admin checkpointed, for a joiner that
-    /// trusts the admin key `admin_pk` (from its invite or admission).
+    /// trusts the admin key `admin_pk` (from its invite or admission, or
+    /// from the public link of an open group).
     /// `registry` and `external_pk` come from the delivery service and are
     /// checked against the checkpoint, whose signer must be an admin of that
     /// registry.
@@ -254,6 +321,13 @@ impl EpochHeader {
         if link.registry.hash()? != header.registry_hash {
             return Err(CoreError::Invalid("registry header"));
         }
+        check_policy_change(
+            &self.gid,
+            &self.registry,
+            link.registry.policy,
+            link.registry.open,
+            link.policy.as_ref(),
+        )?;
         let confirmed = confirmed_transcript_hash(&self.interim, &header.hash()?)?;
         Ok(Self {
             gid: self.gid,

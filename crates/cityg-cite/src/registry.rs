@@ -2,14 +2,16 @@
 //!
 //! ```text
 //! registry_hash := H_L("registry", [[[admin, admin_pk], ...], devices_root,
-//!                                   admissions_root, policy_hash or null])
+//!                                   admissions_root, policy_hash or null, open])
 //! ```
 //!
 //! * the admins, as occupancies with their device keys, in occupancy order;
 //! * `devices`: `device_id` of every member → its occupancy;
-//! * `admissions`: hash of every admission ever used → the occupancy it
-//!   admitted (an admission is good for one join);
-//! * the hash of the eviction policy in force, if any.
+//! * `admissions`: hash of every admission ever used (of the join request,
+//!   for a join without admission) → the occupancy it admitted: an admission
+//!   is good for one join;
+//! * the hash of the group policy in force, if any, and whether it opens the
+//!   group (`open`, 0 or 1; a group without policy is closed).
 //!
 //! Members keep the [`RegistryHeader`] (admins, roots, policy hash); the
 //! delivery service and committers keep the maps.
@@ -17,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ciborium::value::Value;
-use cityg_core::cbor::{array, bytes};
+use cityg_core::cbor::{array, bytes, uint};
 use cityg_core::error::{CoreError, CoreResult};
 use cityg_core::hash::Digest;
 
@@ -33,6 +35,8 @@ pub struct RegistryHeader {
     pub devices_root: Digest,
     pub admissions_root: Digest,
     pub policy: Option<Digest>,
+    /// Whether the group is open: a join needs no admission.
+    pub open: bool,
 }
 
 impl RegistryHeader {
@@ -50,6 +54,7 @@ impl RegistryHeader {
                 bytes(&self.devices_root),
                 bytes(&self.admissions_root),
                 self.policy.as_ref().map_or(Value::Null, |p| bytes(p)),
+                uint(u64::from(self.open)),
             ],
         )
     }
@@ -90,8 +95,8 @@ pub struct RegistryDelta {
     pub admins_added: BTreeMap<Occupancy, Vec<u8>>,
     pub devices: SmmDelta,
     pub admissions: SmmDelta,
-    /// `Some(new)` when the window sets the policy.
-    pub policy: Option<Digest>,
+    /// `Some((hash, open))` when the window sets the group policy.
+    pub policy: Option<(Digest, bool)>,
 }
 
 /// The full registry.
@@ -101,6 +106,7 @@ pub struct Registry {
     devices: Smm,
     admissions: Smm,
     policy: Option<Digest>,
+    open: bool,
 }
 
 impl Registry {
@@ -134,10 +140,16 @@ impl Registry {
         self.admissions.get(admission_hash)
     }
 
-    /// Hash of the eviction policy in force.
+    /// Hash of the group policy in force.
     #[must_use]
     pub const fn policy(&self) -> Option<&Digest> {
         self.policy.as_ref()
+    }
+
+    /// Whether the group is open: a join needs no admission.
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        self.open
     }
 
     /// Proof of the entry (or absence) of `device_id`.
@@ -157,6 +169,7 @@ impl Registry {
             devices_root: self.devices.root()?,
             admissions_root: self.admissions.root()?,
             policy: self.policy,
+            open: self.open,
         })
     }
 
@@ -179,7 +192,8 @@ impl Registry {
             admins: self.admins_with(delta),
             devices_root: self.devices.root_with(&delta.devices)?,
             admissions_root: self.admissions.root_with(&delta.admissions)?,
-            policy: delta.policy.or(self.policy),
+            policy: delta.policy.map(|(hash, _)| hash).or(self.policy),
+            open: delta.policy.map_or(self.open, |(_, open)| open),
         })
     }
 
@@ -188,8 +202,9 @@ impl Registry {
         self.admins = self.admins_with(delta);
         self.devices.apply(&delta.devices);
         self.admissions.apply(&delta.admissions);
-        if delta.policy.is_some() {
-            self.policy = delta.policy;
+        if let Some((hash, open)) = delta.policy {
+            self.policy = Some(hash);
+            self.open = open;
         }
     }
 
@@ -222,13 +237,20 @@ mod tests {
         next.admins_removed.insert(admin);
         next.devices.insert([2; 32], Some(member));
         next.admissions.insert([3; 32], Some(member));
-        next.policy = Some([4; 32]);
+        next.policy = Some(([4; 32], true));
         let predicted = registry.header_with(&next).unwrap();
         assert_ne!(predicted.hash().unwrap(), header.hash().unwrap());
         registry.apply(&next);
         assert_eq!(registry.header().unwrap(), predicted);
         assert!(!registry.is_admin(admin));
         assert_eq!(registry.policy(), Some(&[4; 32]));
+        assert!(registry.is_open());
+        let mut closed = registry.header().unwrap();
+        closed.open = false;
+        assert_ne!(
+            closed.hash().unwrap(),
+            registry.header().unwrap().hash().unwrap()
+        );
         let header = registry.header().unwrap();
         header
             .check_new_device(&[9; 32], &registry.device_proof(&[9; 32]).unwrap())

@@ -38,11 +38,18 @@ pub struct Sim {
 }
 
 impl Sim {
-    /// A group created by one member, with districts of `2^bits` leaves.
+    /// A closed group created by one member, with districts of `2^bits`
+    /// leaves.
     pub fn new(bits: u8, seed: u64) -> Self {
+        Self::with_policy(bits, seed, false)
+    }
+
+    /// A group created by one member, open or closed.
+    pub fn with_policy(bits: u8, seed: u64, open: bool) -> Self {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let identity = DeviceIdentity::generate(&mut rng);
-        let (creator, genesis) = Member::create(identity, [7; 32], bits, 1_000, &mut rng).unwrap();
+        let (creator, genesis) =
+            Member::create(identity, [7; 32], bits, open, 1_000, &mut rng).unwrap();
         let ds = DeliveryService::new(genesis, DsConfig::default()).unwrap();
         let mut members = BTreeMap::new();
         members.insert(creator.occupancy(), creator);
@@ -107,12 +114,39 @@ impl Sim {
             let admission = self.members[&admin]
                 .admit(identity.public_key(), self.ds.epoch() + 100, &mut self.rng)
                 .unwrap();
-            let joiner = Joiner::new(identity, &admission, anchor.clone(), &mut self.rng).unwrap();
+            let not_after = admission.not_after_epoch;
+            let joiner = Joiner::new(
+                identity,
+                Some(&admission),
+                not_after,
+                anchor.clone(),
+                &mut self.rng,
+            )
+            .unwrap();
             let reference = self
                 .ds
                 .submit_join(joiner.request().clone(), self.now)
                 .unwrap();
             let _ = device_id;
+            self.joiners.insert(reference, joiner);
+            references.push(reference);
+        }
+        references
+    }
+
+    /// `count` devices ask to join an open group, with no admission.
+    pub fn request_open_joins(&mut self, count: usize) -> Vec<[u8; 32]> {
+        let anchor = self.anchor();
+        let mut references = Vec::new();
+        for _ in 0..count {
+            let identity = DeviceIdentity::generate(&mut self.rng);
+            let not_after = self.ds.epoch() + 100;
+            let joiner =
+                Joiner::new(identity, None, not_after, anchor.clone(), &mut self.rng).unwrap();
+            let reference = self
+                .ds
+                .submit_join(joiner.request().clone(), self.now)
+                .unwrap();
             self.joiners.insert(reference, joiner);
             references.push(reference);
         }

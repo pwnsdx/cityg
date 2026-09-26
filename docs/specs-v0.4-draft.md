@@ -5,7 +5,7 @@
 | Profile | `city-g/v0.4-draft` |
 | Status | **Draft, not normative.** Profile [v0.3](specs.md) stays the normative profile. The two profiles do not interoperate, and nothing of v0.3 changes. |
 | Prototype | [`crates/cityg-cite`](../crates/cityg-cite): protocol core and an in-memory delivery service, no I/O |
-| Design | [design-v0.4.md](design-v0.4.md) (decisions E-1 to E-13) |
+| Design | [design-v0.4.md](design-v0.4.md) (decisions E-1 to E-14) |
 | Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); symbolic model [`research/formal/`](research/formal/README.md); cost model [`research/rekey_sim.py`](research/rekey_sim.py) |
 | Conformance | None yet: no test vectors (section 19) |
 
@@ -26,6 +26,8 @@ key schedule of v0.3, and changes how the group is re-keyed:
   re-keys the city and creates the epoch;
 * any member can commit any district or seal a window; when no member is
   online, a joiner or a returning member seals the window itself;
+* a group can be *open*: any device joins without an admin's signature, and
+  every join stays visible (section 6.1);
 * a member downloads one small packet per window and keeps O(log N) state.
 
 ## Contents
@@ -115,11 +117,19 @@ that follow the group, with the changes below.
   proves nothing against the DS, which knows the external public key
   (model `external_tag_only.pv`): members also check the entrant's
   admission and signature (section 12.2; model `external_checked.pv`).
-* **Admission control** holds with sampling: the DS checks every request,
-  each committer checks the entries of its districts, the sealer checks the
-  structure of every district commit, and members audit random entries
-  (section 15). An invalid entry that escapes all of them is a transferable
-  fraud proof against its committer.
+* **Admission control**, in a closed group, holds with sampling: the DS
+  checks every request, each committer checks the entries of its districts,
+  the sealer checks the structure of every district commit, and members
+  audit random entries (section 15). An invalid entry that escapes all of
+  them is a transferable fraud proof against its committer.
+* **Open groups** (section 6.1) admit any device without admission. They
+  give no confidentiality against whoever joins, the DS included: the DS can
+  keep a device of its own in the group and read from then on (model
+  `open_group.pv`). What holds is that every join is visible (section
+  12.11), that nobody can speak as a member (the member's device key signs
+  its messages and requests; `open_group.pv`), that removals and evictions
+  keep their rules, and that a closed group cannot be opened without an
+  admin (section 12.2).
 * **Joiners** check the chain of seals from an admin checkpoint (section
   12.9), which closes the forked entry of v0.3 section 2.3 (model
   `anchored_join.pv`).
@@ -256,10 +266,11 @@ Invite         := ["city-g/invite/v4", gid, invite_pk, expires_at_ms, max_uses,
 Admission      := ["city-g/admission/v4", gid, device_id, not_after_epoch, kind,
                    admin or null, authorizer_pk, invite or null, signature]
 JoinRequest    := ["city-g/join-request/v4", gid, device_pk, encryption_key,
-                   init_key, admission, signature]
+                   init_key, not_after_epoch, admission or null, signature]
 RemoveProposal := ["city-g/remove/v4", gid, target, proposer, signature]
 Eviction       := ["city-g/eviction/v4", gid, target, policy_hash]
-EvictionPolicy := ["city-g/eviction-policy/v4", gid, max_idle_epochs, admin, signature]
+GroupPolicy    := ["city-g/group-policy/v4", gid, admission_mode,
+                   max_idle_epochs or null, admin, signature]   admission_mode: 0 closed, 1 open
 UpdateRequest  := ["city-g/update/v4", gid, member, replaces, encryption_key, signature]
 CatchUpRequest := ["city-g/catch-up/v4", gid, member, prev_interim, init_key, signature]
 ReEntryRequest := ["city-g/re-entry/v4", gid, member, replaces, encryption_key,
@@ -286,14 +297,22 @@ Checkpoint     := ["city-g/checkpoint/v4", gid, epoch, interim, tree_hash,
   the inviter's key (kind 1).
 * **JoinRequest.** Signed by the joining device. `encryption_key` and
   `init_key` are distinct X-Wing keys that MUST pass the input check; the
-  init key is used for one welcome.
+  init key is used for one welcome. For a join creating epoch `n`,
+  `n <= not_after_epoch <= n + MAX_ADMISSION_EPOCHS`. In a closed group the
+  request MUST carry an admission; in an open group it MAY carry none. Its
+  *token*, which the admission map records so that it enters once, is
+  `admission_hash`, or `H(JoinRequest)` without admission; the joiner's
+  leaf holds the token as its `admission_hash`.
 * **RemoveProposal.** Signed by an admin of the previous epoch, or by the
   target itself (`proposer = target`).
 * **Eviction.** Written by the DS. Valid in a window creating epoch `n` if
-  the registry holds `policy_hash`, the policy object hashes to it, and the
-  target's leaf key has not changed for more than `max_idle_epochs`:
-  `n - updated > max_idle_epochs`.
-* **EvictionPolicy.** Signed by an admin of the previous epoch.
+  the registry holds `policy_hash`, the policy object hashes to it, sets
+  `max_idle_epochs`, and the target's leaf key has not changed for more
+  than that: `n - updated > max_idle_epochs`.
+* **GroupPolicy.** Signed by an admin of the previous epoch, or by the
+  creator at genesis. It says whether the group is open and after how long
+  an idle member may be evicted. A group without policy is closed and
+  evicts nobody.
 * **UpdateRequest** and **ReEntryRequest.** Signed with the member's device
   key. `replaces := kem_pk_hash(current leaf key)`: the request is valid
   only while that key is the member's leaf key, so it applies once and
@@ -310,6 +329,25 @@ Checkpoint     := ["city-g/checkpoint/v4", gid, epoch, interim, tree_hash,
 
 Decoding checks encodings and key lengths only; signatures are checked by
 whoever the rules of sections 10, 14 and 15 name.
+
+### 6.1 Open and closed groups
+
+A group is *closed* unless the group policy in force opens it. The registry
+binds the policy's hash and the admission mode (section 8), so every member
+knows the mode, and the mode changes only by a new policy signed by an admin
+(section 12.2). In an open group:
+
+* a device joins with its own signed request and no admission; nothing
+  else about joining changes (placement, welcomes, anchoring);
+* when no member is online, any new device can be the entrant of a window,
+  including one the DS controls (section 12.7);
+* the checks of sections 10 and 15 skip the admission of a join that has
+  none, and keep all others: signatures, the device not already a member,
+  the token unused, the request not expired.
+
+The joiner of an open group trusts an admin key from the group's public
+link to check checkpoints (section 12.9). Nothing in an open group is signed
+per join by an admin.
 
 <a id="7-rekey"></a>
 ## 7. Re-key
@@ -416,18 +454,21 @@ the child's key of that time, which is still its key.
 ## 8. Registry
 
 ```text
-RegistryHeader := [admins, devices_root, admissions_root, policy_hash or null]
+RegistryHeader := [admins, devices_root, admissions_root, policy_hash or null, open]
 registry_hash  := H_L("registry", [[[admin, admin_pk], ...], devices_root,
-                                   admissions_root, policy_hash or null])
+                                   admissions_root, policy_hash or null, open])
 ```
 
 * `admins`: occupancies of the admins with their device keys, in
   occupancy order;
 * `devices`: a sparse Merkle map from the `device_id` of every member to
   its occupancy;
-* `admissions`: a sparse Merkle map from the hash of every admission ever
-  used to the occupancy it admitted. Entries are never removed;
-* `policy_hash`: hash of the eviction policy in force, if any.
+* `admissions`: a sparse Merkle map from the token of every join ever
+  made (its admission's hash, or its request's hash without admission) to
+  the occupancy it admitted. Entries are never removed;
+* `policy_hash`: hash of the group policy in force, if any;
+* `open`: 1 if the policy in force opens the group, else 0 (a group without
+  policy is closed).
 
 Members keep the header; the DS and committers keep the maps.
 
@@ -454,11 +495,11 @@ MUST be rejected.
 1. every removed or evicted member leaves `devices`, and `admins` if it
    was an admin;
 2. every join adds `device_id -> [leaf, n]` to `devices` and
-   `admission_hash -> [leaf, n]` to `admissions`. The device MUST NOT be
-   in `devices` before the window, and neither the device nor the
-   admission MAY appear twice in the window or be in the maps already;
-3. an eviction policy in the seal body, signed by an admin of epoch
-   `n - 1`, sets `policy_hash`;
+   `token -> [leaf, n]` to `admissions`. The device MUST NOT be in
+   `devices` before the window, and neither the device nor the token MAY
+   appear twice in the window or be in the maps already;
+3. a group policy in the seal body, signed by an admin of epoch `n - 1`,
+   sets `policy_hash` and `open`;
 4. if no admin is left, the sealer becomes admin, with its device key (the
    promotion rule of v0.3).
 
@@ -505,10 +546,13 @@ interim_transcript_hash_n := H_L("interim-transcript", [confirmed_transcript_has
 **Genesis.** The creator draws a nonce and computes `gid`. The tree has
 height 1: the creator at leaf 0 (`since = 0`, `admission_hash = ZERO32`)
 and the root `(1, 0)`, keyed from a fresh secret with the creator's
-taint. The registry has the creator as admin and its device in `devices`.
-`init_-1 = ZERO32`. The genesis seal (kind 0, section 10.4) carries in its
-body `[nonce, creator_pk, encryption_key, root_pk]`; the DS rebuilds the
-state from it and checks the hashes, `gid` and the signature.
+taint. The registry has the creator as admin and its device in `devices`,
+and the group policy the creator chose, if any (an open group has one from
+genesis). `init_-1 = ZERO32`. The genesis seal (kind 0, section 10.4)
+carries in its body `[nonce, creator_pk, encryption_key, root_pk]` and that
+policy, signed by the creator as admin `[0, 0]`; the DS rebuilds the state
+from it and checks the hashes, `gid`, the policy's signature and the seal's
+signature.
 
 <a id="10-windows"></a>
 ## 10. Windows: district commits and seals
@@ -584,7 +628,7 @@ SealHeader := ["city-g/seal/v4", gid, epoch, prev_interim, kind, sealer, height,
                district_bits, tree_hash, registry_hash, body_hash, time_ms,
                [kem_output, request_ref] or null]
 SealBody   := ["city-g/seal-body/v4", [[district, H(district commit)], ...],
-               city_nodes, city_wraps, eviction_policy or null,
+               city_nodes, city_wraps, group_policy or null,
                [nonce, creator_pk, encryption_key, root_pk] or null]
 Seal       := [SealHeader, SealBody, confirmation_tag, external_pk, signature]
 
@@ -632,7 +676,8 @@ check it (section 12.2).
 * **Entrant windows (kind 2).** The entrant's request MUST be a join or a
   re-entry among the window's changes. The sealer is the entrant: for a
   join, `[leaf, n]` where `leaf` is the join's leaf, with the key of the
-  join request, whose signature and admission MUST be checked; for a
+  join request, whose signature and admission (none, in an open group) MUST
+  be checked; for a
   re-entry, the member's occupancy and device key, and the request's
   signature MUST be checked. Every district commit of the window is by the
   entrant.
@@ -642,7 +687,7 @@ check it (section 12.2).
 The tree grows to the window's height; changed leaves take their new
 state; every node of a district commit takes its new key (or becomes
 blank) with the committer's taint, and every city node with the sealer's;
-the registry changes (section 8); the eviction policy of the body, if any,
+the registry changes (section 8); the group policy of the body, if any,
 comes into force; the epoch, interim transcript hash, external key and
 time are those of the seal.
 
@@ -707,7 +752,11 @@ of epoch `n - 1`:
 1. checks `gid`, `epoch = n`, `prev_interim` (its interim transcript hash)
    and `district_bits`; the height is not below its own;
 2. rebuilds the registry header from the update and checks it hashes to the
-   header's `registry_hash`;
+   header's `registry_hash`. If the policy changed, the update carries the
+   new policy object: it MUST hash to the new `policy_hash`, match the new
+   `open` flag, and be signed by an admin of epoch `n - 1`; if the policy
+   did not change, `open` MUST NOT change either. So a closed group cannot
+   be opened, even by a sealer that colludes with the DS;
 3. takes `init_n-1`: its own for kind 1; for kind 2, the external init
    secret recovered from `kem_output` with its external key;
 4. takes its leaf key: the current one, or the pending one if the packet
@@ -717,8 +766,8 @@ of epoch `n - 1`:
    confirmation tag;
 6. for kind 2 only, rebuilds the seal proof with the external key it
    derived and checks the entrant evidence against its header of epoch
-   `n - 1` (section 13.2): the entrant's request, its admission or its
-   leaf, and the seal signature;
+   `n - 1` (section 13.2): the entrant's request, its admission (none in an
+   open group) or its leaf, and the seal signature;
 7. only then replaces its state.
 
 A member that cannot derive its path (a blank ancestor, a wrap it cannot
@@ -798,11 +847,13 @@ a DS that leaks later, not one that colludes now.
 ### 12.9 Joining
 
 1. **Anchor.** The joiner trusts the anchor key of its admission (section
-   6). It obtains a checkpoint signed with that key, and from the DS the
-   registry header and external key of the checkpointed epoch, which it
-   checks against the checkpoint (`registry_hash`, `external_pk_hash`).
+   6), or, for an open group, an admin key from the group's public link. It
+   obtains a checkpoint signed with that key by an admin of the
+   checkpointed registry, and from the DS the registry header and external
+   key of the checkpointed epoch, which it checks against the checkpoint
+   (`registry_hash`, `external_pk_hash`).
 2. **Request.** It draws a leaf key and a one-time init key and records a
-   join request.
+   join request, with its admission or, in an open group, without one.
 3. **Chain of seals.** For every window from the checkpoint to the one it
    enters, it follows the seal link (section 13.3): the seal is signed by a
    member of the previous epoch, shown by a leaf proof against the previous
@@ -810,7 +861,7 @@ a DS that leaks later, not one that colludes now.
    chain from the checkpoint.
 4. **Entry.** For the window that places it, it receives an entry (section
    13.4): its leaf proof against the new tree hash, which MUST show its
-   device key, its leaf key and its admission at `[leaf, n]`; the parents of
+   device key, its leaf key and its token at `[leaf, n]`; the parents of
    its path, checked against that proof; the steps of its path, from which
    it recovers its path secrets (section 7.4) and checks each against its
    node's key; and its welcome, whose joiner secret MUST reproduce the
@@ -834,6 +885,22 @@ A member that missed windows has three ways back (E-8):
   no member online, it seals the window itself as an entrant (section
   12.7).
 
+### 12.11 Seeing who joined
+
+Every join is a change of a district commit that the seal lists. A member
+that holds the seal of an epoch it accepted can list the devices that
+window let in: it checks that the seal hashes to its transcript, that the
+body hashes to `body_hash`, that the body lists exactly the district
+commits it was given, and that each join's request hashes to its reference.
+In an open group this is how members see the devices of strangers, the DS's
+included. A device can never take a member's place: it cannot sign with the
+member's device key (a request claiming that key fails its signature), and
+a device key already in `devices` cannot join again.
+
+The protocol has no names. A client that shows names MUST bind each name
+to a device key and show when a name appears with another key, as when a
+contact's safety number changes.
+
 <a id="13-packets"></a>
 ## 13. Packets, seal links and entries
 
@@ -846,8 +913,9 @@ The packet of member `m` for the window creating epoch `n` holds:
 
 * the seal header and the confirmation tag;
 * for kind 2, the seal signature and the entrant evidence (section 13.2);
-* the registry update: the new roots and policy hash, and the admins only
-  when they changed;
+* the registry update: the new roots, policy hash and `open` flag, the
+  admins only when they changed, and the new group policy object when the
+  window set one;
 * `kem_pk_hash` of `m`'s leaf key after the window;
 * the steps of `m`'s path (section 7.4): for each ancestor the window
   re-keyed, the wrap to the child toward `m`, or `Chain`.
@@ -859,11 +927,12 @@ for 2,000 changes among 16,384 members, and 8.3 KB for 4,000 among 65,536.
 ### 13.2 Entrant evidence
 
 * For a joiner: its join request, and proofs against the registry of epoch
-  `n - 1` that its device is not in `devices` and its admission not in
+  `n - 1` that its device is not in `devices` and its token not in
   `admissions`. A verifier checks the request's reference in the header,
-  `sealer.since = n`, the request's signature and admission against the
-  admins of epoch `n - 1`, both proofs, and the seal signature under the
-  request's device key.
+  `sealer.since = n`, the request's signature and validity, its admission
+  against the admins of epoch `n - 1` (or, without admission, that the
+  group of epoch `n - 1` is open), both proofs, and the seal signature
+  under the request's device key.
 * For a re-entering member: its re-entry request and its leaf proof against
   the tree hash of epoch `n - 1`. A verifier checks the request's reference,
   that the member is the sealer and is at the proven leaf, that `replaces`
@@ -873,15 +942,17 @@ for 2,000 changes among 16,384 members, and 8.3 KB for 4,000 among 65,536.
 ### 13.3 Seal links
 
 A seal link holds the seal proof, the sealer evidence (the sealer's leaf
-proof against the previous tree hash, or the entrant evidence) and the
-registry header after the window. Following a link from the header of
+proof against the previous tree hash, or the entrant evidence), the
+registry header after the window, and the group policy object if the
+window set one. Following a link from the header of
 epoch `n - 1`:
 
 1. `gid`, `epoch = n`, `prev_interim`, `district_bits`, height not below;
 2. kind 1: the leaf proof checks against the previous tree hash and shows
    the sealer; the seal signature checks under its device key. Kind 2: the
    entrant evidence (section 13.2). Other kinds are refused;
-3. the registry header hashes to `registry_hash`;
+3. the registry header hashes to `registry_hash`, and a change of policy
+   or of the `open` flag is checked as in section 12.2;
 4. the next header takes the seal's hashes, height and external key, and
    `interim = H_L("interim-transcript", [H_L("confirmed-transcript",
    [prev_interim, seal_hash]), tag])`.
@@ -904,16 +975,18 @@ that tree.
 
 The DS checks every request against the current state before recording it:
 
-* a join: its signature and admission (section 6), its device not a member,
-  its admission unused, no other queued join with the same device or
-  admission; for an invite, not expired and not used up (uses applied plus
-  uses queued);
+* a join: its signature and validity, its admission (none needed in an
+  open group, section 6.1), its device not a member, its token unused, no
+  other queued join with the same device or token; for an invite, not
+  expired and not used up (uses applied plus uses queued). In an open
+  group, the DS SHOULD also limit the rate of joins, since anyone can
+  request one;
 * a removal: its target is a member, the proposer may remove it, the
   signature; one per target;
 * an update or a re-entry: the member exists, `replaces` names its current
   key, the signature; the latest one per member;
 * a catch-up: the member exists, `prev_interim` is current, the signature;
-* an eviction policy: signed by an admin;
+* a group policy: signed by an admin;
 * a checkpoint: signed by an admin of the current registry, and matching
   the epoch it names.
 
@@ -927,10 +1000,11 @@ key), joins, catch-ups bound to the current epoch whose member the window
 does not affect, and the pending policy.
 
 What may have changed since a request was recorded is checked again, so
-that no committer is handed an entry it must refuse: an admission's expiry
-and its signer's admin status, a device or admission used meanwhile, a
-removal proposer's admin status, an eviction's policy and the member's
-`updated` epoch. Signatures are not checked again. Entries that fail are
+that no committer is handed an entry it must refuse: a request's and an
+admission's expiry, the admission's signer's admin status (or, without
+admission, that the group is still open), a device or token used
+meanwhile, a removal proposer's admin status, an eviction's policy and the
+member's `updated` epoch. Signatures are not checked again. Entries that fail are
 left out, and joins and catch-ups that can no longer be valid leave the
 queue.
 
@@ -998,9 +1072,9 @@ subtrees.
 
 ### 14.7 Eviction
 
-Under an eviction policy in force, the DS MAY queue an eviction of every
-member whose leaf key has not changed for more than `max_idle_epochs`
-(section 6). Without a policy it MUST NOT evict. Verifiers check the policy
+Under a group policy in force that sets `max_idle_epochs`, the DS MAY queue
+an eviction of every member whose leaf key has not changed for more than
+that (section 6). Otherwise it MUST NOT evict. Verifiers check the policy
 and the leaf's `updated` epoch.
 
 <a id="15-audits"></a>
@@ -1028,10 +1102,11 @@ against its header of the previous epoch. The verdict is:
 * an error, if the record's proofs do not check (nothing can be
   concluded);
 * *fraud*, if the entry fails the rules of section 6 or section 10.1: an
-  invalid signature or admission, a device already a member, an admission
-  already used, a target that is not the leaf's occupant, a `replaces` that
-  names another key, an eviction without policy or of a member not idle
-  long enough;
+  invalid signature or admission, a join without admission in a closed
+  group, an expired request, a device already a member, a token already
+  used, a target that is not the leaf's occupant, a `replaces` that names
+  another key, an eviction without policy or of a member not idle long
+  enough;
 * *valid* otherwise.
 
 **Sampling.** With `E` entries and `M` auditing members, each member audits
@@ -1094,7 +1169,7 @@ of wraps and new keys equals the count of the research cost model
 | `tree/parent` | `[content or null, left_hash, right_hash]` | 5.3 |
 | `smm/leaf` | `[key, occupancy]` | 8 |
 | `smm/node` | `[left, right]` | 8 |
-| `registry` | `[admins, devices_root, admissions_root, policy_hash or null]` | 8 |
+| `registry` | `[admins, devices_root, admissions_root, policy_hash or null, open]` | 8 |
 | `confirmed-transcript` | `[prev_interim, seal_hash]` | 9 |
 | `interim-transcript` | `[confirmed, confirmation_tag]` | 9 |
 
@@ -1104,7 +1179,7 @@ of wraps and new keys equals the count of the research cost model
 | --- | --- |
 | `ExpandLabel` / `DeriveSecret` / `KemKey` | `tree node key`, `tree path`, `fresh node`, `wrap key`, `wrap nonce`, `commit`, `joiner`, `epoch`, `init`, `msg`, `confirm`, `external`, `external kem`, `external init`, `welcome key`, `welcome nonce` |
 | Framing tags | `city-g/v0.4` (H_L), `city-g/v0.4 expand`, `city-g/v0.4 mac`; profile identifier `city-g/v0.4-draft` |
-| Encoded objects | `city-g/group-context/v4`, `city-g/invite/v4`, `city-g/admission/v4`, `city-g/join-request/v4`, `city-g/remove/v4`, `city-g/eviction/v4`, `city-g/eviction-policy/v4`, `city-g/update/v4`, `city-g/catch-up/v4`, `city-g/re-entry/v4`, `city-g/checkpoint/v4`, `city-g/district-commit/v4`, `city-g/seal/v4`, `city-g/seal-body/v4`, `city-g/welcome/v4` |
+| Encoded objects | `city-g/group-context/v4`, `city-g/invite/v4`, `city-g/admission/v4`, `city-g/join-request/v4`, `city-g/remove/v4`, `city-g/eviction/v4`, `city-g/group-policy/v4`, `city-g/update/v4`, `city-g/catch-up/v4`, `city-g/re-entry/v4`, `city-g/checkpoint/v4`, `city-g/district-commit/v4`, `city-g/seal/v4`, `city-g/seal-body/v4`, `city-g/welcome/v4` |
 
 ### 17.3 Signature contexts (FIPS 204 `ctx`)
 
@@ -1116,7 +1191,7 @@ of wraps and new keys equals the count of the research cost model
 | `city-g/catch-up/v4` | CatchUpRequest |
 | `city-g/re-entry/v4` | ReEntryRequest |
 | `city-g/checkpoint/v4` | Checkpoint |
-| `city-g/eviction-policy/v4` | EvictionPolicy |
+| `city-g/group-policy/v4` | GroupPolicy |
 | `city-g/invite/v2` | Invite (label `city-g/invite/v4`) |
 | `city-g/admission/v2` | Admission (label `city-g/admission/v4`) |
 | `city-g/join-request/v1` | JoinRequest (label `city-g/join-request/v4`) |
@@ -1132,10 +1207,23 @@ a normative profile MAY still give them contexts of their own.
 * **Windows sealed by an entrant.** The external public key is public, so
   the DS can compute a correct confirmation tag for a window it seals itself
   (model `external_tag_only.pv`). Members MUST check the entrant evidence of
-  every kind-2 window: an admin-signed admission never used and a device
-  not a member, or a re-entry signed by the member's device key, and the
-  seal signature under the entrant's key (`external_checked.pv`). The DS
-  refuses such a window too (section 10.5), but members cannot rely on it.
+  every kind-2 window: an admin-signed admission never used (or, in an open
+  group, none) and a device not a member, or a re-entry signed by the
+  member's device key, and the seal signature under the entrant's key
+  (`external_checked.pv`). The DS refuses such a window too (section 10.5),
+  but members cannot rely on it.
+* **Open groups.** Anyone can join an open group, so it has no
+  confidentiality against the DS or anyone else who joins: a device kept in
+  the group reads from its join on (`open_group.pv`). Epochs before that
+  join stay closed to it. What an open group keeps: joins are visible
+  (section 12.11); nobody can speak as a member, since messages and
+  requests are signed with the member's device key (`open_group.pv`);
+  removals, evictions and admin rights keep their rules; and the admission
+  mode changes only by an admin's policy, which members check themselves
+  (section 12.2). A DS that seals a window with a device of its own acts as
+  committer of every district: an invalid removal or update it places is
+  caught by audits, as any committer's (section 15), and its victim sees
+  it. Rate limits and abuse control belong to the DS and the application.
 * **Removed members and the external init.** Every member of epoch `n - 1`
   can recover the external init secret of window `n`, including the members
   the window removes. The new epoch is secret from them only because the
@@ -1192,6 +1280,8 @@ Before this draft could become a normative profile:
 * reports of wraps a member cannot open (the cover-failure reports of
   v0.3), so that a malicious committer cannot silently cut members off;
 * shrinking the tree; pruning the admission map;
+* for open groups, optional unique handles bound to device keys, so that a
+  name cannot move to another key without every client noticing;
 * newer checkpoints signed by later admins, so that a joiner holding an old
   checkpoint does not check a long chain;
 * a formal model of this draft; the research model checks the design
@@ -1211,5 +1301,6 @@ Before this draft could become a normative profile:
 | Checks of a following member | commit signature and the whole transition | the confirmation tag; entrant evidence for entrant windows |
 | Joining | checks the epoch it enters | checks the chain of seals from an admin checkpoint |
 | Coming back | Resync commit | replay, jump with a welcome, or re-entry |
+| Admission | every join needs an admission signed by an admin or an invite | closed groups: likewise, one admission per join; open groups: none, the device's own request is enough |
 | Eviction | none | by the DS, under an admin-signed policy |
 | Checking a wave | every member checks everything | split between the DS, committers, the sealer and sampled audits, with fraud proofs |

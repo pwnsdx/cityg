@@ -283,7 +283,8 @@ fn a_wave_on_a_full_group_matches_the_model() {
                 &device,
                 &KemSecret::generate(&mut rng).public_key(),
                 &KemSecret::generate(&mut rng).public_key(),
-                &admission,
+                epoch + 10,
+                Some(&admission),
                 &mut rng,
             )
             .unwrap();
@@ -403,8 +404,11 @@ fn a_wave_on_a_full_group_matches_the_model() {
         index.add(&commit.updates, &commit.wraps);
     }
     index.add(&sealed.seal.body.city_updates, &sealed.seal.body.city_wraps);
-    let registry =
-        RegistryUpdate::between(&state.registry.header().unwrap(), &sealed.header.registry);
+    let registry = RegistryUpdate::between(
+        &state.registry.header().unwrap(),
+        &sealed.header.registry,
+        None,
+    );
     let removed_set: HashSet<u32> = removed.iter().copied().collect();
     let mut sizes = Vec::new();
     let mut wrap_counts = Vec::new();
@@ -444,6 +448,7 @@ fn a_wave_on_a_full_group_matches_the_model() {
         proof: sealed.seal.proof(),
         sealer: SealerEvidence::Member(state.tree.leaf_proof(0).unwrap()),
         registry: sealed.header.registry.clone(),
+        policy: None,
     };
     println!(
         "seal link (chain from a checkpoint): {}",

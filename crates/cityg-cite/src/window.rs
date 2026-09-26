@@ -14,7 +14,7 @@ use cityg_core::hash::{Digest, ZERO32};
 
 use crate::commit::{Change, DistrictCommit, Seal, SealKind};
 use crate::crypto::kem_pk_hash;
-use crate::objects::{ChangeKind, EvictionPolicy, Request, device_id, group_id};
+use crate::objects::{ChangeKind, GroupPolicy, Request, device_id, group_id};
 use crate::registry::{Registry, RegistryDelta, RegistryHeader};
 use crate::rekey::{self, LeafChanges, NodeUpdate, growth_nodes, plan_city, plan_district};
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
@@ -49,8 +49,8 @@ pub struct PublicState {
     pub epoch: u64,
     pub tree: PublicTree,
     pub registry: Registry,
-    /// The eviction policy in force (its hash is in the registry).
-    pub policy: Option<EvictionPolicy>,
+    /// The group policy in force (its hash is in the registry).
+    pub policy: Option<GroupPolicy>,
     pub interim: Digest,
     pub external_pk: Vec<u8>,
     pub time_ms: u64,
@@ -106,19 +106,31 @@ impl PublicState {
             || !seal.body.districts.is_empty()
             || !seal.body.city_updates.is_empty()
             || !seal.body.city_wraps.is_empty()
-            || seal.body.policy.is_some()
         {
             return Err(CoreError::Invalid("genesis seal"));
         }
         cityg_core::identity::check_device_key(&genesis.creator_pk, "creator key")?;
         cityg_core::kem::validate_public_key(&genesis.encryption_key)?;
         cityg_core::kem::validate_public_key(&genesis.root_pk)?;
+        let policy = seal
+            .body
+            .policy
+            .as_deref()
+            .map(GroupPolicy::decode)
+            .transpose()?;
+        if let Some(policy) = &policy {
+            if policy.admin != creator {
+                return Err(CoreError::Invalid("genesis policy signer"));
+            }
+            policy.verify_signature(&header.gid, &genesis.creator_pk)?;
+        }
         let (tree, registry) = genesis_tree(
             &header.gid,
             header.district_bits,
             &genesis.creator_pk,
             &genesis.encryption_key,
             &genesis.root_pk,
+            policy.as_ref(),
         )?;
         if tree.tree_hash()? != header.tree_hash
             || registry.header()?.hash()? != header.registry_hash
@@ -133,7 +145,7 @@ impl PublicState {
             epoch: 0,
             tree,
             registry,
-            policy: None,
+            policy,
             interim: interim_transcript_hash(&confirmed, &seal.tag)?,
             external_pk: seal.external_pk.clone(),
             time_ms: header.time_ms,
@@ -161,14 +173,16 @@ impl PublicState {
     }
 }
 
-/// Tree and registry of a new group: the creator at leaf 0, admin, and the
-/// root keyed by it.
+/// Tree and registry of a new group: the creator at leaf 0, admin, the root
+/// keyed by it, and the group policy it chose, if any (a group without
+/// policy is closed).
 pub fn genesis_tree(
     gid: &Digest,
     district_bits: u8,
     creator_pk: &[u8],
     encryption_key: &[u8],
     root_pk: &[u8],
+    policy: Option<&GroupPolicy>,
 ) -> CoreResult<(PublicTree, Registry)> {
     let creator = Occupancy { leaf: 0, since: 0 };
     let mut tree = PublicTree::new(1, district_bits)?;
@@ -195,6 +209,7 @@ pub fn genesis_tree(
     delta
         .devices
         .insert(device_id(gid, creator_pk)?, Some(creator));
+    delta.policy = policy.map(|policy| (policy.hash(), policy.open));
     registry.apply(&delta);
     Ok((tree, registry))
 }
@@ -382,12 +397,12 @@ pub fn check_entry(
             if state.registry.device(&join.device_id()?).is_some() {
                 return Err(CoreError::Invalid("device already a member"));
             }
-            let admission_hash = join.admission.hash();
+            let admission_hash = join.token();
             if state.registry.admission(&admission_hash).is_some() {
                 return Err(CoreError::Invalid("admission already used"));
             }
             if entries {
-                join.verify(&state.gid, epoch, admins)?;
+                join.verify(&state.gid, epoch, admins, state.registry.is_open())?;
             }
             Ok(Some(LeafNode {
                 device_pk: join.device_pk.clone(),
@@ -516,12 +531,12 @@ pub fn check_district_commit(
 
 /// The registry changes of a window: joins enter the device and admission
 /// maps, removed members leave the device map and the admins, the seal may
-/// set the eviction policy, and the sealer becomes admin if none is left.
+/// set the group policy, and the sealer becomes admin if none is left.
 pub fn registry_delta(
     state: &PublicState,
     window: &WindowShape,
     requests: &Requests,
-    policy: Option<&EvictionPolicy>,
+    policy: Option<&GroupPolicy>,
     sealer: Occupancy,
     sealer_pk: &[u8],
 ) -> CoreResult<RegistryDelta> {
@@ -550,7 +565,7 @@ pub fn registry_delta(
             since: window.epoch,
         };
         let id = join.device_id()?;
-        let admission = join.admission.hash();
+        let admission = join.token();
         if state.registry.device(&id).is_some()
             || delta.devices.get(&id).is_some_and(Option::is_some)
         {
@@ -566,7 +581,7 @@ pub fn registry_delta(
     }
     if let Some(policy) = policy {
         policy.verify(&state.gid, state.registry.admins())?;
-        delta.policy = Some(policy.hash());
+        delta.policy = Some((policy.hash(), policy.open));
     }
     if state.registry.admins_with(&delta).is_empty() {
         delta.admins_added.insert(sealer, sealer_pk.to_vec());
@@ -624,7 +639,12 @@ pub fn check_sealer(
                     if occupancy != sealer {
                         return Err(CoreError::Invalid("entrant occupancy"));
                     }
-                    join.verify(&state.gid, window.epoch, state.registry.admins())?;
+                    join.verify(
+                        &state.gid,
+                        window.epoch,
+                        state.registry.admins(),
+                        state.registry.is_open(),
+                    )?;
                     Ok(SealerInfo {
                         occupancy,
                         device_pk: join.device_pk.clone(),
@@ -686,13 +706,54 @@ pub struct WindowOutcome {
     pub window: WindowShape,
     pub tree: TreeDelta,
     pub registry: RegistryDelta,
-    pub policy: Option<EvictionPolicy>,
+    pub policy: Option<GroupPolicy>,
     pub sealer: SealerInfo,
     pub seal_hash: Digest,
     pub interim: Digest,
     pub tag: Digest,
     pub external_pk: Vec<u8>,
     pub time_ms: u64,
+}
+
+/// The joins of a window, checked against its seal: the occupancy and
+/// device key of every device it let in. The body must hash to the header's
+/// `body_hash`, list exactly `commits`, and every join's request must hash
+/// to its reference.
+pub fn joins_of(
+    seal: &Seal,
+    commits: &[DistrictCommit],
+    requests: &Requests,
+) -> CoreResult<Vec<(Occupancy, Vec<u8>)>> {
+    if seal.body.hash()? != seal.header.body_hash {
+        return Err(CoreError::Invalid("seal body"));
+    }
+    let listed: Vec<(u32, Digest)> = commits
+        .iter()
+        .map(|commit| (commit.district, commit.hash()))
+        .collect();
+    if listed != seal.body.districts {
+        return Err(CoreError::Invalid("seal lists other district commits"));
+    }
+    let mut joins = Vec::new();
+    for change in commits.iter().flat_map(|commit| commit.changes.iter()) {
+        if change.kind != ChangeKind::Join {
+            continue;
+        }
+        let Some(Request::Join(join)) = requests.get(&change.request) else {
+            return Err(CoreError::Invalid("missing join request"));
+        };
+        if join.reference() != change.request {
+            return Err(CoreError::Invalid("join request"));
+        }
+        joins.push((
+            Occupancy {
+                leaf: change.leaf,
+                since: seal.header.epoch,
+            },
+            join.device_pk.clone(),
+        ));
+    }
+    Ok(joins)
 }
 
 /// Roots of the districts of a window after their commits: whether each is
@@ -807,7 +868,7 @@ pub fn check_window(
         .body
         .policy
         .as_deref()
-        .map(EvictionPolicy::decode)
+        .map(GroupPolicy::decode)
         .transpose()?;
     let registry = registry_delta(
         state,

@@ -78,8 +78,9 @@ impl SignatureContext {
     pub const RE_ENTRY: Self = Self(b"city-g/re-entry/v4");
     /// Draft profile v0.4: checkpoint of an epoch, signed by an admin.
     pub const CHECKPOINT: Self = Self(b"city-g/checkpoint/v4");
-    /// Draft profile v0.4: eviction policy of a group, signed by an admin.
-    pub const EVICTION_POLICY: Self = Self(b"city-g/eviction-policy/v4");
+    /// Draft profile v0.4: policy of a group (open or closed admission,
+    /// eviction of idle members), signed by an admin.
+    pub const GROUP_POLICY: Self = Self(b"city-g/group-policy/v4");
 
     /// Context bytes passed to FIPS 204 as `ctx`.
     #[must_use]
@@ -286,7 +287,7 @@ mod tests {
         SignatureContext::CATCH_UP,
         SignatureContext::RE_ENTRY,
         SignatureContext::CHECKPOINT,
-        SignatureContext::EVICTION_POLICY,
+        SignatureContext::GROUP_POLICY,
     ];
 
     #[test]

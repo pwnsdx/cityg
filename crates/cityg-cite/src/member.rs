@@ -28,7 +28,7 @@ use crate::commit::{
 };
 use crate::crypto::{Secret, commit_secret, fresh_secret, kem_pk_hash, node_key};
 use crate::objects::{
-    Admission, CatchUpRequest, Checkpoint, CheckpointContent, EvictionPolicy, Invite, JoinRequest,
+    Admission, CatchUpRequest, Checkpoint, CheckpointContent, GroupPolicy, Invite, JoinRequest,
     ReEntryRequest, RemoveProposal, Request, UpdateRequest, group_id,
 };
 use crate::packet::{Entry, Packet, SealLink};
@@ -78,16 +78,27 @@ impl core::fmt::Debug for Member {
 
 impl Member {
     /// Create a group: the creator at leaf 0, admin, in a tree of two leaves
-    /// with districts of `2^district_bits` leaves. Returns the creator and
-    /// the genesis seal.
+    /// with districts of `2^district_bits` leaves. An `open` group admits any
+    /// device without admission (its creator signs that policy at genesis);
+    /// otherwise every join needs an admission. Returns the creator and the
+    /// genesis seal.
     pub fn create(
         identity: DeviceIdentity,
         nonce: [u8; 32],
         district_bits: u8,
+        open: bool,
         time_ms: u64,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<(Self, Seal)> {
         let gid = group_id(identity.public_key(), &nonce)?;
+        let creator = Occupancy { leaf: 0, since: 0 };
+        let policy = if open {
+            Some(GroupPolicy::sign(
+                &gid, true, None, creator, &identity, rng,
+            )?)
+        } else {
+            None
+        };
         let leaf_key = KemSecret::generate(rng);
         let root_secret = fresh_secret(&ZERO32, rng)?;
         let root_pk = node_key(&root_secret)?.public_key();
@@ -97,8 +108,10 @@ impl Member {
             identity.public_key(),
             &leaf_key.public_key(),
             &root_pk,
+            policy.as_ref(),
         )?;
         let body = SealBody {
+            policy: policy.as_ref().map(|policy| policy.encoded().to_vec()),
             genesis: Some(Genesis {
                 nonce,
                 creator_pk: identity.public_key().to_vec(),
@@ -107,7 +120,6 @@ impl Member {
             }),
             ..SealBody::default()
         };
-        let creator = Occupancy { leaf: 0, since: 0 };
         let tree_hash = tree.tree_hash()?;
         let registry_header = registry.header()?;
         let header = SealHeader {
@@ -218,6 +230,21 @@ impl Member {
         self.path.leaf_public_key()
     }
 
+    /// The devices the window that created the current epoch let in, with
+    /// their occupancies, checked against the seal the member accepted: in
+    /// an open group, every join is visible to whoever looks.
+    pub fn window_joins(
+        &self,
+        seal: &Seal,
+        commits: &[DistrictCommit],
+        requests: &Requests,
+    ) -> CoreResult<Vec<(Occupancy, Vec<u8>)>> {
+        if seal.header.hash()? != self.seal_hash {
+            return Err(CoreError::Invalid("seal of another epoch"));
+        }
+        crate::window::joins_of(seal, commits, requests)
+    }
+
     /// Follow one window.
     pub fn process(&mut self, packet: &Packet) -> CoreResult<()> {
         let header = &packet.header;
@@ -234,7 +261,9 @@ impl Member {
             });
         }
         let shape = self.header.shape.grown(header.height)?;
-        let registry = packet.registry.apply(&self.header.registry);
+        let registry = packet
+            .registry
+            .apply(&self.header.gid, &self.header.registry)?;
         if registry.hash()? != header.registry_hash {
             return Err(CoreError::Invalid("registry header"));
         }
@@ -388,15 +417,18 @@ impl Member {
         )
     }
 
-    /// Sign an eviction policy (as an admin).
-    pub fn eviction_policy(
+    /// Sign a group policy (as an admin): whether the group is open, and
+    /// after how many epochs without a key update a member may be evicted.
+    pub fn group_policy(
         &self,
-        max_idle_epochs: u64,
+        open: bool,
+        max_idle_epochs: Option<u64>,
         rng: &mut impl CryptoRngCore,
-    ) -> CoreResult<EvictionPolicy> {
+    ) -> CoreResult<GroupPolicy> {
         self.require_admin()?;
-        EvictionPolicy::sign(
+        GroupPolicy::sign(
             &self.header.gid,
+            open,
             max_idle_epochs,
             self.occupancy,
             &self.identity,
@@ -708,11 +740,13 @@ impl core::fmt::Debug for Joiner {
 }
 
 impl Joiner {
-    /// A joiner with `admission`, anchored on `anchor` (a checkpointed
-    /// epoch, E-10).
+    /// A joiner anchored on `anchor` (a checkpointed epoch, E-10), with an
+    /// admission, or without one for an open group. Its request may enter
+    /// until epoch `not_after_epoch`.
     pub fn new(
         identity: DeviceIdentity,
-        admission: &Admission,
+        admission: Option<&Admission>,
+        not_after_epoch: u64,
         anchor: EpochHeader,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Self> {
@@ -723,6 +757,7 @@ impl Joiner {
             &identity,
             &leaf_key.public_key(),
             &init_key.public_key(),
+            not_after_epoch,
             admission,
             rng,
         )?;
@@ -764,7 +799,7 @@ impl Joiner {
             since: last.proof.header.epoch,
         };
         let expected = self.leaf_key.public_key();
-        let admission_hash = self.request.admission.hash();
+        let admission_hash = self.request.token();
         enter_with(
             EnterInput {
                 identity: self.identity,

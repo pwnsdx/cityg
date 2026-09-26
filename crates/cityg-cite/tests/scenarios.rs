@@ -148,6 +148,10 @@ mod forged {
         pub evidence: EntrantEvidence,
         pub index: WindowIndex,
         pub registry: cityg_cite::registry::RegistryHeader,
+        /// The device the forger joined, and the epoch's message secret, which
+        /// it knows.
+        pub forger: DeviceIdentity,
+        pub msg_secret: [u8; 32],
     }
 
     /// A district commit whose committer skipped the entry checks.
@@ -207,13 +211,17 @@ mod forged {
         (commit, drawn)
     }
 
-    pub fn forge(state: &PublicState, rng: &mut ChaCha20Rng) -> Forged {
+    /// `with_admission`: the forger signs an admission itself, claiming to
+    /// be the creator; otherwise its request carries none (as in an open
+    /// group).
+    pub fn forge(state: &PublicState, with_admission: bool, rng: &mut ChaCha20Rng) -> Forged {
         let forger = DeviceIdentity::generate(rng);
         let epoch = state.epoch + 1;
         let id = device_id(&state.gid, forger.public_key()).unwrap();
         let creator = Occupancy { leaf: 0, since: 0 };
-        let admission =
-            Admission::by_admin(&state.gid, &id, epoch + 10, creator, &forger, rng).unwrap();
+        let admission = with_admission.then(|| {
+            Admission::by_admin(&state.gid, &id, epoch + 10, creator, &forger, rng).unwrap()
+        });
         let leaf_key = KemSecret::generate(rng);
         let init_key = KemSecret::generate(rng);
         let join = JoinRequest::sign(
@@ -221,7 +229,8 @@ mod forged {
             &forger,
             &leaf_key.public_key(),
             &init_key.public_key(),
-            &admission,
+            epoch + 10,
+            admission.as_ref(),
             rng,
         )
         .unwrap();
@@ -289,20 +298,19 @@ mod forged {
         index.add(&sealed.seal.body.city_updates, &sealed.seal.body.city_wraps);
         let evidence = EntrantEvidence::Join {
             device: state.registry.device_proof(&id).unwrap(),
-            admission: state
-                .registry
-                .admission_proof(&join.admission.hash())
-                .unwrap(),
-            request: join,
+            admission: state.registry.admission_proof(&join.token()).unwrap(),
+            request: Box::new(join),
         };
         Forged {
             state: state.clone(),
             commits,
+            msg_secret: *sealed.secrets.msg_secret(),
             seal: sealed.seal,
             requests,
             evidence,
             index,
             registry: sealed.header.registry,
+            forger,
         }
     }
 
@@ -318,6 +326,7 @@ mod forged {
                 registry: RegistryUpdate::between(
                     &self.state.registry.header().unwrap(),
                     &self.registry,
+                    None,
                 ),
                 leaf_key: kem_pk_hash(leaf_pk).unwrap(),
                 path: self.index.steps(leaf, self.seal.header.height).unwrap(),
@@ -343,7 +352,7 @@ fn a_forged_external_epoch_is_rejected() {
     sim.request_joins(3);
     sim.run_window();
     let state = sim.ds.state().clone();
-    let forged = forged::forge(&state, &mut sim.rng);
+    let forged = forged::forge(&state, true, &mut sim.rng);
     let not_admin = cityg_core::error::CoreError::Unauthorized("admission signer is not an admin");
     // The delivery service's own check refuses it.
     assert_eq!(forged::check_rejects(&forged), not_admin);
@@ -662,7 +671,7 @@ fn the_delivery_service_evicts_only_under_an_admin_policy() {
     );
     // The admin sets a policy and refreshes its own key in the same window.
     let policy = sim.members[&common::CREATOR]
-        .eviction_policy(2, &mut sim.rng)
+        .group_policy(false, Some(2), &mut sim.rng)
         .unwrap();
     sim.ds.submit_policy(policy.clone(), sim.now).unwrap();
     let update = sim
@@ -777,7 +786,16 @@ fn audits_expose_a_committer_that_placed_an_invalid_join() {
             Admission::by_admin(&state.gid, &id, epoch + 10, as_admin, admitted_by, rng).unwrap();
         let leaf = KemSecret::generate(rng).public_key();
         let init = KemSecret::generate(rng).public_key();
-        JoinRequest::sign(&state.gid, &device, &leaf, &init, &admission, rng).unwrap()
+        JoinRequest::sign(
+            &state.gid,
+            &device,
+            &leaf,
+            &init,
+            epoch + 10,
+            Some(&admission),
+            rng,
+        )
+        .unwrap()
     };
     let bad = join(sim.members[&committer].identity(), committer, &mut sim.rng);
     let good = join(
@@ -899,7 +917,8 @@ fn invites_admit_joiners_up_to_their_uses_and_expiry() {
         let device = DeviceIdentity::generate(&mut sim.rng);
         let id = cityg_cite::objects::device_id(&invite.gid, device.public_key()).unwrap();
         let admission = Admission::with_invite(&invite, &seed, &id, 50, &mut sim.rng).unwrap();
-        let joiner = Joiner::new(device, &admission, anchor.clone(), &mut sim.rng).unwrap();
+        let joiner =
+            Joiner::new(device, Some(&admission), 50, anchor.clone(), &mut sim.rng).unwrap();
         let result = sim.ds.submit_join(joiner.request().clone(), at);
         if let Ok(reference) = result {
             sim.joiners.insert(reference, joiner);
@@ -934,7 +953,17 @@ fn joiners_check_the_chain_of_seals_from_their_checkpoint() {
         let admission = sim.members[&common::CREATOR]
             .admit(device.public_key(), anchor.epoch + 100, &mut sim.rng)
             .unwrap();
-        late.push(Joiner::new(device, &admission, anchor.clone(), &mut sim.rng).unwrap());
+        let not_after = anchor.epoch + 100;
+        late.push(
+            Joiner::new(
+                device,
+                Some(&admission),
+                not_after,
+                anchor.clone(),
+                &mut sim.rng,
+            )
+            .unwrap(),
+        );
     }
     for _ in 0..2 {
         sim.request_joins(1);
@@ -983,4 +1012,236 @@ fn joiners_check_the_chain_of_seals_from_their_checkpoint() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn an_open_group_admits_devices_without_any_admin_signature() {
+    use cityg_cite::objects::Request;
+
+    let mut sim = Sim::with_policy(2, 20, true);
+    assert!(sim.ds.state().registry.is_open());
+    sim.request_open_joins(3);
+    sim.run_window();
+    assert_eq!(sim.members.len(), 4);
+    sim.assert_agreement();
+    let stored = sim.ds.window(1).unwrap();
+    assert!(
+        stored
+            .requests
+            .values()
+            .all(|request| matches!(request, Request::Join(join) if join.admission.is_none()))
+    );
+    // A wave over several districts.
+    sim.request_open_joins(9);
+    let task = sim.run_window();
+    assert!(task.committers.len() >= 2);
+    assert_eq!(sim.members.len(), 13);
+    sim.assert_agreement();
+    // Every member sees who came in, checked against the seal it accepted.
+    let stored = sim.ds.window(sim.ds.epoch()).unwrap();
+    for member in sim.members.values() {
+        let joins = member
+            .window_joins(&stored.seal, &stored.commits, &stored.requests)
+            .unwrap();
+        assert_eq!(joins.len(), 9);
+    }
+    // A list the seal does not commit to is refused.
+    let mut fewer = stored.commits.clone();
+    fewer.pop();
+    assert!(
+        sim.member(common::CREATOR)
+            .window_joins(&stored.seal, &fewer, &stored.requests)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_closed_group_refuses_joins_without_admission() {
+    use cityg_cite::member::Joiner;
+    use cityg_core::error::CoreError;
+    use cityg_core::identity::DeviceIdentity;
+
+    let mut sim = Sim::new(2, 21);
+    sim.request_joins(2);
+    sim.run_window();
+    let anchor = sim.anchor();
+    let device = DeviceIdentity::generate(&mut sim.rng);
+    let joiner = Joiner::new(device, None, anchor.epoch + 100, anchor, &mut sim.rng).unwrap();
+    let refused = CoreError::Unauthorized("join without admission in a closed group");
+    assert_eq!(
+        sim.ds
+            .submit_join(joiner.request().clone(), sim.now)
+            .unwrap_err(),
+        refused
+    );
+    // Sealed by the delivery service itself as an entrant, the join is
+    // refused by the service's own check and by every member.
+    let state = sim.ds.state().clone();
+    let forged = forged::forge(&state, false, &mut sim.rng);
+    assert_eq!(forged::check_rejects(&forged), refused);
+    for member in sim.members.values_mut() {
+        let packet = forged.packet(member.occupancy().leaf, member.leaf_public_key());
+        assert_eq!(member.process(&packet).unwrap_err(), refused);
+    }
+}
+
+#[test]
+fn in_an_open_group_the_service_can_join_but_is_visible_and_cannot_pose_as_a_member() {
+    use cityg_cite::crypto::kem_pk_hash;
+    use cityg_cite::objects::{JoinRequest, UpdateRequest};
+    use cityg_cite::window::check_entry;
+    use cityg_core::cbor::{array, bytes, encode, text, uint};
+    use cityg_core::error::CoreError;
+    use cityg_core::kem::KemSecret;
+    use cityg_pqc::SignatureContext;
+
+    let mut sim = Sim::with_policy(2, 22, true);
+    sim.request_open_joins(3);
+    sim.run_window();
+    // With nobody online, the delivery service joins a device of its own
+    // and seals the window itself. In an open group that is a join like any
+    // other: the members accept it, and the service reads the new epoch.
+    let state = sim.ds.state().clone();
+    let forged = forged::forge(&state, false, &mut sim.rng);
+    cityg_cite::window::check_window(
+        &forged.state,
+        &forged.commits,
+        &forged.seal,
+        &forged.requests,
+        true,
+    )
+    .unwrap();
+    for member in sim.members.values_mut() {
+        let packet = forged.packet(member.occupancy().leaf, member.leaf_public_key());
+        member.process(&packet).unwrap();
+        assert_eq!(*member.msg_secret(), forged.msg_secret);
+    }
+    // It is visible: its device is among the window's joins, checked by
+    // every member against the seal it accepted.
+    let forger_pk = forged.forger.public_key().to_vec();
+    for member in sim.members.values() {
+        let joins = member
+            .window_joins(&forged.seal, &forged.commits, &forged.requests)
+            .unwrap();
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].1, forger_pk);
+    }
+    // It cannot pose as a member: a request in a member's name needs that
+    // member's device key.
+    let victim = *sim.members.keys().nth(1).unwrap();
+    let victim_leaf = state.tree.member(victim).unwrap().clone();
+    let gid = state.gid;
+    let epoch = state.epoch + 1;
+    let leaf = KemSecret::generate(&mut sim.rng).public_key();
+    let init = KemSecret::generate(&mut sim.rng).public_key();
+    let fields = vec![
+        text(cityg_cite::objects::JOIN_REQUEST_LABEL),
+        bytes(&gid),
+        bytes(&victim_leaf.device_pk),
+        bytes(&leaf),
+        bytes(&init),
+        uint(epoch + 10),
+        ciborium::value::Value::Null,
+    ];
+    let tbs = encode(&array(fields.clone())).unwrap();
+    let signature = forged
+        .forger
+        .sign(SignatureContext::JOIN_REQUEST, &tbs, &mut sim.rng)
+        .unwrap();
+    let mut signed = fields;
+    signed.push(bytes(&signature));
+    let posing = JoinRequest::decode(&encode(&array(signed)).unwrap()).unwrap();
+    assert_eq!(
+        posing
+            .verify(&gid, epoch, state.registry.admins(), true)
+            .unwrap_err(),
+        CoreError::BadSignature("join request")
+    );
+    assert_eq!(
+        check_entry(
+            &state,
+            epoch,
+            0,
+            &cityg_cite::objects::Request::Join(posing),
+            true
+        )
+        .unwrap_err(),
+        CoreError::Invalid("device already a member")
+    );
+    let update = UpdateRequest::sign(
+        &gid,
+        victim,
+        &victim_leaf.encryption_key,
+        &leaf,
+        &forged.forger,
+        &mut sim.rng,
+    )
+    .unwrap();
+    assert_eq!(
+        update.replaces,
+        kem_pk_hash(&victim_leaf.encryption_key).unwrap()
+    );
+    assert_eq!(
+        update.verify(&gid, &victim_leaf.device_pk).unwrap_err(),
+        CoreError::BadSignature("update request")
+    );
+}
+
+#[test]
+fn only_an_admin_policy_opens_a_group() {
+    use cityg_cite::objects::GroupPolicy;
+    use cityg_core::error::CoreError;
+
+    let mut sim = Sim::new(2, 23);
+    sim.request_joins(3);
+    sim.run_window();
+    let member = *sim.members.keys().nth(1).unwrap();
+    // A member that is not an admin cannot open the group.
+    assert!(
+        sim.members[&member]
+            .group_policy(true, None, &mut sim.rng)
+            .is_err()
+    );
+    let gid = *sim.member(member).gid();
+    let posing = GroupPolicy::sign(
+        &gid,
+        true,
+        None,
+        member,
+        sim.members[&member].identity(),
+        &mut sim.rng,
+    )
+    .unwrap();
+    assert_eq!(
+        sim.ds.submit_policy(posing, sim.now).unwrap_err(),
+        CoreError::Unauthorized("policy signer is not an admin")
+    );
+    // A member refuses a window that opens the group without the admins'
+    // policy, whoever sealed it.
+    sim.absent.insert(member);
+    sim.request_joins(1);
+    sim.run_window();
+    let mut packet = sim.ds.packet(sim.ds.epoch(), member).unwrap();
+    packet.registry.open = true;
+    assert_eq!(
+        sim.members
+            .get_mut(&member)
+            .unwrap()
+            .process(&packet)
+            .unwrap_err(),
+        CoreError::Invalid("admission mode changed without a policy")
+    );
+    sim.replay(member);
+    // The admin opens it.
+    let policy = sim.members[&common::CREATOR]
+        .group_policy(true, None, &mut sim.rng)
+        .unwrap();
+    sim.ds.submit_policy(policy, sim.now).unwrap();
+    sim.run_window();
+    assert!(sim.ds.state().registry.is_open());
+    assert!(sim.members.values().all(|m| m.header().registry.open));
+    sim.request_open_joins(2);
+    sim.run_window();
+    assert_eq!(sim.members.len(), 7);
+    sim.assert_agreement();
 }

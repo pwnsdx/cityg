@@ -49,8 +49,9 @@ expected for the sanity checks.
 | [`entrant_removal.pv`](entrant_removal.pv) | No member is online. M's removal is recorded; M had committed district 1 and knows everything of epoch 1, the external key included. J, admitted by an admin, seals window 2 as an entrant: it takes M's leaf, re-keys M's taints and seals with an external init that M can open. A checks J's admission and signature. | Proved: the removed M does not read epoch 2. |
 | [`external_tag_only.pv`](external_tag_only.pv) | The delivery service forges a window "sealed by an entrant" for A, who checks only the confirmation tag. | Attack: the external key is public, so the service computes the tag. |
 | [`external_checked.pv`](external_checked.pv) | The same forgery, with a device the service controls, for a member that also checks the entrant's admission and its signature of the seal. | Proved. |
+| [`open_group.pv`](open_group.pv) | An open group: a join needs no admission. A accepts a window sealed by any new device that signed it, whose key the new epoch binds for every member to see. B sends signed messages. | Attack, as expected: the delivery service joins a device of its own and reads what A sends (an open group gives no confidentiality against whoever joins it). Proved: it cannot make A accept a message as B's. |
 
-The results bear on five decisions:
+The results bear on six decisions:
 
 * **Taint rule.** Removing a member re-keys the nodes it tainted. Updating re-keys them too.
 * **Init chain.** Keeping it gives forward secrecy of past epochs even when a
@@ -64,6 +65,8 @@ The results bear on five decisions:
   removals included, when no member is online. Members then check the
   entrant's admission and signature: for such a window, the confirmation
   tag alone proves nothing against the delivery service.
+* **Open groups (E-14).** Without admissions, anyone can join, the
+  delivery service included; what it cannot do is speak as a member.
 
 ## Abstractions and limits
 

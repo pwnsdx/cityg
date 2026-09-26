@@ -9,7 +9,7 @@
 | Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French): lower bounds, related work, cost model, measured costs; [`research/formal/`](research/formal/README.md): symbolic model of the security choices |
 
 The research note says why this design and what it costs. This note
-records the decisions of the draft profile (E-1 to E-13), what each one
+records the decisions of the draft profile (E-1 to E-14), what each one
 costs, and what was left out.
 
 ## Starting point
@@ -178,16 +178,17 @@ signs a group object. When no member is online at the end of a window:
     `WINDOW_REMOVAL` still waiting. Since nobody sends while nobody is
     online, the removed member reads no message sent after its removal.
 * **Eviction policy.** The delivery service removes a member on its own
-  only under an admin-signed eviction policy, for a member whose leaf key
-  has not changed for longer than the policy allows. Verifiers check the
-  policy and the leaf.
+  only under the admin-signed group policy (E-14), for a member whose leaf
+  key has not changed for longer than the policy allows. Verifiers check
+  the policy and the leaf.
 
 **Why.** A group keeps admitting joiners and enforcing removals with no one
 online, and the server still reads nothing.
 
 **Cost.** In an entrant-sealed window, the tag alone no longer proves
 anything against the delivery service, because the external key is public.
-Every member checks the entrant's signature and admission for such windows.
+Every member checks the entrant's signature and admission for such windows
+(in an open group, a join needs no admission: E-14).
 Also, removal without any online participant cannot be cryptographic: it
 would take a non-interactive key agreement among the removed member's
 copath subtrees, which no practical construction provides.
@@ -216,8 +217,10 @@ latest wraps of every node.
 **Decision.** The registry holds three things:
 * the admins, as occupancies with their device keys;
 * two sparse Merkle maps: device ids to occupancies, and the hash of every
-  admission ever used to the occupancy it admitted;
-* the hash of the eviction policy, if any.
+  admission ever used (of the request, for a join without admission) to the
+  occupancy it admitted;
+* the hash of the group policy, if any, and whether the group is open
+  (E-14).
 
 The seal applies the map changes that follow from the window's changes,
 and the registry hash binds the map roots. An admission is good for one
@@ -234,10 +237,12 @@ join ever made, at the delivery service and committers.
 ### E-10 — Anchored joins
 
 **Decision.** An admin signs checkpoints: epoch, interim transcript hash,
-tree hash and time. An invite carries the latest checkpoint. A joiner checks
+tree hash and time. An invite carries the latest checkpoint; in an open
+group, the group's public link gives the admin key (E-14). A joiner checks
 the chain of seals from the checkpoint to its entry epoch. Each seal must be
 signed by a member of the previous epoch, shown by a leaf proof against the
-previous tree hash, or by an admitted entrant.
+previous tree hash, or by an admitted entrant (any new device, in an open
+group).
 
 **Why.** It closes the forked entry of v0.3 (specification section 2.3):
 `anchored_join.pv` is proved, and `join_without_anchor.pv` finds the attack.
@@ -291,6 +296,52 @@ when only a small tag is authenticated.
 
 **Cost.** The delivery service stores every window and serves a packet per
 member.
+
+<a id="e-14"></a>
+### E-14 — Open groups
+
+**Decision.** A group is closed unless its policy opens it. The policy is
+one object an admin signs, the creator at genesis or any admin later: it
+says whether the group is open, and how long a member may keep the same
+leaf key before it can be evicted (E-7). The registry holds its hash and
+the open flag, so every member knows the mode. A member accepts a change
+of mode only with the policy object, signed by an admin of the previous
+epoch.
+
+In an open group:
+* a device joins with its own signed request and no admission. The
+  admission map records the request's hash, so a request enters once, and
+  the request names its last epoch;
+* anyone can be the entrant of a window when no member is online,
+  including the delivery service;
+* the checks of E-12 skip the admission of a join that has none, and keep
+  the rest.
+
+**Why.** An admin cannot sign one admission per join in a public group of
+millions of members.
+
+**What stays.**
+* **Joins are visible.** Every join is in a district commit that the seal
+  lists. Any member can list the devices a window let in, checked against
+  the seal it accepted.
+* **No one can speak as a member.** Messages, removals, updates and
+  re-entries are signed with the member's device key. A device that claims
+  a member's key cannot sign its request: the key mismatch shows. A device
+  already in the group cannot join twice.
+* **Removals and evictions** still need an admin, the member itself, or the
+  admin's policy.
+* **A closed group stays closed.** The delivery service cannot open it,
+  and members refuse a sealer that tries.
+
+**Cost.**
+* An open group has no confidentiality against whoever joins it, the
+  delivery service included. The service can keep a device in the group
+  and read everything from then on (model `open_group.pv`). Epochs before
+  its join stay closed to it.
+* Anyone can join, so rate limits and abuse control belong to the delivery
+  service and the application.
+* Names are not in the protocol. A client that shows names must bind each
+  to a device key and warn when a name comes with another key.
 
 ## Parameters
 

@@ -19,7 +19,7 @@ use crate::commit::{Change, DistrictCommit, Seal, SealKind};
 use crate::crypto::{Wrap, kem_pk_hash};
 use crate::member::{CatchUps, PendingRemoval};
 use crate::objects::{
-    Authorizer, CatchUpRequest, ChangeKind, Checkpoint, Eviction, EvictionPolicy, JoinRequest,
+    Authorizer, CatchUpRequest, ChangeKind, Checkpoint, Eviction, GroupPolicy, JoinRequest,
     ReEntryRequest, RemoveProposal, Request, UpdateRequest,
 };
 use crate::packet::{
@@ -68,7 +68,7 @@ struct Queue {
     updates: Vec<Queued<UpdateRequest>>,
     re_entries: Vec<Queued<ReEntryRequest>>,
     catch_ups: Vec<Queued<CatchUpRequest>>,
-    policy: Option<Queued<EvictionPolicy>>,
+    policy: Option<Queued<GroupPolicy>>,
 }
 
 impl Queue {
@@ -141,6 +141,7 @@ pub struct StoredWindow {
     sealer: SealerEvidence,
     registry_before: RegistryHeader,
     registry: RegistryHeader,
+    policy: Option<GroupPolicy>,
     leaves: BTreeMap<u32, Option<LeafNode>>,
     entries: HashMap<Digest, EntryData>,
     welcomes: HashMap<Digest, Welcome>,
@@ -277,7 +278,7 @@ impl DeliveryService {
     }
 
     fn check_invite(&self, join: &JoinRequest, now_ms: u64) -> CoreResult<()> {
-        if let Authorizer::Invite(invite) = &join.admission.authorizer {
+        if let Some(Authorizer::Invite(invite)) = join.admission.as_ref().map(|a| &a.authorizer) {
             if now_ms > invite.expires_at_ms {
                 return Err(CoreError::Invalid("invite expired"));
             }
@@ -287,9 +288,9 @@ impl DeliveryService {
                 .queue
                 .joins
                 .iter()
-                .filter(|q| match &q.item.admission.authorizer {
-                    Authorizer::Invite(other) => other.invite_pk == invite.invite_pk,
-                    Authorizer::Admin(_) => false,
+                .filter(|q| match q.item.admission.as_ref().map(|a| &a.authorizer) {
+                    Some(Authorizer::Invite(other)) => other.invite_pk == invite.invite_pk,
+                    _ => false,
                 })
                 .count() as u64;
             if used + queued >= invite.max_uses {
@@ -309,10 +310,9 @@ impl DeliveryService {
             true,
         )?;
         let device = request.device_id()?;
-        let admission = request.admission.hash();
+        let token = request.token();
         if self.queue.joins.iter().any(|q| {
-            q.item.device_id().is_ok_and(|other| other == device)
-                || q.item.admission.hash() == admission
+            q.item.device_id().is_ok_and(|other| other == device) || q.item.token() == token
         }) {
             return Err(CoreError::Invalid("join already queued"));
         }
@@ -414,8 +414,8 @@ impl DeliveryService {
         Ok(reference)
     }
 
-    /// Record an eviction policy after checking it.
-    pub fn submit_policy(&mut self, policy: EvictionPolicy, now_ms: u64) -> CoreResult<()> {
+    /// Record a group policy after checking it.
+    pub fn submit_policy(&mut self, policy: GroupPolicy, now_ms: u64) -> CoreResult<()> {
         policy.verify(&self.state.gid, self.state.registry.admins())?;
         self.queue.policy = Some(Queued {
             item: policy,
@@ -430,13 +430,16 @@ impl DeliveryService {
         let Some(policy) = self.state.policy.clone() else {
             return Ok(0);
         };
+        let Some(max_idle) = policy.max_idle_epochs else {
+            return Ok(0);
+        };
         let epoch = self.next_epoch();
         let queued: BTreeSet<Occupancy> = self.queue.removal_targets().into_keys().collect();
         let idle: Vec<Occupancy> = self
             .state
             .tree
             .leaves()
-            .filter(|(_, leaf)| epoch.saturating_sub(leaf.updated) > policy.max_idle_epochs)
+            .filter(|(_, leaf)| epoch.saturating_sub(leaf.updated) > max_idle)
             .map(|(index, leaf)| leaf.occupancy(index))
             .filter(|occupancy| !queued.contains(occupancy))
             .collect();
@@ -494,19 +497,26 @@ impl DeliveryService {
         let admins = self.state.registry.admins();
         match request {
             Request::Join(join) => {
-                let admission = &join.admission;
-                let authorized = match &admission.authorizer {
-                    Authorizer::Admin(admin) => admins.get(admin) == Some(&admission.authorizer_pk),
-                    Authorizer::Invite(invite) => {
-                        admins.get(&invite.inviter) == Some(&invite.inviter_pk)
+                let authorized = match &join.admission {
+                    None => self.state.registry.is_open(),
+                    Some(admission) => {
+                        epoch <= admission.not_after_epoch
+                            && match &admission.authorizer {
+                                Authorizer::Admin(admin) => {
+                                    admins.get(admin) == Some(&admission.authorizer_pk)
+                                }
+                                Authorizer::Invite(invite) => {
+                                    admins.get(&invite.inviter) == Some(&invite.inviter_pk)
+                                }
+                            }
                     }
                 };
                 authorized
-                    && epoch <= admission.not_after_epoch
+                    && epoch <= join.not_after_epoch
                     && join
                         .device_id()
                         .is_ok_and(|id| self.state.registry.device(&id).is_none())
-                    && self.state.registry.admission(&admission.hash()).is_none()
+                    && self.state.registry.admission(&join.token()).is_none()
             }
             Request::Removal(proposal) => {
                 self.state.tree.is_member(proposal.target)
@@ -522,7 +532,9 @@ impl DeliveryService {
                         .member(eviction.target)
                         .zip(policy)
                         .is_some_and(|(leaf, policy)| {
-                            epoch.saturating_sub(leaf.updated) > policy.max_idle_epochs
+                            policy.max_idle_epochs.is_some_and(|max_idle| {
+                                epoch.saturating_sub(leaf.updated) > max_idle
+                            })
                         })
             }
             Request::Update(_) | Request::ReEntry(_) => true,
@@ -899,12 +911,9 @@ impl DeliveryService {
                 .ok_or(CoreError::Invalid("entrant seal"))?;
             SealerEvidence::Entrant(Box::new(match open.requests.get(&reference) {
                 Some(Request::Join(join)) => EntrantEvidence::Join {
-                    request: join.clone(),
+                    request: Box::new(join.clone()),
                     device: self.state.registry.device_proof(&join.device_id()?)?,
-                    admission: self
-                        .state
-                        .registry
-                        .admission_proof(&join.admission.hash())?,
+                    admission: self.state.registry.admission_proof(&join.token())?,
                 },
                 Some(Request::ReEntry(re_entry)) => EntrantEvidence::ReEntry {
                     request: re_entry.clone(),
@@ -979,7 +988,10 @@ impl DeliveryService {
         self.remove_applied(&open);
         for change in &open.task.changes {
             if let Some(Request::Join(join)) = open.requests.get(&change.request)
-                && let Authorizer::Invite(invite) = &join.admission.authorizer
+                && let Some(Authorizer::Invite(invite)) = join
+                    .admission
+                    .as_ref()
+                    .map(|admission| &admission.authorizer)
             {
                 *self.invite_uses.entry(invite.id()?).or_insert(0) += 1;
             }
@@ -994,6 +1006,7 @@ impl DeliveryService {
             sealer,
             registry_before,
             registry,
+            policy: outcome.policy.clone(),
             leaves: outcome.tree.leaves.clone(),
             entries,
             welcomes: HashMap::new(),
@@ -1120,7 +1133,11 @@ impl DeliveryService {
             header: header.clone(),
             tag: stored.seal.tag,
             entrant,
-            registry: RegistryUpdate::between(&stored.registry_before, &stored.registry),
+            registry: RegistryUpdate::between(
+                &stored.registry_before,
+                &stored.registry,
+                stored.policy.as_ref(),
+            ),
             leaf_key: kem_pk_hash(&leaf.encryption_key)?,
             path: stored.index.steps(member.leaf, header.height)?,
         })
@@ -1133,6 +1150,7 @@ impl DeliveryService {
             proof: stored.seal.proof(),
             sealer: stored.sealer.clone(),
             registry: stored.registry.clone(),
+            policy: stored.policy.clone(),
         })
     }
 
