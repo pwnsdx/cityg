@@ -20,11 +20,13 @@ with X25519) and ML-DSA-65.
 > [`cityg-core`](crates/cityg-core) with an in-memory delivery service. The
 > core implements stage 1 of the [v0.5 draft](docs/specs-v0.5-draft.md), a
 > delta on v0.4: members may read the tree by island through relays, and
-> removals are urgent or ordinary. It also implements stage 2, disputes
-> aside: the city is re-keyed by sub-city, the window's joiners perform
-> tasks first, the sealer draws nothing, entrants enter by island, and a
-> member that a faulty task cut off asks for a repair, which counts
-> against the performer to blame. The message plane, the
+> removals are urgent or ordinary. It also implements stage 2: the city is
+> re-keyed by sub-city, the window's joiners perform tasks first, the
+> sealer draws nothing, entrants enter by island, and a member that a
+> faulty task cut off asks for a repair, which counts against the
+> performer to blame, and disputes the faulty wrap; the delivery service
+> judges disputes with a proof system it is given, which the core does not
+> include. The message plane, the
 > networked
 > delivery service and the clients do not exist yet
 > ([specification, section 19](docs/specs.md#19-open-items)). There are no

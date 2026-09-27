@@ -438,9 +438,12 @@ asks for a repair, naming the first level of its path it cannot derive
 against the published keys; another member wraps the root secret to its
 leaf key, and the member updates. The DS counts each request against the
 performer whose taint that node bears, and gives no role to a performer
-that enough distinct members blamed: an exclusion without conviction,
-until disputes, whose proof system is still open, name the faulty
-performer.
+that enough distinct members blamed: an exclusion without conviction. A
+dispute convicts: the member proves in zero knowledge that the wrap does
+not open, or opens to a secret whose node key is not the published one,
+and the DS, which builds the statement from its own copy of the task,
+excludes the performer at once and keeps the dispute as evidence. The DS
+takes the proof system as a verifier; its circuits are still open.
 
 **Why.** In v0.4 the sealer re-keys the whole city: in a burst of 100,000
 joins and 100,000 departures at a million members, the heaviest role took
@@ -457,6 +460,10 @@ joiners stay online, and which members could not follow. A member can
 blame a performer without proof, once per performer: exclusion is a
 choice of the DS among performers, which binds no member and re-keys
 nothing, and fewer colluding members than the threshold exclude no one.
+Nor does a conviction re-key the performer's taints: it stays a member of
+the epoch, and its path gives it the root again. Its removal by an admin,
+on the evidence, re-keys them; a device whose key may have been stolen
+heals by its update.
 
 ## Parameters
 

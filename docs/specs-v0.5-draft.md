@@ -3,9 +3,9 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, disputes aside (sections 3.1 to 3.7, and the exclusion without conviction of section 3.8); stage 3 (section 4) is outlined, with its labels reserved. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is outlined, with its labels reserved. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
-| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2, disputes aside) |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2; the proof system of disputes is plugged in, not included) |
 | Design | [design.md](design.md) (decisions E-15 to E-17) |
 | Research | the three stages, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (section 3.6); îlots, relays and the maintained city, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (sections 2.4 to 2.8); urgent and ordinary removals and the parity profile, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md) (section 3); symbolic models of relays and îlots, [`research/formal-parity/`](research/formal-parity/README.md) (all research notes in French) |
 | Conformance | None yet: no test vectors (section 7) |
@@ -663,27 +663,74 @@ the next maker and drops the repair kept.
 
 ### 3.8 Disputes
 
-A member that cannot open a wrap addressed to it proves so without
-revealing its key or a past secret:
+A member that a wrap addressed to it cuts off proves the wrap faulty,
+without revealing its key or a past secret, and the DS convicts the
+performer that made it:
 
 ```text
-Dispute := ["city-g/dispute/v5", gid, epoch, task, wrap_index, branch, proof,
-            member, signature]
-  task   := H(district commit) or H(city task)
-  branch := 1 (the wrap does not open under the member's key in its context)
-          | 2 (it opens to a secret whose node key is not the published one)
+Dispute := ["city-g/dispute/v5", gid, epoch, seal_hash, member, task, wrap_index,
+            statement, proof]
+  seal_hash  := H(SealHeader) of the window that created epoch n
+  task       := H(district commit) or H(city task), listed in that seal
+  wrap_index := the wrap's index in the task's wraps
+  statement  := 1  the wrap does not open (branch 1)
+              | 2  its ciphertext's re-encryption differs: no X-Wing
+                   encapsulation gives that ciphertext
+              | 3  it opens to a secret whose node key differs from pk_v in its
+                   matrix seed or its X25519 key (branch 2, short)
+              | 4  it opens to a secret whose node key is not pk_v (branch 2)
+  proof      := a proof of the statement, at most 2^20 bytes; empty when the
+                public checks alone convict
 ```
 
-signed by the member under `DISPUTE`. `proof` is a zero-knowledge proof of
-the branch's statement, over the member's key and the wrap in its context
-(research notes on disputes: `litige-entier`, `litige-deux-branches`).
+signed by the member under `DISPUTE`. The statement's public inputs are
+public data of epoch `n`:
 
-* The DS checks the signature, that the wrap is addressed to a node the
-  member holds, and the proof. It then excludes the performer from tasks,
-  and the next window treats the performer as affected: it re-keys every
-  node the performer taints (v0.4 §10.2).
-* **Not fixed by this draft**: the proof system and the encoding of
-  `proof`. Until they are, a DS MAY exclude a performer on repair requests,
+```text
+DisputeStatement := ["city-g/dispute-statement/v5", statement, context, pk_t,
+                     kem_ciphertext, sealed, pk_v or null]
+  context := the wrap's context (v0.4 §7.2)
+  pk_t    := the key the wrap is addressed to: the member's leaf key, or the
+             published key of the node of its path that the wrap targets
+  pk_v    := the published key of the wrapped node, for statements 3 and 4
+```
+
+A proof binds its statement: the proof system's transcript absorbs the
+encoded `DisputeStatement` before it draws any challenge. The statements,
+their circuits and their costs are in the research notes on disputes
+(`litige-entier`, `litige-deux-branches`): with Longfellow, without setup,
+proofs of 573 to 787 KB that anyone can verify, proved in 1.4 to 3.7 s and
+verified in 1.0 to 2.3 s at the pace of a Pixel 9. Their witness is the
+member's key for `pk_t`; the member's seed and the wrapped secret stay out.
+
+* **Which statement.** The member computes everything in the clear, then
+  proves the first that holds: the re-encryption differs (2); the tag is
+  wrong (1); the node key differs in its matrix seed or its X25519 key (3);
+  it differs in `t` (4). Otherwise the wrap is good. A fault in a chained
+  step (v0.4 §7.3) names no wrap and has no statement yet: the member's
+  repair request blames its performer (section 3.7).
+* **Public checks.** Before any proof, the verifier checks that `ct_X`, the
+  ciphertext's X25519 part, is the canonical u-coordinate of a point of
+  prime order, and, for statements 3 and 4, that `pk_v` is canonical (the
+  FIPS 203 modulus check, and `pk_X` below `2^255 − 19`). No encapsulation
+  and no key generation gives anything else: a failed check convicts
+  without proof.
+* **The DS** checks the signature with the member's device key in the tree
+  of epoch `n`, that `seal_hash` is the latest window's and lists `task`,
+  and that the wrap exists and is addressed to the member's leaf or to a
+  node of its path. It builds the statement from its own copy of the task
+  and of the tree, and verifies. A DS without a verifier refuses disputes.
+* **A conviction** excludes the performer from every role at once,
+  whatever `repair_threshold` (below). The DS keeps the dispute with its
+  window and serves it to whoever asks: anyone can check it. An admin MAY
+  remove the performer on it (v0.4 §6); its removal re-keys every node it
+  tainted (v0.4 §10.2). A conviction re-keys nothing while the performer
+  stays: it is a member of the epoch, and its path gives it the root again.
+  A device whose key may have been stolen heals by its update, which
+  re-keys its leaf and its taints (v0.4 §12.6).
+* **Not fixed by this draft**: the proof system, that is the circuits of
+  the four statements, their serialized form and the encoding of `proof`.
+  Until a DS has a verifier, it MAY exclude a performer on repair requests,
   without conviction.
 
 **Exclusion without conviction.** The DS counts, for each performer, the
@@ -726,7 +773,7 @@ entrant (v0.4 §12.7).
   The sealer checks its path against the published keys (section 3.5), so
   a task that holds the root cannot make it seal an epoch that only its
   side of the tree follows. Repairs restore the cut-off members within the
-  window; disputes name the performer and the taint rule re-keys what it
+  window; disputes convict the performer, and its removal re-keys what it
   drew.
 * **Taints** follow performers, joiners included: removing or updating a
   performer re-keys every node it drew (E-4).
@@ -735,6 +782,13 @@ entrant (v0.4 §12.7).
   request only costs a repair, and counts once against a performer. The
   exclusion they lead to is the DS's choice of performers, not a verdict;
   disputes (section 3.8) are what convict.
+* **Disputes** reveal the fault and nothing else: the proof is
+  zero-knowledge in the member's key, and the statement names only public
+  data. A member convicts an honest performer only if its own key fails
+  to decrypt an honest ciphertext: at most `2^−121.2` per ciphertext for
+  the worst key the circuits admit (research note `litige-deux-branches`,
+  section 2). The DS builds the statement from its own copy of the task,
+  so that a member cannot convict on a wrap of its choosing.
 * **A joiner that commits a district** checks its entries as a member
   committer does, and audits name it as they name a member (v0.4 §15). A
   faulty joiner can place entries it should not, as a faulty member can in
@@ -834,8 +888,9 @@ Every object label of v0.4 ends in `/v5` instead of `/v4`:
 `city-g/re-entry/v5`, `city-g/checkpoint/v5`, `city-g/district-commit/v5`,
 `city-g/seal/v5`, `city-g/seal-body/v5`, `city-g/welcome/v5`, and the new
 unsigned `city-g/relay/v5`; for stage 2, `city-g/city-task/v5`,
-`city-g/repair-request/v5` and `city-g/dispute/v5` (signed) and
-`city-g/repair/v5` (unsigned).
+`city-g/repair-request/v5` and `city-g/dispute/v5` (signed),
+`city-g/repair/v5` (unsigned), and `city-g/dispute-statement/v5`, the
+encoding of a dispute's public inputs.
 
 The FIPS 204 context of every signed object is its label, as in v0.4
 §17.3; the seal is signed under `city-g/seal/v5`.
@@ -901,9 +956,11 @@ Nothing of v0.4 decodes under this draft: every label changed.
 * **Excluding on repairs.** The threshold, whether counts should decay or
   weigh the requester's own history (a member that asks in many windows),
   and when a DS should ask an excluded performer for an update.
-* **The proof system of disputes** (section 3.8): the statements are
-  measured in the research notes, in Longfellow; the encoding of `proof`,
-  its verifier in the DS, and the size limits remain to be fixed.
+* **The proof system of disputes** (section 3.8): the object, the public
+  inputs and the size limit are fixed, and the DS takes a verifier; the
+  circuits of the four statements (measured in Longfellow in the research
+  notes), their serialized form and the encoding of `proof` remain, as
+  does a statement for faults in chained steps.
 * **The formal models of stage 2**: hedges, city tasks bound to the state
   they build on, repairs and welcomes by members for joiner districts are
   modelled ([`formal/`](formal/README.md), `task_hedge*.pv`,

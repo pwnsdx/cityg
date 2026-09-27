@@ -14,7 +14,8 @@ use std::collections::BTreeSet;
 use cityg_core::commit::{
     CityTask, CityTaskContent, DistrictCommit, DistrictCommitContent, SealKind,
 };
-use cityg_core::crypto::wrap;
+use cityg_core::crypto::{Wrap, h, wrap};
+use cityg_core::dispute::{DisputeKind, DisputeStatement, DisputeVerifier};
 use cityg_core::ds::TopChoice;
 use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
@@ -26,6 +27,7 @@ use cityg_core::top::{RelayContext, RelayElement, Top};
 use cityg_core::tree::{CityPart, Divisions, NodeId, Occupancy};
 use cityg_core::window::{Requests, check_committer, check_sealer};
 use common::Sim;
+use rand_chacha::ChaCha20Rng;
 
 /// A group of `size` members with districts, islands and sub-cities of two.
 fn group(seed: u64, size: usize) -> Sim {
@@ -406,6 +408,30 @@ fn cut_off(sim: &mut Sim, commit: &DistrictCommit, victim: Occupancy) -> Distric
         .unwrap()
         .encryption_key
         .clone();
+    let (gid, epoch) = (commit.gid, commit.epoch);
+    tamper(sim, commit, victim, |wrapped, rng| {
+        *wrapped = wrap(
+            &gid,
+            epoch,
+            wrapped.node,
+            wrapped.target,
+            &victim_pk,
+            &[7; 32],
+            &[0; 32],
+            rng,
+        )
+        .unwrap();
+    })
+}
+
+/// `commit`, with the wrap of its first level to `victim`'s leaf changed by
+/// `change`, signed again by its committer.
+fn tamper(
+    sim: &mut Sim,
+    commit: &DistrictCommit,
+    victim: Occupancy,
+    change: impl FnOnce(&mut Wrap, &mut ChaCha20Rng),
+) -> DistrictCommit {
     let node = NodeId::of_leaf(victim.leaf, 1);
     let target = NodeId::leaf(victim.leaf);
     let mut wraps = commit.wraps.clone();
@@ -413,17 +439,7 @@ fn cut_off(sim: &mut Sim, commit: &DistrictCommit, victim: Occupancy) -> Distric
         .iter_mut()
         .find(|wrapped| wrapped.node == node && wrapped.target == target)
         .unwrap();
-    *slot = wrap(
-        &commit.gid,
-        commit.epoch,
-        node,
-        target,
-        &victim_pk,
-        &[7; 32],
-        &[0; 32],
-        &mut sim.rng,
-    )
-    .unwrap();
+    change(slot, &mut sim.rng);
     DistrictCommit::sign(
         DistrictCommitContent {
             gid: commit.gid,
@@ -441,6 +457,25 @@ fn cut_off(sim: &mut Sim, commit: &DistrictCommit, victim: Occupancy) -> Distric
         &mut sim.rng,
     )
     .unwrap()
+}
+
+/// A stand-in for a proof system: the proof of a statement is the hash of
+/// its encoding, which checks that the member and the service state the same
+/// public inputs. A real verifier runs the public checks and checks a
+/// zero-knowledge proof (docs/research/dispute-zk).
+struct StandIn;
+
+impl DisputeVerifier for StandIn {
+    fn verify(&self, statement: &DisputeStatement, proof: &[u8]) -> bool {
+        statement
+            .encode()
+            .is_ok_and(|encoded| h(&encoded).as_slice() == proof)
+    }
+}
+
+/// What the stand-in accepts as the proof of `statement`.
+fn stand_in_proof(statement: &DisputeStatement) -> Vec<u8> {
+    h(&statement.encode().unwrap()).to_vec()
 }
 
 #[test]
@@ -1266,4 +1301,163 @@ fn a_performer_two_members_blame_gets_no_role_until_pardoned() {
     sim.ds.pardon(faulty);
     assert!(!sim.ds.is_excluded(faulty));
     assert_eq!(sim.ds.blame(faulty), 0);
+}
+
+#[test]
+fn a_dispute_convicts_the_performer_of_a_faulty_wrap() {
+    let mut sim = group(76, 16);
+    sim.set_joiner_tasks(false);
+    let shape = sim.ds.state().tree.shape();
+    let gone = at(&sim, &[8, 12]);
+    let victims = at(&sim, &[9, 13]);
+    // The victims are offline, so that members commit their districts when
+    // their neighbours leave. One committer wraps another secret to the
+    // first victim, the other breaks the tag of its wrap to the second.
+    for victim in &victims {
+        sim.ds.set_online(*victim, false);
+    }
+    for target in &gone {
+        remove(&mut sim, *target);
+    }
+    let task = sim.open_window();
+    let districts: Vec<u32> = victims
+        .iter()
+        .map(|victim| shape.district_of(victim.leaf))
+        .collect();
+    let committers: Vec<Occupancy> = districts.iter().map(|d| task.committers[d]).collect();
+    let (_, requests, _) = sim.ds.open_window_data().unwrap();
+    let requests = requests.clone();
+    for (district, committer) in &task.committers {
+        let mut commit = sim.members[committer]
+            .commit_district(sim.ds.state(), &task, *district, &requests, &mut sim.rng)
+            .unwrap();
+        if *district == districts[0] {
+            commit = cut_off(&mut sim, &commit, victims[0]);
+        } else if *district == districts[1] {
+            commit = tamper(&mut sim, &commit, victims[1], |wrapped, _| {
+                wrapped.sealed[40] ^= 1;
+            });
+        }
+        sim.ds.submit_district_commit(commit).unwrap();
+    }
+    sim.perform_city_tasks(&task);
+    let seal = sim.seal_open(&task);
+    let epoch = sim.ds.submit_seal(seal).unwrap();
+    sim.absent.extend(victims.iter().copied());
+    sim.follow(epoch);
+    // Each victim finds the wrap it cannot use, the statement that holds,
+    // and the task that holds the wrap.
+    let mut claims = Vec::new();
+    for (victim, kind) in victims
+        .iter()
+        .zip([DisputeKind::KeyDiffersShort, DisputeKind::DoesNotOpen])
+    {
+        let whole = sim.ds.packet(epoch, *victim).unwrap();
+        assert!(
+            sim.members
+                .get_mut(victim)
+                .unwrap()
+                .process(&whole)
+                .is_err()
+        );
+        let (leaf, nodes) = sim.ds.path_proof(*victim).unwrap();
+        let (wrapped, statement) = sim.members[victim]
+            .dispute_claim(&whole, &leaf, &nodes)
+            .unwrap();
+        assert_eq!(statement.kind, kind);
+        assert_eq!(wrapped.target, NodeId::leaf(victim.leaf));
+        assert_eq!(statement.node_key.is_some(), kind.names_node_key());
+        let (task_hash, index) = sim.ds.wrap_origin(wrapped.node, wrapped.target).unwrap();
+        claims.push((*victim, whole, task_hash, index, statement));
+    }
+    let sign = |sim: &mut Sim, claim: usize, index: u32, proof: Vec<u8>| {
+        let (victim, whole, task_hash, _, statement) = &claims[claim];
+        sim.members[victim]
+            .dispute(whole, *task_hash, index, statement, proof, &mut sim.rng)
+            .unwrap()
+    };
+    let (_, _, _, index, statement) = &claims[0];
+    let dispute = sign(&mut sim, 0, *index, stand_in_proof(statement));
+    // A service without a proof system refuses disputes.
+    assert!(sim.ds.submit_dispute(&dispute).is_err());
+    sim.ds.set_dispute_verifier(Box::new(StandIn));
+    // A proof of another statement, or of a wrap off the member's path,
+    // convicts no one.
+    let mut other = statement.clone();
+    other.kind = DisputeKind::KeyDiffers;
+    let unproven = sign(&mut sim, 0, *index, stand_in_proof(&other));
+    assert!(sim.ds.submit_dispute(&unproven).is_err());
+    let missing = sign(&mut sim, 0, index + 100, stand_in_proof(statement));
+    assert!(sim.ds.submit_dispute(&missing).is_err());
+    // The sub-city task wraps its root to the victim's district and to the
+    // one beside it, which is off the victim's path.
+    let district_root = NodeId::of_leaf(victims[0].leaf, 1);
+    let beside = NodeId {
+        level: 1,
+        index: district_root.index ^ 1,
+    };
+    let (city_task, off_index) = sim
+        .ds
+        .wrap_origin(NodeId::of_leaf(victims[0].leaf, 2), beside)
+        .unwrap();
+    let (victim, whole, _, _, statement) = &claims[0];
+    let off_path = sim.members[victim]
+        .dispute(
+            whole,
+            city_task,
+            off_index,
+            statement,
+            stand_in_proof(statement),
+            &mut sim.rng,
+        )
+        .unwrap();
+    assert!(sim.ds.submit_dispute(&off_path).is_err());
+    assert!(!sim.ds.is_convicted(committers[0]));
+    // Nor does a dispute signed by another member in the victim's name.
+    let (_, whole, task_hash, index, statement) = &claims[0];
+    let forged = cityg_core::dispute::Dispute::sign(
+        cityg_core::dispute::DisputeContent {
+            gid: sim.ds.state().gid,
+            epoch,
+            seal_hash: whole.header.hash().unwrap(),
+            member: victims[0],
+            task: *task_hash,
+            wrap_index: *index,
+            kind: statement.kind,
+            proof: stand_in_proof(statement),
+        },
+        sim.members[&committers[1]].identity(),
+        &mut sim.rng,
+    )
+    .unwrap();
+    assert!(sim.ds.submit_dispute(&forged).is_err());
+    // The victims' disputes convict both committers, at once excluded.
+    assert_eq!(sim.ds.submit_dispute(&dispute).unwrap(), committers[0]);
+    let (_, _, _, index, statement) = &claims[1];
+    let second = sign(&mut sim, 1, *index, stand_in_proof(statement));
+    assert_eq!(sim.ds.submit_dispute(&second).unwrap(), committers[1]);
+    for committer in &committers {
+        assert!(sim.ds.is_convicted(*committer) && sim.ds.is_excluded(*committer));
+        assert_eq!(sim.ds.blame(*committer), 0);
+    }
+    // The disputes stay with the window, as evidence anyone can check.
+    let evidence = sim.ds.window(epoch).unwrap().disputes().to_vec();
+    assert_eq!(evidence, vec![dispute.clone(), second]);
+    assert_eq!(
+        cityg_core::dispute::Dispute::decode(dispute.encoded()).unwrap(),
+        dispute
+    );
+    // The next window gives them no role.
+    sim.request_joins(1);
+    let next = sim.open_window();
+    for committer in &committers {
+        assert!(next.committers.values().all(|c| c != committer));
+        assert!(next.city.values().all(|p| p != committer));
+        assert_ne!(next.sealer, *committer);
+    }
+    sim.ds.abort_window();
+    // Pardoned, they may take roles again; the evidence stays.
+    sim.ds.pardon(committers[0]);
+    assert!(!sim.ds.is_excluded(committers[0]));
+    assert_eq!(sim.ds.window(epoch).unwrap().disputes().len(), 2);
 }

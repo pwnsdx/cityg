@@ -727,6 +727,25 @@ impl MemberPath {
         )
     }
 
+    /// The secrets of levels 1 to `top` after `steps` (by level, with the
+    /// epoch of the window that made each); levels without a step keep the
+    /// member's.
+    pub fn follow_steps(
+        &self,
+        top: u8,
+        steps: &BTreeMap<u8, (u64, Step)>,
+        gid: &Digest,
+    ) -> CoreResult<PathSecrets> {
+        self.walk(
+            &self.path,
+            1,
+            top,
+            |level| steps.get(&level).map(|(epoch, step)| (*epoch, step)),
+            true,
+            gid,
+        )
+    }
+
     /// The whole path from the last step of every level, each from the
     /// window that last re-keyed the node (a join, a re-entry or a jump).
     pub fn recover(

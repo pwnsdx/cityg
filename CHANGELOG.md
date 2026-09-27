@@ -76,6 +76,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flat element, repair, nor a task it would take over (`is_excluded`,
   `pardon`). It binds no member and re-keys nothing; disputes are what
   convict.
+- **Disputes.** A member proves a wrap faulty with a signed `Dispute`
+  (`city-g/dispute/v5`, new signature context `DISPUTE`): the window's
+  seal, the task and the wrap's index, one of the four statements of the
+  research notes (the wrap does not open; its re-encryption differs; it
+  opens to a secret whose node key differs in its matrix seed or X25519
+  key; or in `t`), and a proof of at most 1 MiB. Its public inputs are a
+  `DisputeStatement` (`city-g/dispute-statement/v5`): the wrap's context,
+  the key it is addressed to, the ciphertext, the sealed secret and, for
+  the second branch, the published node key. `classify` tells the member
+  which statement holds, and `Member::dispute_claim` finds the wrap
+  (`cityg_core::dispute`). The delivery service takes the proof system as
+  a `DisputeVerifier` (`set_dispute_verifier`), finds a wrap's task
+  (`wrap_origin`), and judges a dispute (`submit_dispute`) on a statement
+  it builds from its own copy of the task and of the tree. A conviction
+  excludes the performer from every role at once (`is_convicted`), and the
+  dispute stays with its window as evidence (`StoredWindow::disputes`).
+  The specification drops the re-key of a convicted performer's taints:
+  it stays a member of the epoch, and its removal re-keys them. The
+  circuits, measured in the research notes, are not in the core.
 - **Delivery service.** Tasks go to the window's joiners first: each
   district to a joiner that takes one of its leaves, else to a joiner with
   no task, else to a volunteer; city tasks to joiners with no task, then to
@@ -113,7 +132,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a faulty commit cut off asks for its repair, naming its leaf's parent,
   is repaired by the member the service asks, then updates, while a
   bystander has nothing to ask; a performer that cut off two members gets
-  no role until pardoned.
+  no role until pardoned; two members dispute a wrap of another secret and
+  a wrap with a broken tag, and convict their committers, while a proof of
+  another statement, a wrap off the member's path, a missing wrap or a
+  dispute signed in another's name convict no one.
 - Symbolic model of stage 2 ([`docs/formal/`](docs/formal/README.md)): ten
   ProVerif scenarios, 33 in all. A device that hedges with its leaf seed,
   the coins of its encapsulations included, keeps a weak generator from

@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::audit::{AuditRecord, records};
 use crate::commit::{Change, CityTask, DistrictCommit, Seal, SealKind};
 use crate::crypto::{Digest, Wrap, ZERO32, kem_pk_hash};
+use crate::dispute::{Dispute, DisputeStatement, DisputeVerifier};
 use crate::error::{CoreError, CoreResult};
 use crate::member::{CatchUps, PendingRemoval};
 use crate::objects::{
@@ -205,6 +206,8 @@ pub struct StoredWindow {
     repairs: BTreeMap<u32, Repair>,
     /// The member asked for each leaf's repair, and how many were asked.
     repair_makers: BTreeMap<u32, (Occupancy, usize)>,
+    /// Disputes that convicted a performer of the window.
+    disputes: Vec<Dispute>,
 }
 
 impl StoredWindow {
@@ -239,6 +242,13 @@ impl StoredWindow {
     #[must_use]
     pub const fn top_task(&self) -> &TopTask {
         &self.top
+    }
+
+    /// The disputes that convicted a performer of the window: evidence that
+    /// anyone can check (docs/specs-v0.5-draft.md section 3.8).
+    #[must_use]
+    pub fn disputes(&self) -> &[Dispute] {
+        &self.disputes
     }
 
     /// Islands whose relay element or flat element was delivered.
@@ -278,6 +288,10 @@ pub struct DeliveryService {
     invite_uses: HashMap<Digest, u64>,
     /// The members that asked for repairs of nodes each performer drew.
     blamed: BTreeMap<Occupancy, BTreeSet<Occupancy>>,
+    /// Performers that a dispute convicted.
+    convicted: BTreeSet<Occupancy>,
+    /// The proof system that checks disputes, if the service has one.
+    verifier: Option<Box<dyn DisputeVerifier>>,
 }
 
 impl core::fmt::Debug for DeliveryService {
@@ -321,6 +335,8 @@ impl DeliveryService {
             checkpoints: Vec::new(),
             invite_uses: HashMap::new(),
             blamed: BTreeMap::new(),
+            convicted: BTreeSet::new(),
+            verifier: None,
         })
     }
 
@@ -1383,6 +1399,7 @@ impl DeliveryService {
             flats: BTreeMap::new(),
             repairs: BTreeMap::new(),
             repair_makers: BTreeMap::new(),
+            disputes: Vec::new(),
         });
         Ok(epoch)
     }
@@ -1534,19 +1551,145 @@ impl DeliveryService {
         self.blamed.get(&performer).map_or(0, BTreeSet::len)
     }
 
-    /// Whether the service gives `member` no role: `repair_threshold`
-    /// members asked for repairs of nodes it drew (docs/specs-v0.5-draft.md
-    /// section 3.8). An exclusion without conviction: it binds no member,
+    /// Whether the service gives `member` no role: a dispute convicted it,
+    /// or `repair_threshold` members asked for repairs of nodes it drew
+    /// (docs/specs-v0.5-draft.md section 3.8). The exclusion binds no member,
     /// and re-keys nothing.
     #[must_use]
     pub fn is_excluded(&self, member: Occupancy) -> bool {
-        self.config.repair_threshold > 0 && self.blame(member) >= self.config.repair_threshold
+        self.convicted.contains(&member)
+            || (self.config.repair_threshold > 0
+                && self.blame(member) >= self.config.repair_threshold)
     }
 
-    /// Lift the exclusion of `member`, and forget the requests counted
-    /// against it.
+    /// Whether a dispute convicted `performer`.
+    #[must_use]
+    pub fn is_convicted(&self, performer: Occupancy) -> bool {
+        self.convicted.contains(&performer)
+    }
+
+    /// Lift the exclusion of `member`: forget the requests counted against
+    /// it and its conviction. The disputes stay with their windows.
     pub fn pardon(&mut self, member: Occupancy) {
         self.blamed.remove(&member);
+        self.convicted.remove(&member);
+    }
+
+    /// Give the service the proof system that checks disputes
+    /// (docs/specs-v0.5-draft.md section 3.8); without one, it refuses them.
+    pub fn set_dispute_verifier(&mut self, verifier: Box<dyn DisputeVerifier>) {
+        self.verifier = Some(verifier);
+    }
+
+    /// The task of the latest window that holds the wrap of `node` to
+    /// `target`, and the wrap's index in it: what a dispute names.
+    pub fn wrap_origin(&self, node: NodeId, target: NodeId) -> CoreResult<(Digest, u32)> {
+        let stored = self.window(self.state.epoch)?;
+        let tasks = stored
+            .commits
+            .iter()
+            .map(|commit| (commit.hash(), &commit.wraps))
+            .chain(
+                stored
+                    .city_tasks
+                    .iter()
+                    .map(|task| (task.hash(), &task.wraps)),
+            );
+        for (hash, wraps) in tasks {
+            if let Some(index) = wraps
+                .iter()
+                .position(|wrapped| wrapped.node == node && wrapped.target == target)
+            {
+                let index = u32::try_from(index).map_err(|_| CoreError::Invalid("wrap index"))?;
+                return Ok((hash, index));
+            }
+        }
+        Err(CoreError::Invalid("no such wrap in the latest window"))
+    }
+
+    /// Judge a dispute of a wrap of the latest window, and return the
+    /// performer it convicts (docs/specs-v0.5-draft.md section 3.8). The
+    /// dispute must be signed by a member the service accepts from, for the
+    /// window's seal, and name a wrap of a task the seal lists, addressed to
+    /// the member's leaf or to a node of its path. The service builds the
+    /// statement from its own copy of the task and of the tree, and its
+    /// verifier checks it. A conviction excludes the performer from every
+    /// role at once; the dispute stays with its window as evidence.
+    pub fn submit_dispute(&mut self, dispute: &Dispute) -> CoreResult<Occupancy> {
+        // The fields the signature covers, whatever the caller changed.
+        let dispute = Dispute::decode(dispute.encoded())?;
+        let claim = &dispute.content;
+        let verifier = self
+            .verifier
+            .as_ref()
+            .ok_or(CoreError::Invalid("no dispute verifier"))?;
+        let epoch = self.state.epoch;
+        let stored = self.window(epoch)?;
+        if claim.epoch != epoch || claim.seal_hash != stored.seal.header.hash()? {
+            return Err(CoreError::Invalid("dispute of another window"));
+        }
+        let member = claim.member;
+        if !self.accepts_from(member) {
+            return Err(CoreError::Unauthorized("dispute"));
+        }
+        let leaf = self
+            .state
+            .tree
+            .member(member)
+            .ok_or(CoreError::Unauthorized("dispute"))?;
+        dispute.verify(&self.state.gid, &leaf.device_pk)?;
+        let (performer, wraps) = stored
+            .commits
+            .iter()
+            .find(|commit| commit.hash() == claim.task)
+            .map(|commit| (commit.committer, &commit.wraps))
+            .or_else(|| {
+                stored
+                    .city_tasks
+                    .iter()
+                    .find(|task| task.hash() == claim.task)
+                    .map(|task| (task.performer, &task.wraps))
+            })
+            .ok_or(CoreError::Invalid(
+                "dispute of a task the seal does not list",
+            ))?;
+        let wrapped = usize::try_from(claim.wrap_index)
+            .ok()
+            .and_then(|index| wraps.get(index))
+            .ok_or(CoreError::Invalid(
+                "dispute of a wrap the task does not hold",
+            ))?;
+        if wrapped.target != NodeId::of_leaf(member.leaf, wrapped.target.level) {
+            return Err(CoreError::Invalid(
+                "dispute of a wrap off the member's path",
+            ));
+        }
+        // `pk_t`, the key the wrap is addressed to, and `pk_v`, the published
+        // key of the wrapped node, from the tree of the epoch.
+        let pk_t = if wrapped.target.level == 0 {
+            &leaf.encryption_key
+        } else {
+            &self
+                .state
+                .tree
+                .parent(wrapped.target)
+                .ok_or(CoreError::Invalid("dispute of a wrap to a blank node"))?
+                .encryption_key
+        };
+        let pk_v = &self
+            .state
+            .tree
+            .parent(wrapped.node)
+            .ok_or(CoreError::Invalid("dispute of a wrap of a blank node"))?
+            .encryption_key;
+        let statement =
+            DisputeStatement::new(&self.state.gid, epoch, wrapped, pk_t, pk_v, claim.kind)?;
+        if !verifier.verify(&statement, &claim.proof) {
+            return Err(CoreError::Invalid("dispute not proven"));
+        }
+        self.convicted.insert(performer);
+        self.stored_mut(epoch)?.disputes.push(dispute);
+        Ok(performer)
     }
 
     /// The leaf of `member` and the parents of its path in the current tree,

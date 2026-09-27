@@ -87,6 +87,11 @@ names the check that backs it.
       window re-keyed on the member's path) and counts once per member
       against a performer; exclusion only withholds roles, and no rule a
       member checks depends on it (v0.5 draft, sections 3.7 and 3.8).
+- [ ] The DS builds a dispute's statement from its own copy of the task
+      and of the tree, never from the member's, checks that the wrap is
+      addressed to the member's leaf or a node of its path; its verifier
+      absorbs the whole encoded statement into the proof's transcript
+      (v0.5 draft, section 3.8).
 
 ## Claims
 

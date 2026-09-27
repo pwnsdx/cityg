@@ -35,13 +35,16 @@
 //! * an in-memory delivery service: queues, placement, roles, checks,
 //!   packets, recorded removals, eviction, audit records, repair requests
 //!   and the exclusion of performers they blame ([`ds`]);
-//! * audits of a window's entries and fraud proofs ([`audit`]).
+//! * audits of a window's entries and fraud proofs ([`audit`]);
+//! * disputes of faulty wraps, their public inputs and the interface of the
+//!   proof system that checks them ([`dispute`]).
 
 pub mod audit;
 pub mod cbor;
 mod codec;
 pub mod commit;
 pub mod crypto;
+pub mod dispute;
 pub mod ds;
 pub mod error;
 pub mod identity;

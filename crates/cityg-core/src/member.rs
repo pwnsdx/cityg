@@ -33,6 +33,7 @@ use crate::crypto::{
     Digest, Secret, Wrap, ZERO32, commit_secret, digest_eq, fresh_secret, kem_pk_hash, node_key,
     task_hedge,
 };
+use crate::dispute::{Dispute, DisputeContent, DisputeStatement, classify};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::DeviceIdentity;
 use crate::kem::KemSecret;
@@ -42,7 +43,7 @@ use crate::objects::{
     device_id, group_id,
 };
 use crate::packet::{Entry, EntrySteps, Packet, SealLink};
-use crate::rekey::{MemberPath, PathSecrets, WindowIndex};
+use crate::rekey::{MemberPath, PathSecrets, Step, WindowIndex};
 use crate::roles::{
     CityTaskInput, SealDraft, WelcomeKind, WindowTask, WindowWork, build_city_task, build_district,
     finish_seal, with_city,
@@ -70,6 +71,14 @@ pub struct PendingRemoval {
 
 /// Catch-up requests of a window, by reference.
 pub type CatchUps = HashMap<Digest, CatchUpRequest>;
+
+/// The first level of a member's path that a window does not let it
+/// derive, with the path and the steps it walked.
+struct Fault {
+    path: MemberPath,
+    steps: EntrySteps,
+    level: u8,
+}
 
 /// What [`Member::process`] returns for a packet that names a leaf key the
 /// member neither holds nor requested: an update or a re-entry was signed
@@ -995,6 +1004,122 @@ impl Member {
         nodes: &[Option<ParentNode>],
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<RepairRequest> {
+        let fault = self.fault(packet, leaf, nodes)?;
+        let header = &packet.header;
+        RepairRequest::sign(
+            &self.header.gid,
+            header.epoch,
+            &header.hash()?,
+            self.occupancy,
+            fault.level,
+            &self.identity,
+            rng,
+        )
+    }
+
+    /// What the member disputes in the window of `packet`, which it cannot
+    /// follow (docs/specs-v0.5-draft.md section 3.8): the wrap at the first
+    /// level of its path that the window does not let it derive, found as
+    /// for [`Member::repair_request`], and the statement that holds about it,
+    /// which the member's prover proves with its key for the wrap's target.
+    /// A fault in a chained step, or in a step of an earlier window, names
+    /// no wrap of the window.
+    pub fn dispute_claim(
+        &self,
+        packet: &Packet,
+        leaf: &LeafProof,
+        nodes: &[Option<ParentNode>],
+    ) -> CoreResult<(Wrap, DisputeStatement)> {
+        let fault = self.fault(packet, leaf, nodes)?;
+        let epoch = packet.header.epoch;
+        let wrapped = match fault.steps.get(&fault.level) {
+            Some((made, Step::Wrap(wrapped))) if *made == epoch => wrapped,
+            _ => return Err(CoreError::Invalid("the fault names no wrap of the window")),
+        };
+        let published = |level: u8| {
+            nodes
+                .get(usize::from(level) - 1)
+                .and_then(Option::as_ref)
+                .map(|node| node.encryption_key.as_slice())
+                .ok_or(CoreError::Invalid("blank ancestor of a member"))
+        };
+        let (key, target_key) = if fault.level == 1 {
+            (
+                fault.path.leaf_key().clone(),
+                fault.path.leaf_public_key().to_vec(),
+            )
+        } else {
+            let below = fault
+                .path
+                .follow_steps(fault.level - 1, &fault.steps, &self.header.gid)?;
+            let secret = below
+                .secret(fault.level - 1)
+                .ok_or(CoreError::Invalid("unknown path secret"))?;
+            (node_key(secret)?, published(fault.level - 1)?.to_vec())
+        };
+        let node_key_published = published(fault.level)?;
+        let kind = classify(
+            &self.header.gid,
+            epoch,
+            wrapped,
+            &key,
+            &target_key,
+            node_key_published,
+        )?
+        .ok_or(CoreError::Invalid("the wrap gives its published key"))?;
+        let statement = DisputeStatement::new(
+            &self.header.gid,
+            epoch,
+            wrapped,
+            &target_key,
+            node_key_published,
+            kind,
+        )?;
+        Ok((wrapped.clone(), statement))
+    }
+
+    /// Sign a dispute of the window of `packet`: the wrap at `wrap_index`
+    /// of the task whose hash is `task`, and `proof`, a proof of `statement`
+    /// (docs/specs-v0.5-draft.md section 3.8).
+    pub fn dispute(
+        &self,
+        packet: &Packet,
+        task: Digest,
+        wrap_index: u32,
+        statement: &DisputeStatement,
+        proof: Vec<u8>,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Dispute> {
+        let header = &packet.header;
+        if header.gid != self.header.gid || header.epoch != self.header.epoch + 1 {
+            return Err(CoreError::Invalid("packet for another epoch"));
+        }
+        Dispute::sign(
+            DisputeContent {
+                gid: self.header.gid,
+                epoch: header.epoch,
+                seal_hash: header.hash()?,
+                member: self.occupancy,
+                task,
+                wrap_index,
+                kind: statement.kind,
+                proof,
+            },
+            &self.identity,
+            rng,
+        )
+    }
+
+    /// The first fault of the member's path in the window of `packet`,
+    /// checked against the published keys of its path, which `leaf` and
+    /// `nodes` prove against the packet's tree hash; `packet` is the
+    /// member's whole packet, or its island packet with a refresh.
+    fn fault(
+        &self,
+        packet: &Packet,
+        leaf: &LeafProof,
+        nodes: &[Option<ParentNode>],
+    ) -> CoreResult<Fault> {
         let header = &packet.header;
         if header.gid != self.header.gid
             || header.prev_interim != self.header.interim
@@ -1031,20 +1156,12 @@ impl Member {
         match &packet.top {
             None => {}
             Some(Top::Refresh(refresh)) => steps.extend(refresh.clone()),
-            Some(_) => return Err(CoreError::Invalid("repair request without a path")),
+            Some(_) => return Err(CoreError::Invalid("a fault sought without a path")),
         }
         let level = path
             .first_fault(shape.height, &steps, nodes, &self.header.gid)?
             .ok_or(CoreError::Invalid("the window gives every key of the path"))?;
-        RepairRequest::sign(
-            &self.header.gid,
-            header.epoch,
-            &header.hash()?,
-            self.occupancy,
-            level,
-            &self.identity,
-            rng,
-        )
+        Ok(Fault { path, steps, level })
     }
 
     /// Whether the member may send in its epoch: not while an urgent

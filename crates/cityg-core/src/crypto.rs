@@ -203,7 +203,7 @@ pub struct Wrap {
     pub sealed: Vec<u8>,
 }
 
-fn wrap_context(
+pub(crate) fn wrap_context(
     gid: &Digest,
     epoch: u64,
     node: NodeId,
