@@ -1019,6 +1019,27 @@ impl LeafProof {
         Ok(())
     }
 
+    /// Check that `nodes` (by level, from 1) are the parents on the proven
+    /// path up to level `nodes.len()`, and `root` the root's node: what an
+    /// entry by island carries (docs/specs-v0.5-draft.md section 3.6).
+    pub fn check_island_path(
+        &self,
+        nodes: &[Option<ParentNode>],
+        root: &ParentNode,
+    ) -> CoreResult<()> {
+        let last = self.steps.last().ok_or(CoreError::Invalid("path nodes"))?;
+        if nodes.len() >= self.steps.len() || last.content != Some(root.content_digest()?) {
+            return Err(CoreError::Invalid("path nodes"));
+        }
+        for (node, step) in nodes.iter().zip(&self.steps) {
+            let content = node.as_ref().map(ParentNode::content_digest).transpose()?;
+            if content != step.content {
+                return Err(CoreError::Invalid("path nodes"));
+            }
+        }
+        Ok(())
+    }
+
     /// Size of the proof in bytes, as a deployment would send it (leaf
     /// encoding plus 64 bytes per level).
     pub fn encoded_len(&self) -> CoreResult<usize> {

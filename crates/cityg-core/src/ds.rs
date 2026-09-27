@@ -8,8 +8,9 @@
 //! an entrant (E-3, E-7, E-17): its district commits, its city tasks and
 //! its seal; checks what the roles send back, assigns the relays and flat
 //! elements of each window's islands (E-15), serves one packet per member,
-//! whole or by island (E-13, E-15), the chains of seals and the entries of
-//! joiners and returning members (E-8, E-10), keeps the latest wrap of
+//! whole or by island (E-13, E-15), or by repair (E-17), the chains of seals
+//! and the entries of joiners and returning members, whole or by island
+//! (E-8, E-10, E-17), keeps the latest wrap of
 //! every node, enforces recorded removals at delivery, evicts under an
 //! admin-signed policy, and keeps the records auditors sample (E-12).
 
@@ -25,14 +26,14 @@ use crate::objects::{
     ReEntryRequest, RemoveProposal, Request, UpdateRequest, Urgency,
 };
 use crate::packet::{
-    EntrantEvidence, EntrantProof, Entry, EntrySteps, Packet, RegistryUpdate, SealLink,
+    EntrantEvidence, EntrantProof, Entry, EntrySteps, EntryTop, Packet, RegistryUpdate, SealLink,
     SealerEvidence,
 };
 use crate::registry::RegistryHeader;
 use crate::rekey::{Step, WindowIndex};
 use crate::roles::{WelcomeKind, WelcomeTask, WindowTask, WindowWork};
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
-use crate::top::{RelayElement, Top, TopTask};
+use crate::top::{RelayElement, Repair, Top, TopTask};
 use crate::tree::{
     CityPart, LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode, Shape,
 };
@@ -195,6 +196,8 @@ pub struct StoredWindow {
     top: TopTask,
     relays: BTreeMap<u32, RelayElement>,
     flats: BTreeMap<u32, Wrap>,
+    /// Repairs of members a faulty task cut off, by leaf.
+    repairs: BTreeMap<u32, Repair>,
 }
 
 impl StoredWindow {
@@ -1363,6 +1366,7 @@ impl DeliveryService {
             top,
             relays: BTreeMap::new(),
             flats: BTreeMap::new(),
+            repairs: BTreeMap::new(),
         });
         Ok(epoch)
     }
@@ -1431,6 +1435,43 @@ impl DeliveryService {
         }
         stored.relays.insert(element.island, element);
         Ok(())
+    }
+
+    /// Keep a repair for the member at `repair.leaf`, made by `maker`, a
+    /// member the service accepts from (docs/specs-v0.5-draft.md section
+    /// 3.7). The service checks its addresses, not its content: unsigned,
+    /// like a flat element, a repair that does not lead to the tag only makes
+    /// the member ask again.
+    pub fn submit_repair(&mut self, maker: Occupancy, repair: Repair) -> CoreResult<()> {
+        if !self.accepts_from(maker) {
+            return Err(CoreError::Unauthorized("repair maker"));
+        }
+        let gid = self.state.gid;
+        let stored = self.stored_mut(repair.epoch)?;
+        if repair.gid != gid
+            || repair.wrap.node != stored.shape.root()
+            || repair.wrap.target != NodeId::leaf(repair.leaf)
+            || repair.wrap.sealed.len() != crate::crypto::SEALED_SECRET_BYTES
+        {
+            return Err(CoreError::Invalid("repair"));
+        }
+        stored.repairs.insert(repair.leaf, repair);
+        Ok(())
+    }
+
+    /// The packet of window `epoch` for `member` by repair: its header and
+    /// tag, no path, and the repair of its leaf.
+    pub fn repair_packet(&self, epoch: u64, member: Occupancy) -> CoreResult<Packet> {
+        let mut packet = self.packet(epoch, member)?;
+        let repair = self
+            .window(epoch)?
+            .repairs
+            .get(&member.leaf)
+            .cloned()
+            .ok_or(CoreError::Invalid("no repair for this leaf"))?;
+        packet.path.clear();
+        packet.top = Some(Top::Repair(repair));
+        Ok(packet)
     }
 
     /// Keep the flat elements of a sealed window from `member`, the
@@ -1753,7 +1794,52 @@ impl DeliveryService {
             steps: data.steps.clone(),
             leaf: data.leaf.clone(),
             nodes: data.nodes.clone(),
+            top: None,
         })
+    }
+
+    /// The entry of `request` by island (docs/specs-v0.5-draft.md section
+    /// 3.6): the steps and parents of its path up to its island root, the
+    /// root's node, and the relay element of its island, else its flat
+    /// element (as `choice` allows, like an island packet); with neither,
+    /// or no islands, the whole path.
+    pub fn island_entry(
+        &self,
+        request: &Digest,
+        anchor: u64,
+        choice: TopChoice,
+    ) -> CoreResult<Entry> {
+        let mut entry = self.entry(request, anchor)?;
+        let stored = self.window(entry.welcome.epoch)?;
+        let shape = stored.shape;
+        if !shape.has_islands() {
+            return Ok(entry);
+        }
+        let island = shape.island_of(entry.leaf.index);
+        let relay = stored
+            .relays
+            .get(&island)
+            .filter(|_| choice == TopChoice::Best)
+            .map(|relay| Top::Relay(relay.clone()));
+        let flat = stored
+            .flats
+            .get(&island)
+            .filter(|_| choice != TopChoice::Refresh)
+            .map(|flat| Top::Flat(flat.clone()));
+        let Some(top) = relay.or(flat) else {
+            return Ok(entry);
+        };
+        let root = entry
+            .nodes
+            .last()
+            .cloned()
+            .flatten()
+            .ok_or(CoreError::Invalid("blank root"))?;
+        let level = shape.island_level();
+        entry.steps.retain(|stepped, _| *stepped <= level);
+        entry.nodes.truncate(usize::from(level));
+        entry.top = Some(EntryTop { root, top });
+        Ok(entry)
     }
 
     /// Keep an admin's checkpoint after checking it against the epoch it

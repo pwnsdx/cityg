@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-//! City-G protocol core, profile `city-g/v0.5-draft`, stage 1 and the tasks
-//! of stage 2 (`docs/specs-v0.5-draft.md`, a delta on `city-g/v0.4`,
+//! City-G protocol core, profile `city-g/v0.5-draft`, stages 1 and 2 but
+//! disputes (`docs/specs-v0.5-draft.md`, a delta on `city-g/v0.4`,
 //! `docs/specs.md`): end-to-end encrypted groups of up to millions of
 //! members, whose tree is split into districts under a city of sub-cities
 //! and a top, re-keyed once per window by district commits and city tasks
@@ -27,8 +27,9 @@
 //! * the public state and the checked transition of a window ([`window`]);
 //! * what committers, performers of city tasks and sealers compute
 //!   ([`roles`]);
-//! * packets, seal links and entries ([`packet`]), and the top of an island
-//!   follower's path: relay elements, flat elements and refreshes ([`top`]);
+//! * packets, seal links and entries, whole or by island ([`packet`]), and
+//!   the top of an island follower's path: relay elements, flat elements,
+//!   refreshes, and repairs ([`top`]);
 //! * members, joiners and returning members, including windows an entrant
 //!   seals when no member is online ([`member`]);
 //! * an in-memory delivery service: queues, placement, roles, checks,

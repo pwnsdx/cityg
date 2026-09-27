@@ -111,45 +111,44 @@ fn updates_from(values: Vec<Value>) -> CoreResult<Vec<NodeUpdate>> {
         .collect()
 }
 
+/// A wrap as `[level, index, target_level, target_index, kem_ciphertext,
+/// sealed]`.
+pub(crate) fn wrap_value(wrapped: &Wrap) -> Value {
+    array(vec![
+        uint(u64::from(wrapped.node.level)),
+        uint(u64::from(wrapped.node.index)),
+        uint(u64::from(wrapped.target.level)),
+        uint(u64::from(wrapped.target.index)),
+        bytes(&wrapped.kem_ciphertext),
+        bytes(&wrapped.sealed),
+    ])
+}
+
+/// Parse a wrap.
+pub(crate) fn wrap_from(value: Value) -> CoreResult<Wrap> {
+    let items = expect_array(value, 6, "wrap")?;
+    let mut fields = Fields::new(items, "wrap");
+    let level = fields.u8()?;
+    let index = fields.u32()?;
+    let target_level = fields.u8()?;
+    let target_index = fields.u32()?;
+    Ok(Wrap {
+        node: NodeId { level, index },
+        target: NodeId {
+            level: target_level,
+            index: target_index,
+        },
+        kem_ciphertext: fields.bytes()?,
+        sealed: fields.bytes()?,
+    })
+}
+
 fn wraps_value(wraps: &[Wrap]) -> Value {
-    array(
-        wraps
-            .iter()
-            .map(|wrapped| {
-                array(vec![
-                    uint(u64::from(wrapped.node.level)),
-                    uint(u64::from(wrapped.node.index)),
-                    uint(u64::from(wrapped.target.level)),
-                    uint(u64::from(wrapped.target.index)),
-                    bytes(&wrapped.kem_ciphertext),
-                    bytes(&wrapped.sealed),
-                ])
-            })
-            .collect(),
-    )
+    array(wraps.iter().map(wrap_value).collect())
 }
 
 fn wraps_from(values: Vec<Value>) -> CoreResult<Vec<Wrap>> {
-    values
-        .into_iter()
-        .map(|value| {
-            let items = expect_array(value, 6, "wrap")?;
-            let mut fields = Fields::new(items, "wrap");
-            let level = fields.u8()?;
-            let index = fields.u32()?;
-            let target_level = fields.u8()?;
-            let target_index = fields.u32()?;
-            Ok(Wrap {
-                node: NodeId { level, index },
-                target: NodeId {
-                    level: target_level,
-                    index: target_index,
-                },
-                kem_ciphertext: fields.bytes()?,
-                sealed: fields.bytes()?,
-            })
-        })
-        .collect()
+    values.into_iter().map(wrap_from).collect()
 }
 
 /// The re-key of one district in a window, signed by its committer.

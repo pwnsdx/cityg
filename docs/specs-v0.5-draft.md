@@ -3,9 +3,9 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and its tasks are implemented, joiners as performers included (sections 3.1 to 3.5); stage 3 (section 4) is outlined, with its labels reserved. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, disputes aside (sections 3.1 to 3.7); stage 3 (section 4) is outlined, with its labels reserved. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
-| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stage 1; the tasks of stage 2) |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2, disputes aside) |
 | Design | [design.md](design.md) (decisions E-15 to E-17) |
 | Research | the three stages, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (section 3.6); îlots, relays and the maintained city, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (sections 2.4 to 2.8); urgent and ordinary removals and the parity profile, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md) (section 3); symbolic models of relays and îlots, [`research/formal-parity/`](research/formal-parity/README.md) (all research notes in French) |
 | Conformance | None yet: no test vectors (section 7) |
@@ -600,7 +600,9 @@ An entry (v0.4 §13.4) carries, instead of the whole path:
 
 The entrant takes `r_n` from the top and MUST check that the root's key
 derives from it (`KemKey(r_n, "tree node key")`). It then follows as an
-island follower. An entry with a refresh is the entry of v0.4.
+island follower. An entry with a refresh is the entry of v0.4. An entrant
+whose top does not open, from a relay that lied, keeps its state and asks
+for the next: the flat element, then its whole path.
 
 ### 3.7 Repairs
 
@@ -621,6 +623,8 @@ Repair := ["city-g/repair/v5", gid, epoch, leaf, wrap]
 * **After a repair**, the member holds `r_n` but no valid path: it MUST
   ask for an update at once (v0.4 §12.6), and follows by repair until the
   window of its update re-keys its path.
+* **The DS** keeps a repair with its window, and serves it as the top of
+  the member's packet, which then carries no steps.
 
 ### 3.8 Disputes
 
@@ -834,8 +838,9 @@ Nothing of v0.4 decodes under this draft: every label changed.
   entries carry the island path (stage 2).
 * **Encodings** of island packets and top tasks, and test vectors, as for
   the objects v0.4 leaves open (v0.4 §19).
-* **The rest of stage 2** in `cityg-core`: entries by island (section 3.6)
-  and repairs (section 3.7).
+* **Asking for repairs.** How a member tells the DS that it cannot follow,
+  and whom the DS asks for its repair; the in-memory DS keeps a repair from
+  any member it accepts.
 * **The proof system of disputes** (section 3.8): the statements are
   measured in the research notes, in Longfellow; the encoding of `proof`,
   its verifier in the DS, and the size limits remain to be fixed.

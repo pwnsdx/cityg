@@ -6,8 +6,10 @@
 //! from [`Packet`]s, checking the confirmation tag (and, for windows an
 //! entrant sealed, the entrant's signature and admission). A member may
 //! follow its whole path, or only its island path and the top of its path
-//! (a relay element, a flat element or a refresh: E-15); it then makes the
-//! relay and flat elements the delivery service asks of it. Any member may
+//! (a relay element, a flat element or a refresh: E-15), or, cut off by a
+//! faulty task, by repair until its update (E-17); it then makes the relay
+//! and flat elements, and the repairs, the delivery service asks of it.
+//! Any member may
 //! commit a district, perform a city task or seal a window from the public
 //! state the delivery service shows it, once it has checked that state
 //! against its header; a sealer draws nothing (E-17).
@@ -48,7 +50,7 @@ use crate::roles::{
 use crate::schedule::{
     EpochSecrets, GroupContext, confirmed_transcript_hash, external_init, interim_transcript_hash,
 };
-use crate::top::{RelayContext, RelayElement, Top, flat_element, open_flat};
+use crate::top::{RelayContext, RelayElement, Repair, Top, flat_element, open_flat};
 use crate::tree::{CityPart, Divisions, LeafNode, Occupancy, Overlay, Shape};
 use crate::welcome::Welcome;
 use crate::window::{
@@ -87,6 +89,9 @@ pub struct Member {
     seal_hash: Digest,
     secrets: EpochSecrets,
     pending_leaf: Option<KemSecret>,
+    /// It followed a window by repair, and holds no valid path until the
+    /// window of its update (docs/specs-v0.5-draft.md section 3.7).
+    repaired: bool,
 }
 
 impl core::fmt::Debug for Member {
@@ -203,6 +208,7 @@ impl Member {
             seal_hash,
             secrets,
             pending_leaf: None,
+            repaired: false,
         };
         Ok((member, seal))
     }
@@ -367,6 +373,12 @@ impl Member {
         if leaf_changed {
             self.pending_leaf = None;
         }
+        // A repair leaves no valid path; the window of an update re-keys it.
+        if matches!(packet.top, Some(Top::Repair(_))) {
+            self.repaired = true;
+        } else if leaf_changed {
+            self.repaired = false;
+        }
         let next = EpochHeader {
             gid: self.header.gid,
             epoch: header.epoch,
@@ -396,6 +408,22 @@ impl Member {
     ) -> CoreResult<(PathSecrets, Secret)> {
         let gid = &self.header.gid;
         let epoch = packet.header.epoch;
+        if let Some(Top::Repair(repair)) = &packet.top {
+            // A repair (docs/specs-v0.5-draft.md section 3.7): the root
+            // secret under the member's leaf key, and no path.
+            if !packet.path.is_empty() {
+                return Err(CoreError::Invalid("repair with a path"));
+            }
+            let root = repair.open(
+                gid,
+                epoch,
+                shape,
+                self.occupancy.leaf,
+                path.leaf_key(),
+                path.leaf_public_key(),
+            )?;
+            return Ok((PathSecrets::default(), root));
+        }
         let Some(top) = &packet.top else {
             if packet.path.is_empty() && shape == self.header.shape {
                 // The window re-keyed nothing: the root did not change.
@@ -446,6 +474,7 @@ impl Member {
                     .clone();
                 Ok((whole, root))
             }
+            Top::Repair(_) => Err(CoreError::Invalid("repair")),
         }
     }
 
@@ -915,6 +944,41 @@ impl Member {
         task_hedge(self.path.leaf_key().seed(), &self.header.gid, epoch)
     }
 
+    /// Whether the member followed a window by repair and has not yet asked
+    /// for the update that re-keys its path, which it MUST do at once
+    /// (docs/specs-v0.5-draft.md section 3.7).
+    #[must_use]
+    pub const fn needs_update(&self) -> bool {
+        self.repaired && self.pending_leaf.is_none()
+    }
+
+    /// A repair for the member at `leaf` (docs/specs-v0.5-draft.md section
+    /// 3.7): the root secret of the member's epoch, wrapped to that leaf's
+    /// key in the tree of the epoch, which it checks against its header.
+    pub fn repair(
+        &self,
+        state: &PublicState,
+        leaf: u32,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Repair> {
+        state.check_against(&self.header)?;
+        let target = state
+            .tree
+            .leaf(leaf)
+            .ok_or(CoreError::Invalid("repair for a blank leaf"))?;
+        let hedge = self.hedge(self.header.epoch)?;
+        Repair::make(
+            &self.header.gid,
+            self.header.epoch,
+            self.header.shape,
+            leaf,
+            &target.encryption_key,
+            &self.root,
+            &hedge,
+            rng,
+        )
+    }
+
     /// Whether the member may send in its epoch: not while an urgent
     /// removal older than `window_urgent_ms` waits (E-7, E-16). Ordinary
     /// removals wait for the next scheduled window without stopping anyone.
@@ -1172,8 +1236,20 @@ impl Joiner {
         Ok((occupancy, window, hedge))
     }
 
+    /// Check an entry and open it without entering: a joiner that fails with
+    /// an entry by island asks for another (docs/specs-v0.5-draft.md section
+    /// 3.6).
+    pub fn check_entry(&self, entry: &Entry) -> CoreResult<()> {
+        self.open(entry).map(|_| ())
+    }
+
     /// Enter the epoch a member sealed, with its welcome.
     pub fn enter(self, entry: &Entry) -> CoreResult<Member> {
+        let (occupancy, opened) = self.open(entry)?;
+        Ok(opened.into_member(self.identity, occupancy))
+    }
+
+    fn open(&self, entry: &Entry) -> CoreResult<(Occupancy, Opened)> {
         let last = entry
             .links
             .last()
@@ -1184,11 +1260,11 @@ impl Joiner {
         };
         let expected = self.leaf_key.public_key();
         let admission_hash = self.request.token();
-        enter_with(
-            EnterInput {
-                identity: self.identity,
+        let opened = open_entry(
+            &EnterInput {
+                device_pk: self.identity.public_key(),
                 occupancy,
-                leaf_key: self.leaf_key,
+                leaf_key: &self.leaf_key,
                 jump: false,
                 init_key: &self.init_key,
                 request: self.request.reference(),
@@ -1196,7 +1272,8 @@ impl Joiner {
                 entry,
             },
             |leaf| leaf.encryption_key == expected && leaf.admission_hash == admission_hash,
-        )
+        )?;
+        Ok((occupancy, opened))
     }
 
     /// Seal the window as its entrant (nobody online): commit every district,
@@ -1283,6 +1360,18 @@ impl Returning {
     /// or the pending one if a window the member missed applied its update)
     /// or a re-entry a member sealed (the new leaf key).
     pub fn enter(self, entry: &Entry) -> CoreResult<Member> {
+        let opened = self.open(entry)?;
+        let occupancy = self.occupancy;
+        Ok(opened.into_member(self.identity, occupancy))
+    }
+
+    /// Check an entry and open it without entering (docs/specs-v0.5-draft.md
+    /// section 3.6).
+    pub fn check_entry(&self, entry: &Entry) -> CoreResult<()> {
+        self.open(entry).map(|_| ())
+    }
+
+    fn open(&self, entry: &Entry) -> CoreResult<Opened> {
         let re_entry = self.re_entry;
         let entry_epoch = entry
             .links
@@ -1296,16 +1385,16 @@ impl Returning {
             .leaf
             .as_ref()
             .map(|leaf| leaf.encryption_key.as_slice());
-        let leaf_key = match self.pending_leaf {
+        let leaf_key = match &self.pending_leaf {
             Some(pending) if !re_entry && in_tree == Some(pending.public_key().as_slice()) => {
                 pending
             }
-            _ => self.leaf_key,
+            _ => &self.leaf_key,
         };
         let expected = leaf_key.public_key();
-        enter_with(
-            EnterInput {
-                identity: self.identity,
+        open_entry(
+            &EnterInput {
+                device_pk: self.identity.public_key(),
                 occupancy: self.occupancy,
                 leaf_key,
                 jump: !re_entry,
@@ -1356,9 +1445,9 @@ fn follow_all(anchor: &EpochHeader, links: &[SealLink]) -> CoreResult<EpochHeade
 }
 
 struct EnterInput<'a> {
-    identity: DeviceIdentity,
+    device_pk: &'a [u8],
     occupancy: Occupancy,
-    leaf_key: KemSecret,
+    leaf_key: &'a KemSecret,
     /// A jump: the welcome is sealed to the leaf key too.
     jump: bool,
     init_key: &'a KemSecret,
@@ -1367,10 +1456,40 @@ struct EnterInput<'a> {
     entry: &'a Entry,
 }
 
-fn enter_with(
-    input: EnterInput<'_>,
+/// What opening an entry gives: everything a member holds but its device
+/// key.
+struct Opened {
+    path: MemberPath,
+    root: Secret,
+    header: EpochHeader,
+    previous: EpochHeader,
+    seal_hash: Digest,
+    secrets: EpochSecrets,
+}
+
+impl Opened {
+    fn into_member(self, identity: DeviceIdentity, occupancy: Occupancy) -> Member {
+        Member {
+            identity,
+            occupancy,
+            path: self.path,
+            root: self.root,
+            header: self.header,
+            previous: Some(self.previous),
+            seal_hash: self.seal_hash,
+            secrets: self.secrets,
+            pending_leaf: None,
+            repaired: false,
+        }
+    }
+}
+
+/// Check an entry and open it, without consuming the entrant: a client that
+/// fails with the relay element of its island asks for another entry.
+fn open_entry(
+    input: &EnterInput<'_>,
     expected_leaf: impl Fn(&LeafNode) -> bool,
-) -> CoreResult<Member> {
+) -> CoreResult<Opened> {
     let entry = input.entry;
     let (last, before) = entry
         .links
@@ -1385,19 +1504,69 @@ fn enter_with(
         .as_ref()
         .ok_or(CoreError::Invalid("entry leaf"))?;
     if entry.leaf.occupancy() != Some(input.occupancy)
-        || leaf.device_pk != input.identity.public_key()
+        || leaf.device_pk != input.device_pk
         || !expected_leaf(leaf)
     {
         return Err(CoreError::Invalid("entry leaf"));
     }
-    entry.leaf.check_path(&entry.nodes)?;
-    let mut path = MemberPath::new(input.occupancy.leaf, input.leaf_key);
-    let secrets = path.recover(header.shape.height, &entry.steps, &header.gid)?;
-    MemberPath::check_keys(&secrets, &entry.nodes)?;
-    let root = secrets
-        .secret(header.shape.height)
-        .ok_or(CoreError::Invalid("unknown root secret"))?
-        .clone();
+    let mut path = MemberPath::new(input.occupancy.leaf, input.leaf_key.clone());
+    let shape = header.shape;
+    let (secrets, root) = match &entry.top {
+        None => {
+            entry.leaf.check_path(&entry.nodes)?;
+            let secrets = path.recover(shape.height, &entry.steps, &header.gid)?;
+            MemberPath::check_keys(&secrets, &entry.nodes)?;
+            let root = secrets
+                .secret(shape.height)
+                .ok_or(CoreError::Invalid("unknown root secret"))?
+                .clone();
+            (secrets, root)
+        }
+        Some(top) => {
+            // By island (docs/specs-v0.5-draft.md section 3.6): the path up
+            // to the island root, then the root secret from the top, whose
+            // key must be the root's.
+            let level = shape.island_level();
+            if !shape.has_islands() || entry.nodes.len() != usize::from(level) {
+                return Err(CoreError::Invalid("entry by island"));
+            }
+            entry.leaf.check_island_path(&entry.nodes, &top.root)?;
+            let secrets = path.recover(level, &entry.steps, &header.gid)?;
+            MemberPath::check_keys(&secrets, &entry.nodes)?;
+            let island_secret = secrets
+                .secret(level)
+                .ok_or(CoreError::Invalid("unknown island secret"))?;
+            let island = shape.island_of(input.occupancy.leaf);
+            let root = match &top.top {
+                Top::Relay(element) => element.open(
+                    &RelayContext {
+                        gid: header.gid,
+                        epoch: header.epoch,
+                        island_bits: shape.island_bits,
+                        island,
+                        interim: header.interim,
+                    },
+                    island_secret,
+                )?,
+                Top::Flat(wrapped) => open_flat(
+                    &header.gid,
+                    header.epoch,
+                    shape,
+                    island,
+                    wrapped,
+                    island_secret,
+                )?,
+                Top::Refresh(_) => {
+                    return Err(CoreError::Invalid("an entry by refresh carries its path"));
+                }
+                Top::Repair(_) => return Err(CoreError::Invalid("an entry by repair")),
+            };
+            if node_key(&root)?.public_key() != top.root.encryption_key {
+                return Err(CoreError::Invalid("entry root"));
+            }
+            (secrets, root)
+        }
+    };
     let welcome = &entry.welcome;
     if welcome.gid != header.gid
         || welcome.epoch != header.epoch
@@ -1416,16 +1585,13 @@ fn enter_with(
         return Err(CoreError::Invalid("welcome does not match the seal"));
     }
     path.set_path(secrets);
-    Ok(Member {
-        identity: input.identity,
-        occupancy: input.occupancy,
+    Ok(Opened {
         path,
         root,
         header,
-        previous: Some(previous),
+        previous,
         seal_hash,
         secrets: secrets_of_epoch,
-        pending_leaf: None,
     })
 }
 
@@ -1605,6 +1771,7 @@ fn seal_as_entrant(
         seal_hash,
         secrets: sealed.secrets,
         pending_leaf: None,
+        repaired: false,
     };
     Ok(EntrantSealed {
         commits,

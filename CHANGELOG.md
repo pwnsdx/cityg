@@ -12,9 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stage 2 of the draft is specified in detail (section 3 of
   [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
   E-17): sub-cities, city tasks, joiners as performers, entries by island,
-  repairs, and disputes, whose proof system stays open. Its tasks are
-  implemented in `cityg-core`, joiners as performers included; entries by
-  island and repairs are not yet.
+  repairs, and disputes, whose proof system stays open. All of it is
+  implemented in `cityg-core` but disputes.
 - **Sub-cities and the top.** The shape gains `subcity_bits` (`S`, 8 by
   default, fixed at genesis), bound after `island_bits` in the seal header,
   the group context and checkpoints: sub-cities of `2^S` districts, and a
@@ -45,6 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by `[leaf, n]`. A joiner cannot welcome: the welcomes of its district go
   to members in turn, and a member welcomes a join from its own commit or a
   joiner's.
+- **Entries by island.** An entry carries the entrant's path up to its
+  island root, the root's node, which the leaf proof covers, and the relay
+  element or the flat element of its island (`DeliveryService::island_entry`,
+  `EntryTop`). The entrant takes the root secret from it and checks the
+  root's key against it; it then follows as an island follower. Joiners and
+  returning members open an entry without being consumed (`check_entry`),
+  so that one whose relay lied asks for the flat element, then its whole
+  path.
+- **Repairs.** A member that a faulty task cut off, which no top lets
+  follow, gets a repair: the root secret wrapped to its leaf key by a member
+  of the epoch, who takes the key from the tree it checked
+  (`Member::repair`, `Repair`, `city-g/repair/v5`, unsigned). The service
+  serves it as the top of a packet without steps (`submit_repair`,
+  `repair_packet`, `Top::Repair`). The member then holds the epoch but no
+  valid path, and asks for an update at once (`needs_update`); the window
+  of its update re-keys its path.
 - **Delivery service.** Tasks go to the window's joiners first: each
   district to a joiner that takes one of its leaves, else to a joiner with
   no task, else to a volunteer; city tasks to joiners with no task, then to
@@ -74,7 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Every other scenario test with joins now has joiners perform tasks; three
   tests of member committers turn joiner tasks off. A sealer refuses a task
   whose wrap to its side opens to another secret, and the top goes to
-  another performer.
+  another performer. A joiner enters by island through the relay of its
+  island, and refuses a forged root node, relay element or top of another
+  island; one whose relay lied falls back to its whole path; a member that
+  a faulty commit cut off is repaired, then updates.
 - Symbolic model of stage 2 ([`docs/formal/`](docs/formal/README.md)): five
   ProVerif scenarios, 28 in all. A device that hedges with its leaf seed,
   the coins of its encapsulations included, keeps a weak generator from

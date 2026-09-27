@@ -15,7 +15,13 @@
 //!                 root (c, j), under the island root's key
 //! refresh      := the last step of every level above c on the member's path,
 //!                 each with the epoch of the window that made it
+//! Repair       := ["city-g/repair/v5", gid, epoch, leaf, wrap]
+//!   wrap := r_n wrapped from the root (height, 0) to the leaf (0, leaf)
 //! ```
+//!
+//! A repair is for a member that a faulty task cut off (section 3.7 of the
+//! draft): it gives it `r_n` under its leaf key, and the member, holding no
+//! valid path any more, asks for an update at once.
 //!
 //! `s_j` is the secret of the island root after the window, and
 //! `interim_transcript_hash_n` that of the window's epoch, which covers its
@@ -42,17 +48,20 @@ use zeroize::Zeroizing;
 
 use crate::cbor::{array, bytes, decode, encode, expect_array, text, uint};
 use crate::codec::Fields;
+use crate::commit::{wrap_from, wrap_value};
 use crate::crypto::{
     Digest, KEM_WRAP_BYTES, SEALED_SECRET_BYTES, Secret, Wrap, expand_label_into, expand_label32,
     node_key, unwrap, wrap,
 };
 use crate::error::{CoreError, CoreResult};
+use crate::kem::KemSecret;
 use crate::packet::EntrySteps;
 use crate::rekey::Step;
-use crate::tree::{Occupancy, Shape};
+use crate::tree::{NodeId, Occupancy, Shape};
 
 /// Label of a relay element.
 pub const RELAY_LABEL: &str = "city-g/relay/v5";
+pub const REPAIR_LABEL: &str = "city-g/repair/v5";
 
 /// Size of a relay element in a packet: the island index and the sealed
 /// root secret.
@@ -243,7 +252,103 @@ pub fn open_flat(
     unwrap(gid, epoch, wrapped, &key, &pk)
 }
 
-/// How an island follower gets the root secret of a window.
+/// The root secret of a window for the member at `leaf`, which a faulty
+/// task cut off (docs/specs-v0.5-draft.md section 3.7), made by a member of
+/// the window's epoch. Unsigned: the member checks the confirmation tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repair {
+    pub gid: Digest,
+    pub epoch: u64,
+    pub leaf: u32,
+    /// `r_n` wrapped from the root to the leaf.
+    pub wrap: Wrap,
+}
+
+impl Repair {
+    /// Wrap `root_secret` from the root of `shape` to leaf `leaf`, whose key
+    /// is `leaf_pk`, with coins hedged by `hedge` (the maker's).
+    #[allow(clippy::too_many_arguments)]
+    pub fn make(
+        gid: &Digest,
+        epoch: u64,
+        shape: Shape,
+        leaf: u32,
+        leaf_pk: &[u8],
+        root_secret: &[u8; 32],
+        hedge: &[u8; 32],
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Self> {
+        if !shape.contains_leaf(leaf) {
+            return Err(CoreError::Invalid("repair for no leaf"));
+        }
+        let wrapped = wrap(
+            gid,
+            epoch,
+            shape.root(),
+            NodeId::leaf(leaf),
+            leaf_pk,
+            root_secret,
+            hedge,
+            rng,
+        )?;
+        Ok(Self {
+            gid: *gid,
+            epoch,
+            leaf,
+            wrap: wrapped,
+        })
+    }
+
+    /// Open the repair for the window of `epoch` of the member at `leaf`
+    /// with its leaf key.
+    pub fn open(
+        &self,
+        gid: &Digest,
+        epoch: u64,
+        shape: Shape,
+        leaf: u32,
+        leaf_key: &KemSecret,
+        leaf_pk: &[u8],
+    ) -> CoreResult<Secret> {
+        if self.gid != *gid
+            || self.epoch != epoch
+            || self.leaf != leaf
+            || self.wrap.node != shape.root()
+            || self.wrap.target != NodeId::leaf(leaf)
+        {
+            return Err(CoreError::Invalid("repair of another window or leaf"));
+        }
+        unwrap(gid, epoch, &self.wrap, leaf_key, leaf_pk)
+    }
+
+    /// `CBOR_det` encoding.
+    pub fn encode(&self) -> CoreResult<Vec<u8>> {
+        encode(&array(vec![
+            text(REPAIR_LABEL),
+            bytes(&self.gid),
+            uint(self.epoch),
+            uint(u64::from(self.leaf)),
+            wrap_value(&self.wrap),
+        ]))
+    }
+
+    /// Parse a repair.
+    pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
+        const WHAT: &str = "repair";
+        let items = expect_array(decode(encoded, 2048, WHAT)?, 5, WHAT)?;
+        let mut fields = Fields::new(items, WHAT);
+        let label = fields.next()?;
+        crate::cbor::expect_label(&label, REPAIR_LABEL, WHAT)?;
+        Ok(Self {
+            gid: fields.digest()?,
+            epoch: fields.uint()?,
+            leaf: fields.u32()?,
+            wrap: wrap_from(fields.next()?)?,
+        })
+    }
+}
+
+/// How a member gets the root secret of a window besides its whole path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Top {
     /// A relay element of its island.
@@ -252,6 +357,8 @@ pub enum Top {
     Flat(Wrap),
     /// The last step of every level above its island, as of the window.
     Refresh(EntrySteps),
+    /// A repair: the root secret wrapped to its leaf.
+    Repair(Repair),
 }
 
 impl Top {
@@ -261,6 +368,7 @@ impl Top {
         match self {
             Self::Relay(_) => RELAY_ELEMENT_BYTES,
             Self::Flat(_) => KEM_WRAP_BYTES,
+            Self::Repair(_) => 4 + KEM_WRAP_BYTES,
             Self::Refresh(steps) => steps
                 .values()
                 .map(|(_, step)| match step {

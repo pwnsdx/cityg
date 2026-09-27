@@ -17,7 +17,7 @@ use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::member::{Joiner, Member, Returning};
 use cityg_core::objects::ChangeKind;
-use cityg_core::packet::SealLink;
+use cityg_core::packet::{Entry, SealLink};
 use cityg_core::roles::{WindowTask, WindowWork};
 use cityg_core::tree::{Divisions, Occupancy};
 use cityg_core::window::EpochHeader;
@@ -404,6 +404,13 @@ impl Sim {
 
     /// Welcomers seal their welcomes; joiners of the window enter.
     pub fn welcome_and_enter(&mut self, epoch: u64) {
+        self.seal_welcomes(epoch);
+        self.enter_joiners();
+        self.enter_returning();
+    }
+
+    /// The welcomers of window `epoch` seal their welcomes.
+    pub fn seal_welcomes(&mut self, epoch: u64) {
         let stored = self.ds.window(epoch).unwrap().clone();
         let welcomers: Vec<Occupancy> = stored
             .task
@@ -434,8 +441,6 @@ impl Sim {
                 self.ds.submit_welcome(welcomer, welcome).unwrap();
             }
         }
-        self.enter_joiners();
-        self.enter_returning();
     }
 
     /// Run a window that an entrant seals (nobody online).
@@ -484,7 +489,11 @@ impl Sim {
         let references: Vec<[u8; 32]> = self.returning.keys().copied().collect();
         for reference in references {
             let anchor = self.returning[&reference].anchor().epoch;
-            if let Ok(entry) = self.ds.entry(&reference, anchor) {
+            let returning = &self.returning[&reference];
+            let found = self.entry_for(&reference, anchor, |entry| {
+                returning.check_entry(entry).is_ok()
+            });
+            if let Some(entry) = found {
                 let returning = self.returning.remove(&reference).unwrap();
                 let member = returning.enter(&entry).unwrap();
                 self.absent.remove(&member.occupancy());
@@ -524,13 +533,39 @@ impl Sim {
         let references: Vec<[u8; 32]> = self.joiners.keys().copied().collect();
         for reference in references {
             let anchor = self.joiners[&reference].anchor().epoch;
-            if let Ok(entry) = self.ds.entry(&reference, anchor) {
+            let joiner = &self.joiners[&reference];
+            let found = self.entry_for(&reference, anchor, |entry| {
+                joiner.check_entry(entry).is_ok()
+            });
+            if let Some(entry) = found {
                 let joiner = self.joiners.remove(&reference).unwrap();
                 let member = joiner.enter(&entry).unwrap();
                 self.ds.set_online(member.occupancy(), true);
                 self.members.insert(member.occupancy(), member);
             }
         }
+    }
+
+    /// The entry of `reference` that `opens` accepts: with islands, by island
+    /// through the relay element, else the flat element, else the whole
+    /// path (docs/specs-v0.5-draft.md section 3.6). `None` until its welcome
+    /// is sealed.
+    pub fn entry_for(
+        &self,
+        reference: &[u8; 32],
+        anchor: u64,
+        opens: impl Fn(&Entry) -> bool,
+    ) -> Option<Entry> {
+        if self.islands {
+            for choice in [TopChoice::Best, TopChoice::AvoidRelay] {
+                if let Ok(entry) = self.ds.island_entry(reference, anchor, choice)
+                    && opens(&entry)
+                {
+                    return Some(entry);
+                }
+            }
+        }
+        self.ds.entry(reference, anchor).ok()
     }
 
     /// Links from `after` to the current epoch.

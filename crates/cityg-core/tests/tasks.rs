@@ -11,13 +11,17 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use cityg_core::commit::{CityTask, CityTaskContent, SealKind};
+use cityg_core::commit::{
+    CityTask, CityTaskContent, DistrictCommit, DistrictCommitContent, SealKind,
+};
 use cityg_core::crypto::wrap;
+use cityg_core::ds::TopChoice;
 use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::member::Joiner;
 use cityg_core::objects::Urgency;
 use cityg_core::roles::{WindowTask, WindowWork, build_district};
+use cityg_core::top::{RelayContext, RelayElement, Top};
 use cityg_core::tree::{CityPart, Divisions, NodeId, Occupancy};
 use cityg_core::window::{check_committer, check_sealer};
 use common::Sim;
@@ -742,4 +746,286 @@ fn a_sealer_refuses_a_task_whose_wrap_opens_to_another_secret() {
     seal_and_follow(&mut sim, &task);
     sim.assert_agreement();
     assert_eq!(sim.members.len(), 15);
+}
+
+/// A window in which one device joins the leaf a removal freed in
+/// sub-city 1; the window is sealed and followed, and its welcome sealed.
+/// Returns the join's request and the joiner's anchor.
+fn joined_window(seed: u64) -> (Sim, [u8; 32], u64) {
+    let mut sim = group(seed, 16);
+    remove_in(&mut sim, 1);
+    sim.run_window();
+    let reference = sim.request_joins(1)[0];
+    let task = sim.open_window();
+    let epoch = sim.complete_window(&task);
+    sim.seal_welcomes(epoch);
+    let anchor = sim.joiners[&reference].anchor().epoch;
+    (sim, reference, anchor)
+}
+
+#[test]
+fn a_joiner_enters_by_island_through_the_relay_of_its_island() {
+    let (mut sim, reference, anchor) = joined_window(73);
+    let shape = sim.ds.state().tree.shape();
+    let entry = sim
+        .ds
+        .island_entry(&reference, anchor, TopChoice::Best)
+        .unwrap();
+    let whole = sim.ds.entry(&reference, anchor).unwrap();
+    // Its path up to its island root, the root's node, and the relay
+    // element of its island, instead of its whole path.
+    let top = entry.top.clone().unwrap();
+    assert!(matches!(top.top, Top::Relay(_)));
+    assert!(
+        entry
+            .steps
+            .keys()
+            .all(|level| *level <= shape.island_level())
+    );
+    assert_eq!(entry.nodes.len(), usize::from(shape.island_level()));
+    assert!(whole.top.is_none() && whole.nodes.len() == usize::from(shape.height));
+    assert!(entry.encoded_len() < whole.encoded_len());
+    let joiner = &sim.joiners[&reference];
+    joiner.check_entry(&entry).unwrap();
+    // A root node the leaf proof does not cover, a relay element that does
+    // not open, or the element of another island are refused.
+    let mut forged = entry.clone();
+    let mut root = top.root.clone();
+    root.encryption_key = entry.nodes[0].clone().unwrap().encryption_key;
+    forged.top.as_mut().unwrap().root = root;
+    assert!(joiner.check_entry(&forged).is_err());
+    let mut forged = entry.clone();
+    let context = RelayContext {
+        gid: sim.ds.state().gid,
+        epoch: entry.welcome.epoch,
+        island_bits: shape.island_bits,
+        island: shape.island_of(entry.leaf.index),
+        interim: [9; 32],
+    };
+    forged.top.as_mut().unwrap().top =
+        Top::Relay(RelayElement::seal(&context, &[9; 32], &[9; 32]).unwrap());
+    assert!(joiner.check_entry(&forged).is_err());
+    let other = *sim
+        .members
+        .keys()
+        .find(|member| shape.island_of(member.leaf) != shape.island_of(entry.leaf.index))
+        .unwrap();
+    let elsewhere = sim
+        .ds
+        .island_packet(entry.welcome.epoch, other, TopChoice::Best)
+        .unwrap()
+        .top
+        .unwrap();
+    let mut forged = entry.clone();
+    forged.top.as_mut().unwrap().top = elsewhere;
+    assert!(joiner.check_entry(&forged).is_err());
+    let mut forged = entry.clone();
+    forged.steps.clear();
+    assert!(joiner.check_entry(&forged).is_err());
+    // It enters as an island follower, and follows the next window so.
+    sim.enter_joiners();
+    assert!(sim.joiners.is_empty());
+    let occupancy = Occupancy {
+        leaf: entry.leaf.index,
+        since: entry.welcome.epoch,
+    };
+    assert!(!sim.member(occupancy).knows_path());
+    sim.assert_agreement();
+    remove_in(&mut sim, 3);
+    sim.run_window();
+    sim.assert_agreement();
+    assert_eq!(sim.member(occupancy).epoch(), sim.ds.epoch());
+}
+
+#[test]
+fn an_entrant_falls_back_to_its_whole_path_when_its_relay_lies() {
+    let mut sim = group(74, 16);
+    remove_in(&mut sim, 1);
+    sim.run_window();
+    let reference = sim.request_joins(1)[0];
+    let task = sim.open_window();
+    let epoch = sim.seal_window(&task);
+    let shape = sim.ds.state().tree.shape();
+    let leaf = sim.joiners[&reference].occupancy_in(&task).unwrap().leaf;
+    let island = shape.island_of(leaf);
+    let hostile = sim.ds.window(epoch).unwrap().top_task().relays[&island];
+    // The joiner's island relay follows, then sends an element it made up.
+    let packet = sim
+        .ds
+        .island_packet(epoch, hostile, TopChoice::Refresh)
+        .unwrap();
+    sim.members
+        .get_mut(&hostile)
+        .unwrap()
+        .process(&packet)
+        .unwrap();
+    let context = RelayContext {
+        gid: sim.ds.state().gid,
+        epoch,
+        island_bits: shape.island_bits,
+        island,
+        interim: [9; 32],
+    };
+    let garbage = RelayElement::seal(&context, &[9; 32], &[9; 32]).unwrap();
+    sim.ds.submit_relay(hostile, garbage).unwrap();
+    sim.follow(epoch);
+    sim.seal_welcomes(epoch);
+    let anchor = sim.joiners[&reference].anchor().epoch;
+    let entry = sim
+        .ds
+        .island_entry(&reference, anchor, TopChoice::Best)
+        .unwrap();
+    assert!(sim.joiners[&reference].check_entry(&entry).is_err());
+    // The island has no flat element: it takes its whole path instead.
+    let fallback = sim
+        .ds
+        .island_entry(&reference, anchor, TopChoice::AvoidRelay)
+        .unwrap();
+    assert!(fallback.top.is_none());
+    sim.enter_joiners();
+    assert!(sim.joiners.is_empty());
+    let occupancy = Occupancy { leaf, since: epoch };
+    assert!(sim.member(occupancy).knows_path());
+    sim.assert_agreement();
+}
+
+#[test]
+fn a_member_that_a_faulty_commit_cut_off_is_repaired_then_updates() {
+    let mut sim = group(75, 16);
+    let shape = sim.ds.state().tree.shape();
+    let (gone, victim) = (at(&sim, &[8])[0], at(&sim, &[9])[0]);
+    // The victim is offline, so that another member commits its district
+    // when its neighbour leaves.
+    sim.ds.set_online(victim, false);
+    remove(&mut sim, gone);
+    let task = sim.open_window();
+    let district = shape.district_of(victim.leaf);
+    let committer = task.committers[&district];
+    assert_ne!(committer, victim);
+    // The committer wraps another secret to the victim's leaf, and signs.
+    let (_, requests, _) = sim.ds.open_window_data().unwrap();
+    let requests = requests.clone();
+    let victim_pk = sim
+        .ds
+        .state()
+        .tree
+        .leaf(victim.leaf)
+        .unwrap()
+        .encryption_key
+        .clone();
+    for (d, c) in &task.committers {
+        let mut commit = sim.members[c]
+            .commit_district(sim.ds.state(), &task, *d, &requests, &mut sim.rng)
+            .unwrap();
+        if *d == district {
+            let node = NodeId::of_leaf(victim.leaf, 1);
+            let target = NodeId::leaf(victim.leaf);
+            let mut wraps = commit.wraps.clone();
+            let slot = wraps
+                .iter_mut()
+                .find(|wrapped| wrapped.node == node && wrapped.target == target)
+                .unwrap();
+            *slot = wrap(
+                &commit.gid,
+                commit.epoch,
+                node,
+                target,
+                &victim_pk,
+                &[7; 32],
+                &[0; 32],
+                &mut sim.rng,
+            )
+            .unwrap();
+            commit = DistrictCommit::sign(
+                DistrictCommitContent {
+                    gid: commit.gid,
+                    epoch: commit.epoch,
+                    district: commit.district,
+                    height: commit.height,
+                    prev_district_hash: commit.prev_district_hash,
+                    committer: commit.committer,
+                    changes: commit.changes.clone(),
+                    updates: commit.updates.clone(),
+                    wraps,
+                    district_hash: commit.district_hash,
+                },
+                sim.members[c].identity(),
+                &mut sim.rng,
+            )
+            .unwrap();
+        }
+        sim.ds.submit_district_commit(commit).unwrap();
+    }
+    sim.perform_city_tasks(&task);
+    let seal = sim.seal_open(&task);
+    let epoch = sim.ds.submit_seal(seal).unwrap();
+    sim.absent.insert(victim);
+    sim.follow(epoch);
+    sim.welcome_and_enter(epoch);
+    // No top and no whole path lets it follow.
+    for choice in [TopChoice::Best, TopChoice::AvoidRelay, TopChoice::Refresh] {
+        let packet = sim.ds.island_packet(epoch, victim, choice).unwrap();
+        assert!(
+            sim.members
+                .get_mut(&victim)
+                .unwrap()
+                .process(&packet)
+                .is_err()
+        );
+    }
+    let whole = sim.ds.packet(epoch, victim).unwrap();
+    assert!(
+        sim.members
+            .get_mut(&victim)
+            .unwrap()
+            .process(&whole)
+            .is_err()
+    );
+    // A member of the epoch makes its repair; one addressed to another leaf
+    // is refused.
+    let maker = *sim
+        .members
+        .keys()
+        .find(|member| **member != victim && sim.member(**member).epoch() == epoch)
+        .unwrap();
+    let other = sim.members[&maker]
+        .repair(sim.ds.state(), victim.leaf ^ 2, &mut sim.rng)
+        .unwrap();
+    let mut misdirected = other.clone();
+    misdirected.leaf = victim.leaf;
+    let repair = sim.members[&maker]
+        .repair(sim.ds.state(), victim.leaf, &mut sim.rng)
+        .unwrap();
+    assert!(sim.ds.submit_repair(maker, misdirected).is_err());
+    sim.ds.submit_repair(maker, repair.clone()).unwrap();
+    let packet = sim.ds.repair_packet(epoch, victim).unwrap();
+    assert!(packet.path.is_empty());
+    sim.members
+        .get_mut(&victim)
+        .unwrap()
+        .process(&packet)
+        .unwrap();
+    sim.absent.remove(&victim);
+    sim.assert_agreement();
+    // It holds the epoch but no valid path, and asks for an update at once.
+    assert!(sim.member(victim).needs_update());
+    assert!(!sim.member(victim).knows_path());
+    let request = sim
+        .members
+        .get_mut(&victim)
+        .unwrap()
+        .update_request(&mut sim.rng)
+        .unwrap();
+    assert!(!sim.member(victim).needs_update());
+    sim.ds.submit_update(request, sim.now).unwrap();
+    // The window of its update re-keys its path: it follows as usual.
+    sim.run_window();
+    sim.assert_agreement();
+    assert_eq!(sim.member(victim).epoch(), sim.ds.epoch());
+    assert!(!sim.member(victim).needs_update());
+    // And a repair encodes and decodes.
+    assert_eq!(
+        cityg_core::top::Repair::decode(&repair.encode().unwrap()).unwrap(),
+        repair
+    );
 }

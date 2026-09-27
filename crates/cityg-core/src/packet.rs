@@ -401,17 +401,32 @@ impl Packet {
 pub type EntrySteps = BTreeMap<u8, (u64, Step)>;
 
 /// What a joiner, a member re-entering its leaf or a member jumping to the
-/// present downloads to enter an epoch.
+/// present downloads to enter an epoch: its whole path, or its island path
+/// and a top (docs/specs-v0.5-draft.md section 3.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// Seals from the verifier's anchor to the epoch it enters.
     pub links: Vec<SealLink>,
     pub welcome: Welcome,
+    /// The steps of its path, up to the root, or up to its island root for
+    /// an entry by island.
     pub steps: EntrySteps,
     /// Its leaf in the tree of the epoch it enters.
     pub leaf: LeafProof,
-    /// The parents on its path in that tree, by level from 1.
+    /// The parents on its path in that tree, by level from 1, as far as
+    /// `steps` go.
     pub nodes: Vec<Option<ParentNode>>,
+    /// For an entry by island: the root's node and the top of its island.
+    pub top: Option<EntryTop>,
+}
+
+/// The top of an entry by island: the root's node, which the leaf proof
+/// covers, and the relay element or the flat element of the entrant's
+/// island, which gives the root secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryTop {
+    pub root: ParentNode,
+    pub top: Top,
 }
 
 impl Entry {
@@ -435,11 +450,15 @@ impl Entry {
                     .map_or(1, |node| node.encryption_key.len() + 16)
             })
             .sum();
+        let top = self.top.as_ref().map_or(1, |top| {
+            top.root.encryption_key.len() + 16 + top.top.encoded_len()
+        });
         links
             + self.welcome.encode().map_or(0, |encoded| encoded.len())
             + steps
             + self.leaf.encoded_len().unwrap_or_default()
             + nodes
+            + top
     }
 }
 

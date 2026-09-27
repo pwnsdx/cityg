@@ -99,14 +99,10 @@ fn island_followers_take_the_root_from_their_relays() {
         island_bytes += island.encoded_len();
         whole_bytes += sim.ds.packet(epoch, *member).unwrap().encoded_len();
         // Members that followed from a relay element hold their island path
-        // only; the relays refreshed theirs, and the joiners entered with
-        // their whole path.
-        let joined = !before.contains(member);
-        assert_eq!(
-            state.knows_path(),
-            relays.contains(member) || joined,
-            "{member:?}"
-        );
+        // only, and so do the joiners, which entered by island
+        // (docs/specs-v0.5-draft.md section 3.6); the relays refreshed theirs.
+        assert_eq!(state.knows_path(), relays.contains(member), "{member:?}");
+        assert!(before.contains(member) || !state.knows_path());
     }
     assert!(island_bytes < whole_bytes);
     // The next window goes the same way, the joiners now island followers.
