@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use crate::commit::{SealHeader, SealKind, SealProof};
 use crate::crypto::{Digest, KEM_WRAP_BYTES, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
-use crate::objects::{Checkpoint, GroupPolicy, JoinRequest, ReEntryRequest};
+use crate::objects::{AdmissionMode, Checkpoint, GroupPolicy, JoinRequest, ReEntryRequest};
 use crate::registry::RegistryHeader;
 use crate::rekey::Step;
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
@@ -37,26 +37,27 @@ pub struct RegistryUpdate {
     pub admins: Option<BTreeMap<Occupancy, Vec<u8>>>,
     pub devices_root: Digest,
     pub admissions_root: Digest,
+    pub keys_root: Digest,
     pub policy: Option<Digest>,
-    pub open: bool,
+    pub admission: AdmissionMode,
+    pub authorizer: Option<Digest>,
     /// The policy the window set, if it changed.
     pub policy_object: Option<GroupPolicy>,
 }
 
-/// Check a change of the registry's policy, from `before` to `policy` and
-/// `open`: a policy the window sets must come with its object, signed by an
-/// admin of the previous epoch, and a group opens or closes only by a new
-/// policy. A member checks this itself, so that no sealer can open a closed
-/// group behind the admins' backs.
+/// Check a change of the registry's policy, from `before` to `after`: a
+/// policy the window sets must come with its object, signed by an admin of
+/// the previous epoch, and the admission mode and the authorizer change only
+/// by a new policy. A member checks this itself, so that no sealer can open
+/// a closed group behind the admins' backs.
 pub fn check_policy_change(
     gid: &Digest,
     before: &RegistryHeader,
-    policy: Option<Digest>,
-    open: bool,
+    after: &RegistryHeader,
     object: Option<&GroupPolicy>,
 ) -> CoreResult<()> {
-    if policy == before.policy && object.is_none() {
-        return if open == before.open {
+    if after.policy == before.policy && object.is_none() {
+        return if after.admission == before.admission && after.authorizer == before.authorizer {
             Ok(())
         } else {
             Err(CoreError::Invalid(
@@ -65,7 +66,10 @@ pub fn check_policy_change(
         };
     }
     let object = object.ok_or(CoreError::Invalid("new policy without its object"))?;
-    if Some(object.hash()) != policy || object.open != open {
+    if Some(object.hash()) != after.policy
+        || object.admission() != after.admission
+        || object.authorizer() != after.authorizer
+    {
         return Err(CoreError::Invalid("policy object"));
     }
     object.verify(gid, &before.admins)
@@ -84,8 +88,10 @@ impl RegistryUpdate {
             admins: (before.admins != after.admins).then(|| after.admins.clone()),
             devices_root: after.devices_root,
             admissions_root: after.admissions_root,
+            keys_root: after.keys_root,
             policy: after.policy,
-            open: after.open,
+            admission: after.admission,
+            authorizer: after.authorizer,
             policy_object: (before.policy != after.policy)
                 .then(|| policy.cloned())
                 .flatten(),
@@ -94,20 +100,17 @@ impl RegistryUpdate {
 
     /// The header after the window, once a change of policy is checked.
     pub fn apply(&self, gid: &Digest, before: &RegistryHeader) -> CoreResult<RegistryHeader> {
-        check_policy_change(
-            gid,
-            before,
-            self.policy,
-            self.open,
-            self.policy_object.as_ref(),
-        )?;
-        Ok(RegistryHeader {
+        let after = RegistryHeader {
             admins: self.admins.clone().unwrap_or_else(|| before.admins.clone()),
             devices_root: self.devices_root,
             admissions_root: self.admissions_root,
+            keys_root: self.keys_root,
             policy: self.policy,
-            open: self.open,
-        })
+            admission: self.admission,
+            authorizer: self.authorizer,
+        };
+        check_policy_change(gid, before, &after, self.policy_object.as_ref())?;
+        Ok(after)
     }
 
     fn encoded_len(&self) -> usize {
@@ -119,7 +122,7 @@ impl RegistryUpdate {
             .policy_object
             .as_ref()
             .map_or(1, |policy| policy.encoded().len());
-        admins + 2 * 33 + 36 + policy
+        admins + 3 * 33 + 36 + 34 + policy
     }
 }
 
@@ -163,7 +166,7 @@ impl EntrantEvidence {
                     &previous.gid,
                     header.epoch,
                     &previous.registry.admins,
-                    previous.registry.open,
+                    previous.registry.is_open(),
                 )?;
                 previous
                     .registry
@@ -336,8 +339,7 @@ impl EpochHeader {
         check_policy_change(
             &self.gid,
             &self.registry,
-            link.registry.policy,
-            link.registry.open,
+            &link.registry,
             link.policy.as_ref(),
         )?;
         let confirmed = confirmed_transcript_hash(&self.interim, &header.hash()?)?;
@@ -482,30 +484,51 @@ mod tests {
             admins: BTreeMap::from([(admin, admin_id.public_key().to_vec())]),
             devices_root: [0; 32],
             admissions_root: [0; 32],
+            keys_root: [0; 32],
             policy: None,
-            open: false,
+            admission: AdmissionMode::Closed,
+            authorizer: None,
         };
-        check_policy_change(&gid, &before, None, false, None).unwrap();
-        assert!(check_policy_change(&gid, &before, None, true, None).is_err());
+        let with = |policy: Option<Digest>, admission: AdmissionMode| RegistryHeader {
+            policy,
+            admission,
+            ..before.clone()
+        };
+        check_policy_change(&gid, &before, &before, None).unwrap();
+        assert!(
+            check_policy_change(&gid, &before, &with(None, AdmissionMode::Open), None).is_err()
+        );
         // A new policy comes with its object, which matches the hash and the
         // mode and is signed by an admin.
         let open = GroupPolicy::sign(&gid, true, None, admin, &admin_id, &mut rng).unwrap();
         let hash = Some(open.hash());
-        assert!(check_policy_change(&gid, &before, hash, true, None).is_err());
-        assert!(check_policy_change(&gid, &before, hash, false, Some(&open)).is_err());
-        check_policy_change(&gid, &before, hash, true, Some(&open)).unwrap();
+        let opened = with(hash, AdmissionMode::Open);
+        assert!(check_policy_change(&gid, &before, &opened, None).is_err());
+        assert!(
+            check_policy_change(
+                &gid,
+                &before,
+                &with(hash, AdmissionMode::Closed),
+                Some(&open)
+            )
+            .is_err()
+        );
+        check_policy_change(&gid, &before, &opened, Some(&open)).unwrap();
         let posing = GroupPolicy::sign(&gid, true, None, other, &other_id, &mut rng).unwrap();
         assert!(
-            check_policy_change(&gid, &before, Some(posing.hash()), true, Some(&posing)).is_err()
+            check_policy_change(
+                &gid,
+                &before,
+                &with(Some(posing.hash()), AdmissionMode::Open),
+                Some(&posing)
+            )
+            .is_err()
         );
         // The policy in force, with or without its object.
-        let after = RegistryHeader {
-            policy: hash,
-            open: true,
-            ..before
-        };
-        check_policy_change(&gid, &after, hash, true, Some(&open)).unwrap();
-        check_policy_change(&gid, &after, hash, true, None).unwrap();
-        assert!(check_policy_change(&gid, &after, hash, false, None).is_err());
+        check_policy_change(&gid, &opened, &opened, Some(&open)).unwrap();
+        check_policy_change(&gid, &opened, &opened, None).unwrap();
+        assert!(
+            check_policy_change(&gid, &opened, &with(hash, AdmissionMode::Closed), None).is_err()
+        );
     }
 }

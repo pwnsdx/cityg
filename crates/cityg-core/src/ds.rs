@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::audit::{AuditRecord, records};
+use crate::card::Card;
 use crate::commit::{Change, CityTask, DistrictCommit, Seal, SealKind};
 use crate::crypto::{Digest, Wrap, ZERO32, kem_pk_hash};
 use crate::dispute::{Dispute, DisputeStatement, DisputeVerifier};
@@ -36,7 +37,7 @@ use crate::roles::{WelcomeKind, WelcomeTask, WindowTask, WindowWork};
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
 use crate::top::{RelayElement, Repair, Top, TopTask};
 use crate::tree::{
-    CityPart, LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode, Shape,
+    CityPart, LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode, Shape, leaf_key_hash,
 };
 use crate::welcome::Welcome;
 use crate::window::{
@@ -416,6 +417,7 @@ impl DeliveryService {
         }) {
             return Err(CoreError::Invalid("join already queued"));
         }
+        self.check_free_keys(&request.encryption_key, &request.card, None)?;
         self.check_invite(&request, now_ms)?;
         let reference = request.reference();
         self.queue.joins.push(Queued {
@@ -423,6 +425,45 @@ impl DeliveryService {
             recorded_ms: now_ms,
         });
         Ok(reference)
+    }
+
+    /// Check that a request's leaf key and card are in no leaf and in no
+    /// other queued request (docs/specs-v0.5-draft.md section 4.2): a window
+    /// that sets a key twice would be refused. The queued request of
+    /// `member`, which this one replaces, does not count.
+    fn check_free_keys(
+        &self,
+        encryption_key: &[u8],
+        card: &Card,
+        member: Option<Occupancy>,
+    ) -> CoreResult<()> {
+        let keys = [leaf_key_hash(encryption_key)?, card.hash()?];
+        let mut queued = Vec::new();
+        for q in &self.queue.joins {
+            queued.push((None, &q.item.encryption_key, &q.item.card));
+        }
+        for q in &self.queue.updates {
+            queued.push((Some(q.item.member), &q.item.encryption_key, &q.item.card));
+        }
+        for q in &self.queue.re_entries {
+            queued.push((Some(q.item.member), &q.item.encryption_key, &q.item.card));
+        }
+        for (owner, other_key, other_card) in queued {
+            if member.is_some() && owner == member {
+                continue;
+            }
+            let other = [leaf_key_hash(other_key)?, other_card.hash()?];
+            if keys.iter().any(|key| other.contains(key)) {
+                return Err(CoreError::Invalid("a leaf key or card already queued"));
+            }
+        }
+        if keys
+            .iter()
+            .any(|key| self.state.registry.key(key).is_some())
+        {
+            return Err(CoreError::Invalid("a leaf key or card already in use"));
+        }
+        Ok(())
     }
 
     fn check_subject(&self, subject: Occupancy) -> CoreResult<()> {
@@ -480,6 +521,7 @@ impl DeliveryService {
             &Request::Update(request.clone()),
             true,
         )?;
+        self.check_free_keys(&request.encryption_key, &request.card, Some(request.member))?;
         self.queue
             .updates
             .retain(|q| q.item.member != request.member);
@@ -500,6 +542,7 @@ impl DeliveryService {
             &Request::ReEntry(request.clone()),
             true,
         )?;
+        self.check_free_keys(&request.encryption_key, &request.card, Some(request.member))?;
         self.queue
             .re_entries
             .retain(|q| q.item.member != request.member);

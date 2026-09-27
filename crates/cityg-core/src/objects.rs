@@ -661,6 +661,32 @@ impl Eviction {
     }
 }
 
+/// How devices are admitted: the registry's `admission_mode`
+/// (docs/specs-v0.5-draft.md section 4.2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum AdmissionMode {
+    /// Every join carries an admission by an admin or an invite.
+    #[default]
+    Closed,
+    /// A join may carry none.
+    Open,
+    /// Every join carries an authorization by the group's authorizer
+    /// (section 4.9).
+    Authorized,
+}
+
+impl AdmissionMode {
+    /// The mode's code: 0 closed, 1 open, 2 authorized.
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::Closed => 0,
+            Self::Open => 1,
+            Self::Authorized => 2,
+        }
+    }
+}
+
 /// The policy of a group, which an admin signs: whether the group is open
 /// (a join needs no admission) and, if set, how long a member's leaf key
 /// may stay unchanged before the delivery service may evict it.
@@ -674,6 +700,22 @@ pub struct GroupPolicy {
 }
 
 impl GroupPolicy {
+    /// The admission mode it sets.
+    #[must_use]
+    pub const fn admission(&self) -> AdmissionMode {
+        if self.open {
+            AdmissionMode::Open
+        } else {
+            AdmissionMode::Closed
+        }
+    }
+
+    /// The hash of the authorizer's key it names, in an authorized group.
+    #[must_use]
+    pub const fn authorizer(&self) -> Option<Digest> {
+        None
+    }
+
     /// Sign a policy.
     pub fn sign(
         gid: &Digest,

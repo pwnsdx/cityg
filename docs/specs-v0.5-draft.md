@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, and implemented as far as cards in leaves. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, and implemented as far as part 3a: cards in leaves and unique keys. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
 | Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2; the proof system of disputes is plugged in, not included) |
 | Design | [design.md](design.md) (decisions E-15 to E-18) |
@@ -53,7 +53,7 @@ earlier ones.
 | --- | --- | --- | --- |
 | 1. Relays and cadence | Members read the tree by island: the root secret comes from a relay of their island, a flat element or a refresh. Urgent and ordinary removals. Districts and the roles of v0.4 do not change. | At a million members, 1.7 changes per second and 5-minute windows, following the group costs about 94 KB per day, against 1.8 MB for whole paths with the same windows, and 44 MB for v0.4 with a window every 5 seconds per departure (research model, section 2.11). | Specified (section 2) and implemented |
 | 2. Tasks | Islands become the districts; the city is re-keyed by sub-city tasks and a top task; joiners perform tasks first; the sealer draws nothing; entries by island; repairs; disputes. | No committer role beyond small tasks; a task cuts off at most 256 members; the heaviest task of a burst takes 42 ms instead of 0.6 s; a joiner no longer reads the upper levels. | Specified (section 3); disputes lack their proof system |
-| 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, cards in leaves hashed by their summary, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Specified (section 4), not implemented |
+| 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, cards in leaves hashed by their summary, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Specified (section 4); part 3a implemented |
 
 <a id="2-stage-1"></a>
 ## 2. Stage 1: islands, relays and cadence
@@ -904,10 +904,19 @@ key_hash := H_L("tree/leaf-key", [encryption_key]) | H_L("card", [card])
   the map in the order of v0.4 §8: the two keys of a removed or evicted
   member leave it; an update or a re-entry replaces the member's two keys;
   a join adds the joiner's two.
-* A change MUST NOT set a key that is in the map after the removals, or
-  that another change of the window sets. The DS, the committers and the
-  auditors check it with the map (v0.4 §15); a member that copies another's
-  card would otherwise make its messages attributable to two leaves (G5).
+* A change MUST NOT set a key that is in the map before the window, or
+  that another change of the window sets; an update or a re-entry thus
+  brings two fresh keys, and the keys of a member removed by the window
+  are not free until the next. The rule is that of devices (v0.4 §8): a
+  member that copies another's card would otherwise make its messages
+  attributable to two leaves (G5).
+* The DS checks it as it records a request (against the map and its
+  queue), a committer as it checks an entry, the sealer over the window.
+  The audit record of a join, an update or a re-entry (v0.4 §15) carries
+  the proofs of its two keys against `keys_root` of the epoch before the
+  window, leaf key first; a key the proofs show present makes the entry
+  a fraud. A key that two changes of one window set is found by the
+  sealer and the DS, as a device that joins twice is.
 * `admission_mode` replaces `open`: 0 closed, 1 open, 2 authorized
   (section 4.9); `authorizer_pk_hash := H_L("authorizer", [authorizer_pk])`
   in an authorized group, else `null`.
@@ -1298,7 +1307,7 @@ Nothing of v0.4 decodes under this draft: every label changed.
 * **Assignment under load**: how many tasks a joiner takes, and when a DS
   prefers a volunteer with a good network.
 * **Stage 3**, specified in section 4: cards in leaves and their summary
-  hash are implemented (part 3a, unique keys aside); the rest is not. FN-DSA-512 cards
+  hash, and unique keys, are implemented (part 3a); the rest is not. FN-DSA-512 cards
   wait for FIPS 206. The research models of the message plane and of
   parity (`research/formal-messages/`, `research/formal-parity/`) cover
   the sender hidden, burst chains, cards checked against the epoch's leaf,

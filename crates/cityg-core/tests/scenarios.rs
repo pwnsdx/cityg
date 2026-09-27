@@ -1598,7 +1598,7 @@ fn only_an_admin_policy_opens_a_group() {
     sim.request_joins(1);
     sim.run_window();
     let mut packet = sim.ds.packet(sim.ds.epoch(), member).unwrap();
-    packet.registry.open = true;
+    packet.registry.admission = cityg_core::objects::AdmissionMode::Open;
     assert_eq!(
         sim.members
             .get_mut(&member)
@@ -1615,7 +1615,7 @@ fn only_an_admin_policy_opens_a_group() {
     sim.ds.submit_policy(policy, sim.now).unwrap();
     sim.run_window();
     assert!(sim.ds.state().registry.is_open());
-    assert!(sim.members.values().all(|m| m.header().registry.open));
+    assert!(sim.members.values().all(|m| m.header().registry.is_open()));
     sim.request_open_joins(2);
     sim.run_window();
     assert_eq!(sim.members.len(), 7);

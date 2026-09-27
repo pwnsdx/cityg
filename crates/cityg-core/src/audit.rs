@@ -12,12 +12,13 @@ use std::collections::BTreeSet;
 
 use rand_core::CryptoRngCore;
 
+use crate::card::Card;
 use crate::commit::{Change, DistrictCommit};
 use crate::crypto::kem_pk_hash;
 use crate::error::{CoreError, CoreResult};
 use crate::objects::{GroupPolicy, Request};
 use crate::smm::SmmProof;
-use crate::tree::{LeafProof, Occupancy};
+use crate::tree::{LeafProof, Occupancy, leaf_key_hash};
 use crate::window::{EpochHeader, PublicState, Requests, WindowShape};
 
 /// Mean number of audits per entry.
@@ -36,6 +37,10 @@ pub struct EntryProofs {
     pub admission: Option<SmmProof>,
     /// For an eviction: the policy in force.
     pub policy: Option<GroupPolicy>,
+    /// For a join, an update or a re-entry: the leaf key's and the card's
+    /// absence from the map of keys, in that order
+    /// (docs/specs-v0.5-draft.md section 4.2).
+    pub keys: Vec<SmmProof>,
 }
 
 /// One entry of a window, with what it takes to audit it.
@@ -76,17 +81,33 @@ pub fn records(
                 device: None,
                 admission: None,
                 policy: None,
+                keys: Vec::new(),
+            };
+            let key_proofs = |encryption_key: &[u8], card: &Card| -> CoreResult<Vec<SmmProof>> {
+                [leaf_key_hash(encryption_key)?, card.hash()?]
+                    .iter()
+                    .map(|key| state.registry.key_proof(key))
+                    .collect()
             };
             match &request {
                 Request::Join(join) => {
                     proofs.device = Some(state.registry.device_proof(&join.device_id()?)?);
                     proofs.admission = Some(state.registry.admission_proof(&join.token())?);
+                    proofs.keys = key_proofs(&join.encryption_key, &join.card)?;
                 }
                 Request::Eviction(_) => {
                     proofs.subject = Some(state.tree.leaf_proof(change.leaf)?);
                     proofs.policy.clone_from(&state.policy);
                 }
-                _ => proofs.subject = Some(state.tree.leaf_proof(change.leaf)?),
+                Request::Update(update) => {
+                    proofs.subject = Some(state.tree.leaf_proof(change.leaf)?);
+                    proofs.keys = key_proofs(&update.encryption_key, &update.card)?;
+                }
+                Request::ReEntry(re_entry) => {
+                    proofs.subject = Some(state.tree.leaf_proof(change.leaf)?);
+                    proofs.keys = key_proofs(&re_entry.encryption_key, &re_entry.card)?;
+                }
+                Request::Removal(_) => proofs.subject = Some(state.tree.leaf_proof(change.leaf)?),
             }
             records.push(AuditRecord {
                 epoch: window.epoch,
@@ -104,6 +125,27 @@ pub fn records(
 fn fraud_if(check: CoreResult<()>, why: &'static str) -> Option<Verdict> {
     check.err().map(|_| Verdict::Fraud(why))
 }
+
+/// Whether the leaf key or the card that a record's change sets is in the
+/// map of keys before its window, by the record's two proofs.
+fn keys_in_use(
+    previous: &EpochHeader,
+    record: &AuditRecord,
+    encryption_key: &[u8],
+    card: &Card,
+) -> CoreResult<bool> {
+    let keys = [leaf_key_hash(encryption_key)?, card.hash()?];
+    if record.proofs.keys.len() != keys.len() {
+        return Err(CoreError::Invalid("audit record without the key proofs"));
+    }
+    let mut in_use = false;
+    for (proof, key) in record.proofs.keys.iter().zip(&keys) {
+        in_use |= proof.verify(&previous.registry.keys_root, key)?.is_some();
+    }
+    Ok(in_use)
+}
+
+const KEY_IN_USE: Verdict = Verdict::Fraud("a leaf key or card already in use");
 
 /// Audit one entry against `previous`, the header of the epoch before its
 /// window. `Err` means the record's proofs do not check (nothing can be
@@ -148,13 +190,16 @@ pub fn check_record(previous: &EpochHeader, record: &AuditRecord) -> CoreResult<
                     "audit record without the admission proof",
                 ))?
                 .verify(&previous.registry.admissions_root, &join.token())?;
+            let in_use = keys_in_use(previous, record, &join.encryption_key, &join.card)?;
             if device.is_some() {
                 Some(Verdict::Fraud("device already a member"))
             } else if admission.is_some() {
                 Some(Verdict::Fraud("admission already used"))
+            } else if in_use {
+                Some(KEY_IN_USE)
             } else {
                 fraud_if(
-                    join.verify(gid, record.epoch, admins, previous.registry.open),
+                    join.verify(gid, record.epoch, admins, previous.registry.is_open()),
                     "join request or admission",
                 )
             }
@@ -202,6 +247,8 @@ pub fn check_record(previous: &EpochHeader, record: &AuditRecord) -> CoreResult<
                 Some(node) if leaf.occupancy() == Some(update.member) => {
                     if update.replaces != kem_pk_hash(&node.encryption_key)? {
                         Some(Verdict::Fraud("update replaces another key"))
+                    } else if keys_in_use(previous, record, &update.encryption_key, &update.card)? {
+                        Some(KEY_IN_USE)
                     } else {
                         fraud_if(update.verify(gid, &node.device_pk), "update request")
                     }
@@ -215,6 +262,13 @@ pub fn check_record(previous: &EpochHeader, record: &AuditRecord) -> CoreResult<
                 Some(node) if leaf.occupancy() == Some(re_entry.member) => {
                     if re_entry.replaces != kem_pk_hash(&node.encryption_key)? {
                         Some(Verdict::Fraud("re-entry replaces another key"))
+                    } else if keys_in_use(
+                        previous,
+                        record,
+                        &re_entry.encryption_key,
+                        &re_entry.card,
+                    )? {
+                        Some(KEY_IN_USE)
                     } else {
                         fraud_if(re_entry.verify(gid, &node.device_pk), "re-entry request")
                     }

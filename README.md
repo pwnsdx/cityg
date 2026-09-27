@@ -26,8 +26,8 @@ with X25519) and ML-DSA-65.
 > faulty task cut off asks for a repair, which counts against the
 > performer to blame, and disputes the faulty wrap; the delivery service
 > judges disputes with a proof system it is given, which the core does not
-> include. The message plane, the
-> networked
+> include. Of stage 3, it implements cards in leaves and unique keys. The
+> message plane, the networked
 > delivery service and the clients do not exist yet
 > ([specification, section 19](docs/specs.md#19-open-items)). There are no
 > test vectors and no independent human cryptographic review: **for
@@ -229,7 +229,8 @@ Fourteen more, in French, look at what comes next; the fifth gathers them
 into a candidate profile for the next version, in three stages, and the
 following ones work on its open problems. None of them is part of profile
 v0.4; the [v0.5 draft](docs/specs-v0.5-draft.md) specifies the three
-stages, and `cityg-core` implements the first two.
+stages, and `cityg-core` implements the first two and the first part of
+the third.
 
 | Note | Question | What it finds |
 | --- | --- | --- |

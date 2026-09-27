@@ -197,6 +197,14 @@ fn full_group(height: u8, divisions: Divisions, rng: &mut ChaCha20Rng) -> Group 
     for (id, occupancy) in devices {
         delta.devices.insert(id, Some(occupancy));
     }
+    // Every leaf key and card, unique (docs/specs-v0.5-draft.md section 4.2).
+    for (leaf, node) in tree.leaves() {
+        let occupancy = node.occupancy(leaf);
+        delta.keys.insert(node.key_hash().unwrap(), Some(occupancy));
+        delta
+            .keys
+            .insert(node.card.hash().unwrap(), Some(occupancy));
+    }
     registry.apply(&delta);
     let state = PublicState {
         gid,

@@ -23,7 +23,7 @@ use crate::rekey::{
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
 use crate::tree::{
     CityPart, Divisions, LeafNode, NodeId, Occupancy, Overlay, ParentNode, PublicTree, Shape,
-    TreeDelta,
+    TreeDelta, leaf_key_hash,
 };
 
 /// Requests of a window, by reference. [`Requests::insert`] files a request
@@ -257,7 +257,11 @@ pub fn genesis_tree(
     delta
         .devices
         .insert(device_id(gid, creator_pk)?, Some(creator));
-    delta.policy = policy.map(|policy| (policy.hash(), policy.open));
+    delta
+        .keys
+        .insert(leaf_key_hash(keys.encryption_key)?, Some(creator));
+    delta.keys.insert(keys.card.hash()?, Some(creator));
+    delta.policy = policy.map(|policy| (policy.hash(), policy.admission(), policy.authorizer()));
     registry.apply(&delta);
     Ok((tree, registry))
 }
@@ -453,6 +457,17 @@ pub fn district_leaves(
     Ok(leaves)
 }
 
+/// Refuse a leaf key or a card that is in the map of keys before the
+/// window (docs/specs-v0.5-draft.md section 4.2).
+fn check_keys_free(state: &PublicState, keys: LeafKeys<'_>) -> CoreResult<()> {
+    for key in [leaf_key_hash(keys.encryption_key)?, keys.card.hash()?] {
+        if state.registry.key(&key).is_some() {
+            return Err(CoreError::Invalid("a leaf key or card already in use"));
+        }
+    }
+    Ok(())
+}
+
 /// Check one entry against the state before the window and return the new
 /// state of its leaf. With `entries`, check signatures and admissions
 /// (what auditors sample); the rest is always checked.
@@ -474,6 +489,11 @@ pub fn check_entry(
             if state.registry.admission(&admission_hash).is_some() {
                 return Err(CoreError::Invalid("admission already used"));
             }
+            let keys = LeafKeys {
+                encryption_key: &join.encryption_key,
+                card: &join.card,
+            };
+            check_keys_free(state, keys)?;
             if entries {
                 join.verify(&state.gid, epoch, admins, state.registry.is_open())?;
             }
@@ -481,10 +501,7 @@ pub fn check_entry(
                 &state.gid,
                 &join.device_pk,
                 epoch,
-                LeafKeys {
-                    encryption_key: &join.encryption_key,
-                    card: &join.card,
-                },
+                keys,
                 admission_hash,
                 epoch,
             )?))
@@ -513,6 +530,13 @@ pub fn check_entry(
             if update.replaces != kem_pk_hash(&current.encryption_key)? {
                 return Err(CoreError::Invalid("update replaces another key"));
             }
+            check_keys_free(
+                state,
+                LeafKeys {
+                    encryption_key: &update.encryption_key,
+                    card: &update.card,
+                },
+            )?;
             if entries {
                 update.verify(&state.gid, &current.device_pk)?;
             }
@@ -528,6 +552,13 @@ pub fn check_entry(
             if re_entry.replaces != kem_pk_hash(&current.encryption_key)? {
                 return Err(CoreError::Invalid("re-entry replaces another key"));
             }
+            check_keys_free(
+                state,
+                LeafKeys {
+                    encryption_key: &re_entry.encryption_key,
+                    card: &re_entry.card,
+                },
+            )?;
             if entries {
                 re_entry.verify(&state.gid, &current.device_pk)?;
             }
@@ -635,9 +666,52 @@ pub fn registry_delta(
         delta
             .devices
             .insert(device_id(&state.gid, &leaf.device_pk)?, None);
+        for key in [leaf.key_hash()?, leaf.card.hash()?] {
+            delta.keys.insert(key, None);
+        }
         if state.registry.is_admin(*removed) {
             delta.admins_removed.insert(*removed);
         }
+    }
+    // Updates and re-entries replace their member's keys; every key a
+    // change sets must be absent from the map before the window, as a
+    // device must, and set once (docs/specs-v0.5-draft.md section 4.2).
+    let mut set = BTreeSet::new();
+    let mut new_keys = Vec::new();
+    for change in window.all_changes() {
+        let (occupancy, encryption_key, card) = match requests.get(&change.request) {
+            Some(Request::Join(join)) => (
+                Occupancy {
+                    leaf: change.leaf,
+                    since: window.epoch,
+                },
+                &join.encryption_key,
+                &join.card,
+            ),
+            Some(Request::Update(update)) => (update.member, &update.encryption_key, &update.card),
+            Some(Request::ReEntry(re_entry)) => {
+                (re_entry.member, &re_entry.encryption_key, &re_entry.card)
+            }
+            _ => continue,
+        };
+        if change.kind != ChangeKind::Join {
+            let leaf = state
+                .tree
+                .member(occupancy)
+                .ok_or(CoreError::Invalid("change of a non-member"))?;
+            for key in [leaf.key_hash()?, leaf.card.hash()?] {
+                delta.keys.insert(key, None);
+            }
+        }
+        for key in [leaf_key_hash(encryption_key)?, card.hash()?] {
+            if state.registry.key(&key).is_some() || !set.insert(key) {
+                return Err(CoreError::Invalid("a leaf key or card already in use"));
+            }
+            new_keys.push((key, occupancy));
+        }
+    }
+    for (key, occupancy) in new_keys {
+        delta.keys.insert(key, Some(occupancy));
     }
     for change in window.all_changes() {
         if change.kind != ChangeKind::Join {
@@ -667,7 +741,7 @@ pub fn registry_delta(
     }
     if let Some(policy) = policy {
         policy.verify(&state.gid, state.registry.admins())?;
-        delta.policy = Some((policy.hash(), policy.open));
+        delta.policy = Some((policy.hash(), policy.admission(), policy.authorizer()));
     }
     if state.registry.admins_with(&delta).is_empty() {
         delta.admins_added.insert(sealer, sealer_pk.to_vec());

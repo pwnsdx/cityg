@@ -7,12 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Protocol: the v0.5 draft, stage 3 (parity), specified
+### Protocol: the v0.5 draft, stage 3 (parity), specified; part 3a implemented
 
 - Stage 3 of the draft is specified in detail (section 4 of
   [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
-  E-18), from the research notes on parity and on the message plane; it is
-  not implemented yet. Four parts, in the order of their implementation:
+  E-18), from the research notes on parity and on the message plane; its
+  first part is implemented. Four parts, in the order of their
+  implementation:
   - **leaves with cards**: a card, the key that signs messages, beside the
     leaf key, and changed with it; the leaf hash takes the leaf's summary
     (`device_id`, the leaf key's hash, the card), so that a reader checks a
@@ -41,12 +42,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A member draws a fresh card with each leaf key, keeps the pending one
   with its pending leaf key, and holds its card once a window applies it
   (`Member::card`); joiners and returning members bring theirs.
+- **Unique keys, implemented** (section 4.2): the registry maps every leaf
+  key and card to its occupancy (`Registry::key`, `Registry::key_proof`,
+  `keys_root` in `RegistryHeader`). A change may not set a key that is in
+  the map before its window, or that another change of the window sets,
+  as for devices: the DS refuses such a request as it records it (against
+  the map and its queue), `check_entry` as a committer checks an entry, and
+  `registry_delta` over the window. An update or a re-entry thus brings a
+  fresh card and a fresh leaf key.
+- **The admission mode** replaces the registry's `open` flag
+  (`AdmissionMode`: closed, open, authorized; `RegistryHeader::is_open`);
+  the header also carries the authorizer's key hash, `null` until the
+  authorized mode (part 3c).
+- Audits: the record of a join, an update or a re-entry carries the proofs
+  of its two keys against the previous `keys_root`
+  (`EntryProofs::keys`), and a key they show present is a fraud.
 - Breaking: `JoinRequest::sign`, `UpdateRequest::sign`,
   `ReEntryRequest::sign` and `genesis_tree` take `LeafKeys`;
   `LeafNode::new` and `LeafNode::from_value` take the group's id;
-  `EntrantEvidence::ReEntry` boxes its request.
+  `EntrantEvidence::ReEntry` boxes its request. `RegistryHeader` and
+  `RegistryUpdate` lose `open` and gain `keys_root`, `admission` and
+  `authorizer`; `RegistryDelta` gains `keys`, and its `policy` carries the
+  admission mode and the authorizer's hash; `check_policy_change` compares
+  two registry headers; `EntryProofs` gains `keys`.
 - Tests in `crates/cityg-core/tests/parity.rs`: a leaf holds its member's
-  card, which an update replaces; a leaf's hash takes its summary.
+  card, which an update replaces; a leaf's hash takes its summary; no leaf
+  key or card is set twice, whoever builds the window; an audit finds a
+  key already in use.
 
 ### Protocol: the v0.5 draft, stage 2 (tasks)
 
