@@ -121,15 +121,16 @@ refresh, it holds its whole path again.
 
 ```text
 RelayElement := ["city-g/relay/v5", gid, epoch, island, sealed]
-context      := CBOR_det([gid, epoch, island_bits, island, seal_hash])
+context      := CBOR_det([gid, epoch, island_bits, island, interim_transcript_hash_n])
 sealed       := ChaCha20-Poly1305(key   = ExpandLabel(s_j, "relay key", context, 32),
                                   nonce = ExpandLabel(s_j, "relay nonce", context, 12),
                                   aad   = context, plaintext = r_n)          (48 bytes)
 ```
 
 `s_j` is the secret of the island root `(c, j)` after window `n`, `r_n`
-the window's root secret, and `seal_hash` the hash of the window's seal
-header (v0.4 §9), which the member has before it opens the element.
+the window's root secret, and `interim_transcript_hash_n` that of epoch
+`n` (v0.4 §9), which covers the window's seal and its confirmation tag. A
+member computes it from its packet before it opens the element.
 
 * **Who makes it.** The *relay* the DS names for the island and the window
   (section 2.8): a member of the island that was a member of epoch `n - 1`.
@@ -144,18 +145,21 @@ header (v0.4 §9), which the member has before it opens the element.
   confirmation tag (section 2.6). An element that does not open, or leads
   to a wrong tag, makes the member ask for the flat element or a refresh.
 * **Keys.** `s_j` changes only when a window re-keys the island root, but
-  the context binds the epoch and the seal: the key and nonce change at
-  every window, and each seals one plaintext.
-* **Bound to the seal.** The two branches of a fork (v0.4 §2.3) share the
-  epoch, and an island root that neither re-keys keeps its secret in both.
-  Without `seal_hash`, the relays of that island in the two branches would
-  seal two root secrets under the same key and nonce: the XOR of the two
-  elements is the XOR of the two roots, so a member of one branch, which
-  knows its root, would read the other's. With the DS, a member that one
-  branch removes and the other keeps would then derive the epoch that
-  removes it, with the init secret it held. Two seals of the same epoch
-  differ, so their elements have different keys, and an element of one
-  branch does not open in the other.
+  the context binds the epoch and its transcript: the key and nonce change
+  at every window, and each seals one plaintext.
+* **Bound to the transcript.** The branches of a fork (v0.4 §2.3) share
+  the epoch, and an island root that no branch re-keys keeps its secret in
+  all of them. They differ by their seal, when two sealers sealed two
+  windows, or only by their tag, when an insider that knows `init_n-1`
+  leads a member into a root of its choice under the real seal. Bound to
+  the epoch alone, or to the seal alone, the relays of that island in two
+  branches would seal two root secrets under the same key and nonce: the
+  XOR of the two elements is the XOR of the two roots, so whoever knows one
+  root reads the other. With the DS, a member that one branch removes, and
+  that knows the other branch's root, would derive the epoch that removes
+  it, with the init secret it held. Members that accepted the same interim
+  transcript hash hold the same root, so each key seals one plaintext, and
+  an element of one branch does not open in another.
 * **Size.** In a packet, the island index and `sealed`: 52 bytes.
 
 ### 2.4 Flat elements
@@ -327,9 +331,9 @@ urgent removal `WINDOW_URGENT`.
   the members of the island after the window know, and the committer that
   drew it until it erases it. The taint rule (v0.4 §10.2) re-keys what a
   removed committer drew. The DS reads nothing.
-* **Forks.** A relay element binds the seal of its window (section 2.3):
-  each branch of a fork has its own keys, and an honest relay seals one
-  root secret per key.
+* **Forks.** A relay element binds the interim transcript hash of its
+  epoch (section 2.3): each branch of a fork has its own keys, and honest
+  relays seal one root secret per key.
 * **Removed members.** The window that removes a member re-keys its path,
   island root included, before anyone seals `r_n` to it: the relay
   element, the flat element and the refresh of that window are all under

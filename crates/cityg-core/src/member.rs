@@ -328,8 +328,9 @@ impl Member {
             leaf_changed = true;
         }
         let seal_hash = header.hash()?;
-        let (secrets, root) = self.follow_path(&path, shape, packet, &seal_hash)?;
         let confirmed = confirmed_transcript_hash(&self.header.interim, &seal_hash)?;
+        let interim = interim_transcript_hash(&confirmed, &packet.tag)?;
+        let (secrets, root) = self.follow_path(&path, shape, packet, &interim)?;
         let context = GroupContext {
             gid: self.header.gid,
             epoch: header.epoch,
@@ -365,7 +366,7 @@ impl Member {
             shape,
             tree_hash: header.tree_hash,
             registry,
-            interim: interim_transcript_hash(&confirmed, &packet.tag)?,
+            interim,
             external_pk,
         };
         self.previous = Some(core::mem::replace(&mut self.header, next));
@@ -377,14 +378,14 @@ impl Member {
     }
 
     /// The path the member will hold after the window of `packet`, whose
-    /// seal header hashes to `seal_hash`, and the window's root secret.
-    /// Nothing is checked against the tag here.
+    /// epoch has the interim transcript hash `interim`, and the window's root
+    /// secret. Nothing is checked against the tag here.
     fn follow_path(
         &self,
         path: &MemberPath,
         shape: Shape,
         packet: &Packet,
-        seal_hash: &Digest,
+        interim: &Digest,
     ) -> CoreResult<(PathSecrets, Secret)> {
         let gid = &self.header.gid;
         let epoch = packet.header.epoch;
@@ -421,7 +422,7 @@ impl Member {
                     epoch,
                     island_bits: shape.island_bits,
                     island: index,
-                    seal_hash: *seal_hash,
+                    interim: *interim,
                 };
                 let root = relay.open(&context, island_secret)?;
                 Ok((island, root))
@@ -467,8 +468,8 @@ impl Member {
     }
 
     /// The relay element of the member's island for its epoch (E-15): the
-    /// root secret sealed under the secret of its island root, for the seal
-    /// the member followed.
+    /// root secret sealed under the secret of its island root, bound to the
+    /// interim transcript hash of the epoch the member accepted.
     pub fn relay_element(&self) -> CoreResult<RelayElement> {
         let shape = self.header.shape;
         if !shape.has_islands() {
@@ -485,7 +486,7 @@ impl Member {
             epoch: self.header.epoch,
             island_bits: shape.island_bits,
             island: shape.island_of(self.occupancy.leaf),
-            seal_hash: self.seal_hash,
+            interim: self.header.interim,
         };
         RelayElement::seal(&context, island_secret, &self.root)
     }

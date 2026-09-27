@@ -115,6 +115,49 @@ fn island_followers_take_the_root_from_their_relays() {
 }
 
 #[test]
+fn a_relay_element_opens_only_under_the_transcript_of_its_window() {
+    // The branches of a fork share the epoch and the islands a window leaves
+    // alone. A relay element binds the interim transcript hash of its epoch,
+    // which covers the seal and the tag: under another tag, as when an
+    // insider leads a member into a root of its choice under the real seal,
+    // the element does not open (docs/specs-v0.5-draft.md section 2.3).
+    let mut sim = group(2, 47, 16);
+    let updater = *sim.members.keys().nth(5).unwrap();
+    some_update(&mut sim, updater);
+    let task = sim.open_window();
+    let epoch = sim.seal_window(&task);
+    sim.make_tops(epoch);
+    let relays: BTreeSet<Occupancy> = sim
+        .ds
+        .window(epoch)
+        .unwrap()
+        .top_task()
+        .relays
+        .values()
+        .copied()
+        .collect();
+    let follower = *sim
+        .members
+        .keys()
+        .find(|member| !relays.contains(*member) && sim.members[*member].epoch() + 1 == epoch)
+        .unwrap();
+    let packet = sim
+        .ds
+        .island_packet(epoch, follower, TopChoice::Best)
+        .unwrap();
+    assert!(matches!(packet.top, Some(Top::Relay(_))));
+    let mut forked = packet.clone();
+    forked.tag[0] ^= 1;
+    let member = sim.members.get_mut(&follower).unwrap();
+    assert_eq!(
+        member.process(&forked).unwrap_err(),
+        cityg_core::CoreError::Decrypt("relay element")
+    );
+    member.process(&packet).unwrap();
+    assert_eq!(member.epoch(), epoch);
+}
+
+#[test]
 fn an_island_with_no_member_online_gets_a_flat_element() {
     let mut sim = group(2, 42, 16);
     // The members of island 1 go offline; they still follow when they look.
@@ -180,7 +223,7 @@ fn a_relay_that_sends_garbage_only_makes_its_island_fall_back() {
         epoch,
         island_bits: 2,
         island,
-        seal_hash: [9; 32],
+        interim: [9; 32],
     };
     let garbage = RelayElement::seal(&context, &[9; 32], &[9; 32]).unwrap();
     sim.ds.submit_relay(hostile, garbage.clone()).unwrap();

@@ -428,7 +428,7 @@ fn a_large_window_on_a_full_group_matches_the_model() {
         epoch,
         island_bits,
         island: 0,
-        seal_hash: [3; 32],
+        interim: [3; 32],
     };
     let relay = Top::Relay(RelayElement::seal(&context, &[1; 32], &[2; 32]).unwrap());
     let island_pk = &state

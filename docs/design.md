@@ -374,10 +374,11 @@ top of its packet:
 
 It checks the confirmation tag as before, and keeps the root secret. The
 windows, the roles and the re-key do not change: every window still
-re-keys every ancestor of what it changes. A relay element binds the hash
-of its window's seal: the two branches of a fork share the epoch and the
-islands neither re-keys, and without it two honest relays would seal two
-root secrets under one key and nonce.
+re-keys every ancestor of what it changes. A relay element binds the
+interim transcript hash of its epoch, which covers the seal and the tag:
+the branches of a fork share the epoch and the islands no branch re-keys,
+and without it two honest relays would seal two root secrets under one key
+and nonce.
 
 **Why.** Above about `2^14` leaves, the upper levels change in almost every
 window, and a member read a wrap per such level only to learn the root

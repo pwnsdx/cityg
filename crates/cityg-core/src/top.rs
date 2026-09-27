@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! RelayElement := ["city-g/relay/v5", gid, epoch, island, sealed]
-//!   context := CBOR_det([gid, epoch, island_bits, island, seal_hash])
+//!   context := CBOR_det([gid, epoch, island_bits, island, interim_transcript_hash_n])
 //!   sealed  := ChaCha20-Poly1305(key   = ExpandLabel(s_j, "relay key", context, 32),
 //!                                nonce = ExpandLabel(s_j, "relay nonce", context, 12),
 //!                                aad = context, plaintext = r_n)            (48 bytes)
@@ -17,16 +17,21 @@
 //!                 each with the epoch of the window that made it
 //! ```
 //!
-//! `s_j` is the secret of the island root after the window, and `seal_hash`
-//! the hash of the window's seal header. A relay element is made by a member
-//! of the island, which knows `s_j` and `r_n`; a flat element by any member
-//! that knows `r_n`, once it checked the island root's key against its
-//! header. Neither is signed: the member checks the confirmation tag, so a
-//! wrong element only makes it fall back to another.
+//! `s_j` is the secret of the island root after the window, and
+//! `interim_transcript_hash_n` that of the window's epoch, which covers its
+//! seal and its confirmation tag. A relay element is made by a member of the
+//! island, which knows `s_j` and `r_n`; a flat element by any member that
+//! knows `r_n`, once it checked the island root's key against its header.
+//! Neither is signed: the member checks the confirmation tag, so a wrong
+//! element only makes it fall back to another.
 //!
-//! The seal hash keeps two branches of a fork apart: they can share the
-//! epoch and an island root the window left alone, and without it two honest
-//! relays would seal two root secrets under the same key and nonce.
+//! The interim hash keeps the branches of a fork apart. They share the epoch
+//! and the islands the window left alone; they differ by their seal, or, when
+//! an insider led a member into a root of its choice under the real seal, by
+//! their tag. Without it, two honest relays would seal two root secrets under
+//! the same key and nonce, and the XOR of the elements would give one root to
+//! whoever knows the other. Members that accepted the same interim hash hold
+//! the same root, so each key seals one plaintext.
 
 use std::collections::BTreeMap;
 
@@ -54,15 +59,16 @@ pub const RELAY_LABEL: &str = "city-g/relay/v5";
 pub const RELAY_ELEMENT_BYTES: usize = SEALED_SECRET_BYTES + 4;
 
 /// What a relay element is bound to: its group, window, island, and the
-/// window's seal, which differs between the branches of a fork.
+/// interim transcript hash of the window's epoch, which differs between the
+/// branches of a fork.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RelayContext {
     pub gid: Digest,
     pub epoch: u64,
     pub island_bits: u8,
     pub island: u32,
-    /// `H(SealHeader)` of the window.
-    pub seal_hash: Digest,
+    /// `interim_transcript_hash_n`: the window's seal and confirmation tag.
+    pub interim: Digest,
 }
 
 impl RelayContext {
@@ -72,7 +78,7 @@ impl RelayContext {
             uint(self.epoch),
             uint(u64::from(self.island_bits)),
             uint(u64::from(self.island)),
-            bytes(&self.seal_hash),
+            bytes(&self.interim),
         ]))
     }
 
@@ -285,18 +291,18 @@ mod tests {
 
     const GID: Digest = [6u8; 32];
 
-    fn context(epoch: u64, island_bits: u8, island: u32, seal_hash: Digest) -> RelayContext {
+    fn context(epoch: u64, island_bits: u8, island: u32, interim: Digest) -> RelayContext {
         RelayContext {
             gid: GID,
             epoch,
             island_bits,
             island,
-            seal_hash,
+            interim,
         }
     }
 
     #[test]
-    fn a_relay_element_opens_only_for_its_window_island_seal_and_secret() {
+    fn a_relay_element_opens_only_for_its_window_island_transcript_and_secret() {
         let island_secret = [4u8; 32];
         let root = [9u8; 32];
         let here = context(7, 2, 3, [1; 32]);
@@ -305,7 +311,7 @@ mod tests {
         assert_eq!(*relay.open(&here, &island_secret).unwrap(), root);
         let decoded = RelayElement::decode(&relay.encode().unwrap()).unwrap();
         assert_eq!(decoded, relay);
-        // Another window, island, island size, seal or secret: refused.
+        // Another window, island, island size, transcript or secret: refused.
         assert!(
             relay
                 .open(&context(8, 2, 3, [1; 32]), &island_secret)
@@ -341,8 +347,10 @@ mod tests {
 
     #[test]
     fn two_branches_of_a_fork_seal_under_different_keys() {
-        // Two windows of the same epoch, as a fork shows them to two relays of
-        // an island that neither re-keyed: the same island secret, two roots.
+        // Two branches of one epoch, as a fork shows them to two relays of an
+        // island that neither re-keyed: two seals, or one seal with the tag of
+        // an insider that chose the root. The same island secret, two roots,
+        // two interim transcript hashes.
         let island_secret = [4u8; 32];
         let (root_a, root_b) = ([9u8; 32], [7u8; 32]);
         let a = RelayElement::seal(&context(7, 2, 3, [1; 32]), &island_secret, &root_a).unwrap();
