@@ -433,9 +433,14 @@ already is, which checks the state against its chain of seals and hedges
 with its leaf seed; the DS gives tasks to joiners first. Every device
 hedges what it draws with its leaf seed, the coins of its encapsulations
 included, and the sealer checks its path against the published keys.
-Entries carry the island path and a top. A member a faulty task cut off is repaired with the
-root secret wrapped to its leaf key, and updates. Disputes name the faulty
-performer (their proof system is still open).
+Entries carry the island path and a top. A member a faulty task cut off
+asks for a repair, naming the first level of its path it cannot derive
+against the published keys; another member wraps the root secret to its
+leaf key, and the member updates. The DS counts each request against the
+performer whose taint that node bears, and gives no role to a performer
+that enough distinct members blamed: an exclusion without conviction,
+until disputes, whose proof system is still open, name the faulty
+performer.
 
 **Why.** In v0.4 the sealer re-keys the whole city: in a burst of 100,000
 joins and 100,000 departures at a million members, the heaviest role took
@@ -448,7 +453,10 @@ and a faulty one cuts off at most 256 members, repaired within the window.
 **Cost.** A joiner that performs a task first follows the chain of seals
 from its anchor; its hedge rests on its own leaf seed, not on a group
 secret. Every task binds the state it was built on. The DS learns which
-joiners stay online.
+joiners stay online, and which members could not follow. A member can
+blame a performer without proof, once per performer: exclusion is a
+choice of the DS among performers, which binds no member and re-keys
+nothing, and fewer colluding members than the threshold exclude no one.
 
 ## Parameters
 

@@ -21,6 +21,8 @@
 //! CatchUpRequest := ["city-g/catch-up/v5", gid, member, prev_interim, init_key]  ctx CATCH_UP
 //! ReEntryRequest := ["city-g/re-entry/v5", gid, member, replaces, encryption_key,
 //!                    init_key]                                    ctx RE_ENTRY
+//! RepairRequest  := ["city-g/repair-request/v5", gid, epoch, seal_hash, member,
+//!                    level]                                       ctx REPAIR_REQUEST
 //! Checkpoint     := ["city-g/checkpoint/v5", gid, epoch, interim, tree_hash,
 //!                    registry_hash, height, district_bits, island_bits,
 //!                    subcity_bits, external_pk_hash, time_ms, admin]
@@ -37,6 +39,9 @@
 //! `H_L("kem-pk", [key])` of the leaf key an update or a re-entry replaces:
 //! a request applies once, and cannot be replayed once the key changed.
 //! `prev_interim` binds a catch-up request to the window that serves it.
+//! A repair request names the window by its seal header's hash, and the
+//! first level of the member's path whose secret that window does not let
+//! it derive (docs/specs-v0.5-draft.md section 3.7).
 //!
 //! Decoding parses and checks lengths; signatures are checked by `verify`
 //! methods, so that a party can place an entry without checking it (E-12).
@@ -73,6 +78,7 @@ pub const POLICY_LABEL: &str = "city-g/group-policy/v5";
 pub const UPDATE_LABEL: &str = "city-g/update/v5";
 pub const CATCH_UP_LABEL: &str = "city-g/catch-up/v5";
 pub const RE_ENTRY_LABEL: &str = "city-g/re-entry/v5";
+pub const REPAIR_REQUEST_LABEL: &str = "city-g/repair-request/v5";
 pub const CHECKPOINT_LABEL: &str = "city-g/checkpoint/v5";
 
 /// `gid := H_L("group-id", [creator_device_pk, nonce])`.
@@ -884,6 +890,89 @@ impl CatchUpRequest {
         }
         self.signed
             .verify(device_pk, SignatureContext::CATCH_UP, "catch-up request")
+    }
+}
+
+/// A member's request for a repair of the window that created `epoch`,
+/// which a faulty task keeps it from following (docs/specs-v0.5-draft.md
+/// section 3.7). It names the first level of the member's path whose secret
+/// the window does not let it derive; the node at that level bears the
+/// taint of the performer the request blames.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepairRequest {
+    pub gid: Digest,
+    pub epoch: u64,
+    pub seal_hash: Digest,
+    pub member: Occupancy,
+    pub level: u8,
+    signed: Signed,
+}
+
+impl RepairRequest {
+    /// Sign a repair request for the window whose seal header hashes to
+    /// `seal_hash`.
+    pub fn sign(
+        gid: &Digest,
+        epoch: u64,
+        seal_hash: &Digest,
+        member: Occupancy,
+        level: u8,
+        identity: &DeviceIdentity,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Self> {
+        let signed = sign_fields(
+            vec![
+                text(REPAIR_REQUEST_LABEL),
+                bytes(gid),
+                uint(epoch),
+                bytes(seal_hash),
+                member.value(),
+                uint(u64::from(level)),
+            ],
+            identity,
+            SignatureContext::REPAIR_REQUEST,
+            rng,
+        )?;
+        Self::decode(&signed.encoded)
+    }
+
+    /// Parse a repair request.
+    pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
+        let (mut fields, signed) = open_signed(
+            encoded,
+            REPAIR_REQUEST_LABEL,
+            6,
+            MAX_REQUEST_BYTES,
+            "repair request",
+        )?;
+        let request = Self {
+            gid: fields.digest()?,
+            epoch: fields.uint()?,
+            seal_hash: fields.digest()?,
+            member: fields.occupancy()?,
+            level: fields.u8()?,
+            signed,
+        };
+        if request.level == 0 {
+            return Err(CoreError::Invalid("repair request level"));
+        }
+        Ok(request)
+    }
+
+    /// Encoded signed request.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.signed.encoded
+    }
+
+    /// Check the member's signature with its device key `device_pk`.
+    pub fn verify(&self, gid: &Digest, device_pk: &[u8]) -> CoreResult<()> {
+        check_gid(&self.gid, gid, "repair request group")?;
+        self.signed.verify(
+            device_pk,
+            SignatureContext::REPAIR_REQUEST,
+            "repair request",
+        )
     }
 }
 

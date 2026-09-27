@@ -33,7 +33,8 @@
 //! * members, joiners and returning members, including windows an entrant
 //!   seals when no member is online ([`member`]);
 //! * an in-memory delivery service: queues, placement, roles, checks,
-//!   packets, recorded removals, eviction and audit records ([`ds`]);
+//!   packets, recorded removals, eviction, audit records, repair requests
+//!   and the exclusion of performers they blame ([`ds`]);
 //! * audits of a window's entries and fraud proofs ([`audit`]).
 
 pub mod audit;

@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, disputes aside (sections 3.1 to 3.7); stage 3 (section 4) is outlined, with its labels reserved. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, disputes aside (sections 3.1 to 3.7, and the exclusion without conviction of section 3.8); stage 3 (section 4) is outlined, with its labels reserved. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
 | Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2, disputes aside) |
 | Design | [design.md](design.md) (decisions E-15 to E-17) |
@@ -609,12 +609,40 @@ for the next: the flat element, then its whole path.
 ### 3.7 Repairs
 
 A member whose packet it cannot follow with any top (section 2.8), because
-a task's wrap to it does not open, asks the DS for a repair:
+a task's wrap to it does not open or opens to a wrong secret, asks the DS
+for a repair of the latest window:
 
 ```text
+RepairRequest := ["city-g/repair-request/v5", gid, epoch, seal_hash, member, level]
+  seal_hash := H(SealHeader) of the window that created epoch n
+  level     := the first level of the member's path whose secret the window
+               does not let it derive, from 1
 Repair := ["city-g/repair/v5", gid, epoch, leaf, wrap]
   wrap := r_n wrapped (v0.4 §7.2) from the root (height, 0) to the leaf (0, leaf)
 ```
+
+**Repair requests** are signed by the member under `REPAIR_REQUEST`. To
+find `level`, the member takes its leaf proof and the parents of its path
+in the tree of epoch `n`, checks them against the header's `tree_hash`,
+and walks its steps from the leaf up: its whole packet's, or its island
+packet's with a refresh above the island. `level` is the first level whose
+step does not open or does not chain, or gives a secret whose key is not
+the published one; a level without a step keeps the secret the member
+holds. If every level gives its published key, the member has nothing to
+repair. The node at `level` bears the taint of the performer that drew it
+(v0.4 §10.6): the request blames that performer, without proof. Without the
+tag, the member cannot tell the header from a forgery; it MAY check it
+against the seal's signature (its seal link, v0.4 §12.9) first. A member
+cut off from an older window jumps instead (v0.4 §12.10).
+
+The DS checks the signature with the member's device key in the tree of
+epoch `n`, that `seal_hash` is the latest window's, and that the window
+re-keyed the node at `level`. It then asks one member for the repair: an
+online member outside the subtree of that node, neither the member nor the
+blamed performer, nor excluded (section 3.8), in turn. It keeps a repair
+from that maker alone. A second request for the same window, after a
+repair that did not lead to the tag or a maker that did not answer, asks
+the next maker and drops the repair kept.
 
 * **Who makes it.** Any member of epoch `n` holding `r_n` that the DS
   asks, with the leaf key of the tree of epoch `n`, checked against its
@@ -630,6 +658,8 @@ Repair := ["city-g/repair/v5", gid, epoch, leaf, wrap]
   window of its update re-keys its path.
 * **The DS** keeps a repair with its window, and serves it as the top of
   the member's packet, which then carries no steps.
+* **What the DS learns**: which member could not follow, and which node it
+  names; nothing of a secret.
 
 ### 3.8 Disputes
 
@@ -653,8 +683,23 @@ the branch's statement, over the member's key and the wrap in its context
   and the next window treats the performer as affected: it re-keys every
   node the performer taints (v0.4 §10.2).
 * **Not fixed by this draft**: the proof system and the encoding of
-  `proof`. Until they are, a DS MAY exclude a performer on repairs it made
-  necessary, without conviction.
+  `proof`. Until they are, a DS MAY exclude a performer on repair requests,
+  without conviction.
+
+**Exclusion without conviction.** The DS counts, for each performer, the
+distinct members whose repair requests blame it (section 3.7), and gives
+no role to a performer that `repair_threshold` members blamed (2 in the
+in-memory DS; 0 turns it off): no district commit, city task, seal, relay,
+flat element or repair, nor a task it would take over. It binds no member,
+since the requests prove nothing: members accept tasks from any performer
+the rules allow (section 3.4), and the DS already chooses who performs.
+It re-keys nothing either: the performer's taints stay until its next
+update (v0.4 §10.2), which the DS MAY ask for, or an admin removes it. An
+operator MAY lift an exclusion. The threshold bounds framing: members can
+blame only the performers of nodes on their own paths, once each, so that
+fewer than `repair_threshold` colluding members exclude no one. With every
+online member excluded, windows wait for another member, or for an
+entrant (v0.4 §12.7).
 
 ### 3.9 Security considerations
 
@@ -685,6 +730,11 @@ the branch's statement, over the member's key and the wrap in its context
   drew.
 * **Taints** follow performers, joiners included: removing or updating a
   performer re-keys every node it drew (E-4).
+* **Repair requests** carry no secret, and a repair's maker takes the
+  member's leaf key from its own checked state (`repair.pv`): a false
+  request only costs a repair, and counts once against a performer. The
+  exclusion they lead to is the DS's choice of performers, not a verdict;
+  disputes (section 3.8) are what convict.
 * **A joiner that commits a district** checks its entries as a member
   committer does, and audits name it as they name a member (v0.4 §15). A
   faulty joiner can place entries it should not, as a faulty member can in
@@ -783,8 +833,9 @@ Every object label of v0.4 ends in `/v5` instead of `/v4`:
 `city-g/group-policy/v5`, `city-g/update/v5`, `city-g/catch-up/v5`,
 `city-g/re-entry/v5`, `city-g/checkpoint/v5`, `city-g/district-commit/v5`,
 `city-g/seal/v5`, `city-g/seal-body/v5`, `city-g/welcome/v5`, and the new
-unsigned `city-g/relay/v5`; for stage 2, `city-g/city-task/v5` and
-`city-g/dispute/v5` (signed) and `city-g/repair/v5` (unsigned).
+unsigned `city-g/relay/v5`; for stage 2, `city-g/city-task/v5`,
+`city-g/repair-request/v5` and `city-g/dispute/v5` (signed) and
+`city-g/repair/v5` (unsigned).
 
 The FIPS 204 context of every signed object is its label, as in v0.4
 §17.3; the seal is signed under `city-g/seal/v5`.
@@ -821,7 +872,7 @@ The FIPS 204 context of every signed object is its label, as in v0.4
 | §7.1, §7.2, §11, §12.7 | Stage 2: every device hedges its fresh secrets and the coins of its encapsulations with its leaf seed (section 3.3) |
 | §11 | Stage 2: a joiner does not welcome; members welcome the entries of a district that a joiner commits (section 3.4) |
 | §13.4 | Stage 2: entries by island (section 3.6) |
-| §14.4 | Stage 2: joiners perform tasks first (section 3.4); repairs and disputes (sections 3.7 and 3.8) |
+| §14.4 | Stage 2: joiners perform tasks first (section 3.4); repair requests, repairs, exclusion without conviction and disputes (sections 3.7 and 3.8) |
 
 Nothing of v0.4 decodes under this draft: every label changed.
 
@@ -847,9 +898,9 @@ Nothing of v0.4 decodes under this draft: every label changed.
   entries carry the island path (stage 2).
 * **Encodings** of island packets and top tasks, and test vectors, as for
   the objects v0.4 leaves open (v0.4 §19).
-* **Asking for repairs.** How a member tells the DS that it cannot follow,
-  and whom the DS asks for its repair; the in-memory DS keeps a repair from
-  any member it accepts.
+* **Excluding on repairs.** The threshold, whether counts should decay or
+  weigh the requester's own history (a member that asks in many windows),
+  and when a DS should ask an excluded performer for an update.
 * **The proof system of disputes** (section 3.8): the statements are
   measured in the research notes, in Longfellow; the encoding of `proof`,
   its verifier in the DS, and the size limits remain to be fixed.

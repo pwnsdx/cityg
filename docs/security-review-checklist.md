@@ -83,6 +83,10 @@ names the check that backs it.
       a repair, a welcome's leaf key) comes from a state it checked against
       its header, never from the delivery service (models `flat_unchecked.pv`,
       `repair*.pv`).
+- [ ] A repair request is checked (signature, seal hash, a node the latest
+      window re-keyed on the member's path) and counts once per member
+      against a performer; exclusion only withholds roles, and no rule a
+      member checks depends on it (v0.5 draft, sections 3.7 and 3.8).
 
 ## Claims
 

@@ -607,8 +607,6 @@ impl MemberPath {
     ) -> CoreResult<PathSecrets> {
         let mut path = base.up_to(from.saturating_sub(1));
         for level in from..=to {
-            let node = NodeId::of_leaf(self.leaf, level);
-            let child = NodeId::of_leaf(self.leaf, level - 1);
             let Some((epoch, step)) = step_at(level) else {
                 if !keep_others {
                     return Err(CoreError::Invalid("missing path step"));
@@ -620,35 +618,92 @@ impl MemberPath {
                 path.insert(level, kept.clone(), *epoch);
                 continue;
             };
-            let secret = match step {
-                Step::Wrap(wrapped) => {
-                    if wrapped.node != node || wrapped.target != child {
-                        return Err(CoreError::Invalid("wrap off the member's path"));
-                    }
-                    if level == 1 {
-                        unwrap(gid, epoch, wrapped, &self.leaf_key, &self.leaf_pk)?
-                    } else {
-                        let below = path
-                            .secret(level - 1)
-                            .ok_or(CoreError::Invalid("unknown path secret"))?;
-                        let key = node_key(below)?;
-                        let pk = key.public_key();
-                        unwrap(gid, epoch, wrapped, &key, &pk)?
-                    }
-                }
-                Step::Chain => {
-                    if level == 1 || path.epochs.get(&(level - 1)) != Some(&epoch) {
-                        return Err(CoreError::Invalid("chain from a child not re-keyed"));
-                    }
-                    chain(
-                        path.secret(level - 1)
-                            .ok_or(CoreError::Invalid("unknown path secret"))?,
-                    )?
-                }
-            };
+            let secret = self.step_secret(&path, level, epoch, step, gid)?;
             path.insert(level, secret, epoch);
         }
         Ok(path)
+    }
+
+    /// The secret of the ancestor at `level` from its step, made by the
+    /// window of `epoch`, and from `path`, which holds the levels below.
+    fn step_secret(
+        &self,
+        path: &PathSecrets,
+        level: u8,
+        epoch: u64,
+        step: &Step,
+        gid: &Digest,
+    ) -> CoreResult<Secret> {
+        let node = NodeId::of_leaf(self.leaf, level);
+        let child = NodeId::of_leaf(self.leaf, level.saturating_sub(1));
+        match step {
+            Step::Wrap(wrapped) => {
+                if level == 0 || wrapped.node != node || wrapped.target != child {
+                    return Err(CoreError::Invalid("wrap off the member's path"));
+                }
+                if level == 1 {
+                    unwrap(gid, epoch, wrapped, &self.leaf_key, &self.leaf_pk)
+                } else {
+                    let below = path
+                        .secret(level - 1)
+                        .ok_or(CoreError::Invalid("unknown path secret"))?;
+                    let key = node_key(below)?;
+                    let pk = key.public_key();
+                    unwrap(gid, epoch, wrapped, &key, &pk)
+                }
+            }
+            Step::Chain => {
+                if level <= 1 || path.epochs.get(&(level - 1)) != Some(&epoch) {
+                    return Err(CoreError::Invalid("chain from a child not re-keyed"));
+                }
+                chain(
+                    path.secret(level - 1)
+                        .ok_or(CoreError::Invalid("unknown path secret"))?,
+                )
+            }
+        }
+    }
+
+    /// The first level from 1 to `height` whose secret the member cannot
+    /// derive as the published key of `nodes` (the path's parents, by level
+    /// from 1) demands: its step does not open or does not chain, or gives
+    /// another key. `steps` are by level, with the epoch of the window that
+    /// made each; a level without a step keeps the secret the member holds.
+    /// `None` if every level gives its published key: what a member that a
+    /// faulty task cut off names in its repair request
+    /// (docs/specs-v0.5-draft.md section 3.7).
+    pub fn first_fault(
+        &self,
+        height: u8,
+        steps: &BTreeMap<u8, (u64, Step)>,
+        nodes: &[Option<ParentNode>],
+        gid: &Digest,
+    ) -> CoreResult<Option<u8>> {
+        let mut path = PathSecrets::default();
+        for level in 1..=height {
+            let published = nodes
+                .get(usize::from(level - 1))
+                .and_then(Option::as_ref)
+                .ok_or(CoreError::Invalid("blank ancestor of a member"))?;
+            let (secret, epoch) = if let Some((epoch, step)) = steps.get(&level) {
+                match self.step_secret(&path, level, *epoch, step, gid) {
+                    Ok(secret) => (secret, *epoch),
+                    Err(_) => return Ok(Some(level)),
+                }
+            } else {
+                let (Some(kept), Some(epoch)) =
+                    (self.path.secret(level), self.path.epochs.get(&level))
+                else {
+                    return Err(CoreError::Invalid("unknown path secret"));
+                };
+                (kept.clone(), *epoch)
+            };
+            if node_key(&secret)?.public_key() != published.encryption_key {
+                return Ok(Some(level));
+            }
+            path.insert(level, secret, epoch);
+        }
+        Ok(None)
     }
 
     /// The path secrets up to `height` after a window of epoch `epoch`

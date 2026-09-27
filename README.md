@@ -23,7 +23,8 @@ with X25519) and ML-DSA-65.
 > removals are urgent or ordinary. It also implements stage 2, disputes
 > aside: the city is re-keyed by sub-city, the window's joiners perform
 > tasks first, the sealer draws nothing, entrants enter by island, and a
-> member that a faulty task cut off is repaired. The message plane, the
+> member that a faulty task cut off asks for a repair, which counts
+> against the performer to blame. The message plane, the
 > networked
 > delivery service and the clients do not exist yet
 > ([specification, section 19](docs/specs.md#19-open-items)). There are no
@@ -288,7 +289,8 @@ a top re-keyed by their own performers, tasks that wait for what they
 build on, failed performers replaced, a removed performer's parts re-keyed,
 an entrant that performs every task, joiners that perform the tasks of the
 window they enter from the state their chain of seals gives, entries by
-island, and repairs.
+island, repairs that members ask for, and a performer excluded from roles
+once two members blamed it.
 
 ## Contributing
 

@@ -20,7 +20,7 @@ use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::kem::KemSecret;
 use cityg_core::member::Joiner;
-use cityg_core::objects::{JoinRequest, Request, Urgency};
+use cityg_core::objects::{JoinRequest, RepairRequest, Request, Urgency};
 use cityg_core::roles::{WindowTask, WindowWork, build_district};
 use cityg_core::top::{RelayContext, RelayElement, Top};
 use cityg_core::tree::{CityPart, Divisions, NodeId, Occupancy};
@@ -393,6 +393,54 @@ fn at(sim: &Sim, leaves: &[u32]) -> Vec<Occupancy> {
         .iter()
         .map(|leaf| sim.ds.state().tree.occupancy(*leaf).unwrap())
         .collect()
+}
+
+/// `commit`, with the wrap of its first level to `victim`'s leaf replaced by
+/// a wrap of another secret, signed again by its committer.
+fn cut_off(sim: &mut Sim, commit: &DistrictCommit, victim: Occupancy) -> DistrictCommit {
+    let victim_pk = sim
+        .ds
+        .state()
+        .tree
+        .leaf(victim.leaf)
+        .unwrap()
+        .encryption_key
+        .clone();
+    let node = NodeId::of_leaf(victim.leaf, 1);
+    let target = NodeId::leaf(victim.leaf);
+    let mut wraps = commit.wraps.clone();
+    let slot = wraps
+        .iter_mut()
+        .find(|wrapped| wrapped.node == node && wrapped.target == target)
+        .unwrap();
+    *slot = wrap(
+        &commit.gid,
+        commit.epoch,
+        node,
+        target,
+        &victim_pk,
+        &[7; 32],
+        &[0; 32],
+        &mut sim.rng,
+    )
+    .unwrap();
+    DistrictCommit::sign(
+        DistrictCommitContent {
+            gid: commit.gid,
+            epoch: commit.epoch,
+            district: commit.district,
+            height: commit.height,
+            prev_district_hash: commit.prev_district_hash,
+            committer: commit.committer,
+            changes: commit.changes.clone(),
+            updates: commit.updates.clone(),
+            wraps,
+            district_hash: commit.district_hash,
+        },
+        sim.members[&commit.committer].identity(),
+        &mut sim.rng,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -948,8 +996,10 @@ fn a_member_that_a_faulty_commit_cut_off_is_repaired_then_updates() {
     let shape = sim.ds.state().tree.shape();
     let (gone, victim) = (at(&sim, &[8])[0], at(&sim, &[9])[0]);
     // The victim is offline, so that another member commits its district
-    // when its neighbour leaves.
+    // when its neighbour leaves; so is a bystander of another district.
+    let bystander = at(&sim, &[3])[0];
     sim.ds.set_online(victim, false);
+    sim.ds.set_online(bystander, false);
     remove(&mut sim, gone);
     let task = sim.open_window();
     let district = shape.district_of(victim.leaf);
@@ -958,54 +1008,12 @@ fn a_member_that_a_faulty_commit_cut_off_is_repaired_then_updates() {
     // The committer wraps another secret to the victim's leaf, and signs.
     let (_, requests, _) = sim.ds.open_window_data().unwrap();
     let requests = requests.clone();
-    let victim_pk = sim
-        .ds
-        .state()
-        .tree
-        .leaf(victim.leaf)
-        .unwrap()
-        .encryption_key
-        .clone();
     for (d, c) in &task.committers {
         let mut commit = sim.members[c]
             .commit_district(sim.ds.state(), &task, *d, &requests, &mut sim.rng)
             .unwrap();
         if *d == district {
-            let node = NodeId::of_leaf(victim.leaf, 1);
-            let target = NodeId::leaf(victim.leaf);
-            let mut wraps = commit.wraps.clone();
-            let slot = wraps
-                .iter_mut()
-                .find(|wrapped| wrapped.node == node && wrapped.target == target)
-                .unwrap();
-            *slot = wrap(
-                &commit.gid,
-                commit.epoch,
-                node,
-                target,
-                &victim_pk,
-                &[7; 32],
-                &[0; 32],
-                &mut sim.rng,
-            )
-            .unwrap();
-            commit = DistrictCommit::sign(
-                DistrictCommitContent {
-                    gid: commit.gid,
-                    epoch: commit.epoch,
-                    district: commit.district,
-                    height: commit.height,
-                    prev_district_hash: commit.prev_district_hash,
-                    committer: commit.committer,
-                    changes: commit.changes.clone(),
-                    updates: commit.updates.clone(),
-                    wraps,
-                    district_hash: commit.district_hash,
-                },
-                sim.members[c].identity(),
-                &mut sim.rng,
-            )
-            .unwrap();
+            commit = cut_off(&mut sim, &commit, victim);
         }
         sim.ds.submit_district_commit(commit).unwrap();
     }
@@ -1013,8 +1021,26 @@ fn a_member_that_a_faulty_commit_cut_off_is_repaired_then_updates() {
     let seal = sim.seal_open(&task);
     let epoch = sim.ds.submit_seal(seal).unwrap();
     sim.absent.insert(victim);
+    sim.absent.insert(bystander);
     sim.follow(epoch);
     sim.welcome_and_enter(epoch);
+    // The bystander, whose path the window lets it derive, from its island
+    // path and a refresh above it, has nothing to ask for.
+    let refresh = sim
+        .ds
+        .island_packet(epoch, bystander, TopChoice::Refresh)
+        .unwrap();
+    let (leaf, nodes) = sim.ds.path_proof(bystander).unwrap();
+    assert!(matches!(
+        sim.members[&bystander].repair_request(&refresh, &leaf, &nodes, &mut sim.rng),
+        Err(CoreError::Invalid(reason)) if reason.contains("every key")
+    ));
+    sim.members
+        .get_mut(&bystander)
+        .unwrap()
+        .process(&refresh)
+        .unwrap();
+    sim.absent.remove(&bystander);
     // No top and no whole path lets it follow.
     for choice in [TopChoice::Best, TopChoice::AvoidRelay, TopChoice::Refresh] {
         let packet = sim.ds.island_packet(epoch, victim, choice).unwrap();
@@ -1034,17 +1060,59 @@ fn a_member_that_a_faulty_commit_cut_off_is_repaired_then_updates() {
             .process(&whole)
             .is_err()
     );
-    // A member of the epoch makes its repair; one addressed to another leaf
-    // is refused.
-    let maker = *sim
+    // It asks for a repair. Its path, proven against the tree hash, shows
+    // that the first level it cannot derive is its leaf's parent, which the
+    // committer drew.
+    let (leaf, nodes) = sim.ds.path_proof(victim).unwrap();
+    let request = sim.members[&victim]
+        .repair_request(&whole, &leaf, &nodes, &mut sim.rng)
+        .unwrap();
+    assert_eq!(request.level, 1);
+    assert_eq!(RepairRequest::decode(request.encoded()).unwrap(), request);
+    // Only its own device key signs it, and only for the window's seal.
+    let impostor = RepairRequest::sign(
+        &request.gid,
+        epoch,
+        &request.seal_hash,
+        victim,
+        1,
+        sim.members[&committer].identity(),
+        &mut sim.rng,
+    )
+    .unwrap();
+    assert!(sim.ds.request_repair(&impostor).is_err());
+    let stale = RepairRequest::sign(
+        &request.gid,
+        epoch,
+        &[0; 32],
+        victim,
+        1,
+        sim.members[&victim].identity(),
+        &mut sim.rng,
+    )
+    .unwrap();
+    assert!(sim.ds.request_repair(&stale).is_err());
+    assert_eq!(sim.ds.blame(committer), 0);
+    // The service counts it against the committer and asks a member of the
+    // epoch, neither the victim nor the committer.
+    let maker = sim.ds.request_repair(&request).unwrap().expect("a maker");
+    assert!(maker != victim && maker != committer);
+    assert_eq!(sim.ds.blame(committer), 1);
+    assert!(!sim.ds.is_excluded(committer));
+    // It keeps the repair of that maker alone, addressed to the victim's leaf.
+    let other = *sim
         .members
         .keys()
-        .find(|member| **member != victim && sim.member(**member).epoch() == epoch)
+        .find(|member| ![victim, maker].contains(*member) && sim.member(**member).epoch() == epoch)
         .unwrap();
-    let other = sim.members[&maker]
+    let unasked = sim.members[&other]
+        .repair(sim.ds.state(), victim.leaf, &mut sim.rng)
+        .unwrap();
+    assert!(sim.ds.submit_repair(other, unasked).is_err());
+    let elsewhere = sim.members[&maker]
         .repair(sim.ds.state(), victim.leaf ^ 2, &mut sim.rng)
         .unwrap();
-    let mut misdirected = other.clone();
+    let mut misdirected = elsewhere.clone();
     misdirected.leaf = victim.leaf;
     let repair = sim.members[&maker]
         .repair(sim.ds.state(), victim.leaf, &mut sim.rng)
@@ -1081,4 +1149,121 @@ fn a_member_that_a_faulty_commit_cut_off_is_repaired_then_updates() {
         cityg_core::top::Repair::decode(&repair.encode().unwrap()).unwrap(),
         repair
     );
+}
+
+#[test]
+fn a_performer_two_members_blame_gets_no_role_until_pardoned() {
+    let mut sim = group(73, 16);
+    sim.set_joiner_tasks(false);
+    let shape = sim.ds.state().tree.shape();
+    let faulty = common::CREATOR;
+    let gone = at(&sim, &[8, 12]);
+    let victims = at(&sim, &[9, 13]);
+    let everyone: Vec<Occupancy> = sim.members.keys().copied().collect();
+    // Alone online, the creator performs every task of the window that
+    // removes two members, and cuts off the other member of each district.
+    for member in &everyone {
+        sim.ds.set_online(*member, *member == faulty);
+    }
+    for target in &gone {
+        remove(&mut sim, *target);
+    }
+    let task = sim.open_window();
+    assert!(task.committers.values().all(|c| *c == faulty));
+    let (_, requests, _) = sim.ds.open_window_data().unwrap();
+    let requests = requests.clone();
+    for district in task.committers.keys().copied() {
+        let mut commit = sim.members[&faulty]
+            .commit_district(sim.ds.state(), &task, district, &requests, &mut sim.rng)
+            .unwrap();
+        if let Some(victim) = victims
+            .iter()
+            .find(|victim| shape.district_of(victim.leaf) == district)
+        {
+            commit = cut_off(&mut sim, &commit, *victim);
+        }
+        sim.ds.submit_district_commit(commit).unwrap();
+    }
+    sim.perform_city_tasks(&task);
+    let seal = sim.seal_open(&task);
+    let epoch = sim.ds.submit_seal(seal).unwrap();
+    sim.absent.extend(victims.iter().copied());
+    sim.follow(epoch);
+    for member in &everyone {
+        sim.ds
+            .set_online(*member, !gone.contains(member) && !victims.contains(member));
+    }
+    // Each victim asks for its repair, which another member makes.
+    let mut requests_made = Vec::new();
+    for victim in &victims {
+        let whole = sim.ds.packet(epoch, *victim).unwrap();
+        assert!(
+            sim.members
+                .get_mut(victim)
+                .unwrap()
+                .process(&whole)
+                .is_err()
+        );
+        let (leaf, nodes) = sim.ds.path_proof(*victim).unwrap();
+        let request = sim.members[victim]
+            .repair_request(&whole, &leaf, &nodes, &mut sim.rng)
+            .unwrap();
+        let maker = sim.ds.request_repair(&request).unwrap().expect("a maker");
+        assert!(maker != faulty && !victims.contains(&maker));
+        let repair = sim.members[&maker]
+            .repair(sim.ds.state(), victim.leaf, &mut sim.rng)
+            .unwrap();
+        sim.ds.submit_repair(maker, repair).unwrap();
+        let packet = sim.ds.repair_packet(epoch, *victim).unwrap();
+        sim.members
+            .get_mut(victim)
+            .unwrap()
+            .process(&packet)
+            .unwrap();
+        sim.absent.remove(victim);
+        requests_made.push(request);
+    }
+    sim.assert_agreement();
+    // Two members blame it: it is excluded. Asking again counts once.
+    assert_eq!(sim.ds.blame(faulty), 2);
+    assert!(sim.ds.is_excluded(faulty));
+    assert!(sim.ds.request_repair(&requests_made[0]).unwrap().is_some());
+    assert_eq!(sim.ds.blame(faulty), 2);
+    // The repaired members ask for their updates. The next window gives the
+    // creator no role, online though it is, nor a district it would take
+    // over.
+    for victim in &victims {
+        let update = sim
+            .members
+            .get_mut(victim)
+            .unwrap()
+            .update_request(&mut sim.rng)
+            .unwrap();
+        sim.ds.submit_update(update, sim.now).unwrap();
+    }
+    sim.ds.set_online(faulty, true);
+    let task = sim.open_window();
+    assert!(task.committers.values().all(|c| *c != faulty));
+    assert!(task.city.values().all(|p| *p != faulty));
+    assert_ne!(task.sealer, faulty);
+    let district = *task.committers.keys().next().unwrap();
+    assert!(sim.ds.reassign(district, faulty).is_err());
+    let epoch = sim.complete_window(&task);
+    assert!(
+        sim.ds
+            .window(epoch)
+            .unwrap()
+            .top_task()
+            .relays
+            .values()
+            .all(|relay| *relay != faulty)
+    );
+    sim.assert_agreement();
+    for victim in &victims {
+        assert!(!sim.member(*victim).needs_update());
+    }
+    // Pardoned, it may take roles again.
+    sim.ds.pardon(faulty);
+    assert!(!sim.ds.is_excluded(faulty));
+    assert_eq!(sim.ds.blame(faulty), 0);
 }

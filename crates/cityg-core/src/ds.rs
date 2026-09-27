@@ -23,7 +23,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::member::{CatchUps, PendingRemoval};
 use crate::objects::{
     Authorizer, CatchUpRequest, ChangeKind, Checkpoint, Eviction, GroupPolicy, JoinRequest,
-    ReEntryRequest, RemoveProposal, Request, UpdateRequest, Urgency,
+    ReEntryRequest, RemoveProposal, RepairRequest, Request, UpdateRequest, Urgency,
 };
 use crate::packet::{
     EntrantEvidence, EntrantProof, Entry, EntrySteps, EntryTop, Packet, RegistryUpdate, SealLink,
@@ -55,6 +55,10 @@ pub struct DsConfig {
     /// Give a window's tasks to its joiners first (docs/specs-v0.5-draft.md
     /// section 3.4); otherwise to members only, as in v0.4.
     pub joiner_tasks: bool,
+    /// Give no role to a performer once this many members asked for
+    /// repairs of nodes it drew (docs/specs-v0.5-draft.md section 3.8); 0
+    /// never excludes.
+    pub repair_threshold: usize,
 }
 
 impl Default for DsConfig {
@@ -63,6 +67,7 @@ impl Default for DsConfig {
             window_ordinary_ms: 60_000,
             window_urgent_ms: 5_000,
             joiner_tasks: true,
+            repair_threshold: 2,
         }
     }
 }
@@ -198,6 +203,8 @@ pub struct StoredWindow {
     flats: BTreeMap<u32, Wrap>,
     /// Repairs of members a faulty task cut off, by leaf.
     repairs: BTreeMap<u32, Repair>,
+    /// The member asked for each leaf's repair, and how many were asked.
+    repair_makers: BTreeMap<u32, (Occupancy, usize)>,
 }
 
 impl StoredWindow {
@@ -269,6 +276,8 @@ pub struct DeliveryService {
     online: BTreeSet<Occupancy>,
     checkpoints: Vec<Checkpoint>,
     invite_uses: HashMap<Digest, u64>,
+    /// The members that asked for repairs of nodes each performer drew.
+    blamed: BTreeMap<Occupancy, BTreeSet<Occupancy>>,
 }
 
 impl core::fmt::Debug for DeliveryService {
@@ -311,6 +320,7 @@ impl DeliveryService {
             online: BTreeSet::new(),
             checkpoints: Vec::new(),
             invite_uses: HashMap::new(),
+            blamed: BTreeMap::new(),
         })
     }
 
@@ -782,7 +792,11 @@ impl DeliveryService {
             .online
             .iter()
             .copied()
-            .filter(|member| tree.is_member(*member) && !window.affected.contains(member))
+            .filter(|member| {
+                tree.is_member(*member)
+                    && !window.affected.contains(member)
+                    && !self.is_excluded(*member)
+            })
             .collect();
         let (committers, city, sealer, entrant) = if volunteers.is_empty() {
             let entrant = changes
@@ -1078,6 +1092,7 @@ impl DeliveryService {
         self.open.as_ref().is_some_and(|open| {
             open.task.entrant.is_none()
                 && !open.window.affected.contains(&performer)
+                && !self.is_excluded(performer)
                 && self.accepts_performer(open, performer)
         })
     }
@@ -1367,6 +1382,7 @@ impl DeliveryService {
             relays: BTreeMap::new(),
             flats: BTreeMap::new(),
             repairs: BTreeMap::new(),
+            repair_makers: BTreeMap::new(),
         });
         Ok(epoch)
     }
@@ -1394,6 +1410,7 @@ impl DeliveryService {
             if member.since < epoch
                 && self.online.contains(&member)
                 && !removing.contains_key(&member)
+                && !self.is_excluded(member)
             {
                 island.push(member);
             }
@@ -1437,8 +1454,119 @@ impl DeliveryService {
         Ok(())
     }
 
-    /// Keep a repair for the member at `repair.leaf`, made by `maker`, a
-    /// member the service accepts from (docs/specs-v0.5-draft.md section
+    /// Take a member's request for a repair of the latest window
+    /// (docs/specs-v0.5-draft.md section 3.7) and name the member the service
+    /// asks for it, if one is online. The request must be signed by a member
+    /// the service accepts from, for the window's seal, and name a node of
+    /// its path that the window re-keyed. The service cannot check the fault
+    /// itself: it counts the member against the performer whose taint the
+    /// node bears, once per member, and excludes the performer from roles
+    /// once `repair_threshold` members did (section 3.8). The maker is an
+    /// online member outside the node's subtree, neither the member nor that
+    /// performer nor excluded, taken in turn; asking again for the same
+    /// window, after a repair that did not open or a maker that did not
+    /// answer, asks the next one and drops the repair kept.
+    pub fn request_repair(&mut self, request: &RepairRequest) -> CoreResult<Option<Occupancy>> {
+        // The fields the signature covers, whatever the caller changed.
+        let request = &RepairRequest::decode(request.encoded())?;
+        let epoch = self.state.epoch;
+        let seal_hash = self.window(epoch)?.seal.header.hash()?;
+        if request.epoch != epoch || request.seal_hash != seal_hash {
+            return Err(CoreError::Invalid("repair request for another window"));
+        }
+        let member = request.member;
+        if !self.accepts_from(member) {
+            return Err(CoreError::Unauthorized("repair request"));
+        }
+        let leaf = self
+            .state
+            .tree
+            .member(member)
+            .ok_or(CoreError::Unauthorized("repair request"))?;
+        request.verify(&self.state.gid, &leaf.device_pk)?;
+        if request.level > self.state.tree.height() {
+            return Err(CoreError::Invalid("repair request level"));
+        }
+        let node = NodeId::of_leaf(member.leaf, request.level);
+        if self.latest.get(&node).map(|latest| latest.epoch) != Some(epoch) {
+            return Err(CoreError::Invalid(
+                "repair request for a node the window did not re-key",
+            ));
+        }
+        let performer = self
+            .state
+            .tree
+            .parent(node)
+            .ok_or(CoreError::Invalid("repair request for a blank node"))?
+            .taint;
+        self.blamed.entry(performer).or_default().insert(member);
+        let makers: Vec<Occupancy> = self
+            .online
+            .iter()
+            .copied()
+            .filter(|maker| {
+                *maker != member
+                    && *maker != performer
+                    && self.accepts_from(*maker)
+                    && !self.is_excluded(*maker)
+                    && NodeId::of_leaf(maker.leaf, node.level) != node
+            })
+            .collect();
+        let stored = self.stored_mut(epoch)?;
+        stored.repairs.remove(&member.leaf);
+        if makers.is_empty() {
+            stored.repair_makers.remove(&member.leaf);
+            return Ok(None);
+        }
+        let asked = stored
+            .repair_makers
+            .get(&member.leaf)
+            .map_or(0, |(_, asked)| *asked);
+        let turn = usize::try_from(epoch).unwrap_or(0).wrapping_add(asked);
+        let maker = makers[turn % makers.len()];
+        stored.repair_makers.insert(member.leaf, (maker, asked + 1));
+        Ok(Some(maker))
+    }
+
+    /// How many members asked for repairs of nodes that `performer` drew.
+    #[must_use]
+    pub fn blame(&self, performer: Occupancy) -> usize {
+        self.blamed.get(&performer).map_or(0, BTreeSet::len)
+    }
+
+    /// Whether the service gives `member` no role: `repair_threshold`
+    /// members asked for repairs of nodes it drew (docs/specs-v0.5-draft.md
+    /// section 3.8). An exclusion without conviction: it binds no member,
+    /// and re-keys nothing.
+    #[must_use]
+    pub fn is_excluded(&self, member: Occupancy) -> bool {
+        self.config.repair_threshold > 0 && self.blame(member) >= self.config.repair_threshold
+    }
+
+    /// Lift the exclusion of `member`, and forget the requests counted
+    /// against it.
+    pub fn pardon(&mut self, member: Occupancy) {
+        self.blamed.remove(&member);
+    }
+
+    /// The leaf of `member` and the parents of its path in the current tree,
+    /// which a member that cannot follow the latest window checks against
+    /// the window's tree hash before it asks for a repair.
+    pub fn path_proof(
+        &self,
+        member: Occupancy,
+    ) -> CoreResult<(LeafProof, Vec<Option<ParentNode>>)> {
+        if !self.state.tree.is_member(member) {
+            return Err(CoreError::Invalid("path of a non-member"));
+        }
+        Ok((
+            self.state.tree.leaf_proof(member.leaf)?,
+            self.state.tree.path_nodes(member.leaf),
+        ))
+    }
+
+    /// Keep a repair for the member at `repair.leaf`, made by `maker`, the
+    /// member the service asked for it (docs/specs-v0.5-draft.md section
     /// 3.7). The service checks its addresses, not its content: unsigned,
     /// like a flat element, a repair that does not lead to the tag only makes
     /// the member ask again.
@@ -1448,6 +1576,14 @@ impl DeliveryService {
         }
         let gid = self.state.gid;
         let stored = self.stored_mut(repair.epoch)?;
+        if stored
+            .repair_makers
+            .get(&repair.leaf)
+            .map(|(asked, _)| *asked)
+            != Some(maker)
+        {
+            return Err(CoreError::Unauthorized("repair nobody asked for"));
+        }
         if repair.gid != gid
             || repair.wrap.node != stored.shape.root()
             || repair.wrap.target != NodeId::leaf(repair.leaf)

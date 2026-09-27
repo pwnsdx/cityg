@@ -38,8 +38,8 @@ use crate::identity::DeviceIdentity;
 use crate::kem::KemSecret;
 use crate::objects::{
     Admission, CatchUpRequest, ChangeKind, Checkpoint, CheckpointContent, GroupPolicy, Invite,
-    JoinRequest, ReEntryRequest, RemoveProposal, Request, UpdateRequest, Urgency, device_id,
-    group_id,
+    JoinRequest, ReEntryRequest, RemoveProposal, RepairRequest, Request, UpdateRequest, Urgency,
+    device_id, group_id,
 };
 use crate::packet::{Entry, EntrySteps, Packet, SealLink};
 use crate::rekey::{MemberPath, PathSecrets, WindowIndex};
@@ -51,7 +51,9 @@ use crate::schedule::{
     EpochSecrets, GroupContext, confirmed_transcript_hash, external_init, interim_transcript_hash,
 };
 use crate::top::{RelayContext, RelayElement, Repair, Top, flat_element, open_flat};
-use crate::tree::{CityPart, Divisions, LeafNode, Occupancy, Overlay, Shape};
+use crate::tree::{
+    CityPart, Divisions, LeafNode, LeafProof, Occupancy, Overlay, ParentNode, Shape,
+};
 use crate::welcome::Welcome;
 use crate::window::{
     EpochHeader, PublicState, Requests, WindowShape, check_city_tasks, check_districts,
@@ -975,6 +977,72 @@ impl Member {
             &target.encryption_key,
             &self.root,
             &hedge,
+            rng,
+        )
+    }
+
+    /// Ask for a repair of the window of `packet`, which the member cannot
+    /// follow (docs/specs-v0.5-draft.md section 3.7). `packet` is its whole
+    /// packet, or its island packet with a refresh; `leaf` and `nodes` prove
+    /// the member's leaf and the published keys of its path against the
+    /// packet's tree hash. The request names the first level of the path
+    /// whose secret the window does not let the member derive: the service
+    /// blames the performer whose taint the node at that level bears.
+    pub fn repair_request(
+        &self,
+        packet: &Packet,
+        leaf: &LeafProof,
+        nodes: &[Option<ParentNode>],
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<RepairRequest> {
+        let header = &packet.header;
+        if header.gid != self.header.gid
+            || header.prev_interim != self.header.interim
+            || header.epoch != self.header.epoch + 1
+        {
+            return Err(CoreError::Invalid("packet for another epoch"));
+        }
+        let shape = self.header.shape.grown(header.height)?;
+        leaf.verify(&header.tree_hash)?;
+        leaf.check_path(nodes)?;
+        let mut path = self.path.clone();
+        if packet.leaf_key != kem_pk_hash(path.leaf_public_key())? {
+            let pending = self.pending_leaf.as_ref().ok_or(LEAF_TAKEN)?;
+            if packet.leaf_key != kem_pk_hash(&pending.public_key())? {
+                return Err(LEAF_TAKEN);
+            }
+            path.set_leaf_key(pending.clone());
+        }
+        let proven = leaf
+            .leaf
+            .as_ref()
+            .filter(|_| leaf.index == self.occupancy.leaf)
+            .ok_or(CoreError::Invalid("leaf proof of another leaf"))?;
+        if proven.occupancy(leaf.index) != self.occupancy
+            || proven.encryption_key != path.leaf_public_key()
+        {
+            return Err(CoreError::Invalid("leaf proof of another member"));
+        }
+        let mut steps: EntrySteps = packet
+            .path
+            .iter()
+            .map(|(level, step)| (*level, (header.epoch, step.clone())))
+            .collect();
+        match &packet.top {
+            None => {}
+            Some(Top::Refresh(refresh)) => steps.extend(refresh.clone()),
+            Some(_) => return Err(CoreError::Invalid("repair request without a path")),
+        }
+        let level = path
+            .first_fault(shape.height, &steps, nodes, &self.header.gid)?
+            .ok_or(CoreError::Invalid("the window gives every key of the path"))?;
+        RepairRequest::sign(
+            &self.header.gid,
+            header.epoch,
+            &header.hash()?,
+            self.occupancy,
+            level,
+            &self.identity,
             rng,
         )
     }

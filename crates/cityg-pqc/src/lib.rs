@@ -59,6 +59,8 @@ impl SignatureContext {
     pub const CATCH_UP: Self = Self(b"city-g/catch-up/v5");
     /// Request of a member to re-enter its own leaf.
     pub const RE_ENTRY: Self = Self(b"city-g/re-entry/v5");
+    /// Request of a member that a faulty task cut off, for a repair.
+    pub const REPAIR_REQUEST: Self = Self(b"city-g/repair-request/v5");
     /// Checkpoint of an epoch, signed by an admin.
     pub const CHECKPOINT: Self = Self(b"city-g/checkpoint/v5");
     /// Policy of a group (open or closed admission, eviction of idle
@@ -250,7 +252,7 @@ mod tests {
 
     use super::*;
 
-    const ALL_CONTEXTS: [SignatureContext; 12] = [
+    const ALL_CONTEXTS: [SignatureContext; 13] = [
         SignatureContext::DISTRICT_COMMIT,
         SignatureContext::CITY_TASK,
         SignatureContext::SEAL,
@@ -261,6 +263,7 @@ mod tests {
         SignatureContext::UPDATE_REQUEST,
         SignatureContext::CATCH_UP,
         SignatureContext::RE_ENTRY,
+        SignatureContext::REPAIR_REQUEST,
         SignatureContext::CHECKPOINT,
         SignatureContext::GROUP_POLICY,
     ];

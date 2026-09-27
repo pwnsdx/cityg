@@ -60,6 +60,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `repair_packet`, `Top::Repair`). The member then holds the epoch but no
   valid path, and asks for an update at once (`needs_update`); the window
   of its update re-keys its path.
+- **Repair requests.** A member that cannot follow asks for its repair
+  with a signed `RepairRequest` (`city-g/repair-request/v5`, new signature
+  context `REPAIR_REQUEST`): it checks its leaf and the parents of its path
+  against the tree hash (`DeliveryService::path_proof`) and names the first
+  level whose secret the window does not let it derive
+  (`Member::repair_request`, `MemberPath::first_fault`). The service checks
+  the request, asks one online member outside the node's subtree for the
+  repair (`request_repair`), and keeps a repair from that maker alone;
+  asking again asks the next one.
+- **Exclusion without conviction.** Each request counts once against the
+  performer whose taint the named node bears (`blame`); once
+  `DsConfig::repair_threshold` members (2 by default, 0 for never) blamed
+  it, the service gives it no role: no district, city task, seal, relay,
+  flat element, repair, nor a task it would take over (`is_excluded`,
+  `pardon`). It binds no member and re-keys nothing; disputes are what
+  convict.
 - **Delivery service.** Tasks go to the window's joiners first: each
   district to a joiner that takes one of its leaves, else to a joiner with
   no task, else to a volunteer; city tasks to joiners with no task, then to
@@ -71,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   district or part is refused. `reassign_city` gives a part to another
   performer, a member or a joiner; reassigning a district drops only the
   tasks of its sub-city and of the top, and moves its welcomes.
+- Breaking: `submit_repair` keeps a repair only from the maker the service
+  asked; `DsConfig` gains `repair_threshold`.
 - Breaking: the seal header, the group context and checkpoints gain
   `subcity_bits`; `SealBody` lists the city tasks (`city`) instead of
   `city_updates` and `city_wraps`; `plan_part` and `build_city_task`
@@ -92,7 +110,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another performer. A joiner enters by island through the relay of its
   island, and refuses a forged root node, relay element or top of another
   island; one whose relay lied falls back to its whole path; a member that
-  a faulty commit cut off is repaired, then updates.
+  a faulty commit cut off asks for its repair, naming its leaf's parent,
+  is repaired by the member the service asks, then updates, while a
+  bystander has nothing to ask; a performer that cut off two members gets
+  no role until pardoned.
 - Symbolic model of stage 2 ([`docs/formal/`](docs/formal/README.md)): ten
   ProVerif scenarios, 33 in all. A device that hedges with its leaf seed,
   the coins of its encapsulations included, keeps a weak generator from
