@@ -430,8 +430,10 @@ sealer draws nothing: it follows the tasks along its path and signs.
 Districts default to islands (`L = c = 8`). A district commit or a city
 task may be performed by a joiner of the window, `[leaf, n]` as an entrant
 already is, which checks the state against its chain of seals and hedges
-with its leaf seed; the DS gives tasks to joiners first. Entries carry the
-island path and a top. A member a faulty task cut off is repaired with the
+with its leaf seed; the DS gives tasks to joiners first. Every device
+hedges what it draws with its leaf seed, the coins of its encapsulations
+included, and the sealer checks its path against the published keys.
+Entries carry the island path and a top. A member a faulty task cut off is repaired with the
 root secret wrapped to its leaf key, and updates. Disputes name the faulty
 performer (their proof system is still open).
 

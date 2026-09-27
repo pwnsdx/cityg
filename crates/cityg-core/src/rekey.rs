@@ -344,6 +344,7 @@ pub fn generate(
                 *target,
                 &target_pk,
                 &secret,
+                hedge,
                 rng,
             )?);
         }

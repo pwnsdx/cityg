@@ -255,7 +255,8 @@ mod forged {
         let window = WindowShape::new(&state.tree, epoch, shape, changes.iter().copied()).unwrap();
         let requests: Requests = [(reference, Request::Join(join.clone()))].into();
         let occupancy = Occupancy { leaf, since: epoch };
-        let (kem_output, init_prev) = external_init(&state.external_pk, rng).unwrap();
+        let (kem_output, init_prev) =
+            external_init(&state.gid, epoch, &state.external_pk, &[0; 32], rng).unwrap();
         let mut commits = Vec::new();
         let mut path = std::collections::BTreeMap::new();
         for district in &window.districts {
@@ -1041,6 +1042,7 @@ fn only_the_assigned_welcomer_delivers_a_welcome() {
         &owed.request,
         &init_key,
         None,
+        &[0; 32],
         &[0; 32],
         &mut sim.rng,
     )

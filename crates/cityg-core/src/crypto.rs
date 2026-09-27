@@ -27,7 +27,7 @@ use zeroize::Zeroizing;
 
 use crate::cbor::{array, bytes, encode, text, uint};
 use crate::error::{CoreError, CoreResult};
-use crate::kem::{KEM_CIPHERTEXT_BYTES, KemSecret, encapsulate};
+use crate::kem::{ENCAPS_COINS_BYTES, KEM_CIPHERTEXT_BYTES, KemSecret, encapsulate_derand};
 use crate::tree::NodeId;
 
 /// Profile identifier bound into every group context.
@@ -146,13 +146,48 @@ pub fn fresh_secret(hedge: &[u8; 32], rng: &mut impl CryptoRngCore) -> CoreResul
     derive_secret(&prk, "fresh node")
 }
 
-/// The hedge of a joiner's fresh secrets when it performs a task
+/// The hedge of what a device draws for the window of epoch `epoch`
 /// (docs/specs-v0.5-draft.md section 3.3): `ExpandLabel(leaf_seed, "task
-/// hedge", CBOR_det([gid, epoch]), 32)`, from the seed of the leaf key of
-/// its join request, since it does not know `init_n-1`.
+/// hedge", CBOR_det([gid, epoch]), 32)`, from the seed of its leaf key
+/// (for a joiner, that of its join request), which only it holds.
 pub fn task_hedge(leaf_seed: &[u8; 32], gid: &Digest, epoch: u64) -> CoreResult<Secret> {
     let context = encode(&array(vec![bytes(gid), uint(epoch)]))?;
     expand_label32(leaf_seed, "task hedge", &context)
+}
+
+/// The coins of an encapsulation to `public_key` in an object whose context
+/// is `context`, hedged (docs/specs-v0.5-draft.md section 3.3):
+/// `ExpandLabel(Extract(hedge, r), "encaps coins", CBOR_det([context,
+/// kem_pk_hash(public_key)]), 64)` with 32 random bytes `r`. A weak
+/// generator alone does not let whoever lacks the hedge predict them.
+pub fn encaps_coins(
+    hedge: &[u8; 32],
+    context: &[u8],
+    public_key: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> CoreResult<Zeroizing<[u8; ENCAPS_COINS_BYTES]>> {
+    let mut random = Zeroizing::new([0u8; 32]);
+    rng.fill_bytes(random.as_mut());
+    let prk = extract(hedge, random.as_ref());
+    let info = encode(&array(vec![
+        bytes(context),
+        bytes(&kem_pk_hash(public_key)?),
+    ]))?;
+    let mut coins = Zeroizing::new([0u8; ENCAPS_COINS_BYTES]);
+    expand_label_into(&prk, "encaps coins", &info, coins.as_mut())?;
+    Ok(coins)
+}
+
+/// Encapsulate to `public_key` with coins hedged by `hedge` for an object
+/// whose context is `context`: returns `(ciphertext, shared_secret)`.
+pub fn hedged_encapsulate(
+    public_key: &[u8],
+    context: &[u8],
+    hedge: &[u8; 32],
+    rng: &mut impl CryptoRngCore,
+) -> CoreResult<(Vec<u8>, Zeroizing<[u8; 32]>)> {
+    let coins = encaps_coins(hedge, context, public_key, rng)?;
+    encapsulate_derand(public_key, &coins)
 }
 
 /// A node secret wrapped to one child of the node.
@@ -194,7 +229,8 @@ fn wrap_cipher(shared: &[u8; 32], context: &[u8]) -> CoreResult<(ChaCha20Poly130
 }
 
 /// Wrap `secret` (the new secret of `node`) to `target`, whose X-Wing key is
-/// `target_pk`.
+/// `target_pk`, with the coins of the encapsulation hedged by `hedge`.
+#[allow(clippy::too_many_arguments)]
 pub fn wrap(
     gid: &Digest,
     epoch: u64,
@@ -202,10 +238,11 @@ pub fn wrap(
     target: NodeId,
     target_pk: &[u8],
     secret: &[u8; 32],
+    hedge: &[u8; 32],
     rng: &mut impl CryptoRngCore,
 ) -> CoreResult<Wrap> {
     let context = wrap_context(gid, epoch, node, target, &kem_pk_hash(target_pk)?)?;
-    let (kem_ciphertext, shared) = encapsulate(target_pk, rng)?;
+    let (kem_ciphertext, shared) = hedged_encapsulate(target_pk, &context, hedge, rng)?;
     let (cipher, nonce) = wrap_cipher(&shared, &context)?;
     let sealed = cipher
         .encrypt(
@@ -328,7 +365,7 @@ mod tests {
         let node = NodeId { level: 2, index: 1 };
         let target = NodeId { level: 1, index: 3 };
         let secret = [5u8; 32];
-        let wrapped = wrap(&gid, 4, node, target, &pk, &secret, &mut rng).unwrap();
+        let wrapped = wrap(&gid, 4, node, target, &pk, &secret, &[6; 32], &mut rng).unwrap();
         assert_eq!(wrapped.sealed.len(), SEALED_SECRET_BYTES);
         assert_eq!(*unwrap(&gid, 4, &wrapped, &key, &pk).unwrap(), secret);
         assert!(unwrap(&gid, 5, &wrapped, &key, &pk).is_err());
@@ -349,6 +386,29 @@ mod tests {
         let mut c = ChaCha20Rng::seed_from_u64(2);
         assert_ne!(*first, *fresh_secret(&[2u8; 32], &mut c).unwrap());
         assert_ne!(*first, *fresh_secret(&[1u8; 32], &mut a).unwrap());
+    }
+
+    #[test]
+    fn hedged_coins_need_the_hedge_and_differ_per_key_and_context() {
+        let pk = KemSecret::generate(&mut ChaCha20Rng::seed_from_u64(1)).public_key();
+        let other = KemSecret::generate(&mut ChaCha20Rng::seed_from_u64(2)).public_key();
+        // A generator whose output the attacker replays.
+        let replay = || ChaCha20Rng::seed_from_u64(9);
+        let (ct, ss) = hedged_encapsulate(&pk, b"ctx", &[1; 32], &mut replay()).unwrap();
+        let (again, same) = hedged_encapsulate(&pk, b"ctx", &[1; 32], &mut replay()).unwrap();
+        assert_eq!((&ct, *ss), (&again, *same));
+        // Without the hedge, it does not reproduce the encapsulation.
+        let (guess, _) = hedged_encapsulate(&pk, b"ctx", &[2; 32], &mut replay()).unwrap();
+        assert_ne!(ct, guess);
+        let (plain, _) = crate::kem::encapsulate(&pk, &mut replay()).unwrap();
+        assert_ne!(ct, plain);
+        // The same generator output gives other coins for another key or
+        // another object.
+        let coins = encaps_coins(&[1; 32], b"ctx", &pk, &mut replay()).unwrap();
+        let other_key = encaps_coins(&[1; 32], b"ctx", &other, &mut replay()).unwrap();
+        let other_object = encaps_coins(&[1; 32], b"another", &pk, &mut replay()).unwrap();
+        assert_ne!(*coins, *other_key);
+        assert_ne!(*coins, *other_object);
     }
 
     #[test]

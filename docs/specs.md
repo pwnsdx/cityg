@@ -509,7 +509,12 @@ fresh(hedge)         := DeriveSecret(Extract(hedge, r), "fresh node")      r: 32
 
 `hedge` is the committer's `init_secret` of the previous epoch, or the
 external init secret for an entrant (`ZERO32` at genesis): a weak
-generator alone does not expose a fresh secret to an outsider.
+generator alone does not expose a fresh secret to an outsider through its
+derivation. The encapsulations of section 7.2 take their coins from the
+generator, though, so a weak generator exposes the secrets they wrap, and
+a member that a window removes knows the `init_secret` it hedged with. The
+v0.5 draft hedges both the secrets and the coins with the device's leaf
+seed ([specs-v0.5-draft.md](specs-v0.5-draft.md), section 3.3).
 
 ### 7.2 Wraps
 

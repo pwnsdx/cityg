@@ -905,6 +905,15 @@ impl<'a> Overlay<'a> {
         }
     }
 
+    /// The parents on the path of leaf `index` after the window, by level
+    /// from 1.
+    #[must_use]
+    pub fn path_nodes(&self, index: u32) -> Vec<Option<ParentNode>> {
+        (1..=self.shape.height)
+            .map(|level| self.parent(NodeId::of_leaf(index, level)).cloned())
+            .collect()
+    }
+
     /// Hash of the subtree under `node` after the window.
     pub fn node_hash(&self, node: NodeId) -> CoreResult<Digest> {
         if !self.shape.contains(node) {

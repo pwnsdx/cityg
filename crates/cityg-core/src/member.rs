@@ -49,7 +49,7 @@ use crate::schedule::{
     EpochSecrets, GroupContext, confirmed_transcript_hash, external_init, interim_transcript_hash,
 };
 use crate::top::{RelayContext, RelayElement, Top, flat_element, open_flat};
-use crate::tree::{CityPart, Divisions, LeafNode, Occupancy, Shape};
+use crate::tree::{CityPart, Divisions, LeafNode, Occupancy, Overlay, Shape};
 use crate::welcome::Welcome;
 use crate::window::{
     EpochHeader, PublicState, Requests, WindowShape, check_city_tasks, check_districts,
@@ -123,7 +123,8 @@ impl Member {
             None
         };
         let leaf_key = KemSecret::generate(rng);
-        let root_secret = fresh_secret(&ZERO32, rng)?;
+        let hedge = task_hedge(leaf_key.seed(), &gid, 0)?;
+        let root_secret = fresh_secret(&hedge, rng)?;
         let root_pk = node_key(&root_secret)?.public_key();
         let (tree, registry) = genesis_tree(
             &gid,
@@ -509,6 +510,7 @@ impl Member {
     ) -> CoreResult<Vec<Wrap>> {
         state.check_against(&self.header)?;
         let shape = self.header.shape;
+        let hedge = self.hedge(self.header.epoch)?;
         islands
             .iter()
             .map(|island| {
@@ -523,6 +525,7 @@ impl Member {
                     *island,
                     &key.encryption_key,
                     &self.root,
+                    &hedge,
                     rng,
                 )
             })
@@ -672,6 +675,7 @@ impl Member {
         if window.affected.contains(&self.occupancy) {
             return Err(CoreError::Unauthorized("committer changed by its window"));
         }
+        let hedge = self.hedge(task.epoch)?;
         let (commit, drawn) = build_district(
             state,
             &window,
@@ -679,7 +683,7 @@ impl Member {
             requests,
             self.occupancy,
             &self.identity,
-            self.secrets.init_secret(),
+            &hedge,
             rng,
         )?;
         drop(drawn);
@@ -707,6 +711,7 @@ impl Member {
             return Err(CoreError::Unauthorized("performer changed by its window"));
         }
         let (below, before) = work.base(state, &window, part)?;
+        let hedge = self.hedge(task.epoch)?;
         let (city_task, drawn) = build_city_task(
             &CityTaskInput {
                 state,
@@ -717,7 +722,7 @@ impl Member {
                 performer: self.occupancy,
             },
             &self.identity,
-            self.secrets.init_secret(),
+            &hedge,
             rng,
         )?;
         drop(drawn);
@@ -761,6 +766,7 @@ impl Member {
             &sealer,
             requests,
         )?;
+        let delta = with_city(delta, work.city_tasks);
         let root_secret = if commits.is_empty() && window.shape == self.header.shape {
             self.root.clone()
         } else {
@@ -780,6 +786,12 @@ impl Member {
             let secrets =
                 self.path
                     .advance(window.shape.height, &steps, &state.gid, window.epoch)?;
+            // Each secret must be the one whose key the tasks publish: a
+            // wrap that opens to another would make it seal an epoch that
+            // is not the tree's (docs/specs-v0.5-draft.md section 3.5).
+            let nodes =
+                Overlay::new(&state.tree, window.shape, &delta)?.path_nodes(self.occupancy.leaf);
+            MemberPath::check_keys(&secrets, &nodes)?;
             secrets
                 .secret(window.shape.height)
                 .ok_or(CoreError::Invalid("unknown root secret"))?
@@ -793,7 +805,7 @@ impl Member {
                 requests,
                 sealer: &sealer,
                 entrant: None,
-                delta: with_city(delta, work.city_tasks),
+                delta,
                 city_tasks: work.city_tasks,
                 policy: task.policy()?,
                 time_ms: task.time_ms,
@@ -828,6 +840,7 @@ impl Member {
             return Err(CoreError::Invalid("seal of another epoch"));
         }
         state.check_against(&self.header)?;
+        let hedge = self.hedge(self.header.epoch)?;
         let mut welcomes = Vec::new();
         for welcome in task
             .welcomes
@@ -888,10 +901,18 @@ impl Member {
                 init_key,
                 leaf_key,
                 self.secrets.joiner_secret(),
+                &hedge,
                 rng,
             )?);
         }
         Ok(welcomes)
+    }
+
+    /// The hedge of what the member draws for the window of `epoch`: its
+    /// fresh secrets and the coins of its encapsulations
+    /// (docs/specs-v0.5-draft.md section 3.3).
+    fn hedge(&self, epoch: u64) -> CoreResult<Secret> {
+        task_hedge(self.path.leaf_key().seed(), &self.header.gid, epoch)
     }
 
     /// Whether the member may send in its epoch: not while an urgent
@@ -1445,7 +1466,11 @@ fn seal_as_entrant(
         Some(&input.request),
         requests,
     )?;
-    let (kem_output, init_prev) = external_init(&state.external_pk, rng)?;
+    // Everything the entrant draws is hedged with its leaf seed
+    // (docs/specs-v0.5-draft.md section 3.3), the external init included.
+    let hedge = task_hedge(input.leaf_key.seed(), &state.gid, window.epoch)?;
+    let (kem_output, init_prev) =
+        external_init(&state.gid, window.epoch, &state.external_pk, &hedge, rng)?;
     let mut commits = Vec::with_capacity(window.districts.len());
     let mut path: BTreeMap<u8, Secret> = BTreeMap::new();
     for district in &window.districts {
@@ -1456,7 +1481,7 @@ fn seal_as_entrant(
             requests,
             input.occupancy,
             &input.identity,
-            &init_prev,
+            &hedge,
             rng,
         )?;
         path.extend(drawn.path_secrets(input.occupancy.leaf));
@@ -1481,7 +1506,7 @@ fn seal_as_entrant(
                 performer: input.occupancy,
             },
             &input.identity,
-            &init_prev,
+            &hedge,
             rng,
         )?;
         path.extend(drawn.path_secrets(input.occupancy.leaf));
@@ -1562,6 +1587,7 @@ fn seal_as_entrant(
             init_key,
             leaf_key,
             sealed.secrets.joiner_secret(),
+            &hedge,
             rng,
         )?);
     }

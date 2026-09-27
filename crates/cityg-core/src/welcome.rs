@@ -29,10 +29,11 @@ use zeroize::Zeroizing;
 use crate::cbor::{array, bytes, encode, text, uint};
 use crate::codec::{nullable, open_unsigned};
 use crate::crypto::{
-    Digest, SEALED_SECRET_BYTES, Secret, expand_label_into, expand_label32, extract, kem_pk_hash,
+    Digest, SEALED_SECRET_BYTES, Secret, expand_label_into, expand_label32, extract,
+    hedged_encapsulate, kem_pk_hash,
 };
 use crate::error::{CoreError, CoreResult};
-use crate::kem::{KEM_CIPHERTEXT_BYTES, KemSecret, encapsulate};
+use crate::kem::{KEM_CIPHERTEXT_BYTES, KemSecret};
 
 pub const WELCOME_LABEL: &str = "city-g/welcome/v5";
 const MAX_WELCOME_BYTES: usize = 4096;
@@ -49,31 +50,36 @@ pub struct Welcome {
     pub sealed: Vec<u8>,
 }
 
-fn cipher(
-    welcome_secret: &[u8; 32],
+fn welcome_context(
     gid: &Digest,
     epoch: u64,
     request: &Digest,
     init_key: &[u8],
     leaf_key: Option<&[u8]>,
-) -> CoreResult<(ChaCha20Poly1305, [u8; 12], Vec<u8>)> {
+) -> CoreResult<Vec<u8>> {
     let leaf_hash = leaf_key.map(kem_pk_hash).transpose()?;
-    let context = encode(&array(vec![
+    encode(&array(vec![
         bytes(gid),
         uint(epoch),
         bytes(request),
         bytes(&kem_pk_hash(init_key)?),
         nullable(leaf_hash.as_ref(), |digest| bytes(digest)),
-    ]))?;
-    let key = expand_label32(welcome_secret, "welcome key", &context)?;
+    ]))
+}
+
+fn cipher(welcome_secret: &[u8; 32], context: &[u8]) -> CoreResult<(ChaCha20Poly1305, [u8; 12])> {
+    let key = expand_label32(welcome_secret, "welcome key", context)?;
     let mut nonce = [0u8; 12];
-    expand_label_into(welcome_secret, "welcome nonce", &context, &mut nonce)?;
-    Ok((ChaCha20Poly1305::new(key.as_ref().into()), nonce, context))
+    expand_label_into(welcome_secret, "welcome nonce", context, &mut nonce)?;
+    Ok((ChaCha20Poly1305::new(key.as_ref().into()), nonce))
 }
 
 impl Welcome {
     /// Seal `joiner_secret` to `init_key`, and for a catch-up also to the
-    /// member's `leaf_key` as the tree holds it.
+    /// member's `leaf_key` as the tree holds it, with the coins of both
+    /// encapsulations hedged by `hedge` (the welcomer's,
+    /// docs/specs-v0.5-draft.md section 3.3).
+    #[allow(clippy::too_many_arguments)]
     pub fn seal(
         gid: &Digest,
         epoch: u64,
@@ -81,18 +87,19 @@ impl Welcome {
         init_key: &[u8],
         leaf_key: Option<&[u8]>,
         joiner_secret: &[u8; 32],
+        hedge: &[u8; 32],
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Self> {
-        let (kem_ciphertext, shared) = encapsulate(init_key, rng)?;
+        let context = welcome_context(gid, epoch, request, init_key, leaf_key)?;
+        let (kem_ciphertext, shared) = hedged_encapsulate(init_key, &context, hedge, rng)?;
         let (leaf_ciphertext, welcome_secret) = match leaf_key {
             Some(leaf_key) => {
-                let (ciphertext, leaf_shared) = encapsulate(leaf_key, rng)?;
+                let (ciphertext, leaf_shared) = hedged_encapsulate(leaf_key, &context, hedge, rng)?;
                 (Some(ciphertext), extract(&shared, leaf_shared.as_ref()))
             }
             None => (None, shared),
         };
-        let (cipher, nonce, context) =
-            cipher(&welcome_secret, gid, epoch, request, init_key, leaf_key)?;
+        let (cipher, nonce) = cipher(&welcome_secret, &context)?;
         let sealed = cipher
             .encrypt(
                 (&nonce).into(),
@@ -137,14 +144,14 @@ impl Welcome {
             (None, None) => (shared, None),
             _ => return Err(CoreError::Invalid("welcome of another kind")),
         };
-        let (cipher, nonce, context) = cipher(
-            &welcome_secret,
+        let context = welcome_context(
             &self.gid,
             self.epoch,
             &self.request,
             &init_pk,
             leaf_pk.as_deref(),
         )?;
+        let (cipher, nonce) = cipher(&welcome_secret, &context)?;
         let opened = Zeroizing::new(
             cipher
                 .decrypt(
@@ -209,6 +216,7 @@ mod tests {
             &init.public_key(),
             None,
             &[3; 32],
+            &[4; 32],
             &mut rng,
         )
         .unwrap();
@@ -241,6 +249,7 @@ mod tests {
             &init.public_key(),
             Some(&leaf.public_key()),
             &[3; 32],
+            &[4; 32],
             &mut rng,
         )
         .unwrap();

@@ -158,8 +158,8 @@ Not provided: metadata privacy, availability (the delivery service can deny
 service), secrecy from members of the same epoch, and, in an open group,
 secrecy from whoever joins it. Every join stays visible, and nobody can
 speak as another member. The [symbolic model](docs/formal/README.md) checks
-the choices these properties rest on in 18 ProVerif scenarios, and those of
-stage 1 of the v0.5 draft in five more.
+the choices these properties rest on in 18 ProVerif scenarios, those of
+stage 1 of the v0.5 draft in five more, and those of stage 2 in five more.
 
 ## Numbers
 
@@ -169,12 +169,12 @@ and half joins:
 
 | | 16,384 members, 2,000 changes | 65,536 members, 4,000 changes |
 | --- | --- | --- |
-| Wraps (against the bound `D·ln(N/D)`) | 5,333 (×1.27) | 12,475 (×1.12) |
-| District commits | 16, busiest 852 KB | 16, busiest 1.9 MB |
+| Wraps (against the bound `D·ln(N/D)`) | 5,261 (×1.25) | 12,394 (×1.11) |
+| District commits | 16, busiest 846 KB | 16, busiest 1.9 MB |
 | Seal, which re-keys the city (v0.4) | 51 KB | 51 KB |
 | Seal and city task (v0.5 draft, stage 2) | 5.4 KB and 48.9 KB | 5.4 KB and 48.9 KB |
-| Packet per member | mean 7.7 KB | mean 8.3 KB |
-| Packet per member by island of 256 leaves, with a relay element (v0.5 draft) | mean 3.6 KB | mean 3.0 KB |
+| Packet per member | mean 7.7 KB | mean 8.2 KB |
+| Packet per member by island of 256 leaves, with a relay element (v0.5 draft) | mean 3.5 KB | mean 2.9 KB |
 | DS check of the whole window | 0.8 s | 1.6 s |
 
 **Modelled**, for a group of `2^20` members

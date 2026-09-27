@@ -11,12 +11,14 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use cityg_core::commit::SealKind;
+use cityg_core::commit::{CityTask, CityTaskContent, SealKind};
+use cityg_core::crypto::wrap;
+use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::member::Joiner;
 use cityg_core::objects::Urgency;
 use cityg_core::roles::{WindowTask, WindowWork, build_district};
-use cityg_core::tree::{CityPart, Divisions, Occupancy};
+use cityg_core::tree::{CityPart, Divisions, NodeId, Occupancy};
 use cityg_core::window::{check_committer, check_sealer};
 use common::Sim;
 
@@ -630,4 +632,114 @@ fn a_member_welcomes_a_join_only_from_its_own_commit_or_a_joiners() {
     sim.welcome_and_enter(epoch);
     assert!(sim.joiners.is_empty());
     sim.assert_agreement();
+}
+
+#[test]
+fn a_sealer_refuses_a_task_whose_wrap_opens_to_another_secret() {
+    let mut sim = group(71, 16);
+    remove_in(&mut sim, 0);
+    let task = sim.open_window();
+    commit_districts(&mut sim, &task, |_| true);
+    let subcities: Vec<CityPart> = task
+        .city
+        .keys()
+        .copied()
+        .filter(|part| *part != CityPart::Top)
+        .collect();
+    for part in subcities {
+        let city_task = perform(&mut sim, &task, part);
+        sim.ds.submit_city_task(city_task).unwrap();
+    }
+    // The top's performer wraps another secret to the sealer's sub-city,
+    // and signs: nobody but a holder of that sub-city's root can tell.
+    let honest = perform(&mut sim, &task, CityPart::Top);
+    let sealer = task.sealer;
+    let node = NodeId::of_leaf(sealer.leaf, 3);
+    let target = NodeId::of_leaf(sealer.leaf, 2);
+    let target_pk = sim
+        .ds
+        .open_city_tasks()
+        .iter()
+        .flat_map(|city_task| city_task.updates.iter())
+        .find(|update| update.node == target)
+        .and_then(|update| update.public_key.clone())
+        .or_else(|| sim.ds.state().tree.public_key(target).map(<[u8]>::to_vec))
+        .unwrap();
+    let mut wraps = honest.wraps.clone();
+    let slot = wraps
+        .iter_mut()
+        .find(|wrapped| wrapped.node == node && wrapped.target == target)
+        .unwrap();
+    *slot = wrap(
+        &honest.gid,
+        honest.epoch,
+        node,
+        target,
+        &target_pk,
+        &[7; 32],
+        &[0; 32],
+        &mut sim.rng,
+    )
+    .unwrap();
+    let faulty = CityTask::sign(
+        CityTaskContent {
+            gid: honest.gid,
+            epoch: honest.epoch,
+            part: honest.part,
+            height: honest.height,
+            prev_part_hash: honest.prev_part_hash,
+            performer: honest.performer,
+            updates: honest.updates.clone(),
+            wraps,
+            part_hash: honest.part_hash,
+        },
+        sim.members[&honest.performer].identity(),
+        &mut sim.rng,
+    )
+    .unwrap();
+    sim.ds.submit_city_task(faulty).unwrap();
+    // The sealer follows it to a secret whose key is not the published one,
+    // and does not seal.
+    if !sim.members[&sealer].knows_path() {
+        let steps = sim.ds.refresh_steps(sealer).unwrap();
+        sim.members
+            .get_mut(&sealer)
+            .unwrap()
+            .refresh(&steps)
+            .unwrap();
+    }
+    let (_, requests, _) = sim.ds.open_window_data().unwrap();
+    let requests = requests.clone();
+    let commits = sim.ds.open_commits();
+    let city_tasks = sim.ds.open_city_tasks();
+    let work = WindowWork {
+        commits: &commits,
+        city_tasks: &city_tasks,
+        requests: &requests,
+    };
+    assert_eq!(
+        sim.members[&sealer]
+            .seal(sim.ds.state(), &task, &work, &mut sim.rng)
+            .unwrap_err(),
+        CoreError::Invalid("path key differs from the published one")
+    );
+    // The top goes to another performer, and the window completes.
+    let busy: BTreeSet<Occupancy> = task
+        .committers
+        .values()
+        .chain(task.city.values())
+        .chain([&sealer])
+        .copied()
+        .collect();
+    let replacement = *sim
+        .members
+        .keys()
+        .find(|member| !busy.contains(member) && sim.ds.accepts_from(**member))
+        .unwrap();
+    let task = sim.ds.reassign_city(CityPart::Top, replacement).unwrap();
+    let top = perform(&mut sim, &task, CityPart::Top);
+    sim.ds.submit_city_task(top).unwrap();
+    seal_and_follow(&mut sim, &task);
+    sim.assert_agreement();
+    assert_eq!(sim.members.len(), 15);
 }

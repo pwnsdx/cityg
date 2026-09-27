@@ -386,8 +386,8 @@ cuts the packets of 4,096 members with islands of `2^8`:
 
 | | N = 16,384, L = 10, 2,000 changes | N = 65,536, L = 12, 4,000 changes |
 | --- | --- | --- |
-| Whole path, as in v0.4 | mean 7.7 KB, max 13.4 KB | mean 8.3 KB, max 14.6 KB |
-| Island path and relay element | mean 3.6 KB, max 7.6 KB | mean 3.0 KB, max 6.4 KB |
+| Whole path, as in v0.4 | mean 7.7 KB, max 13.4 KB | mean 8.2 KB, max 14.6 KB |
+| Island path and relay element | mean 3.5 KB, max 7.6 KB | mean 2.9 KB, max 6.4 KB |
 | Island path and flat element | mean 4.7 KB | mean 4.1 KB |
 | Wraps a relay reads above its island | 3.5 | 4.5 |
 
@@ -492,15 +492,30 @@ occupancy:
 A joiner holds no group secret before its welcome. Before its task, it
 follows the chain of seals from its anchor to epoch `n - 1` (v0.4 §12.9,
 step 3) and checks the public state it is shown against the last header
-(v0.4 §12.3). Its fresh secrets are hedged (v0.4 §7.1) with
+(v0.4 §12.3).
+
+**Hedges.** Every device hedges what it draws for a window with the seed
+of its leaf key (for a joiner, that of its join request; for an entrant,
+its new leaf key), which only it holds: the fresh secrets of its tasks,
+and the coins of every X-Wing encapsulation it makes, in a wrap, a flat
+element, a welcome or an external init:
 
 ```text
-hedge := ExpandLabel(leaf_seed, "task hedge", CBOR_det([gid, epoch]), 32)
+hedge    := ExpandLabel(leaf_seed, "task hedge", CBOR_det([gid, epoch]), 32)
+fresh    := DeriveSecret(Extract(hedge, r), "fresh node")                 r: 32 random bytes
+coins    := ExpandLabel(Extract(hedge, r'), "encaps coins",
+                        CBOR_det([context, kem_pk_hash(pk)]), 64)         r': 32 random bytes
+(ct, ss) := X-Wing.EncapsulateDerand(pk, coins)
 ```
 
-where `leaf_seed` is the seed of the leaf key of its join request, instead
-of `init_n-1`, which it does not know. A member hedges with `init_n-1`, as
-in v0.4.
+`epoch` is the epoch the window creates; `context` is the object's: the
+wrap context (v0.4 §7.2) for a wrap or a flat element, the welcome context
+(v0.4 §11) for each of a welcome's encapsulations, `CBOR_det([gid,
+epoch])` for an external init. This replaces the `init_n-1` hedge of v0.4
+§7.1, for two reasons (formal model, `task_hedge*.pv`): v0.4 takes the
+coins of its encapsulations from the generator, so a weak generator
+exposes every secret it wraps, the fresh ones included; and a member that
+the window removes knows `init_n-1`.
 
 The nodes a task re-keys are tainted by its performer: a joiner's taints
 follow the occupancy `[leaf, n]` it takes (v0.4 §10.6).
@@ -549,7 +564,12 @@ The sealer:
    and section 3.2), and the joins of their joiner performers;
 2. follows the tasks along its own path, from its leaf to the root, as a
    member follows a whole packet (v0.4 §7.4), and obtains `r_n`; an island
-   follower refreshes first (section 2.5);
+   follower refreshes first (section 2.5). It MUST check each secret of its
+   path against the node key the tasks publish (`KemKey(secret, "tree node
+   key")`), and not seal if one differs: a wrap that opens to another
+   secret, in a task that holds the root, would otherwise make it seal an
+   epoch that is not the tree's, which only its side of the tree follows
+   (such a task is disputed, section 3.8);
 3. computes the key schedule and the confirmation tag, and signs the seal
    (v0.4 §10.4).
 
@@ -633,16 +653,27 @@ the branch's statement, over the member's key and the wrap in its context
   knows the secrets of the nodes it re-keys, `r_n` for the task that holds
   the root. It is a member of epoch `n`: it learns no more than its welcome
   gives it. Without `init_n-1`, `r_n` does not give the epoch.
-* **The hedge of a joiner** rests on the seed of its leaf key, which no
-  member of the group knows: a weak generator at task time alone exposes
-  nothing to an outsider, as with the `init_n-1` hedge of members.
-* **A joiner shown a false state** builds a task on it; the prev hashes
-  bind the task to that state, so the DS and the sealer refuse it.
+* **Hedges** rest on the seed of each device's leaf key: a weak generator
+  at the time of a task, a welcome, a flat element or an external init
+  exposes nothing to an outsider, nor to a member that the window removes
+  (`task_hedge.pv`). Hedging the fresh secrets alone does not suffice: the
+  coins of the encapsulation that wraps them would give them away
+  (`task_hedge_coins.pv`); nor does the `init_n-1` hedge of v0.4 against
+  a removed member (`task_hedge_init.pv`).
+* **Tasks bind the state they build on.** A joiner checks the state it is
+  shown against its chain of seals; a task's prev hashes and hash of the
+  roots below bind it to that state. A performer that the DS shows a key
+  of its own for a root of the tier below wraps to it; the sealer then
+  refuses the task (`city_task_bound.pv`), which it would otherwise seal
+  for a removed member to read (`city_task_unbound.pv`).
 * **A faulty task** (wraps that do not open, or open to wrong secrets)
   cuts off at most its district, or for a city task the districts below
   it; the tag check keeps the cut-off members from accepting a wrong epoch.
-  Repairs restore them within the window; disputes name the performer and
-  the taint rule re-keys what it drew.
+  The sealer checks its path against the published keys (section 3.5), so
+  a task that holds the root cannot make it seal an epoch that only its
+  side of the tree follows. Repairs restore the cut-off members within the
+  window; disputes name the performer and the taint rule re-keys what it
+  drew.
 * **Taints** follow performers, joiners included: removing or updating a
   performer re-keys every node it drew (E-4).
 * **A joiner that commits a district** checks its entries as a member
@@ -673,7 +704,7 @@ the sub-cities:
 | N = 16,384, L = 10, S = 8, 2,000 changes | one sub-city, no top: 48.9 KB, 23 wraps | 5.4 KB |
 | N = 65,536, L = 12, S = 8, 4,000 changes | one sub-city, no top: 48.9 KB, 23 wraps | 5.4 KB |
 | N = 16,384, L = 10, S = 2, 2,000 changes | 4 sub-cities and the top: 65.0 KB, 25 wraps | 5.5 KB |
-| N = 4,096, L = 4, S = 3, 600 changes | 32 sub-cities and the top: 851 KB, 374 wraps | 12.6 KB |
+| N = 4,096, L = 4, S = 3, 600 changes | 32 sub-cities and the top: 860 KB, 379 wraps | 12.8 KB |
 
 Before stage 2, the seal carried the city: 51 KB in the first two windows.
 
@@ -729,7 +760,7 @@ framing.
 ### 5.3 Derivation labels
 
 Those of v0.4 §17.2, `relay key` and `relay nonce` (section 2.3), and
-`task hedge` (section 3.3).
+`task hedge` and `encaps coins` (section 3.3).
 
 ### 5.4 Encoded objects and signature contexts
 
@@ -773,7 +804,8 @@ The FIPS 204 context of every signed object is its label, as in v0.4
 | §5.1, §6, §9, §10.4 | Stage 2: the shape gains `subcity_bits`, bound in the seal header, the group context and checkpoints (section 3.1); defaults `L = c = 8` |
 | §7.3 | Stage 2: the city is re-keyed by city tasks, one per sub-city and one for the top (section 3.2) |
 | §10.3, §10.5 | Stage 2: a committer may be a joiner of the window, `[leaf, n]` (section 3.3) |
-| §10.4, §12.5 | Stage 2: the seal body lists city tasks instead of the city's nodes and wraps; the sealer draws nothing (section 3.5) |
+| §10.4, §12.5 | Stage 2: the seal body lists city tasks instead of the city's nodes and wraps; the sealer draws nothing and checks its path against the published keys (section 3.5) |
+| §7.1, §7.2, §11, §12.7 | Stage 2: every device hedges its fresh secrets and the coins of its encapsulations with its leaf seed (section 3.3) |
 | §11 | Stage 2: a joiner does not welcome; members welcome the entries of a district that a joiner commits (section 3.4) |
 | §13.4 | Stage 2: entries by island (section 3.6) |
 | §14.4 | Stage 2: joiners perform tasks first (section 3.4); repairs and disputes (sections 3.7 and 3.8) |
@@ -807,9 +839,11 @@ Nothing of v0.4 decodes under this draft: every label changed.
 * **The proof system of disputes** (section 3.8): the statements are
   measured in the research notes, in Longfellow; the encoding of `proof`,
   its verifier in the DS, and the size limits remain to be fixed.
-* **The formal models of stage 2**: joiner performers and their hedge, city
-  tasks bound to the prior state, repairs. The taint rule for tasks and the
-  maintained city are modelled (`taint.pv`, `ilot_city_maintained.pv`).
+* **The formal models of stage 2**: hedges and city tasks bound to the
+  state they build on are modelled ([`formal/`](formal/README.md),
+  `task_hedge*.pv`, `city_task_*.pv`), as are the taint rule for tasks and
+  the maintained city (`taint.pv`, `ilot_city_maintained.pv`); welcomes by
+  members for joiner districts and repairs are not.
 * **Assignment under load**: how many tasks a joiner takes, and when a DS
   prefers a volunteer with a good network.
 * Everything v0.4 §19 lists, except the lighter structure for continuous

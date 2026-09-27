@@ -65,6 +65,13 @@ names the check that backs it.
       of a fork too: the context binds the transcript, not only the epoch.
       The relay elements of the v0.5 draft bind the interim transcript hash
       (research note `extensions-gsd-2026-09-27.md`, section 5.5).
+- [ ] Every value drawn for a window is hedged with the device's leaf
+      seed: fresh secrets and the coins of every encapsulation (wraps,
+      flat elements, welcomes, external inits). No encapsulation takes its
+      coins from the generator alone (v0.5 draft, section 3.3; models
+      `task_hedge*.pv`).
+- [ ] A sealer checks the secrets of its path against the published keys
+      before it seals (v0.5 draft, section 3.5).
 - [ ] The delivery service accepts a welcome only from the welcomer the
       window assigned.
 

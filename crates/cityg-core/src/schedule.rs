@@ -30,10 +30,11 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::cbor::{array, bytes, encode, text, uint};
 use crate::crypto::{
-    Digest, PROFILE, Secret, ZERO32, derive_secret, digest_eq, expand_label32, extract, h, h_l, mac,
+    Digest, PROFILE, Secret, ZERO32, derive_secret, digest_eq, expand_label32, extract, h, h_l,
+    hedged_encapsulate, mac,
 };
 use crate::error::{CoreError, CoreResult};
-use crate::kem::{KemSecret, encapsulate};
+use crate::kem::KemSecret;
 
 /// Public context of an epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,12 +189,18 @@ fn external_init_from_shared(shared: &[u8; 32], kem_output: &[u8]) -> CoreResult
 }
 
 /// Entrant side of the external init: encapsulate to the external key of
-/// the current epoch. Returns `(kem_output, external_init_secret)`.
+/// the current epoch, for the window of `epoch`, with coins hedged by
+/// `hedge` (the entrant's, docs/specs-v0.5-draft.md section 3.3). Returns
+/// `(kem_output, external_init_secret)`.
 pub fn external_init(
+    gid: &Digest,
+    epoch: u64,
     external_pk: &[u8],
+    hedge: &[u8; 32],
     rng: &mut impl CryptoRngCore,
 ) -> CoreResult<(Vec<u8>, Secret)> {
-    let (kem_output, shared) = encapsulate(external_pk, rng)?;
+    let context = encode(&array(vec![bytes(gid), uint(epoch)]))?;
+    let (kem_output, shared) = hedged_encapsulate(external_pk, &context, hedge, rng)?;
     let init = external_init_from_shared(&shared, &kem_output)?;
     Ok((kem_output, init))
 }
@@ -289,7 +296,8 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(4);
         let epoch = EpochSecrets::derive(&[1; 32], &[2; 32], &context(1)).unwrap();
         let external_pk = epoch.external_key().unwrap().public_key();
-        let (kem_output, init) = external_init(&external_pk, &mut rng).unwrap();
+        let (kem_output, init) =
+            external_init(&[1; 32], 2, &external_pk, &[5; 32], &mut rng).unwrap();
         assert_eq!(*epoch.external_init_secret(&kem_output).unwrap(), *init);
         let other = EpochSecrets::derive(&[1; 32], &[2; 32], &context(2)).unwrap();
         assert_ne!(*other.external_init_secret(&kem_output).unwrap(), *init);

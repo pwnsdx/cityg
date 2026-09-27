@@ -90,15 +90,29 @@ fn encapsulation_key(public_key: &[u8]) -> CoreResult<EncapsulationKey> {
         .map_err(|_| CoreError::Malformed("X-Wing public key"))
 }
 
-/// Encapsulate to `public_key`: returns `(ciphertext, shared_secret)`.
+/// Size of the coins of an encapsulation (X-Wing's `eseed`).
+pub const ENCAPS_COINS_BYTES: usize = x_wing::ENCAPSULATION_RANDOMNESS_SIZE;
+
+/// Encapsulate to `public_key` with coins from the generator: returns
+/// `(ciphertext, shared_secret)`. The protocol hedges its coins instead
+/// ([`crate::crypto::hedged_encapsulate`]).
 pub fn encapsulate(
     public_key: &[u8],
     rng: &mut impl CryptoRngCore,
 ) -> CoreResult<(Vec<u8>, Zeroizing<[u8; 32]>)> {
+    let mut coins = Zeroizing::new([0u8; ENCAPS_COINS_BYTES]);
+    rng.fill_bytes(coins.as_mut());
+    encapsulate_derand(public_key, &coins)
+}
+
+/// Encapsulate to `public_key` with the given coins
+/// (`X-Wing.EncapsulateDerand`): returns `(ciphertext, shared_secret)`.
+pub fn encapsulate_derand(
+    public_key: &[u8],
+    coins: &[u8; ENCAPS_COINS_BYTES],
+) -> CoreResult<(Vec<u8>, Zeroizing<[u8; 32]>)> {
     let key = encapsulation_key(public_key)?;
-    let mut randomness = Zeroizing::new([0u8; x_wing::ENCAPSULATION_RANDOMNESS_SIZE]);
-    rng.fill_bytes(randomness.as_mut());
-    let (ciphertext, shared) = key.encapsulate_deterministic(&(*randomness).into());
+    let (ciphertext, shared) = key.encapsulate_deterministic(&(*coins).into());
     let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(shared.as_slice());
     Ok((ciphertext.as_slice().to_vec(), out))

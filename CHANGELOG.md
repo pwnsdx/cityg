@@ -72,10 +72,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state its chain of seals gives, a failed joiner replaced by a member, and
   a member that welcomes a join only from its own commit or a joiner's.
   Every other scenario test with joins now has joiners perform tasks; three
-  tests of member committers turn joiner tasks off. The scale test runs the city tasks and checks
+  tests of member committers turn joiner tasks off. A sealer refuses a task
+  whose wrap to its side opens to another secret, and the top goes to
+  another performer.
+- Symbolic model of stage 2 ([`docs/formal/`](docs/formal/README.md)): five
+  ProVerif scenarios, 28 in all. A device that hedges with its leaf seed,
+  the coins of its encapsulations included, keeps a weak generator from
+  giving the window's epoch to the member it removes; hedging the secrets
+  alone, or with the previous init secret, does not. A city task that
+  binds the roots it wraps to, checked by the sealer against the commits,
+  keeps the delivery service from slipping in a key of its own. The scale test runs the city tasks and checks
   the cost model with a boundary above the sub-cities
   (`CITYG_SCALE_SUBCITY_BITS`, 8 by default): 33 tasks for 4,096 members
-  in sub-cities of eight districts.
+  in sub-cities of eight districts. It draws the leaves of its window from
+  a generator of its own, so that the sample no longer depends on the
+  randomness the group took: its figures moved a little (5,261 wraps
+  instead of 5,333 for 16,384 members).
 
 ### Protocol: the v0.5 draft, stage 1
 
@@ -98,8 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per island among its online members, spreads the flat elements over the
   relays, and serves whole or island packets. A sealer without a city
   refreshes its path first. In the scale test, an island packet with a
-  relay element weighs 3.6 KB against 7.7 KB for the whole path (16,384
-  members, 2,000 changes), and 3.0 KB against 8.3 KB (65,536 members,
+  relay element weighs 3.5 KB against 7.7 KB for the whole path (16,384
+  members, 2,000 changes), and 2.9 KB against 8.2 KB (65,536 members,
   4,000 changes).
 - **Urgent and ordinary removals.** A removal proposal carries a signed
   urgency. Urgent removals (an admin's, or a reported compromise) keep the
@@ -144,6 +156,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The hedge against a weak generator covers the coins of every
+  encapsulation, and rests on the device's leaf seed (v0.5 draft, section
+  3.3). The specification hedged a committer's fresh secrets with its
+  previous init secret (section 7.1), but every wrap, welcome and external
+  init took its X-Wing coins from the generator: a weak generator gave
+  away every secret it wrapped, the fresh ones included, and a member that
+  the window removes knows that init secret anyway. Every device now hedges
+  with `ExpandLabel(leaf_seed, "task hedge", [gid, epoch])` and derives the
+  coins of each encapsulation from it (`encaps coins`, `hedged_encapsulate`,
+  `encapsulate_derand`); `wrap`, `Welcome::seal`, `flat_element` and
+  `external_init` take the hedge. Found while modelling the hedge of joiner
+  performers: three ProVerif scenarios show it (`task_hedge*.pv`), and the
+  research note on the GSD extensions corrects its invariant.
+- A sealer checks each secret it takes along its path against the key the
+  tasks publish, and does not seal otherwise (v0.5 draft, section 3.5).
+  Since it no longer draws the root, a task that holds the root and wraps
+  another secret to the sealer's side would have made it seal an epoch
+  that only that side of the tree follows.
 - A relay element of the v0.5 draft binds the interim transcript hash of
   its epoch, which covers the window's seal and confirmation tag, in its
   context (`RelayContext`). The branches of a fork share the epoch and the

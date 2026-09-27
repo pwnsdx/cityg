@@ -38,6 +38,11 @@ fun kempk(key): kpk.
 fun wrap(kpk, key, key): bitstring.        (* recipient key, randomness, secret *)
 reduc forall sk: key, r: key, m: key; unwrap(sk, wrap(kempk(sk), r, m)) = m.
 
+(* Whoever knows the coins of an encapsulation opens it: the KEM is
+   deterministic given them, so the shared secret, then the plaintext,
+   follow (the scenarios task_hedge*, stage 2). *)
+reduc forall pk: kpk, r: key, m: key; open_coins(r, wrap(pk, r, m)) = m.
+
 (* ---------- ChaCha20-Poly1305 for application messages ---------- *)
 
 fun aenc(key, bitstring): bitstring.
@@ -112,3 +117,17 @@ reduc forall s: key, r: key, m: key;
     up(s, wrap_step(wrap(kempk(kdf(s, L_node)), r, m))) = m
 otherwise forall s: key;
     up(s, chain_step) = kdf(s, L_path).
+
+(* ---------- Tasks (docs/specs-v0.5-draft.md, section 3) ---------- *)
+
+const L_hedge, L_fresh, L_coins, CITY_TASK: bitstring.
+
+(* The hedge of a performer: ExpandLabel(leaf_seed, "task hedge", [gid,
+   epoch]), from the seed of its leaf key, which only it holds. *)
+letfun task_hedge(ls: key, ctx: bitstring) = kdf(ls, (L_hedge, ctx)).
+
+(* A fresh secret, and the coins of an encapsulation, from a random value
+   of the generator and a hedge: DeriveSecret(Extract(hedge, r), "fresh
+   node"), ExpandLabel(Extract(hedge, r), "encaps coins", context). *)
+letfun fresh(h: key, rnd: key) = kdf2(h, rnd, L_fresh).
+letfun coins(h: key, rnd: key) = kdf2(h, rnd, L_coins).

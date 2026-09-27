@@ -298,10 +298,13 @@ fn a_large_window_on_a_full_group_matches_the_model() {
         .map(|(o, _)| o.leaf)
         .chain([0])
         .collect();
+    // The leaves come from a generator of their own, so that the sample does
+    // not depend on how much randomness building the group took.
+    let mut pick = ChaCha20Rng::seed_from_u64(8);
     let mut removed = Vec::new();
     let mut taken = HashSet::new();
     while removed.len() < removals {
-        let leaf = u32::try_from(rng.next_u64() % n as u64).unwrap();
+        let leaf = u32::try_from(pick.next_u64() % n as u64).unwrap();
         if !protected.contains(&leaf) && taken.insert(leaf) {
             removed.push(leaf);
         }
@@ -531,7 +534,10 @@ fn a_large_window_on_a_full_group_matches_the_model() {
         .unwrap()
         .encryption_key;
     let flat = Top::Flat(
-        flat_element(&state.gid, epoch, shape, 0, island_pk, &[2; 32], &mut rng).unwrap(),
+        flat_element(
+            &state.gid, epoch, shape, 0, island_pk, &[2; 32], &[0; 32], &mut rng,
+        )
+        .unwrap(),
     );
     let mut sizes = Vec::new();
     let mut wrap_counts = Vec::new();

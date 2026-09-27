@@ -5,10 +5,11 @@ design choices of City-G, recorded in the [design note](../design.md) and
 studied in the research note
 [`grands-groupes-2026-09-25.md`](../research/grands-groupes-2026-09-25.md)
 (in French). It checks the choices the [specification](../specs.md) relies
-on, against the adversaries of its section 2.1, and stage 1 of the draft
-profile [`city-g/v0.5-draft`](../specs-v0.5-draft.md) (its section 2):
-islands read through relay elements, flat elements and refreshes. It is not
-a model of the whole specification (section 19 of the specification).
+on, against the adversaries of its section 2.1, and stages 1 and 2 of the
+draft profile [`city-g/v0.5-draft`](../specs-v0.5-draft.md) (its sections 2
+and 3): islands read through relay elements, flat elements and refreshes;
+hedges and city tasks. It is not a model of the whole specification
+(section 19 of the specification).
 
 ## Running it
 
@@ -68,7 +69,21 @@ island.
 | [`refresh_checked.pv`](refresh_checked.pv) | A, an island follower, refreshes its path on its own before a role that needs it, and compares the root it recovers with the root secret it holds. The service holds every wrap of two windows and what a removed member knew, and forges wraps. | Proved: A holds the secrets of its upper levels only if they are the real ones. Reachable (sanity): A refreshes. |
 | [`refresh_unchecked.pv`](refresh_unchecked.pv) | A does not compare the roots. | Attack: A holds secrets the service drew, or the stale root the removed member knows. |
 
-The results bear on eight decisions of the design note:
+Five more model stage 2. A *performer* re-keys a part of the tree for a
+window: a member of the previous epoch or a joiner of the window. A weak
+generator gives the attacker every value it draws; a *hedge* is a secret
+mixed into them. The primitives gain one rule: whoever knows the coins of
+an encapsulation opens it, since the KEM is deterministic given them.
+
+| Scenario | What it checks | Expected result |
+| --- | --- | --- |
+| [`task_hedge.pv`](task_hedge.pv) | Window 2 removes M, which knows the init secret of epoch 1. P performs the task that holds the root with a weak generator, and hedges its root secret and the coins of the wrap that gives it to A with its leaf seed. | Proved: M does not read epoch 2. Reachable (sanity): A accepts epoch 2. |
+| [`task_hedge_coins.pv`](task_hedge_coins.pv) | The coins come from the generator, as in v0.4; only the root secret is hedged. | Attack: M opens the wrap with the coins. |
+| [`task_hedge_init.pv`](task_hedge_init.pv) | P, a member of epoch 1, hedges with the init secret of epoch 1, as in v0.4. | Attack: M knows that init secret and predicts the root. |
+| [`city_task_bound.pv`](city_task_bound.pv) | Window 2 removes M. C1 commits district 1; P performs the city task over the district roots the delivery service shows it, which may be a key of the service's own, and signs the hash of the roots it wrapped to. S, the sealer, checks the signatures and that hash against the commits, follows the task and seals. | Proved: M does not read the epoch S seals. Reachable (sanity): S seals. |
+| [`city_task_unbound.pv`](city_task_unbound.pv) | S checks the task's signature only. | Attack: the service shows P a key of its own, opens the root, and M brings the init secret. |
+
+The results bear on nine decisions of the design note:
 
 * **Taint rule (E-4).** Removing a member re-keys the nodes it tainted.
   Updating re-keys them too.
@@ -97,6 +112,11 @@ The results bear on eight decisions of the design note:
   wrong refresh would only make the member fail later, since it opens
   wraps with the secrets and every window's tag is checked; the check
   makes it ask for another refresh at once.
+* **Tasks (E-17).** A device hedges its fresh secrets and the coins of its
+  encapsulations with its leaf seed: hedging the secrets alone leaves them
+  to whoever predicts the coins, and the init secret of the previous epoch
+  is known to the member a window removes. A city task binds the roots it
+  wraps to, and the sealer checks that binding against the commits.
 
 ## Abstractions and limits
 
@@ -116,6 +136,11 @@ The results bear on eight decisions of the design note:
   window and island, which gives the attacker more replays, not fewer.
   Relay rotation, the delivery service's choice of tops and the
   relay-then-flat-then-refresh fallback are not modelled.
+* **Tasks.** A task is written as the wraps that matter to the property,
+  and its part hash as the hash of the keys it wraps to; plans, the tier
+  below a sub-city and the top, welcomes of the districts that joiners
+  commit, repairs and disputes are not modelled. A weak generator is one
+  whose every output the attacker reads.
 * **Committer assignment.** It is given: a member accepts a district commit
   only from the committer the window assigned. The delivery service's
   queues, windows, placement, the enforcement of recorded removals at

@@ -195,7 +195,9 @@ impl RelayElement {
 }
 
 /// The flat element of island `island`: `root_secret` wrapped from the root
-/// to the island root, whose key is `island_pk`.
+/// to the island root, whose key is `island_pk`, with coins hedged by
+/// `hedge` (the maker's, docs/specs-v0.5-draft.md section 3.3).
+#[allow(clippy::too_many_arguments)]
 pub fn flat_element(
     gid: &Digest,
     epoch: u64,
@@ -203,6 +205,7 @@ pub fn flat_element(
     island: u32,
     island_pk: &[u8],
     root_secret: &[u8; 32],
+    hedge: &[u8; 32],
     rng: &mut impl CryptoRngCore,
 ) -> CoreResult<Wrap> {
     if !shape.has_islands() || island >= shape.island_count() {
@@ -215,6 +218,7 @@ pub fn flat_element(
         shape.island_root(island),
         island_pk,
         root_secret,
+        hedge,
         rng,
     )
 }
@@ -369,7 +373,7 @@ mod tests {
         let island_secret = fresh_secret(&[0; 32], &mut rng).unwrap();
         let island_pk = node_key(&island_secret).unwrap().public_key();
         let root = [8u8; 32];
-        let flat = flat_element(&GID, 4, shape, 5, &island_pk, &root, &mut rng).unwrap();
+        let flat = flat_element(&GID, 4, shape, 5, &island_pk, &root, &[6; 32], &mut rng).unwrap();
         assert_eq!(flat.node, shape.root());
         assert_eq!(flat.target, NodeId { level: 2, index: 5 });
         assert_eq!(
@@ -380,6 +384,6 @@ mod tests {
         assert!(open_flat(&GID, 5, shape, 5, &flat, &island_secret).is_err());
         assert!(open_flat(&GID, 4, shape, 5, &flat, &[1u8; 32]).is_err());
         let small = Shape::new(2, Divisions::new(3, 2, 8).unwrap()).unwrap();
-        assert!(flat_element(&GID, 4, small, 0, &island_pk, &root, &mut rng).is_err());
+        assert!(flat_element(&GID, 4, small, 0, &island_pk, &root, &[6; 32], &mut rng).is_err());
     }
 }

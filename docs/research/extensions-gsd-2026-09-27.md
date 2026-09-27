@@ -243,7 +243,7 @@ Chaque ligne dit ce que fait `B` quand un participant honnête exécute l'opéra
 
 | Opération (spécification) | Ce que fait B | Pourquoi l'invariant tient |
 | --- | --- | --- |
-| **Tirer** : clés de feuille et d'init, aléa d'un tirage frais (v0.4 §7.1) | une source ; corrompue si l'adversaire fixe l'aléa | (I1a) ; un tirage frais est `Hash(Join-Hash(couverture, r))` : il reste secret tant que la couverture l'est, même si `r` est corrompu |
+| **Tirer** : clés de feuille et d'init, aléa d'un tirage frais (v0.4 §7.1) et coins d'une encapsulation (brouillon 3.3) | une source ; corrompue si l'adversaire fixe l'aléa | (I1a) ; un tirage frais est `Hash(Join-Hash(couverture, r))`, les coins d'une encapsulation `Hash(Join-Hash(couverture, r'), ctx)` : ils restent secrets tant que la couverture l'est, même si `r` et `r'` sont corrompus (correction ci-dessous) |
 | **Commit de quartier** (§12.4) | secrets frais et chaînés par `Join-Hash` et `Hash` ; pour chaque cible, `Encap` vers la clé de la vue vérifiée, puis `SEnc` | une cible dont la clé vient de l'adversaire, feuille ou nœud publié par un committer corrompu, n'est pas un sommet. `B` corrompt le clair et chiffre elle-même (I4). La règle des taches re-keye ces nœuds au retrait du committer |
 | **Sceau avec ville** (§12.5) | comme un commit, puis le calendrier : `Hash` de la racine, `Join-Hash` avec son `init_n−1`, `Hash` pour chaque secret d'époque, `Hash` puis `Corr` pour le tag | (I1) ; si son `init_n−1` est une valeur (b), `B` crée pour elle une source corrompue avant le `Join-Hash` |
 | **Sceau sans ville** (§12.5, brouillon 2.7) | le scelleur suit le commit de quartier le long de son chemin : comme « suivre » ; un suiveur d'îlot se rafraîchit d'abord | voir ces lignes |
@@ -258,6 +258,8 @@ Chaque ligne dit ce que fait `B` quand un participant honnête exécute l'opéra
 | **Entrer** : joiner, ré-entrée, saut (§12.9, §12.10) | ouvrir le welcome : nom si honnête, sinon `Decap` et `SDec` ; reprendre le chemin des derniers pas, comme « suivre » ; vérifier chaque secret contre la clé publique de l'arbre où il entre | une valeur (b) dont la clé égalerait celle d'un sommet serait une collision de `KemKey` ; le membre rejette |
 | **Mettre à jour, retirer** (§12.6, §14.6) | une source neuve ; le retrait ne tire rien, la fenêtre qui l'applique re-keye | (I1) |
 | **Effacer** (§12.4, §9) | `B` oublie les noms effacés | `CorrompreÉtat` ne corrompt que ce que l'état garde (I4) |
+
+**Correction : les coins des encapsulations.** Dans une première version, la ligne « Tirer » ne couvrait que le secret frais. Or la v0.4 prend les coins de chaque encapsulation X-Wing au générateur (§7.2), et chaque secret frais part dans une enveloppe : si l'adversaire fixe l'aléa, il recalcule l'encapsulation et ouvre l'enveloppe. L'arête `Encap` n'est plus alors l'arête honnête du jeu, et la couverture ne protège rien. De plus, la couverture de la v0.4, `init_n−1`, est connue du membre que la fenêtre retire. Le brouillon v0.5 (section 3.3) couvre donc aussi les coins, par la graine de feuille de l'appareil. Tant que cette graine est secrète, les coins sont une sortie de l'oracle jamais demandée : des coins honnêtes pour le challenger. Si la graine et l'aléa sont tous deux corrompus, `B` corrompt le clair (I4). Le modèle symbolique le vérifie : [`task_hedge.pv`](../formal/task_hedge.pv) est prouvé, [`task_hedge_coins.pv`](../formal/task_hedge_coins.pv) et [`task_hedge_init.pv`](../formal/task_hedge_init.pv) donnent l'attaque.
 
 ### 5.4 Accepter une époque
 

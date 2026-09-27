@@ -36,6 +36,11 @@ EXPECTED=(
   "flat_unchecked: false false"
   "refresh_checked: true false"
   "refresh_unchecked: false false"
+  "task_hedge: true false"
+  "task_hedge_coins: false false"
+  "task_hedge_init: false false"
+  "city_task_bound: true false"
+  "city_task_unbound: false false"
 )
 
 for line in "${EXPECTED[@]}"; do
