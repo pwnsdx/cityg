@@ -41,6 +41,9 @@ pub struct EntryProofs {
     /// absence from the map of keys, in that order
     /// (docs/specs-v0.5-draft.md section 4.2).
     pub keys: Vec<SmmProof>,
+    /// In an authorized group, for a join or a removal: the authorizer's
+    /// key, which the registry's hash of it checks (section 4.9).
+    pub authorizer_pk: Option<Vec<u8>>,
 }
 
 /// One entry of a window, with what it takes to audit it.
@@ -82,6 +85,7 @@ pub fn records(
                 admission: None,
                 policy: None,
                 keys: Vec::new(),
+                authorizer_pk: None,
             };
             let key_proofs = |encryption_key: &[u8], card: &Card| -> CoreResult<Vec<SmmProof>> {
                 [leaf_key_hash(encryption_key)?, card.hash()?]
@@ -89,6 +93,13 @@ pub fn records(
                     .map(|key| state.registry.key_proof(key))
                     .collect()
             };
+            if matches!(request, Request::Join(_) | Request::Removal(_)) {
+                proofs.authorizer_pk = state
+                    .policy
+                    .as_ref()
+                    .and_then(GroupPolicy::authorizer_pk)
+                    .map(<[u8]>::to_vec);
+            }
             match &request {
                 Request::Join(join) => {
                     proofs.device = Some(state.registry.device_proof(&join.device_id()?)?);
@@ -152,7 +163,9 @@ const KEY_IN_USE: Verdict = Verdict::Fraud("a leaf key or card already in use");
 /// concluded); `Ok(Verdict::Fraud(_))` that the entry is invalid.
 pub fn check_record(previous: &EpochHeader, record: &AuditRecord) -> CoreResult<Verdict> {
     let gid = &previous.gid;
-    let admins = &previous.registry.admins;
+    let admitters = previous
+        .registry
+        .admitters(record.proofs.authorizer_pk.as_deref())?;
     if record.epoch != previous.epoch + 1 || record.request.reference() != record.change.request {
         return Err(CoreError::Invalid("audit record"));
     }
@@ -199,7 +212,7 @@ pub fn check_record(previous: &EpochHeader, record: &AuditRecord) -> CoreResult<
                 Some(KEY_IN_USE)
             } else {
                 fraud_if(
-                    join.verify(gid, record.epoch, admins, previous.registry.is_open()),
+                    join.verify(gid, record.epoch, &admitters),
                     "join request or admission",
                 )
             }
@@ -212,7 +225,7 @@ pub fn check_record(previous: &EpochHeader, record: &AuditRecord) -> CoreResult<
                     Some(Verdict::Fraud("removal of another member"))
                 }
                 Some(node) => fraud_if(
-                    proposal.verify(gid, admins, &node.device_pk),
+                    proposal.verify(gid, &admitters, &node.device_pk),
                     "removal proposal",
                 ),
             }

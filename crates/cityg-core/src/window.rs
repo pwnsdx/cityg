@@ -16,7 +16,9 @@ use crate::error::{CoreError, CoreResult};
 use crate::identity::check_device_key;
 use crate::kem::validate_public_key;
 use crate::message::MessageLog;
-use crate::objects::{ChangeKind, GroupPolicy, JoinRequest, Request, device_id, group_id};
+use crate::objects::{
+    Admitters, ChangeKind, GroupPolicy, JoinRequest, Request, device_id, group_id,
+};
 use crate::registry::{Registry, RegistryDelta, RegistryHeader};
 use crate::rekey::{
     self, LeafChanges, NewRoots, NodeUpdate, growth_nodes, plan_district, plan_part,
@@ -130,6 +132,14 @@ impl PublicState {
         } else {
             Err(CoreError::Invalid("state differs from the trusted header"))
         }
+    }
+
+    /// Who may admit and remove devices in the next window: the admins, the
+    /// admission mode and, in an authorized group, the authorizer's key
+    /// from the policy in force (docs/specs-v0.5-draft.md section 4.9).
+    pub fn admitters(&self) -> CoreResult<Admitters<'_>> {
+        self.registry
+            .admitters(self.policy.as_ref().and_then(GroupPolicy::authorizer_pk))
     }
 
     /// Device key of a current member.
@@ -263,7 +273,9 @@ pub fn genesis_tree(
         .keys
         .insert(leaf_key_hash(keys.encryption_key)?, Some(creator));
     delta.keys.insert(keys.card.hash()?, Some(creator));
-    delta.policy = policy.map(|policy| (policy.hash(), policy.admission(), policy.authorizer()));
+    if let Some(policy) = policy {
+        delta.policy = Some((policy.hash(), policy.admission(), policy.authorizer()?));
+    }
     registry.apply(&delta);
     Ok((tree, registry))
 }
@@ -481,7 +493,6 @@ pub fn check_entry(
     entries: bool,
 ) -> CoreResult<Option<LeafNode>> {
     let current = state.tree.leaf(leaf);
-    let admins = state.registry.admins();
     match request {
         Request::Join(join) => {
             if state.registry.device(&join.device_id()?).is_some() {
@@ -497,7 +508,7 @@ pub fn check_entry(
             };
             check_keys_free(state, keys)?;
             if entries {
-                join.verify(&state.gid, epoch, admins, state.registry.is_open())?;
+                join.verify(&state.gid, epoch, &state.admitters()?)?;
             }
             Ok(Some(LeafNode::new(
                 &state.gid,
@@ -511,7 +522,7 @@ pub fn check_entry(
         Request::Removal(proposal) => {
             let current = current.ok_or(CoreError::Invalid("removal of a blank leaf"))?;
             if entries {
-                proposal.verify(&state.gid, admins, &current.device_pk)?;
+                proposal.verify(&state.gid, &state.admitters()?, &current.device_pk)?;
             }
             Ok(None)
         }
@@ -743,7 +754,7 @@ pub fn registry_delta(
     }
     if let Some(policy) = policy {
         policy.verify(&state.gid, state.registry.admins())?;
-        delta.policy = Some((policy.hash(), policy.admission(), policy.authorizer()));
+        delta.policy = Some((policy.hash(), policy.admission(), policy.authorizer()?));
     }
     if state.registry.admins_with(&delta).is_empty() {
         delta.admins_added.insert(sealer, sealer_pk.to_vec());
@@ -801,12 +812,7 @@ pub fn check_sealer(
                     if occupancy != sealer {
                         return Err(CoreError::Invalid("entrant occupancy"));
                     }
-                    join.verify(
-                        &state.gid,
-                        window.epoch,
-                        state.registry.admins(),
-                        state.registry.is_open(),
-                    )?;
+                    join.verify(&state.gid, window.epoch, &state.admitters()?)?;
                     Ok(SealerInfo {
                         occupancy,
                         device_pk: join.device_pk.clone(),
@@ -881,12 +887,7 @@ pub fn check_committer(
         let join = joiner_request(window, committer, requests).ok_or(CoreError::Unauthorized(
             "performer is not a joiner of the window",
         ))?;
-        join.verify(
-            &state.gid,
-            window.epoch,
-            state.registry.admins(),
-            state.registry.is_open(),
-        )?;
+        join.verify(&state.gid, window.epoch, &state.admitters()?)?;
         return Ok(join.device_pk.clone());
     }
     let leaf = state

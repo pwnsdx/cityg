@@ -28,7 +28,7 @@ use ciborium::value::Value;
 use crate::cbor::{array, bytes, uint};
 use crate::crypto::{Digest, h_l};
 use crate::error::{CoreError, CoreResult};
-use crate::objects::AdmissionMode;
+use crate::objects::{AdmissionMode, Admitters};
 use crate::smm::{Smm, SmmDelta, SmmProof};
 use crate::tree::Occupancy;
 
@@ -72,6 +72,18 @@ impl RegistryHeader {
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.admission == AdmissionMode::Open
+    }
+
+    /// Who may admit and remove devices under this registry; in an
+    /// authorized group, with the authorizer's key, which must match the
+    /// registry's hash of it.
+    pub fn admitters<'a>(&'a self, authorizer_pk: Option<&'a [u8]>) -> CoreResult<Admitters<'a>> {
+        Admitters::new(
+            &self.admins,
+            self.admission,
+            self.authorizer.as_ref(),
+            authorizer_pk,
+        )
     }
 
     /// Device key of admin `occupancy`.
@@ -181,6 +193,17 @@ impl Registry {
     #[must_use]
     pub const fn admission_mode(&self) -> AdmissionMode {
         self.admission
+    }
+
+    /// Who may admit and remove devices; in an authorized group, with the
+    /// authorizer's key, which must match the registry's hash of it.
+    pub fn admitters<'a>(&'a self, authorizer_pk: Option<&'a [u8]>) -> CoreResult<Admitters<'a>> {
+        Admitters::new(
+            &self.admins,
+            self.admission,
+            self.authorizer.as_ref(),
+            authorizer_pk,
+        )
     }
 
     /// Proof of the entry (or absence) of `device_id`.

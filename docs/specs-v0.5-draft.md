@@ -1131,6 +1131,16 @@ under their labels.
   join instead of 3.3 KB (research model `batch_authorization.pv`; without
   the signature of the root, the DS lets its own devices in:
   `batch_authorization_unsigned.pv`).
+  * A join waits in the DS's queue until the authorizer authorizes it:
+    before it opens a window, the DS gives the authorizer the joins that
+    wait, and attaches to each the authorization of a batch for that
+    window, whose signature it checks once. A batch authorizes joins for
+    its window only; a join it leaves out waits for a later batch.
+  * A join with an admission is refused in an authorized group, as is one
+    without authorization.
+  * The audit record of a join or a removal carries the authorizer's key,
+    which the registry's `authorizer_pk_hash` checks; so does the evidence
+    of an entrant's join, which members check when they follow.
 * **Checkpoints.** After each window, the authorizer checks it and signs
   the checkpoint of the epoch it creates. It holds the group's public
   state, checks the window as the DS does (v0.4 §14.5), compares its joins

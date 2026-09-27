@@ -254,6 +254,7 @@ fn an_audit_finds_a_leaf_key_or_card_already_in_use() {
             ),
             admission: Some(state.registry.admission_proof(&join.token()).unwrap()),
             policy: None,
+            authorizer_pk: None,
             keys: key_proofs(&join.encryption_key, &join.card),
         };
         let change = Change {
@@ -324,6 +325,7 @@ fn an_audit_finds_a_leaf_key_or_card_already_in_use() {
         admission: None,
         policy: None,
         keys: key_proofs(&stale.encryption_key, &stale.card),
+        authorizer_pk: None,
     };
     let request = Request::Update(stale);
     let change = Change {

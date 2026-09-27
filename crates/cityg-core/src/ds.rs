@@ -25,8 +25,8 @@ use crate::error::{CoreError, CoreResult};
 use crate::member::{CatchUps, PendingRemoval};
 use crate::message::{Message, MessageLog, inclusion_proof};
 use crate::objects::{
-    Authorizer, CatchUpRequest, ChangeKind, Checkpoint, Eviction, GroupPolicy, JoinRequest,
-    ReEntryRequest, RemoveProposal, RepairRequest, Request, UpdateRequest, Urgency,
+    AdmissionMode, Authorizer, CatchUpRequest, ChangeKind, Checkpoint, Eviction, GroupPolicy,
+    JoinRequest, ReEntryRequest, RemoveProposal, RepairRequest, Request, UpdateRequest, Urgency,
 };
 use crate::packet::{
     EntrantEvidence, EntrantProof, Entry, EntrySteps, EntryTop, Packet, RegistryUpdate, SealLink,
@@ -418,15 +418,24 @@ impl DeliveryService {
         Ok(())
     }
 
-    /// Record a join request after checking it.
+    /// Record a join request after checking it. In an authorized group, a
+    /// join may come without its authorization, which the DS then asks the
+    /// authorizer for ([`DeliveryService::awaiting_authorization`]).
     pub fn submit_join(&mut self, request: JoinRequest, now_ms: u64) -> CoreResult<Digest> {
+        let epoch = self.next_epoch();
+        let unauthorized = self.state.registry.admission_mode() == AdmissionMode::Authorized
+            && request.admission.is_none()
+            && request.authorization.is_none();
         check_entry(
             &self.state,
-            self.next_epoch(),
+            epoch,
             0,
             &Request::Join(request.clone()),
-            true,
+            !unauthorized,
         )?;
+        if unauthorized {
+            request.check_signed(&self.state.gid, epoch)?;
+        }
         let device = request.device_id()?;
         let token = request.token();
         if self.queue.joins.iter().any(|q| {
@@ -442,6 +451,70 @@ impl DeliveryService {
             recorded_ms: now_ms,
         });
         Ok(reference)
+    }
+
+    /// The queued joins of an authorized group that the authorizer has not
+    /// authorized for the next window, and that window's epoch: the DS asks
+    /// the authorizer for a batch before it opens the window
+    /// (docs/specs-v0.5-draft.md section 4.9).
+    #[must_use]
+    pub fn awaiting_authorization(&self) -> (u64, Vec<JoinRequest>) {
+        let epoch = self.next_epoch();
+        let joins = self
+            .queue
+            .joins
+            .iter()
+            .filter(|q| {
+                q.item
+                    .authorization
+                    .as_ref()
+                    .is_none_or(|authorization| authorization.batch.epoch != epoch)
+            })
+            .map(|q| {
+                let mut join = q.item.clone();
+                join.authorization = None;
+                join
+            })
+            .collect();
+        (epoch, joins)
+    }
+
+    /// Attach the authorizer's authorizations to queued joins, for the next
+    /// window: each batch's signature is checked once against the
+    /// authorizer's key in force, and each join's proof in it. Returns how
+    /// many joins it authorized.
+    pub fn submit_authorizations(&mut self, joins: Vec<JoinRequest>) -> CoreResult<usize> {
+        let epoch = self.next_epoch();
+        let gid = self.state.gid;
+        let admitters = self.state.admitters()?;
+        let key = admitters
+            .authorizer_pk
+            .ok_or(CoreError::Invalid("the group is not authorized"))?;
+        let mut checked = HashSet::new();
+        for join in &joins {
+            let authorization = join
+                .authorization
+                .as_ref()
+                .ok_or(CoreError::Unauthorized("join without authorization"))?;
+            if checked.insert(crate::crypto::h(authorization.batch.encoded())) {
+                authorization.batch.verify(&gid, key)?;
+            }
+            authorization.check_proof(epoch, &join.reference())?;
+        }
+        let mut authorized = 0;
+        for join in joins {
+            let reference = join.reference();
+            if let Some(queued) = self
+                .queue
+                .joins
+                .iter_mut()
+                .find(|q| q.item.reference() == reference)
+            {
+                queued.item.authorization = join.authorization;
+                authorized += 1;
+            }
+        }
+        Ok(authorized)
     }
 
     /// Check that a request's leaf key and card are in no leaf and in no
@@ -608,7 +681,7 @@ impl DeliveryService {
         let Some(policy) = self.state.policy.clone() else {
             return Ok(0);
         };
-        let Some(max_idle) = policy.max_idle_epochs else {
+        let Some(max_idle) = policy.max_idle_epochs() else {
             return Ok(0);
         };
         let epoch = self.next_epoch();
@@ -678,9 +751,13 @@ impl DeliveryService {
         let admins = self.state.registry.admins();
         match request {
             Request::Join(join) => {
-                let authorized = match &join.admission {
-                    None => self.state.registry.is_open(),
-                    Some(admission) => {
+                let authorized = match (&join.admission, self.state.registry.admission_mode()) {
+                    (None, AdmissionMode::Open) => true,
+                    (None, AdmissionMode::Closed) | (Some(_), AdmissionMode::Authorized) => false,
+                    // It waits for the authorizer; it enters a window only
+                    // with that window's authorization (`authorized_for`).
+                    (None, AdmissionMode::Authorized) => true,
+                    (Some(admission), _) => {
                         epoch <= admission.not_after_epoch
                             && match &admission.authorizer {
                                 Authorizer::Admin(admin) => {
@@ -701,8 +778,22 @@ impl DeliveryService {
             }
             Request::Removal(proposal) => {
                 self.state.tree.is_member(proposal.target)
-                    && (proposal.proposer == proposal.target
-                        || admins.contains_key(&proposal.proposer))
+                    && match proposal.proposer {
+                        Some(proposer) => {
+                            proposer == proposal.target || admins.contains_key(&proposer)
+                        }
+                        // The authorizer's: its key may have changed.
+                        None => self
+                            .state
+                            .admitters()
+                            .ok()
+                            .zip(self.state.device_pk(proposal.target))
+                            .is_some_and(|(admitters, target_pk)| {
+                                proposal
+                                    .verify(&self.state.gid, &admitters, target_pk)
+                                    .is_ok()
+                            }),
+                    }
             }
             Request::Eviction(eviction) => {
                 let policy = self.state.policy.as_ref();
@@ -713,13 +804,24 @@ impl DeliveryService {
                         .member(eviction.target)
                         .zip(policy)
                         .is_some_and(|(leaf, policy)| {
-                            policy.max_idle_epochs.is_some_and(|max_idle| {
+                            policy.max_idle_epochs().is_some_and(|max_idle| {
                                 epoch.saturating_sub(leaf.updated) > max_idle
                             })
                         })
             }
             Request::Update(_) | Request::ReEntry(_) => true,
         }
+    }
+
+    /// Whether a join may enter the window creating `epoch` as far as the
+    /// authorizer is concerned: in an authorized group, with that window's
+    /// authorization, whose batch the DS checked when it attached it.
+    fn authorized_for(&self, join: &JoinRequest, epoch: u64) -> bool {
+        self.state.registry.admission_mode() != AdmissionMode::Authorized
+            || join
+                .authorization
+                .as_ref()
+                .is_some_and(|authorization| authorization.batch.epoch == epoch)
     }
 
     /// Leaves for `count` joins: the leaves the window empties first, then
@@ -825,7 +927,10 @@ impl DeliveryService {
             .joins
             .iter()
             .map(|q| q.item.clone())
-            .filter(|join| self.still_valid(&Request::Join(join.clone()), epoch))
+            .filter(|join| {
+                self.authorized_for(join, epoch)
+                    && self.still_valid(&Request::Join(join.clone()), epoch)
+            })
             .collect();
         let slots = self.place(joins.len(), &emptied);
         for (join, leaf) in joins.into_iter().zip(slots) {
@@ -1425,6 +1530,12 @@ impl DeliveryService {
                     request: Box::new(join.clone()),
                     device: self.state.registry.device_proof(&join.device_id()?)?,
                     admission: self.state.registry.admission_proof(&join.token())?,
+                    authorizer_pk: self
+                        .state
+                        .policy
+                        .as_ref()
+                        .and_then(GroupPolicy::authorizer_pk)
+                        .map(<[u8]>::to_vec),
                 },
                 Some(Request::ReEntry(re_entry)) => EntrantEvidence::ReEntry {
                     request: Box::new(re_entry.clone()),

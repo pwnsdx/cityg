@@ -43,8 +43,8 @@ use crate::message::{
 };
 use crate::objects::{
     Admission, CatchUpRequest, ChangeKind, Checkpoint, CheckpointContent, GroupPolicy, Invite,
-    JoinRequest, ReEntryRequest, RemoveProposal, RepairRequest, Request, UpdateRequest, Urgency,
-    device_id, group_id,
+    JoinRequest, PolicyTerms, ReEntryRequest, RemoveProposal, RepairRequest, Request,
+    UpdateRequest, Urgency, device_id, group_id,
 };
 use crate::packet::{Entry, EntrySteps, Packet, SealLink};
 use crate::rekey::{MemberPath, PathSecrets, Step, WindowIndex};
@@ -147,7 +147,11 @@ impl Member {
         let creator = Occupancy { leaf: 0, since: 0 };
         let policy = if open {
             Some(GroupPolicy::sign(
-                &gid, true, None, creator, &identity, rng,
+                &gid,
+                &PolicyTerms::open(),
+                creator,
+                &identity,
+                rng,
             )?)
         } else {
             None
@@ -764,7 +768,7 @@ impl Member {
         RemoveProposal::sign(
             &self.header.gid,
             target,
-            self.occupancy,
+            Some(self.occupancy),
             urgency,
             &self.identity,
             rng,
@@ -818,23 +822,16 @@ impl Member {
         )
     }
 
-    /// Sign a group policy (as an admin): whether the group is open, and
-    /// after how many epochs without a key update a member may be evicted.
+    /// Sign a group policy (as an admin): how devices are admitted, with
+    /// the authorizer's key in an authorized group, and after how many
+    /// epochs without a key update a member may be evicted.
     pub fn group_policy(
         &self,
-        open: bool,
-        max_idle_epochs: Option<u64>,
+        terms: &PolicyTerms,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<GroupPolicy> {
         self.require_admin()?;
-        GroupPolicy::sign(
-            &self.header.gid,
-            open,
-            max_idle_epochs,
-            self.occupancy,
-            &self.identity,
-            rng,
-        )
+        GroupPolicy::sign(&self.header.gid, terms, self.occupancy, &self.identity, rng)
     }
 
     /// Sign a checkpoint of the current epoch (as an admin).

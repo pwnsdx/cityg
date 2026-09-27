@@ -47,6 +47,7 @@
 //!   proof system that checks them ([`dispute`]).
 
 pub mod audit;
+pub mod authorizer;
 pub mod card;
 pub mod cbor;
 mod codec;
@@ -58,6 +59,7 @@ pub mod error;
 pub mod identity;
 pub mod kem;
 pub mod member;
+pub mod merkle;
 pub mod message;
 pub mod objects;
 pub mod packet;

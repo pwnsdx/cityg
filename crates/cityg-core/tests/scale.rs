@@ -338,7 +338,7 @@ fn a_large_window_on_a_full_group_matches_the_model() {
         let proposal = RemoveProposal::sign(
             &state.gid,
             target,
-            admin_occupancy,
+            Some(admin_occupancy),
             Urgency::Urgent,
             &group.admin,
             &mut rng,

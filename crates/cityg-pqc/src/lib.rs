@@ -70,6 +70,10 @@ impl SignatureContext {
     /// Policy of a group (open or closed admission, eviction of idle
     /// members), signed by an admin.
     pub const GROUP_POLICY: Self = Self(b"city-g/group-policy/v5");
+    /// Batch of join requests that a group's authorizer authorizes.
+    pub const AUTHORIZATION_BATCH: Self = Self(b"city-g/authorization-batch/v5");
+    /// Checkpoint of an epoch, signed by a group's authorizer.
+    pub const AUTHORIZER_CHECKPOINT: Self = Self(b"city-g/authorizer-checkpoint/v5");
 
     /// Context bytes passed to FIPS 204 as `ctx`.
     #[must_use]
@@ -256,7 +260,7 @@ mod tests {
 
     use super::*;
 
-    const ALL_CONTEXTS: [SignatureContext; 15] = [
+    const ALL_CONTEXTS: [SignatureContext; 17] = [
         SignatureContext::DISTRICT_COMMIT,
         SignatureContext::CITY_TASK,
         SignatureContext::SEAL,
@@ -272,6 +276,8 @@ mod tests {
         SignatureContext::MESSAGE,
         SignatureContext::CHECKPOINT,
         SignatureContext::GROUP_POLICY,
+        SignatureContext::AUTHORIZATION_BATCH,
+        SignatureContext::AUTHORIZER_CHECKPOINT,
     ];
 
     #[test]

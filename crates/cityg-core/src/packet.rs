@@ -68,7 +68,7 @@ pub fn check_policy_change(
     let object = object.ok_or(CoreError::Invalid("new policy without its object"))?;
     if Some(object.hash()) != after.policy
         || object.admission() != after.admission
-        || object.authorizer() != after.authorizer
+        || object.authorizer()? != after.authorizer
     {
         return Err(CoreError::Invalid("policy object"));
     }
@@ -130,12 +130,14 @@ impl RegistryUpdate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntrantEvidence {
     /// A joiner: its request, and proofs that its device is not a member
-    /// and its admission (or, in an open group, its request) unused,
-    /// against the previous registry.
+    /// and its admission (or, in an open or authorized group, its request)
+    /// unused, against the previous registry; in an authorized group, the
+    /// authorizer's key, which the registry's hash of it checks.
     Join {
         request: Box<JoinRequest>,
         device: SmmProof,
         admission: SmmProof,
+        authorizer_pk: Option<Vec<u8>>,
     },
     /// A returning member: its request, and its leaf in the previous tree.
     ReEntry {
@@ -158,6 +160,7 @@ impl EntrantEvidence {
                 request,
                 device,
                 admission,
+                authorizer_pk,
             } => {
                 if request.reference() != init.request || header.sealer.since != header.epoch {
                     return Err(CoreError::Invalid("entrant request"));
@@ -165,8 +168,7 @@ impl EntrantEvidence {
                 request.verify(
                     &previous.gid,
                     header.epoch,
-                    &previous.registry.admins,
-                    previous.registry.is_open(),
+                    &previous.registry.admitters(authorizer_pk.as_deref())?,
                 )?;
                 previous
                     .registry
@@ -203,7 +205,17 @@ impl EntrantEvidence {
                 request,
                 device,
                 admission,
-            } => request.encoded().len() + device.encoded_len() + admission.encoded_len(),
+                authorizer_pk,
+            } => {
+                let authorization = request.authorization.as_ref().map_or(0, |authorization| {
+                    authorization.encoded_len() + authorization.batch.encoded().len()
+                });
+                request.encoded().len()
+                    + authorization
+                    + device.encoded_len()
+                    + admission.encoded_len()
+                    + authorizer_pk.as_ref().map_or(1, |key| key.len() + 3)
+            }
             Self::ReEntry { request, leaf } => {
                 request.encoded().len() + leaf.encoded_len().unwrap_or_default()
             }
@@ -469,6 +481,7 @@ impl Entry {
 mod tests {
     use super::*;
     use crate::identity::DeviceIdentity;
+    use crate::objects::PolicyTerms;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
@@ -500,7 +513,8 @@ mod tests {
         );
         // A new policy comes with its object, which matches the hash and the
         // mode and is signed by an admin.
-        let open = GroupPolicy::sign(&gid, true, None, admin, &admin_id, &mut rng).unwrap();
+        let open =
+            GroupPolicy::sign(&gid, &PolicyTerms::open(), admin, &admin_id, &mut rng).unwrap();
         let hash = Some(open.hash());
         let opened = with(hash, AdmissionMode::Open);
         assert!(check_policy_change(&gid, &before, &opened, None).is_err());
@@ -514,7 +528,8 @@ mod tests {
             .is_err()
         );
         check_policy_change(&gid, &before, &opened, Some(&open)).unwrap();
-        let posing = GroupPolicy::sign(&gid, true, None, other, &other_id, &mut rng).unwrap();
+        let posing =
+            GroupPolicy::sign(&gid, &PolicyTerms::open(), other, &other_id, &mut rng).unwrap();
         assert!(
             check_policy_change(
                 &gid,

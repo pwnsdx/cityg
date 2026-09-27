@@ -104,6 +104,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed; `EpochSecrets::msg_secret` returns an `Option`, and
   `take_msg_secret` hands it over; `Member::msg_secret` gives way to
   `Member::epoch_authenticator`.
+- **The authorized mode, batches and removals** (part 3c, section 4.9,
+  `cityg_core::authorizer`): the group policy names the admission mode
+  (closed, open or authorized) and, in an authorized group, the
+  authorizer's ML-DSA-65 key (`PolicyTerms`), whose hash the registry
+  keeps. The authorizer signs, for one window, the Merkle root of the join
+  requests it authorizes (`AuthorizationBatch`); the DS keeps a join
+  without admission until then (`awaiting_authorization`), checks each
+  batch's signature once and attaches to each join its authorization
+  (`submit_authorizations`). Committers, the sealer, auditors and members
+  checking an entrant check it against the authorizer's key, itself
+  checked against the registry's hash (`Admitters`). An admission is
+  refused in an authorized group. The authorizer's removals, which name no
+  proposer, are urgent. A shared module of labelled Merkle trees
+  (`cityg_core::merkle`) serves batches and the message log, and the
+  signature contexts `AUTHORIZATION_BATCH` and `AUTHORIZER_CHECKPOINT` are
+  new.
+- Breaking: `GroupPolicy::sign` and `Member::group_policy` take
+  `PolicyTerms`, and `GroupPolicy` gives `is_open()`, `max_idle_epochs()`
+  and `authorizer_pk()`; `JoinRequest::verify` and `RemoveProposal::verify`
+  take `Admitters`; `RemoveProposal::proposer` is optional; `JoinRequest`
+  carries its `authorization`; `EntrantEvidence::Join` and `EntryProofs`
+  carry the authorizer's key.
+- Tests in `crates/cityg-core/tests/authorized.rs`: an authorized group
+  admits the joins its authorizer signs, window by window; nobody lets in
+  a join the authorizer did not sign (the DS, a committer, an auditor); the
+  authorizer removes members urgently; an authorized joiner seals the
+  window when nobody is online.
 - Tests in `crates/cityg-core/tests/messages.rs` and in the module: members
   exchange messages that the DS cannot attribute; a seal closes the log of
   the epoch it ends, which members check; a card is checked against the

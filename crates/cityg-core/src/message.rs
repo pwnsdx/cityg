@@ -46,10 +46,14 @@ use crate::crypto::{
     Digest, Secret, ZERO32, derive_secret, digest_eq, expand_label_into, expand_label32, h, h_l,
 };
 use crate::error::{CoreError, CoreResult};
+use crate::merkle;
 use crate::tree::{LeafProof, MAX_HEIGHT};
 
 /// Label and signature context of messages.
 pub const MESSAGE_LABEL: &str = "city-g/message/v5";
+
+/// Label of the message log's Merkle tree.
+const LOG_LABEL: &str = "msg-log";
 
 /// A sender signs at once if its last signature is older.
 pub const T_BURST_MS: u64 = 2_000;
@@ -944,7 +948,7 @@ impl MessageLog {
     pub fn of(hashes: &[Digest]) -> CoreResult<Self> {
         Ok(Self {
             count: u64::try_from(hashes.len()).map_err(|_| CoreError::TooLarge("message log"))?,
-            root: mth(hashes)?,
+            root: merkle::root(LOG_LABEL, hashes)?,
         })
     }
 
@@ -989,82 +993,22 @@ impl MessageLog {
         message: &Message,
         proof: &[Digest],
     ) -> CoreResult<()> {
-        if index >= self.count {
-            return Err(CoreError::Invalid("message log proof"));
-        }
-        let mut fn_ = index;
-        let mut sn = self.count - 1;
-        let mut hash = h_l("msg-log", vec![bytes(&message.hash()?)])?;
-        for sibling in proof {
-            if sn == 0 {
-                return Err(CoreError::Invalid("message log proof"));
-            }
-            if fn_ & 1 == 1 || fn_ == sn {
-                hash = node(sibling, &hash)?;
-                if fn_ & 1 == 0 {
-                    while fn_ & 1 == 0 && fn_ != 0 {
-                        fn_ >>= 1;
-                        sn >>= 1;
-                    }
-                }
-            } else {
-                hash = node(&hash, sibling)?;
-            }
-            fn_ >>= 1;
-            sn >>= 1;
-        }
-        if sn == 0 && hash == self.root {
-            Ok(())
-        } else {
-            Err(CoreError::Invalid("message log proof"))
-        }
-    }
-}
-
-fn node(left: &Digest, right: &Digest) -> CoreResult<Digest> {
-    h_l("msg-log", vec![bytes(left), bytes(right)])
-}
-
-/// `MTH("msg-log", hashes)`.
-fn mth(hashes: &[Digest]) -> CoreResult<Digest> {
-    match hashes.len() {
-        0 => h_l("msg-log", vec![]),
-        1 => h_l("msg-log", vec![bytes(&hashes[0])]),
-        n => {
-            let k = split(n);
-            node(&mth(&hashes[..k])?, &mth(&hashes[k..])?)
-        }
-    }
-}
-
-/// The largest power of 2 below `n` (for `n >= 2`).
-fn split(n: usize) -> usize {
-    let mut k = 1;
-    while k * 2 < n {
-        k *= 2;
-    }
-    k
-}
-
-/// The inclusion proof of the `index`-th of `hashes` (RFC 6962 §2.1.1).
-pub fn inclusion_proof(hashes: &[Digest], index: usize) -> CoreResult<Vec<Digest>> {
-    if index >= hashes.len() {
-        return Err(CoreError::Invalid("message log index"));
-    }
-    if hashes.len() == 1 {
-        return Ok(Vec::new());
-    }
-    let k = split(hashes.len());
-    let (mut proof, sibling) = if index < k {
-        (inclusion_proof(&hashes[..k], index)?, mth(&hashes[k..])?)
-    } else {
-        (
-            inclusion_proof(&hashes[k..], index - k)?,
-            mth(&hashes[..k])?,
+        merkle::verify_inclusion(
+            LOG_LABEL,
+            &self.root,
+            self.count,
+            index,
+            &message.hash()?,
+            proof,
         )
-    };
-    proof.push(sibling);
-    Ok(proof)
+        .map_err(|_| CoreError::Invalid("message log proof"))
+    }
+}
+
+/// The inclusion proof of the `index`-th of the message hashes `hashes`
+/// (RFC 6962 §2.1.1).
+pub fn inclusion_proof(hashes: &[Digest], index: usize) -> CoreResult<Vec<Digest>> {
+    merkle::inclusion_proof(LOG_LABEL, hashes, index)
 }
 
 #[cfg(test)]

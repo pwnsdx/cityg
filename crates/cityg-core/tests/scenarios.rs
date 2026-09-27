@@ -5,7 +5,7 @@
 
 mod common;
 
-use cityg_core::objects::Urgency;
+use cityg_core::objects::{PolicyTerms, Urgency};
 use common::Sim;
 
 #[test]
@@ -338,6 +338,7 @@ mod forged {
             device: state.registry.device_proof(&id).unwrap(),
             admission: state.registry.admission_proof(&join.token()).unwrap(),
             request: Box::new(join),
+            authorizer_pk: None,
         };
         Forged {
             state: state.clone(),
@@ -866,7 +867,13 @@ fn the_delivery_service_evicts_only_under_an_admin_policy() {
     );
     // The admin sets a policy and refreshes its own key in the same window.
     let policy = sim.members[&common::CREATOR]
-        .group_policy(false, Some(2), &mut sim.rng)
+        .group_policy(
+            &PolicyTerms {
+                max_idle_epochs: Some(2),
+                ..PolicyTerms::default()
+            },
+            &mut sim.rng,
+        )
         .unwrap();
     sim.ds.submit_policy(policy.clone(), sim.now).unwrap();
     let update = sim
@@ -1089,7 +1096,7 @@ fn a_policy_whose_signer_left_is_dropped() {
     sim.ds.submit_removal(proposal, sim.now).unwrap();
     let task = sim.open_window();
     let policy = sim.members[&common::CREATOR]
-        .group_policy(true, None, &mut sim.rng)
+        .group_policy(&PolicyTerms::open(), &mut sim.rng)
         .unwrap();
     sim.ds.submit_policy(policy, sim.now).unwrap();
     let epoch = sim.complete_window(&task);
@@ -1542,7 +1549,7 @@ fn in_an_open_group_the_service_can_join_but_is_visible_and_cannot_pose_as_a_mem
     let posing = JoinRequest::decode(&encode(&array(signed)).unwrap()).unwrap();
     assert_eq!(
         posing
-            .verify(&gid, epoch, state.registry.admins(), true)
+            .verify(&gid, epoch, &state.admitters().unwrap())
             .unwrap_err(),
         CoreError::BadSignature("join request")
     );
@@ -1592,14 +1599,13 @@ fn only_an_admin_policy_opens_a_group() {
     // A member that is not an admin cannot open the group.
     assert!(
         sim.members[&member]
-            .group_policy(true, None, &mut sim.rng)
+            .group_policy(&PolicyTerms::open(), &mut sim.rng)
             .is_err()
     );
     let gid = *sim.member(member).gid();
     let posing = GroupPolicy::sign(
         &gid,
-        true,
-        None,
+        &PolicyTerms::open(),
         member,
         sim.members[&member].identity(),
         &mut sim.rng,
@@ -1627,7 +1633,7 @@ fn only_an_admin_policy_opens_a_group() {
     sim.replay(member);
     // The admin opens it.
     let policy = sim.members[&common::CREATOR]
-        .group_policy(true, None, &mut sim.rng)
+        .group_policy(&PolicyTerms::open(), &mut sim.rng)
         .unwrap();
     sim.ds.submit_policy(policy, sim.now).unwrap();
     sim.run_window();
