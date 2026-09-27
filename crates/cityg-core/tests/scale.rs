@@ -24,6 +24,7 @@ use cityg_core::commit::{Change, CityTask};
 use cityg_core::crypto::Digest;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::kem::KemSecret;
+use cityg_core::message::MessageLog;
 use cityg_core::objects::{
     Admission, ChangeKind, JoinRequest, RemoveProposal, Request, Urgency, device_id, group_id,
 };
@@ -463,6 +464,7 @@ fn a_large_window_on_a_full_group_matches_the_model() {
             city_tasks: &city_tasks,
             policy: None,
             time_ms: 1,
+            message_log: MessageLog::empty().unwrap(),
             init_prev: &[3; 32],
             root_secret: &root_secret,
         },

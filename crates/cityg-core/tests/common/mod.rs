@@ -16,6 +16,7 @@ use cityg_core::ds::{DeliveryService, DsConfig, TopChoice};
 use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::member::{Joiner, Member, Returning};
+use cityg_core::message::MessageLog;
 use cityg_core::objects::ChangeKind;
 use cityg_core::packet::{Entry, SealLink};
 use cityg_core::roles::{WindowTask, WindowWork};
@@ -218,6 +219,14 @@ impl Sim {
     /// The committers of the open window `task` commit and its sealer
     /// seals; nobody follows yet. Returns the new epoch.
     pub fn seal_window(&mut self, task: &WindowTask) -> u64 {
+        self.commit_open(task);
+        let seal = self.seal_open(task);
+        self.ds.submit_seal(seal).unwrap()
+    }
+
+    /// The committers and performers of the open window `task` commit and
+    /// perform; nobody seals yet.
+    pub fn commit_open(&mut self, task: &WindowTask) {
         let (_, requests, _) = self.ds.open_window_data().unwrap();
         let requests = requests.clone();
         for (district, committer) in &task.committers {
@@ -237,8 +246,6 @@ impl Sim {
             self.ds.submit_district_commit(commit).unwrap();
         }
         self.perform_city_tasks(task);
-        let seal = self.seal_open(task);
-        self.ds.submit_seal(seal).unwrap()
     }
 
     /// The performers of the open window's city tasks perform them,
@@ -295,6 +302,12 @@ impl Sim {
     /// tasks along its own path (an island follower refreshes its path
     /// first). The seal is not submitted.
     pub fn seal_open(&mut self, task: &WindowTask) -> Seal {
+        let log = self.ds.close_message_log().unwrap();
+        self.seal_open_with(task, log)
+    }
+
+    /// The sealer of the open window seals it with `log` as the message log.
+    pub fn seal_open_with(&mut self, task: &WindowTask, log: MessageLog) -> Seal {
         let (_, requests, _) = self.ds.open_window_data().unwrap();
         let requests = requests.clone();
         let commits = self.ds.open_commits();
@@ -313,7 +326,7 @@ impl Sim {
             requests: &requests,
         };
         self.members[&task.sealer]
-            .seal(self.ds.state(), task, &work, &mut self.rng)
+            .seal(self.ds.state(), task, &work, log, &mut self.rng)
             .unwrap()
     }
 
@@ -450,18 +463,33 @@ impl Sim {
         let entrant = task.entrant.expect("an entrant window");
         let (_, requests, catch_ups) = self.ds.open_window_data().unwrap();
         let (requests, catch_ups) = (requests.clone(), catch_ups.clone());
+        let log = self.ds.close_message_log().unwrap();
         let sealed = if let Some(mut joiner) = self.joiners.remove(&entrant) {
             let links = self.links(joiner.anchor().epoch);
             joiner.follow(&links).unwrap();
             joiner
-                .seal_window(self.ds.state(), &task, &requests, &catch_ups, &mut self.rng)
+                .seal_window(
+                    self.ds.state(),
+                    &task,
+                    &requests,
+                    &catch_ups,
+                    log,
+                    &mut self.rng,
+                )
                 .unwrap()
         } else {
             let mut returning = self.returning.remove(&entrant).expect("the entrant");
             let links = self.links(returning.anchor().epoch);
             returning.follow(&links).unwrap();
             returning
-                .seal_window(self.ds.state(), &task, &requests, &catch_ups, &mut self.rng)
+                .seal_window(
+                    self.ds.state(),
+                    &task,
+                    &requests,
+                    &catch_ups,
+                    log,
+                    &mut self.rng,
+                )
                 .unwrap()
         };
         for commit in sealed.commits {
@@ -580,7 +608,7 @@ impl Sim {
             .members
             .values()
             .filter(|member| member.epoch() == epoch)
-            .map(|member| *member.msg_secret());
+            .map(|member| *member.epoch_authenticator());
         let first = secrets.next().expect("a member at the current epoch");
         assert!(secrets.all(|secret| secret == first), "members disagree");
         for member in self.members.values().filter(|m| m.epoch() == epoch) {

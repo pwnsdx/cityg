@@ -3,9 +3,9 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, and implemented as far as part 3a: cards in leaves and unique keys. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, and implemented as far as part 3b: cards in leaves, unique keys and the message plane. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
-| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2; the proof system of disputes is plugged in, not included) |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2, parts 3a and 3b of stage 3; the proof system of disputes is plugged in, not included) |
 | Design | [design.md](design.md) (decisions E-15 to E-18) |
 | Research | the three stages, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (section 3.6); îlots, relays and the maintained city, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (sections 2.4 to 2.8); urgent and ordinary removals and the parity profile, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md) (section 3); symbolic models of relays and îlots, [`research/formal-parity/`](research/formal-parity/README.md) (all research notes in French) |
 | Conformance | None yet: no test vectors (section 7) |
@@ -53,7 +53,7 @@ earlier ones.
 | --- | --- | --- | --- |
 | 1. Relays and cadence | Members read the tree by island: the root secret comes from a relay of their island, a flat element or a refresh. Urgent and ordinary removals. Districts and the roles of v0.4 do not change. | At a million members, 1.7 changes per second and 5-minute windows, following the group costs about 94 KB per day, against 1.8 MB for whole paths with the same windows, and 44 MB for v0.4 with a window every 5 seconds per departure (research model, section 2.11). | Specified (section 2) and implemented |
 | 2. Tasks | Islands become the districts; the city is re-keyed by sub-city tasks and a top task; joiners perform tasks first; the sealer draws nothing; entries by island; repairs; disputes. | No committer role beyond small tasks; a task cuts off at most 256 members; the heaviest task of a burst takes 42 ms instead of 0.6 s; a joiner no longer reads the upper levels. | Specified (section 3); disputes lack their proof system |
-| 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, cards in leaves hashed by their summary, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Specified (section 4); part 3a implemented |
+| 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, cards in leaves hashed by their summary, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Specified (section 4); parts 3a and 3b implemented |
 
 <a id="2-stage-1"></a>
 ## 2. Stage 1: islands, relays and cadence
@@ -978,7 +978,8 @@ ratchet_g+1(i)             := ExpandLabel(ratchet_g(i), "message secret", CBOR_d
 
 ```text
 Message    := ["city-g/message/v5", gid, epoch, encrypted_sender_data, ciphertext, commitment]
-SenderData := [leaf, generation, reuse_guard]                   reuse_guard: 4 random bytes
+SenderData := leaf || generation || reuse_guard     12 bytes: two 4-byte big-endian integers,
+                                                    and reuse_guard, 4 random bytes
 Content    := [application_data, first_generation, signature or null, padding]
 ```
 
@@ -993,19 +994,26 @@ sample                := ciphertext[0..32]
 sender_data_key       := ExpandLabel(sender_data_secret_n, "sender data key", sample, 32)
 sender_data_nonce     := ExpandLabel(sender_data_secret_n, "sender data nonce", sample, 12)
 encrypted_sender_data := ChaCha20-Poly1305(sender_data_key, sender_data_nonce,
-                                           CBOR_det(SenderData), aad)
+                                           SenderData, aad)
 ```
 
 * `padding` is a byte string of zeros, at the sender's choice; a
-  ciphertext has at least 32 bytes.
+  ciphertext has at least 32 bytes, and a message at most
+  `MAX_MESSAGE_BYTES`.
+* **`SenderData` has a fixed length**, as in MLS (RFC 9420 §6.3.2): its
+  `CBOR_det` encoding would give away the range of the sender's leaf and
+  generation by its length. `encrypted_sender_data` has 28 bytes.
 * **The DS does not know who sends** (G2): the sender is under a key of
   the epoch, with the signature. It authenticates connections and limits
   their rates instead, as MLS provides (RFC 9420 §16.11) (research models
   `sender_hidden.pv`, and `sender_visible.pv` with the sender in clear).
-* **A receiver** decrypts the sender data, checks that `leaf` is a member
-  of epoch `n`, derives the key and nonce of `generation`, checks the
-  commitment in constant time, then decrypts the content. It MUST refuse a
-  generation it has already decrypted.
+* **A receiver** decrypts the sender data, derives the key and nonce of
+  `generation`, checks the commitment in constant time, then decrypts the
+  content, and holds it until a signature covers it (section 4.6): the
+  card that signs is that of the sender's leaf in the tree of epoch `n`,
+  which shows `leaf` a member of the epoch. It MUST refuse a generation it
+  has already decrypted, and changes nothing when a message fails to open.
+  A member does not read its own leaf's messages.
 * **The reuse guard** keeps two devices that restored the same state from
   reusing a nonce, as in MLS.
 
@@ -1033,9 +1041,14 @@ at `g` covers the burst `first_generation..g`.
 * **Delivery.** A receiver delivers the messages of a burst to the
   application only once it holds every message of the sender from
   generation 0 to `g`, recomputes `chain_g`, and checks the signature
-  against the sender's card (section 4.1) (G3). It shows an unsigned
-  message as waiting, or holds it back, at most `T_AUTH` and a delivery
-  delay; without a signature by then, it drops the burst and reports it.
+  against the sender's card (section 4.1) (G3); every message of the burst
+  carries the same `first_generation`, the one after the last generation
+  delivered. It shows an unsigned message as waiting, or holds it back, at
+  most `T_AUTH` and a delivery delay; without a signature by then, it
+  drops the burst and reports it. A burst whose signature fails is
+  dropped and reported too. Either way the receiver stops reading the
+  sender in the epoch: the sender's later signatures cover the dropped
+  messages.
 * An insider can forge an unsigned message, but no signature will cover it
   (research model `burst_chain.pv`); a chain authenticated by a key of the
   epoch alone would let any member speak for the sender
@@ -1056,7 +1069,7 @@ signed: they are not deniable, as in MLS.
 ### 4.8 The sealed message log
 
 ```text
-SealBody gains: message_log := [count, root]               the log of epoch n - 1
+SealHeader gains, after time_ms: message_log := [count, root]    the log of epoch n - 1
 root := MTH("msg-log", [H(Message_1), ..., H(Message_count)])
 
 MTH(label, [])  := H_L(label, [])
@@ -1065,13 +1078,19 @@ MTH(label, D)   := H_L(label, [MTH(label, D[0..k]), MTH(label, D[k..|D|])])
                    k: the largest power of 2 below |D|
 ```
 
+* **In the header.** Members download seal headers, not bodies (v0.4
+  §10.4): the log is in the header, where each member reads the log of
+  the epoch it leaves. The genesis seal carries the empty log,
+  `[0, MTH("msg-log", [])]`.
 * **Order.** The DS numbers the messages of epoch `n - 1` in the order it
   accepts them. It closes the log when it gives the sealer of the window
-  that creates epoch `n` its `message_log`, which the seal body carries;
-  it refuses messages of epoch `n - 1` from then on, and their senders
-  encrypt them again in epoch `n`.
-* **Transcript consistency** (G12). `message_log` enters `body_hash`, so
-  `seal_hash_n`, so every member's transcript: two members that accept
+  that creates epoch `n` its work, with `message_log`, which the seal
+  header carries: the tasks of the window do not stop the messages. It
+  refuses messages of epoch `n - 1` from then on, and their senders
+  encrypt them again in epoch `n`; if it aborts the window, it opens the
+  log again. It refuses a seal that carries another log.
+* **Transcript consistency** (G12). `message_log` enters `seal_hash_n`,
+  so every member's transcript: two members that accept
   epoch `n` with the same interim transcript hash agree on the set and the
   order of the messages of epoch `n - 1`. A sender cannot give two versions
   of a generation to two receivers, and a DS that shows two members
@@ -1262,7 +1281,7 @@ The FIPS 204 context of every signed object is its label, as in v0.4
 | §6 | Stage 3: join, update and re-entry requests carry a card; the group policy gains the authorized mode and its key; the authorizer may propose removals (sections 4.1, 4.9) |
 | §8 | Stage 3: the registry gains the map of keys, `admission_mode` and the authorizer's key hash (section 4.2) |
 | §9, §19 | Stage 3: the message plane, from `msg_secret_n` (sections 4.3 to 4.8) |
-| §10.4 | Stage 3: the genesis field of the seal body carries the creator's card after its leaf key; the seal body gains the message log of the previous epoch and the membership log of the window (sections 4.1, 4.8, 4.10) |
+| §10.4 | Stage 3: the genesis field of the seal body carries the creator's card after its leaf key; the seal header gains the message log of the previous epoch, after `time_ms`, and the seal body the membership log of the window (sections 4.1, 4.8, 4.10) |
 | §12.9, §12.2 | Stage 3: joiners may anchor on an authorizer checkpoint, and members may require one (section 4.9) |
 
 Nothing of v0.4 decodes under this draft: every label changed.
@@ -1307,7 +1326,8 @@ Nothing of v0.4 decodes under this draft: every label changed.
 * **Assignment under load**: how many tasks a joiner takes, and when a DS
   prefers a volunteer with a good network.
 * **Stage 3**, specified in section 4: cards in leaves and their summary
-  hash, and unique keys, are implemented (part 3a); the rest is not. FN-DSA-512 cards
+  hash, unique keys (part 3a) and the message plane (part 3b) are
+  implemented; the authorized mode and the membership log are not. FN-DSA-512 cards
   wait for FIPS 206. The research models of the message plane and of
   parity (`research/formal-messages/`, `research/formal-parity/`) cover
   the sender hidden, burst chains, cards checked against the epoch's leaf,

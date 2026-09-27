@@ -129,6 +129,7 @@ mod forged {
     use cityg_core::error::CoreError;
     use cityg_core::identity::DeviceIdentity;
     use cityg_core::kem::KemSecret;
+    use cityg_core::message::{EpochMessages, MessageLog};
     use cityg_core::objects::{Admission, ChangeKind, JoinRequest, Request, device_id};
     use cityg_core::packet::{EntrantEvidence, EntrantProof, Packet, RegistryUpdate};
     use cityg_core::rekey::{KeySource, WindowIndex, generate, plan_district};
@@ -158,7 +159,7 @@ mod forged {
         /// The device the forger joined, and the epoch's message secret, which
         /// it knows.
         pub forger: DeviceIdentity,
-        pub msg_secret: [u8; 32],
+        pub authenticator: [u8; 32],
     }
 
     /// A district commit whose committer skipped the entry checks.
@@ -318,6 +319,7 @@ mod forged {
                 city_tasks: &city_tasks,
                 policy: None,
                 time_ms: state.time_ms + 1,
+                message_log: MessageLog::empty().unwrap(),
                 init_prev: &init_prev,
                 root_secret: &root_secret,
             },
@@ -341,7 +343,15 @@ mod forged {
             state: state.clone(),
             commits,
             city_tasks,
-            msg_secret: *sealed.secrets.msg_secret(),
+            authenticator: *EpochMessages::new(
+                &state.gid,
+                sealed.header.epoch,
+                sealed.header.shape.height,
+                0,
+                sealed.secrets.msg_secret().unwrap(),
+            )
+            .unwrap()
+            .authenticator(),
             seal: sealed.seal,
             requests,
             evidence,
@@ -396,12 +406,12 @@ fn a_forged_external_epoch_is_rejected() {
     // The delivery service's own check refuses it.
     assert_eq!(forged::check_rejects(&forged), not_admin);
     for member in sim.members.values_mut() {
-        let before = *member.msg_secret();
+        let before = *member.epoch_authenticator();
         let packet = forged.packet(member.occupancy().leaf, member.leaf_public_key());
         // The confirmation tag is right (the error comes from the admission,
         // which is checked after the tag), and the member refuses the epoch.
         assert_eq!(member.process(&packet).unwrap_err(), not_admin);
-        assert_eq!(*member.msg_secret(), before);
+        assert_eq!(*member.epoch_authenticator(), before);
     }
     // The group goes on.
     sim.request_joins(1);
@@ -1112,6 +1122,7 @@ fn audits_expose_a_committer_that_placed_an_invalid_join() {
     use cityg_core::commit::Change;
     use cityg_core::identity::DeviceIdentity;
     use cityg_core::kem::KemSecret;
+    use cityg_core::message::MessageLog;
     use cityg_core::objects::{Admission, ChangeKind, JoinRequest, Request, device_id};
     use cityg_core::roles::WindowTask;
     use cityg_core::window::{Requests, WindowShape, check_window, needed_height};
@@ -1222,7 +1233,13 @@ fn audits_expose_a_committer_that_placed_an_invalid_join() {
         requests: &requests,
     };
     let seal = sim.members[&sealer]
-        .seal(&state, &task, &work, &mut sim.rng)
+        .seal(
+            &state,
+            &task,
+            &work,
+            MessageLog::empty().unwrap(),
+            &mut sim.rng,
+        )
         .unwrap();
     assert!(check_window(&state, &commits, &city_tasks, &seal, &requests, true).is_err());
     let outcome = check_window(&state, &commits, &city_tasks, &seal, &requests, false).unwrap();
@@ -1485,7 +1502,7 @@ fn in_an_open_group_the_service_can_join_but_is_visible_and_cannot_pose_as_a_mem
     for member in sim.members.values_mut() {
         let packet = forged.packet(member.occupancy().leaf, member.leaf_public_key());
         member.process(&packet).unwrap();
-        assert_eq!(*member.msg_secret(), forged.msg_secret);
+        assert_eq!(*member.epoch_authenticator(), forged.authenticator);
     }
     // It is visible: its device is among the window's joins, checked by
     // every member against the seal it accepted.

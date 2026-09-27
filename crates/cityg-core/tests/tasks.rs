@@ -862,9 +862,10 @@ fn a_sealer_refuses_a_task_whose_wrap_opens_to_another_secret() {
         city_tasks: &city_tasks,
         requests: &requests,
     };
+    let log = sim.ds.close_message_log().unwrap();
     assert_eq!(
         sim.members[&sealer]
-            .seal(sim.ds.state(), &task, &work, &mut sim.rng)
+            .seal(sim.ds.state(), &task, &work, log, &mut sim.rng)
             .unwrap_err(),
         CoreError::Invalid("path key differs from the published one")
     );

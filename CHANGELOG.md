@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Protocol: the v0.5 draft, stage 3 (parity), specified; part 3a implemented
+### Protocol: the v0.5 draft, stage 3 (parity), specified; parts 3a and 3b implemented
 
 - Stage 3 of the draft is specified in detail (section 4 of
   [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
   E-18), from the research notes on parity and on the message plane; its
-  first part is implemented. Four parts, in the order of their
+  first two parts are implemented. Four parts, in the order of their
   implementation:
   - **leaves with cards**: a card, the key that signs messages, beside the
     leaf key, and changed with it; the leaf hash takes the leaf's summary
@@ -69,6 +69,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   card, which an update replaces; a leaf's hash takes its summary; no leaf
   key or card is set twice, whoever builds the window; an audit finds a
   key already in use.
+- **The message plane, implemented** (part 3b, `cityg_core::message`): from
+  `msg_secret`, which a member erases once it has derived them, the sender
+  data, encryption, exporter and authenticator secrets; a secret tree over
+  the leaves, of which a member keeps the frontier it has not derived, and
+  a chain per sender with `MAX_SKIP` skipped keys. A `Message` hides its
+  sender under the sender data, now of a fixed 12 bytes: the draft's CBOR
+  encoding would have shown the range of the sender's leaf by its length.
+  Its content carries the burst's `first_generation` and, at the end of a
+  burst, the card's signature over the chain of the sender's messages of
+  the epoch; its commitment binds it to its key. A receiver opens each
+  generation once, holds messages until a signature covers them, checks
+  the card against a leaf proof of the message's epoch, or of a later one
+  whose leaf shows `since` and `updated` no later (`sender_card`), and
+  drops a burst whose signature fails or does not come within `T_AUTH`,
+  after which it stops reading the sender in the epoch. `Member` sends,
+  opens and authenticates, signs a burst alone when it is due, exports
+  secrets and gives the epoch authenticator; it keeps the previous epoch's
+  plane until it forgets it.
+- **The sealed message log.** The DS records the messages of the current
+  epoch in the order they arrive (`submit_message`), closes the log when
+  it gives the sealer its work (`close_message_log`), refuses the epoch's
+  messages from then on, opens the log again if it aborts the window, and
+  refuses a seal that carries another log. The seal header carries the
+  log of the previous epoch, `[count, root]`, a Merkle tree hash in the
+  manner of RFC 6962, rather than the body, which members do not download;
+  the genesis seal carries the empty log. Members keep the log their seal
+  closed (`Member::sealed_log`), check it against the epoch's messages
+  (`MessageLog::check`) or a message's inclusion (`message_proof`,
+  `MessageLog::verify_inclusion`).
+- Breaking: `SealHeader` and `SealDraft` gain `message_log`;
+  `Member::seal`, `Joiner::seal_window` and `Returning::seal_window` take
+  the log the DS gave; `DeliveryService::submit_seal` requires the log it
+  closed; `EpochSecrets::msg_secret` returns an `Option`, and
+  `take_msg_secret` hands it over; `Member::msg_secret` gives way to
+  `Member::epoch_authenticator`.
+- Tests in `crates/cityg-core/tests/messages.rs` and in the module: members
+  exchange messages that the DS cannot attribute; a seal closes the log of
+  the epoch it ends, which members check; a card is checked against the
+  leaf of the message's epoch, before an update or a removal; a joiner
+  reads from the epoch it enters; the DS checks what it can see of a
+  message; an insider's forgery is never delivered; skipped generations
+  open later, within `MAX_SKIP`.
 
 ### Protocol: the v0.5 draft, stage 2 (tasks)
 

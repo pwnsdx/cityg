@@ -26,7 +26,7 @@
 //! every member of that epoch recovers.
 
 use rand_core::CryptoRngCore;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::cbor::{array, bytes, encode, text, uint};
 use crate::crypto::{
@@ -102,7 +102,9 @@ pub fn joiner_secret(
 pub struct EpochSecrets {
     joiner_secret: [u8; 32],
     init_secret: [u8; 32],
-    msg_secret: [u8; 32],
+    /// Until the member derives the message plane from it
+    /// (docs/specs-v0.5-draft.md section 4.3).
+    msg_secret: Option<[u8; 32]>,
     confirm_key: [u8; 32],
     external_secret: [u8; 32],
 }
@@ -131,7 +133,7 @@ impl EpochSecrets {
         Ok(Self {
             joiner_secret: *joiner,
             init_secret: *derive_secret(&epoch_secret, "init")?,
-            msg_secret: *derive_secret(&epoch_secret, "msg")?,
+            msg_secret: Some(*derive_secret(&epoch_secret, "msg")?),
             confirm_key: *derive_secret(&epoch_secret, "confirm")?,
             external_secret: *derive_secret(&epoch_secret, "external")?,
         })
@@ -150,10 +152,23 @@ impl EpochSecrets {
         &self.init_secret
     }
 
-    /// `msg_secret_n`, root of the message plane of the epoch.
+    /// `msg_secret_n`, root of the message plane of the epoch, until
+    /// [`EpochSecrets::take_msg_secret`].
     #[must_use]
-    pub const fn msg_secret(&self) -> &[u8; 32] {
-        &self.msg_secret
+    pub const fn msg_secret(&self) -> Option<&[u8; 32]> {
+        self.msg_secret.as_ref()
+    }
+
+    /// Take `msg_secret_n` out, to derive the message plane: the epoch's
+    /// secrets no longer hold it.
+    pub fn take_msg_secret(&mut self) -> CoreResult<Secret> {
+        let mut secret = self
+            .msg_secret
+            .take()
+            .ok_or(CoreError::Invalid("message secret already taken"))?;
+        let taken = Zeroizing::new(secret);
+        secret.zeroize();
+        Ok(taken)
     }
 
     /// `confirmation_tag_n`.

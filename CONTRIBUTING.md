@@ -40,6 +40,7 @@ docs/formal/run.sh /path/to/proverif       # symbolic model
 | `crates/cityg-core/tests/scenarios.rs` | Whole groups on the in-memory delivery service. |
 | `crates/cityg-core/tests/islands.rs` | Island followers, relays, flat elements and refreshes, and urgent and ordinary removals (stage 1 of the v0.5 draft). |
 | `crates/cityg-core/tests/parity.rs` | Stage 3 of the v0.5 draft: cards in leaves, hashed by their summary; unique keys, checked by the DS, committers, sealers and auditors. |
+| `crates/cityg-core/tests/messages.rs` | Stage 3 of the v0.5 draft, the message plane: messages through the DS, burst chains checked against the cards of the message's epoch, the sealed message log. |
 | `crates/cityg-core/tests/tasks.rs` | Stage 2 of the v0.5 draft: sub-cities and the top re-keyed by their performers, joiners performing the tasks of the window they enter, order, failover, taints and welcomes, a sealer that draws nothing, entries by island, repair requests and repairs, the exclusion of a performer that members blame, and disputes that convict the performer of a faulty wrap. |
 | `crates/cityg-core/tests/scale.rs` | A large window on a full group, against the cost model (release, `--ignored`). |
 | `docs/formal/` | Symbolic model of the security choices. |

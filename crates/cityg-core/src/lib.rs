@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 //! City-G protocol core, profile `city-g/v0.5-draft`, stages 1 and 2 but
-//! disputes (`docs/specs-v0.5-draft.md`, a delta on `city-g/v0.4`,
+//! the proof system of disputes, and of stage 3 the cards, unique keys and
+//! the message plane (`docs/specs-v0.5-draft.md`, a delta on `city-g/v0.4`,
 //! `docs/specs.md`): end-to-end encrypted groups of up to millions of
 //! members, whose tree is split into districts under a city of sub-cities
 //! and a top, re-keyed once per window by district commits and city tasks
@@ -30,11 +31,17 @@
 //! * packets, seal links and entries, whole or by island ([`packet`]), and
 //!   the top of an island follower's path: relay elements, flat elements,
 //!   refreshes, and repairs ([`top`]);
+//! * cards, the keys that sign messages ([`card`]), and the message plane:
+//!   a secret tree with a chain per sender, messages whose sender only
+//!   members see, burst chains signed by cards, key commitments, the
+//!   sealed log of each epoch's messages, exports and the epoch
+//!   authenticator ([`message`]);
 //! * members, joiners and returning members, including windows an entrant
 //!   seals when no member is online ([`member`]);
 //! * an in-memory delivery service: queues, placement, roles, checks,
 //!   packets, recorded removals, eviction, audit records, repair requests
-//!   and the exclusion of performers they blame ([`ds`]);
+//!   and the exclusion of performers they blame, and the log of each
+//!   epoch's messages ([`ds`]);
 //! * audits of a window's entries and fraud proofs ([`audit`]);
 //! * disputes of faulty wraps, their public inputs and the interface of the
 //!   proof system that checks them ([`dispute`]).
@@ -51,6 +58,7 @@ pub mod error;
 pub mod identity;
 pub mod kem;
 pub mod member;
+pub mod message;
 pub mod objects;
 pub mod packet;
 pub mod registry;

@@ -17,8 +17,10 @@
 //!
 //! SealHeader := ["city-g/seal/v5", gid, epoch, prev_interim, kind, sealer, height,
 //!                district_bits, island_bits, subcity_bits, tree_hash, registry_hash,
-//!                body_hash, time_ms, [kem_output, request_ref] or null]
+//!                body_hash, time_ms, message_log, [kem_output, request_ref] or null]
 //!   kind 0 genesis, 1 member, 2 entrant (the last field is set for kind 2)
+//!   message_log := [count, root], the log of the previous epoch's messages
+//!                  (docs/specs-v0.5-draft.md section 4.8)
 //! SealBody   := ["city-g/seal-body/v5", [[district, H(district commit)], ...],
 //!                [[part, H(city task)], ...], eviction_policy or null,
 //!                [nonce, creator_pk, encryption_key, card, root_pk] or null]
@@ -41,6 +43,7 @@ use crate::codec::{Fields, Signed, nullable, open_signed, sign_fields};
 use crate::crypto::{Digest, Wrap, h};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::{DeviceIdentity, verify_signature};
+use crate::message::MessageLog;
 use crate::objects::ChangeKind;
 use crate::rekey::NodeUpdate;
 use crate::tree::{CityPart, NodeId, Occupancy};
@@ -431,6 +434,9 @@ pub struct SealHeader {
     pub registry_hash: Digest,
     pub body_hash: Digest,
     pub time_ms: u64,
+    /// The log of the previous epoch's messages, which the DS closed when it
+    /// gave the sealer its work (empty at genesis).
+    pub message_log: MessageLog,
     pub entrant: Option<EntrantInit>,
 }
 
@@ -451,6 +457,7 @@ impl SealHeader {
             bytes(&self.registry_hash),
             bytes(&self.body_hash),
             uint(self.time_ms),
+            self.message_log.value(),
             nullable(self.entrant.as_ref(), |entrant| {
                 array(vec![bytes(&entrant.kem_output), bytes(&entrant.request)])
             }),
@@ -459,7 +466,7 @@ impl SealHeader {
 
     fn from_value(value: Value) -> CoreResult<Self> {
         const WHAT: &str = "seal header";
-        let items = expect_array(value, 15, WHAT)?;
+        let items = expect_array(value, 16, WHAT)?;
         expect_label(&items[0], SEAL_LABEL, WHAT)?;
         let mut fields = Fields::new(items, WHAT);
         fields.next()?;
@@ -481,6 +488,7 @@ impl SealHeader {
         let registry_hash = fields.digest()?;
         let body_hash = fields.digest()?;
         let time_ms = fields.uint()?;
+        let message_log = MessageLog::from_value(fields.next()?, WHAT)?;
         let entrant = match fields.optional()? {
             None => None,
             Some(value) => {
@@ -508,6 +516,7 @@ impl SealHeader {
             registry_hash,
             body_hash,
             time_ms,
+            message_log,
             entrant,
         })
     }
@@ -846,6 +855,10 @@ mod tests {
             registry_hash: [4; 32],
             body_hash: body.hash().unwrap(),
             time_ms: 99,
+            message_log: MessageLog {
+                count: 3,
+                root: [5; 32],
+            },
             entrant: Some(EntrantInit {
                 kem_output: vec![6; 3],
                 request: [8; 32],

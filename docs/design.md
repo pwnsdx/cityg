@@ -494,6 +494,15 @@ leaf keeps its device key, unlike the research note's leaf with
 `device_id`: no rule that takes a device key from the tree changes, and
 readers still download only the summary.
 
+**Implementation choices.** The sender data has a fixed length (12 bytes,
+as in MLS), since a CBOR encoding would show the range of the sender's
+leaf to the DS. The message log is in the seal header, which members
+download, not in the body; the DS closes it when it gives the sealer its
+work, not when the window opens, so that the window's tasks do not stop
+the messages. A receiver whose sender's burst fails or expires stops
+reading that sender in the epoch, since every later signature covers the
+dropped messages.
+
 ## Parameters
 
 | Parameter | Default | Meaning |

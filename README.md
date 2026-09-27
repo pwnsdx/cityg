@@ -26,8 +26,10 @@ with X25519) and ML-DSA-65.
 > faulty task cut off asks for a repair, which counts against the
 > performer to blame, and disputes the faulty wrap; the delivery service
 > judges disputes with a proof system it is given, which the core does not
-> include. Of stage 3, it implements cards in leaves and unique keys. The
-> message plane, the networked
+> include. Of stage 3, it implements cards in leaves, unique keys and the
+> message plane: messages whose sender the delivery service does not see,
+> signed once per burst by the sender's card, and logged in the next seal.
+> The authorized mode, the networked
 > delivery service and the clients do not exist yet
 > ([specification, section 19](docs/specs.md#19-open-items)). There are no
 > test vectors and no independent human cryptographic review: **for
@@ -71,6 +73,7 @@ At a million members, four of its choices get in the way:
 | **Checks by sampling** | The DS checks every request, committers the entries of their district, the sealer the structure of every commit, and members audit random entries. |
 | **Open groups** | An admin-signed policy can open a group to any device; every join stays visible. |
 | **Relays** (v0.5 draft) | A member may read the tree by island of 256 leaves: a member of its island seals each window's root secret for it in 52 bytes, checked by the tag. Urgent removals keep their 5-second windows; departures wait for the next scheduled window. |
+| **Messages** (v0.5 draft) | A secret tree gives each member a chain per epoch, as in MLS. The DS sees neither the sender nor the content; the sender's card, the key in its leaf, signs once per burst, and the next seal logs the epoch's messages, so that members agree on them. |
 
 ## City‑G 0.4 and MLS
 
@@ -229,8 +232,8 @@ Fourteen more, in French, look at what comes next; the fifth gathers them
 into a candidate profile for the next version, in three stages, and the
 following ones work on its open problems. None of them is part of profile
 v0.4; the [v0.5 draft](docs/specs-v0.5-draft.md) specifies the three
-stages, and `cityg-core` implements the first two and the first part of
-the third.
+stages, and `cityg-core` implements the first two and the first two
+parts of the third.
 
 | Note | Question | What it finds |
 | --- | --- | --- |

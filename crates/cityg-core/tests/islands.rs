@@ -351,9 +351,10 @@ fn a_sealer_without_a_city_refreshes_its_path_first() {
                 city_tasks: &[],
                 requests: &requests,
             };
+            let log = sim.ds.close_message_log().unwrap();
             assert!(
                 sim.members[&sealer]
-                    .seal(sim.ds.state(), &task, &work, &mut sim.rng)
+                    .seal(sim.ds.state(), &task, &work, log, &mut sim.rng)
                     .is_err()
             );
             let other = *sim
@@ -374,7 +375,7 @@ fn a_sealer_without_a_city_refreshes_its_path_first() {
             member.refresh(&steps).unwrap();
             assert!(member.knows_path());
             let seal = member
-                .seal(sim.ds.state(), &task, &work, &mut sim.rng)
+                .seal(sim.ds.state(), &task, &work, log, &mut sim.rng)
                 .unwrap();
             let epoch = sim.ds.submit_seal(seal).unwrap();
             sim.follow(epoch);

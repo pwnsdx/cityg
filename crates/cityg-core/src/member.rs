@@ -38,6 +38,9 @@ use crate::dispute::{Dispute, DisputeContent, DisputeStatement, classify};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::DeviceIdentity;
 use crate::kem::KemSecret;
+use crate::message::{
+    Delivered, Dropped, EpochMessages, Message, MessageLog, Received, sender_card,
+};
 use crate::objects::{
     Admission, CatchUpRequest, ChangeKind, Checkpoint, CheckpointContent, GroupPolicy, Invite,
     JoinRequest, ReEntryRequest, RemoveProposal, RepairRequest, Request, UpdateRequest, Urgency,
@@ -103,6 +106,11 @@ pub struct Member {
     previous: Option<EpochHeader>,
     seal_hash: Digest,
     secrets: EpochSecrets,
+    /// The message plane of the current epoch (docs/specs-v0.5-draft.md
+    /// sections 4.3 to 4.8).
+    messages: EpochMessages,
+    /// That of the previous epoch, until the member has read its messages.
+    previous_messages: Option<EpochMessages>,
     pending_leaf: Option<KemSecret>,
     /// The card drawn with the pending leaf key.
     pending_card: Option<CardKey>,
@@ -187,6 +195,7 @@ impl Member {
             registry_hash: registry_header.hash()?,
             body_hash: body.hash()?,
             time_ms,
+            message_log: MessageLog::empty()?,
             entrant: None,
         };
         let seal_hash = header.hash()?;
@@ -203,9 +212,10 @@ impl Member {
             confirmed_transcript_hash: confirmed,
         };
         let commit = commit_secret(&root_secret)?;
-        let secrets = EpochSecrets::derive(&ZERO32, &commit, &context)?;
+        let mut secrets = EpochSecrets::derive(&ZERO32, &commit, &context)?;
         let tag = secrets.confirmation_tag(&confirmed)?;
         let external_pk = secrets.external_key()?.public_key();
+        let messages = EpochMessages::new(&gid, 0, 1, creator.leaf, &*secrets.take_msg_secret()?)?;
         let seal = Seal::sign(header, body, tag, external_pk.clone(), &identity, rng)?;
         let mut path = MemberPath::new(0, leaf_key);
         path.set_path(PathSecrets::at(
@@ -230,6 +240,8 @@ impl Member {
             previous: None,
             seal_hash,
             secrets,
+            messages,
+            previous_messages: None,
             pending_leaf: None,
             pending_card: None,
             repaired: false,
@@ -280,10 +292,124 @@ impl Member {
         self.header.registry.admins.contains_key(&self.occupancy)
     }
 
-    /// `msg_secret` of the current epoch.
+    /// `epoch_authenticator` of the current epoch (docs/specs-v0.5-draft.md
+    /// section 4.3): the same for every member of the epoch, so that two
+    /// members that compare it detect a fork.
     #[must_use]
-    pub const fn msg_secret(&self) -> &[u8; 32] {
-        self.secrets.msg_secret()
+    pub const fn epoch_authenticator(&self) -> &Digest {
+        self.messages.authenticator()
+    }
+
+    /// `Export_n(label, context, length)` of the current epoch, a secret for
+    /// the application.
+    pub fn export(
+        &self,
+        label: &str,
+        context: &[u8],
+        length: usize,
+    ) -> CoreResult<Zeroizing<Vec<u8>>> {
+        self.messages.export(label, context, length)
+    }
+
+    /// Send `application_data` in the current epoch, signed by the member's
+    /// card if its last signature is older than `T_BURST` or its burst is
+    /// due (docs/specs-v0.5-draft.md sections 4.5 and 4.6).
+    pub fn send(
+        &mut self,
+        application_data: &[u8],
+        now_ms: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Message> {
+        self.messages
+            .send(application_data, &self.card, now_ms, rng)
+    }
+
+    /// Whether the member should sign its burst now, alone if it has
+    /// nothing to send ([`Member::sign_burst`]).
+    #[must_use]
+    pub fn sign_due(&self, now_ms: u64) -> bool {
+        self.messages.sign_due(now_ms)
+    }
+
+    /// Sign the member's burst alone, if it has unsigned messages.
+    pub fn sign_burst(
+        &mut self,
+        now_ms: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Option<Message>> {
+        self.messages.sign_burst(&self.card, now_ms, rng)
+    }
+
+    fn messages_of(&mut self, epoch: u64) -> CoreResult<&mut EpochMessages> {
+        if epoch == self.messages.epoch() {
+            return Ok(&mut self.messages);
+        }
+        self.previous_messages
+            .as_mut()
+            .filter(|messages| messages.epoch() == epoch)
+            .ok_or(CoreError::Invalid(
+                "messages of an epoch the member does not read",
+            ))
+    }
+
+    /// Open a message of the current or of the previous epoch, and hold it
+    /// until a signature of its sender covers it.
+    pub fn open_message(&mut self, message: &Message, now_ms: u64) -> CoreResult<Received> {
+        self.messages_of(message.epoch)?.open(message, now_ms)
+    }
+
+    /// Deliver the ready bursts of the sender at `leaf` in `epoch`, checked
+    /// against its card, which `proof` shows in the tree of `proof_epoch`,
+    /// the current or the previous epoch (docs/specs-v0.5-draft.md section
+    /// 4.1).
+    pub fn authenticate(
+        &mut self,
+        epoch: u64,
+        leaf: u32,
+        proof: &LeafProof,
+        proof_epoch: u64,
+    ) -> CoreResult<Vec<Delivered>> {
+        if proof.index != leaf {
+            return Err(CoreError::Invalid("proof of another leaf"));
+        }
+        let header = if proof_epoch == self.header.epoch {
+            &self.header
+        } else {
+            self.previous
+                .as_ref()
+                .filter(|previous| previous.epoch == proof_epoch)
+                .ok_or(CoreError::Invalid(
+                    "proof of an epoch the member does not hold",
+                ))?
+        };
+        let card = sender_card(proof, &header.tree_hash, proof_epoch, epoch)?;
+        self.messages_of(epoch)?.authenticate(leaf, &card)
+    }
+
+    /// Drop the bursts that have waited for their signature longer than
+    /// `T_AUTH` and `delay_ms`, for the application to report.
+    pub fn drop_unsigned(&mut self, now_ms: u64, delay_ms: u64) -> Vec<Dropped> {
+        let mut dropped = self.messages.drop_unsigned(now_ms, delay_ms);
+        if let Some(previous) = &mut self.previous_messages {
+            dropped.extend(previous.drop_unsigned(now_ms, delay_ms));
+        }
+        dropped
+    }
+
+    /// The log of the previous epoch's messages, which the seal of the
+    /// current epoch carries: a member that read them all checks it with
+    /// [`MessageLog::check`], a sender its own messages' inclusion.
+    #[must_use]
+    pub fn sealed_log(&self) -> Option<MessageLog> {
+        self.previous_messages
+            .as_ref()
+            .and_then(EpochMessages::sealed_log)
+    }
+
+    /// Forget the previous epoch's message plane, once its messages are
+    /// read (docs/specs-v0.5-draft.md section 4.3).
+    pub fn forget_previous_messages(&mut self) {
+        self.previous_messages = None;
     }
 
     /// The member's leaf key.
@@ -379,7 +505,7 @@ impl Member {
             confirmed_transcript_hash: confirmed,
         };
         let commit = commit_secret(&root)?;
-        let epoch_secrets = EpochSecrets::derive(&init_prev, &commit, &context)?;
+        let mut epoch_secrets = EpochSecrets::derive(&init_prev, &commit, &context)?;
         epoch_secrets.check_confirmation_tag(&confirmed, &packet.tag)?;
         let external_pk = epoch_secrets.external_key()?.public_key();
         if let Some(entrant) = &packet.entrant {
@@ -415,6 +541,17 @@ impl Member {
             interim,
             external_pk,
         };
+        let messages = EpochMessages::new(
+            &self.header.gid,
+            header.epoch,
+            shape.height,
+            self.occupancy.leaf,
+            &*epoch_secrets.take_msg_secret()?,
+        )?;
+        // The seal closes the log of the epoch the member leaves.
+        let mut closed = core::mem::replace(&mut self.messages, messages);
+        closed.set_sealed_log(header.message_log);
+        self.previous_messages = Some(closed);
         self.previous = Some(core::mem::replace(&mut self.header, next));
         self.path = path;
         self.root = root;
@@ -799,14 +936,17 @@ impl Member {
 
     /// Seal the window `task` (E-1, E-17): check every district commit and
     /// city task (signature, structure, taints), follow them along the
-    /// member's path to the new root secret, and sign the seal. The sealer
-    /// draws nothing; it must hold its whole path (an island follower
-    /// refreshes first).
+    /// member's path to the new root secret, and sign the seal, with the
+    /// log of the current epoch's messages that the DS closed and gave it
+    /// (docs/specs-v0.5-draft.md section 4.8), which the sealer cannot
+    /// check. The sealer draws nothing; it must hold its whole path (an
+    /// island follower refreshes first).
     pub fn seal(
         &self,
         state: &PublicState,
         task: &WindowTask,
         work: &WindowWork<'_>,
+        message_log: MessageLog,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Seal> {
         let (commits, requests) = (work.commits, work.requests);
@@ -877,6 +1017,7 @@ impl Member {
                 city_tasks: work.city_tasks,
                 policy: task.policy()?,
                 time_ms: task.time_ms,
+                message_log,
                 init_prev: self.secrets.init_secret(),
                 root_secret: &root_secret,
             },
@@ -1473,7 +1614,7 @@ impl Joiner {
     /// Enter the epoch a member sealed, with its welcome.
     pub fn enter(self, entry: &Entry) -> CoreResult<Member> {
         let (occupancy, opened) = self.open(entry)?;
-        Ok(opened.into_member(self.identity, occupancy, self.card))
+        opened.into_member(self.identity, occupancy, self.card)
     }
 
     fn open(&self, entry: &Entry) -> CoreResult<(Occupancy, Opened)> {
@@ -1509,13 +1650,15 @@ impl Joiner {
     }
 
     /// Seal the window as its entrant (nobody online): commit every district,
-    /// seal with an external init, and welcome the others.
+    /// seal with an external init and the message log the DS gave it, and
+    /// welcome the others.
     pub fn seal_window(
         self,
         state: &PublicState,
         task: &WindowTask,
         requests: &Requests,
         catch_ups: &CatchUps,
+        message_log: MessageLog,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<EntrantSealed> {
         let reference = self.request.reference();
@@ -1536,6 +1679,7 @@ impl Joiner {
                 card: self.card,
                 request: reference,
                 anchor: &self.anchor,
+                message_log,
             },
             state,
             task,
@@ -1602,7 +1746,7 @@ impl Returning {
             Some(card) if pending => card,
             _ => self.card,
         };
-        Ok(opened.into_member(self.identity, occupancy, card))
+        opened.into_member(self.identity, occupancy, card)
     }
 
     /// Check an entry and open it without entering (docs/specs-v0.5-draft.md
@@ -1663,6 +1807,7 @@ impl Returning {
         task: &WindowTask,
         requests: &Requests,
         catch_ups: &CatchUps,
+        message_log: MessageLog,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<EntrantSealed> {
         if !self.re_entry {
@@ -1676,6 +1821,7 @@ impl Returning {
                 card: self.card,
                 request: self.request,
                 anchor: &self.anchor,
+                message_log,
             },
             state,
             task,
@@ -1718,8 +1864,20 @@ struct Opened {
 }
 
 impl Opened {
-    fn into_member(self, identity: DeviceIdentity, occupancy: Occupancy, card: CardKey) -> Member {
-        Member {
+    fn into_member(
+        mut self,
+        identity: DeviceIdentity,
+        occupancy: Occupancy,
+        card: CardKey,
+    ) -> CoreResult<Member> {
+        let messages = EpochMessages::new(
+            &self.header.gid,
+            self.header.epoch,
+            self.header.shape.height,
+            occupancy.leaf,
+            &*self.secrets.take_msg_secret()?,
+        )?;
+        Ok(Member {
             identity,
             card,
             occupancy,
@@ -1729,10 +1887,12 @@ impl Opened {
             previous: Some(self.previous),
             seal_hash: self.seal_hash,
             secrets: self.secrets,
+            messages,
+            previous_messages: None,
             pending_leaf: None,
             pending_card: None,
             repaired: false,
-        }
+        })
     }
 }
 
@@ -1854,6 +2014,8 @@ struct EntrantInput<'a> {
     card: CardKey,
     request: Digest,
     anchor: &'a EpochHeader,
+    /// The log of the anchor epoch's messages, which the DS gave the entrant.
+    message_log: MessageLog,
 }
 
 fn seal_as_entrant(
@@ -1950,6 +2112,7 @@ fn seal_as_entrant(
             city_tasks: &city_tasks,
             policy: task.policy()?,
             time_ms: task.time_ms,
+            message_log: input.message_log,
             init_prev: &init_prev,
             root_secret: &root_secret,
         },
@@ -2014,6 +2177,14 @@ fn seal_as_entrant(
     let mut member_path = MemberPath::new(input.occupancy.leaf, input.leaf_key);
     member_path.set_path(PathSecrets::at(path, window.epoch));
     let seal_hash = sealed.seal.header.hash()?;
+    let mut secrets = sealed.secrets;
+    let messages = EpochMessages::new(
+        &sealed.header.gid,
+        sealed.header.epoch,
+        sealed.header.shape.height,
+        input.occupancy.leaf,
+        &*secrets.take_msg_secret()?,
+    )?;
     let member = Member {
         identity: input.identity,
         card: input.card,
@@ -2023,7 +2194,9 @@ fn seal_as_entrant(
         header: sealed.header,
         previous: Some(input.anchor.clone()),
         seal_hash,
-        secrets: sealed.secrets,
+        secrets,
+        messages,
+        previous_messages: None,
         pending_leaf: None,
         pending_card: None,
         repaired: false,

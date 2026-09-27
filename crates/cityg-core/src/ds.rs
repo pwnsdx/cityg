@@ -14,7 +14,7 @@
 //! every node, enforces recorded removals at delivery, evicts under an
 //! admin-signed policy, and keeps the records auditors sample (E-12).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::audit::{AuditRecord, records};
 use crate::card::Card;
@@ -23,6 +23,7 @@ use crate::crypto::{Digest, Wrap, ZERO32, kem_pk_hash};
 use crate::dispute::{Dispute, DisputeStatement, DisputeVerifier};
 use crate::error::{CoreError, CoreResult};
 use crate::member::{CatchUps, PendingRemoval};
+use crate::message::{Message, MessageLog, inclusion_proof};
 use crate::objects::{
     Authorizer, CatchUpRequest, ChangeKind, Checkpoint, Eviction, GroupPolicy, JoinRequest,
     ReEntryRequest, RemoveProposal, RepairRequest, Request, UpdateRequest, Urgency,
@@ -273,6 +274,20 @@ struct OpenWindow {
     city_tasks: BTreeMap<CityPart, CityTask>,
 }
 
+/// The messages of the current epoch, in the order the DS accepted them,
+/// and the logs of closed epochs (docs/specs-v0.5-draft.md section 4.8).
+#[derive(Clone, Debug, Default)]
+struct MessageStore {
+    messages: Vec<Message>,
+    hashes: Vec<Digest>,
+    /// The hashes of the current epoch's messages, against replays.
+    seen: HashSet<Digest>,
+    /// The log, once closed for the window being sealed.
+    closed: Option<MessageLog>,
+    /// The closed epochs: their sealed log, messages and hashes.
+    archive: BTreeMap<u64, (MessageLog, Vec<Message>, Vec<Digest>)>,
+}
+
 /// The delivery service of one group.
 pub struct DeliveryService {
     config: DsConfig,
@@ -293,6 +308,7 @@ pub struct DeliveryService {
     convicted: BTreeSet<Occupancy>,
     /// The proof system that checks disputes, if the service has one.
     verifier: Option<Box<dyn DisputeVerifier>>,
+    messages: MessageStore,
 }
 
 impl core::fmt::Debug for DeliveryService {
@@ -338,6 +354,7 @@ impl DeliveryService {
             blamed: BTreeMap::new(),
             convicted: BTreeSet::new(),
             verifier: None,
+            messages: MessageStore::default(),
         })
     }
 
@@ -1163,9 +1180,85 @@ impl DeliveryService {
             || joiner_request(&open.window, performer, &open.requests).is_some()
     }
 
-    /// Drop the open window; its requests stay queued.
+    /// Drop the open window; its requests stay queued, and the log of the
+    /// epoch's messages opens again.
     pub fn abort_window(&mut self) {
         self.open = None;
+        self.messages.closed = None;
+    }
+
+    /// Record a message of the current epoch, in the order it arrives, and
+    /// return its index in the epoch's log (docs/specs-v0.5-draft.md
+    /// sections 4.5 and 4.8). The DS sees neither its sender nor its
+    /// content: it checks the group, the epoch and the sizes, and refuses
+    /// messages once the log is closed, whose senders send them again in
+    /// the next epoch.
+    pub fn submit_message(&mut self, message: Message) -> CoreResult<u64> {
+        if message.gid != self.state.gid {
+            return Err(CoreError::Invalid("message for another group"));
+        }
+        if message.epoch != self.state.epoch || self.messages.closed.is_some() {
+            return Err(CoreError::Invalid("message log closed"));
+        }
+        message.check_sizes()?;
+        let hash = message.hash()?;
+        if !self.messages.seen.insert(hash) {
+            return Err(CoreError::Invalid("message already in the log"));
+        }
+        let index = u64::try_from(self.messages.messages.len())
+            .map_err(|_| CoreError::TooLarge("message log"))?;
+        self.messages.hashes.push(hash);
+        self.messages.messages.push(message);
+        Ok(index)
+    }
+
+    /// Close the log of the current epoch's messages for the open window,
+    /// and give it to the sealer, who signs it into the seal; the same log
+    /// until the window is sealed or aborted.
+    pub fn close_message_log(&mut self) -> CoreResult<MessageLog> {
+        if self.open.is_none() {
+            return Err(CoreError::Invalid("no open window"));
+        }
+        if let Some(log) = self.messages.closed {
+            return Ok(log);
+        }
+        let log = MessageLog::of(&self.messages.hashes)?;
+        self.messages.closed = Some(log);
+        Ok(log)
+    }
+
+    /// The messages of `epoch`, the current one or a closed one, in the
+    /// order of its log.
+    pub fn messages(&self, epoch: u64) -> CoreResult<&[Message]> {
+        if epoch == self.state.epoch {
+            return Ok(&self.messages.messages);
+        }
+        self.messages
+            .archive
+            .get(&epoch)
+            .map(|(_, messages, _)| messages.as_slice())
+            .ok_or(CoreError::Invalid("no messages of this epoch"))
+    }
+
+    /// The sealed log of a closed epoch.
+    pub fn message_log(&self, epoch: u64) -> CoreResult<MessageLog> {
+        self.messages
+            .archive
+            .get(&epoch)
+            .map(|(log, _, _)| *log)
+            .ok_or(CoreError::Invalid("no sealed log of this epoch"))
+    }
+
+    /// The proof that the `index`-th message of a closed epoch is in its
+    /// sealed log (RFC 6962 §2.1.1).
+    pub fn message_proof(&self, epoch: u64, index: u64) -> CoreResult<Vec<Digest>> {
+        let (_, _, hashes) = self
+            .messages
+            .archive
+            .get(&epoch)
+            .ok_or(CoreError::Invalid("no sealed log of this epoch"))?;
+        let index = usize::try_from(index).map_err(|_| CoreError::Invalid("message log index"))?;
+        inclusion_proof(hashes, index)
     }
 
     /// Check and keep a district commit of the open window.
@@ -1307,6 +1400,14 @@ impl DeliveryService {
         if outcome.policy.as_ref().map(|p| p.encoded().to_vec()) != open.task.policy {
             return Err(CoreError::Invalid("seal policy"));
         }
+        // The seal carries the log the DS closed and gave the sealer.
+        let log = self
+            .messages
+            .closed
+            .ok_or(CoreError::Invalid("message log not closed"))?;
+        if seal.header.message_log != log {
+            return Err(CoreError::Invalid("seal message log"));
+        }
         let Some(open) = self.open.take() else {
             return Err(CoreError::Invalid("no open window"));
         };
@@ -1335,8 +1436,16 @@ impl DeliveryService {
             SealerEvidence::Member(self.state.tree.leaf_proof(seal.header.sealer.leaf)?)
         };
         let registry_before = self.state.registry.header()?;
+        let closed_epoch = self.state.epoch;
         self.state.apply(&outcome)?;
         let registry = self.state.registry.header()?;
+        let store = core::mem::take(&mut self.messages.messages);
+        let hashes = core::mem::take(&mut self.messages.hashes);
+        self.messages.seen.clear();
+        self.messages.closed = None;
+        self.messages
+            .archive
+            .insert(closed_epoch, (log, store, hashes));
         let epoch = outcome.epoch;
         let shape = self.state.tree.shape();
         let mut index = WindowIndex::default();

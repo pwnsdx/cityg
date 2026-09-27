@@ -15,6 +15,7 @@ use crate::crypto::{Digest, ZERO32, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::check_device_key;
 use crate::kem::validate_public_key;
+use crate::message::MessageLog;
 use crate::objects::{ChangeKind, GroupPolicy, JoinRequest, Request, device_id, group_id};
 use crate::registry::{Registry, RegistryDelta, RegistryHeader};
 use crate::rekey::{
@@ -156,6 +157,7 @@ impl PublicState {
             || header.gid != group_id(&genesis.creator_pk, &genesis.nonce)?
             || !seal.body.districts.is_empty()
             || !seal.body.city.is_empty()
+            || header.message_log != MessageLog::empty()?
         {
             return Err(CoreError::Invalid("genesis seal"));
         }

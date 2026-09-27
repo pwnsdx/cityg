@@ -14,6 +14,7 @@ use crate::commit::{
 use crate::crypto::{Digest, commit_secret};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::DeviceIdentity;
+use crate::message::MessageLog;
 use crate::objects::GroupPolicy;
 use crate::rekey::{self, KeySource, NewRoots, Rekeyed, generate, plan_district, plan_part};
 use crate::schedule::{
@@ -275,6 +276,9 @@ pub struct SealDraft<'a> {
     pub city_tasks: &'a [CityTask],
     pub policy: Option<GroupPolicy>,
     pub time_ms: u64,
+    /// The log of the previous epoch's messages, which the DS gave the
+    /// sealer (docs/specs-v0.5-draft.md section 4.8).
+    pub message_log: MessageLog,
     /// `init_secret` of the previous epoch, or the external init secret.
     pub init_prev: &'a [u8; 32],
     /// The window's new root secret.
@@ -345,6 +349,7 @@ pub fn finish_seal(
         registry_hash,
         body_hash: body.hash()?,
         time_ms: draft.time_ms,
+        message_log: draft.message_log,
         entrant: draft.entrant,
     };
     let confirmed = confirmed_transcript_hash(&state.interim, &header.hash()?)?;
