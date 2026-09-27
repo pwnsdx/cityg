@@ -11,6 +11,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
+use cityg_core::card::{CardKey, LeafKeys};
 use cityg_core::commit::{
     CityTask, CityTaskContent, DistrictCommit, DistrictCommitContent, SealKind,
 };
@@ -738,10 +739,14 @@ fn a_welcomer_takes_the_init_key_of_the_request_the_commit_names() {
     // rather than seal the joiner secret to the service's key.
     let named = task.welcomes[0].request;
     let device = DeviceIdentity::generate(&mut sim.rng);
+    let card = CardKey::generate(&mut sim.rng).card();
     let own = JoinRequest::sign(
         &stored.seal.header.gid,
         &device,
-        &KemSecret::generate(&mut sim.rng).public_key(),
+        LeafKeys {
+            encryption_key: &KemSecret::generate(&mut sim.rng).public_key(),
+            card: &card,
+        },
         &KemSecret::generate(&mut sim.rng).public_key(),
         epoch + 10,
         None,

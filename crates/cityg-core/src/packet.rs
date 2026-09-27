@@ -136,7 +136,7 @@ pub enum EntrantEvidence {
     },
     /// A returning member: its request, and its leaf in the previous tree.
     ReEntry {
-        request: ReEntryRequest,
+        request: Box<ReEntryRequest>,
         leaf: LeafProof,
     },
 }

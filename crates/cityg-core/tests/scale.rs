@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Instant;
 
+use cityg_core::card::{CARD_ML_DSA_65, Card, CardKey, LeafKeys};
 use cityg_core::commit::{Change, CityTask};
 use cityg_core::crypto::Digest;
 use cityg_core::identity::DeviceIdentity;
@@ -119,16 +120,22 @@ fn full_group(height: u8, divisions: Divisions, rng: &mut ChaCha20Rng) -> Group 
             key[..4].copy_from_slice(&leaf.to_be_bytes());
             key
         };
-        devices.push((
-            device_id(&gid, &device_pk).unwrap(),
-            Occupancy { leaf, since: 0 },
-        ));
+        let id = device_id(&gid, &device_pk).unwrap();
+        devices.push((id, Occupancy { leaf, since: 0 }));
+        // Cards that sign nothing here: distinct keys of the right length.
+        let mut card = vec![1u8; cityg_pqc::PUBLIC_KEY_BYTES];
+        card[..4].copy_from_slice(&leaf.to_be_bytes());
         leaves.insert(
             leaf,
             Some(LeafNode {
                 device_pk,
+                device_id: id,
                 since: 0,
                 encryption_key: KemSecret::generate(rng).public_key(),
+                card: Card {
+                    algorithm: CARD_ML_DSA_65,
+                    public_key: card,
+                },
                 admission_hash: [0; 32],
                 updated: 0,
             }),
@@ -347,10 +354,14 @@ fn a_large_window_on_a_full_group_matches_the_model() {
                 &mut rng,
             )
             .unwrap();
+            let card = CardKey::generate(&mut rng).card();
             let join = JoinRequest::sign(
                 &state.gid,
                 &device,
-                &KemSecret::generate(&mut rng).public_key(),
+                LeafKeys {
+                    encryption_key: &KemSecret::generate(&mut rng).public_key(),
+                    card: &card,
+                },
                 &KemSecret::generate(&mut rng).public_key(),
                 epoch + 10,
                 Some(&admission),

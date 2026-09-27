@@ -1283,7 +1283,7 @@ impl DeliveryService {
                     admission: self.state.registry.admission_proof(&join.token())?,
                 },
                 Some(Request::ReEntry(re_entry)) => EntrantEvidence::ReEntry {
-                    request: re_entry.clone(),
+                    request: Box::new(re_entry.clone()),
                     leaf: self.state.tree.leaf_proof(re_entry.member.leaf)?,
                 },
                 _ => return Err(CoreError::Invalid("entrant request")),

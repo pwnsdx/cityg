@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, not yet implemented. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, and implemented as far as cards in leaves. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
 | Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2; the proof system of disputes is plugged in, not included) |
 | Design | [design.md](design.md) (decisions E-15 to E-18) |
@@ -1253,7 +1253,7 @@ The FIPS 204 context of every signed object is its label, as in v0.4
 | §6 | Stage 3: join, update and re-entry requests carry a card; the group policy gains the authorized mode and its key; the authorizer may propose removals (sections 4.1, 4.9) |
 | §8 | Stage 3: the registry gains the map of keys, `admission_mode` and the authorizer's key hash (section 4.2) |
 | §9, §19 | Stage 3: the message plane, from `msg_secret_n` (sections 4.3 to 4.8) |
-| §10.4 | Stage 3: the seal body gains the message log of the previous epoch and the membership log of the window (sections 4.8, 4.10) |
+| §10.4 | Stage 3: the genesis field of the seal body carries the creator's card after its leaf key; the seal body gains the message log of the previous epoch and the membership log of the window (sections 4.1, 4.8, 4.10) |
 | §12.9, §12.2 | Stage 3: joiners may anchor on an authorizer checkpoint, and members may require one (section 4.9) |
 
 Nothing of v0.4 decodes under this draft: every label changed.
@@ -1297,7 +1297,8 @@ Nothing of v0.4 decodes under this draft: every label changed.
   not.
 * **Assignment under load**: how many tasks a joiner takes, and when a DS
   prefers a volunteer with a good network.
-* **Stage 3**, specified in section 4: not implemented. FN-DSA-512 cards
+* **Stage 3**, specified in section 4: cards in leaves and their summary
+  hash are implemented (part 3a, unique keys aside); the rest is not. FN-DSA-512 cards
   wait for FIPS 206. The research models of the message plane and of
   parity (`research/formal-messages/`, `research/formal-parity/`) cover
   the sender hidden, burst chains, cards checked against the epoch's leaf,

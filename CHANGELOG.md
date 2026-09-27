@@ -33,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The leaf keeps its device key, unlike the research note's, so that no
   rule that takes a device key from the tree changes: only its hash moves
   to the summary.
+- **Cards, implemented** (`cityg_core::card`): a `Card` (ML-DSA-65, under
+  the new signature context `MESSAGE`) and its `CardKey`. `LeafNode` gains
+  the card and the `device_id` its summary names; `leaf_hash` takes
+  `LeafNode::summary`. Join, update and re-entry requests carry the card
+  with the leaf key (`LeafKeys`), as does the genesis seal for the creator.
+  A member draws a fresh card with each leaf key, keeps the pending one
+  with its pending leaf key, and holds its card once a window applies it
+  (`Member::card`); joiners and returning members bring theirs.
+- Breaking: `JoinRequest::sign`, `UpdateRequest::sign`,
+  `ReEntryRequest::sign` and `genesis_tree` take `LeafKeys`;
+  `LeafNode::new` and `LeafNode::from_value` take the group's id;
+  `EntrantEvidence::ReEntry` boxes its request.
+- Tests in `crates/cityg-core/tests/parity.rs`: a leaf holds its member's
+  card, which an update replaces; a leaf's hash takes its summary.
 
 ### Protocol: the v0.5 draft, stage 2 (tasks)
 

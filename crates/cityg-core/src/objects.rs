@@ -8,7 +8,7 @@
 //!                    admin or null, authorizer_pk, invite or null] ctx ADMISSION
 //!   kind 0: signed by admin `admin`, whose key is authorizer_pk
 //!   kind 1: signed by the invite key authorizer_pk of the enclosed invite
-//! JoinRequest    := ["city-g/join-request/v5", gid, device_pk, encryption_key,
+//! JoinRequest    := ["city-g/join-request/v5", gid, device_pk, encryption_key, card,
 //!                    init_key, not_after_epoch, admission or null] ctx JOIN_REQUEST, by the device
 //! RemoveProposal := ["city-g/remove/v5", gid, target, proposer, urgency]  ctx REMOVE_PROPOSAL
 //!   urgency 0: ordinary (the next scheduled window), 1: urgent (a window within
@@ -17,10 +17,11 @@
 //! GroupPolicy    := ["city-g/group-policy/v5", gid, admission, max_idle_epochs or null,
 //!                    admin]                                       ctx GROUP_POLICY
 //!   admission 0: closed (a join needs an admission), 1: open (any device)
-//! UpdateRequest  := ["city-g/update/v5", gid, member, replaces, encryption_key]  ctx UPDATE_REQUEST
+//! UpdateRequest  := ["city-g/update/v5", gid, member, replaces, encryption_key, card]
+//!                                                                 ctx UPDATE_REQUEST
 //! CatchUpRequest := ["city-g/catch-up/v5", gid, member, prev_interim, init_key]  ctx CATCH_UP
 //! ReEntryRequest := ["city-g/re-entry/v5", gid, member, replaces, encryption_key,
-//!                    init_key]                                    ctx RE_ENTRY
+//!                    card, init_key]                              ctx RE_ENTRY
 //! RepairRequest  := ["city-g/repair-request/v5", gid, epoch, seal_hash, member,
 //!                    level]                                       ctx REPAIR_REQUEST
 //! Checkpoint     := ["city-g/checkpoint/v5", gid, epoch, interim, tree_hash,
@@ -34,6 +35,9 @@
 //! in an open group a join may carry none: the device's own signature of
 //! its request is enough, and the device is visible as a member like any
 //! other.
+//!
+//! A join, an update and a re-entry set a leaf key and a card, the key its
+//! member signs messages with (docs/specs-v0.5-draft.md section 4.1).
 //!
 //! Members, admins and inviters are named by occupancy. `replaces` is
 //! `H_L("kem-pk", [key])` of the leaf key an update or a re-entry replaces:
@@ -52,6 +56,7 @@ use ciborium::value::Value;
 use cityg_pqc::SignatureContext;
 use rand_core::CryptoRngCore;
 
+use crate::card::{Card, LeafKeys};
 use crate::cbor::{array, bytes, decode, encode, expect_list, expect_uint, text, uint};
 use crate::codec::{Signed, open_signed, open_unsigned, sign_fields};
 use crate::crypto::{Digest, h, h_l, kem_pk_hash};
@@ -373,6 +378,7 @@ pub struct JoinRequest {
     pub gid: Digest,
     pub device_pk: Vec<u8>,
     pub encryption_key: Vec<u8>,
+    pub card: Card,
     pub init_key: Vec<u8>,
     /// Last epoch the request may enter.
     pub not_after_epoch: u64,
@@ -387,7 +393,7 @@ impl JoinRequest {
     pub fn sign(
         gid: &Digest,
         identity: &DeviceIdentity,
-        encryption_key: &[u8],
+        keys: LeafKeys<'_>,
         init_key: &[u8],
         not_after_epoch: u64,
         admission: Option<&Admission>,
@@ -398,7 +404,8 @@ impl JoinRequest {
                 text(JOIN_REQUEST_LABEL),
                 bytes(gid),
                 bytes(identity.public_key()),
-                bytes(encryption_key),
+                bytes(keys.encryption_key),
+                keys.card.value(),
                 bytes(init_key),
                 uint(not_after_epoch),
                 admission.map_or(Value::Null, |admission| bytes(admission.encoded())),
@@ -415,7 +422,7 @@ impl JoinRequest {
         let (mut fields, signed) = open_signed(
             encoded,
             JOIN_REQUEST_LABEL,
-            7,
+            8,
             MAX_REQUEST_BYTES,
             "join request",
         )?;
@@ -423,6 +430,7 @@ impl JoinRequest {
             gid: fields.digest()?,
             device_pk: fields.bytes()?,
             encryption_key: fields.bytes()?,
+            card: Card::from_value(fields.next()?, "join request card")?,
             init_key: fields.bytes()?,
             not_after_epoch: fields.uint()?,
             admission: fields
@@ -748,6 +756,7 @@ pub struct UpdateRequest {
     pub member: Occupancy,
     pub replaces: Digest,
     pub encryption_key: Vec<u8>,
+    pub card: Card,
     signed: Signed,
 }
 
@@ -757,7 +766,7 @@ impl UpdateRequest {
         gid: &Digest,
         member: Occupancy,
         current_key: &[u8],
-        encryption_key: &[u8],
+        keys: LeafKeys<'_>,
         identity: &DeviceIdentity,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Self> {
@@ -767,7 +776,8 @@ impl UpdateRequest {
                 bytes(gid),
                 member.value(),
                 bytes(&kem_pk_hash(current_key)?),
-                bytes(encryption_key),
+                bytes(keys.encryption_key),
+                keys.card.value(),
             ],
             identity,
             SignatureContext::UPDATE_REQUEST,
@@ -781,7 +791,7 @@ impl UpdateRequest {
         let (mut fields, signed) = open_signed(
             encoded,
             UPDATE_LABEL,
-            5,
+            6,
             MAX_REQUEST_BYTES,
             "update request",
         )?;
@@ -790,6 +800,7 @@ impl UpdateRequest {
             member: fields.occupancy()?,
             replaces: fields.digest()?,
             encryption_key: fields.bytes()?,
+            card: Card::from_value(fields.next()?, "update request card")?,
             signed,
         };
         validate_public_key(&request.encryption_key)?;
@@ -984,6 +995,7 @@ pub struct ReEntryRequest {
     pub member: Occupancy,
     pub replaces: Digest,
     pub encryption_key: Vec<u8>,
+    pub card: Card,
     pub init_key: Vec<u8>,
     signed: Signed,
 }
@@ -994,7 +1006,7 @@ impl ReEntryRequest {
         gid: &Digest,
         member: Occupancy,
         current_key: &[u8],
-        encryption_key: &[u8],
+        keys: LeafKeys<'_>,
         init_key: &[u8],
         identity: &DeviceIdentity,
         rng: &mut impl CryptoRngCore,
@@ -1005,7 +1017,8 @@ impl ReEntryRequest {
                 bytes(gid),
                 member.value(),
                 bytes(&kem_pk_hash(current_key)?),
-                bytes(encryption_key),
+                bytes(keys.encryption_key),
+                keys.card.value(),
                 bytes(init_key),
             ],
             identity,
@@ -1020,7 +1033,7 @@ impl ReEntryRequest {
         let (mut fields, signed) = open_signed(
             encoded,
             RE_ENTRY_LABEL,
-            6,
+            7,
             MAX_REQUEST_BYTES,
             "re-entry request",
         )?;
@@ -1029,6 +1042,7 @@ impl ReEntryRequest {
             member: fields.occupancy()?,
             replaces: fields.digest()?,
             encryption_key: fields.bytes()?,
+            card: Card::from_value(fields.next()?, "re-entry request card")?,
             init_key: fields.bytes()?,
             signed,
         };
@@ -1277,6 +1291,7 @@ impl Request {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::card::CardKey;
     use crate::kem::KemSecret;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
@@ -1309,18 +1324,16 @@ mod tests {
         let id = device_id(&s.gid, device.public_key()).unwrap();
         let leaf = KemSecret::generate(&mut rng).public_key();
         let init = KemSecret::generate(&mut rng).public_key();
+        let card = CardKey::generate(&mut rng).card();
+        let keys = LeafKeys {
+            encryption_key: &leaf,
+            card: &card,
+        };
         let admission =
             Admission::by_admin(&s.gid, &id, 10, s.admin, &s.admin_id, &mut rng).unwrap();
-        let request = JoinRequest::sign(
-            &s.gid,
-            &device,
-            &leaf,
-            &init,
-            10,
-            Some(&admission),
-            &mut rng,
-        )
-        .unwrap();
+        let request =
+            JoinRequest::sign(&s.gid, &device, keys, &init, 10, Some(&admission), &mut rng)
+                .unwrap();
         let decoded = JoinRequest::decode(request.encoded()).unwrap();
         decoded.verify(&s.gid, 3, &s.admins, false).unwrap();
         assert!(
@@ -1339,12 +1352,11 @@ mod tests {
         // An admission for another device does not pass.
         let other = DeviceIdentity::from_seed(&[4; 32]);
         let stolen =
-            JoinRequest::sign(&s.gid, &other, &leaf, &init, 10, Some(&admission), &mut rng)
-                .unwrap();
+            JoinRequest::sign(&s.gid, &other, keys, &init, 10, Some(&admission), &mut rng).unwrap();
         assert!(stolen.verify(&s.gid, 3, &s.admins, false).is_err());
         assert_eq!(admission.anchor_key(), s.admin_id.public_key());
         // Without admission: only in an open group, and only while valid.
-        let open = JoinRequest::sign(&s.gid, &other, &leaf, &init, 10, None, &mut rng).unwrap();
+        let open = JoinRequest::sign(&s.gid, &other, keys, &init, 10, None, &mut rng).unwrap();
         let open = JoinRequest::decode(open.encoded()).unwrap();
         open.verify(&s.gid, 3, &s.admins, true).unwrap();
         assert_eq!(
@@ -1354,7 +1366,7 @@ mod tests {
         assert!(open.verify(&s.gid, 11, &s.admins, true).is_err(), "expired");
         assert_eq!(open.token(), open.reference());
         let late = 3 + MAX_ADMISSION_EPOCHS + 1;
-        let late = JoinRequest::sign(&s.gid, &other, &leaf, &init, late, None, &mut rng).unwrap();
+        let late = JoinRequest::sign(&s.gid, &other, keys, &init, late, None, &mut rng).unwrap();
         assert!(late.verify(&s.gid, 3, &s.admins, true).is_err(), "too long");
     }
 
@@ -1387,6 +1399,11 @@ mod tests {
         let old = KemSecret::generate(&mut rng).public_key();
         let new = KemSecret::generate(&mut rng).public_key();
         let init = KemSecret::generate(&mut rng).public_key();
+        let card = CardKey::generate(&mut rng).card();
+        let keys = LeafKeys {
+            encryption_key: &new,
+            card: &card,
+        };
 
         let by_admin = RemoveProposal::sign(
             &s.gid,
@@ -1444,13 +1461,13 @@ mod tests {
                 .is_err()
         );
 
-        let update = UpdateRequest::sign(&s.gid, member, &old, &new, &member_id, &mut rng).unwrap();
+        let update = UpdateRequest::sign(&s.gid, member, &old, keys, &member_id, &mut rng).unwrap();
         update.verify(&s.gid, member_id.public_key()).unwrap();
         assert_eq!(update.replaces, kem_pk_hash(&old).unwrap());
         assert!(update.verify(&s.gid, s.admin_id.public_key()).is_err());
 
         let re_entry =
-            ReEntryRequest::sign(&s.gid, member, &old, &new, &init, &member_id, &mut rng).unwrap();
+            ReEntryRequest::sign(&s.gid, member, &old, keys, &init, &member_id, &mut rng).unwrap();
         re_entry.verify(&s.gid, member_id.public_key()).unwrap();
         assert_eq!(
             Request::decode(re_entry.encoded()).unwrap().subject(),

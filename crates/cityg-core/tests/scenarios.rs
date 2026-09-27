@@ -121,6 +121,7 @@ fn a_joiner_applies_a_pending_removal_when_nobody_is_online() {
 }
 
 mod forged {
+    use cityg_core::card::{CardKey, LeafKeys};
     use cityg_core::commit::{
         Change, CityTask, DistrictCommit, DistrictCommitContent, EntrantInit,
     };
@@ -230,10 +231,14 @@ mod forged {
         });
         let leaf_key = KemSecret::generate(rng);
         let init_key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng).card();
         let join = JoinRequest::sign(
             &state.gid,
             &forger,
-            &leaf_key.public_key(),
+            LeafKeys {
+                encryption_key: &leaf_key.public_key(),
+                card: &card,
+            },
             &init_key.public_key(),
             epoch + 10,
             admission.as_ref(),
@@ -514,6 +519,7 @@ fn a_stolen_device_key_does_not_buy_a_jump() {
 
 #[test]
 fn a_member_whose_leaf_a_thief_changed_notices() {
+    use cityg_core::card::{CardKey, LeafKeys};
     use cityg_core::kem::KemSecret;
     use cityg_core::member::LEAF_TAKEN;
     use cityg_core::objects::UpdateRequest;
@@ -535,11 +541,15 @@ fn a_member_whose_leaf_a_thief_changed_notices() {
         .encryption_key
         .clone();
     let thief_leaf = KemSecret::generate(&mut sim.rng);
+    let thief_card = CardKey::generate(&mut sim.rng).card();
     let update = UpdateRequest::sign(
         &gid,
         victim,
         &current,
-        &thief_leaf.public_key(),
+        LeafKeys {
+            encryption_key: &thief_leaf.public_key(),
+            card: &thief_card,
+        },
         &stolen,
         &mut sim.rng,
     )
@@ -1098,6 +1108,7 @@ fn a_policy_whose_signer_left_is_dropped() {
 #[test]
 fn audits_expose_a_committer_that_placed_an_invalid_join() {
     use cityg_core::audit::{self, FraudProof, Verdict};
+    use cityg_core::card::{CardKey, LeafKeys};
     use cityg_core::commit::Change;
     use cityg_core::identity::DeviceIdentity;
     use cityg_core::kem::KemSecret;
@@ -1121,10 +1132,14 @@ fn audits_expose_a_committer_that_placed_an_invalid_join() {
             Admission::by_admin(&state.gid, &id, epoch + 10, as_admin, admitted_by, rng).unwrap();
         let leaf = KemSecret::generate(rng).public_key();
         let init = KemSecret::generate(rng).public_key();
+        let card = CardKey::generate(rng).card();
         JoinRequest::sign(
             &state.gid,
             &device,
-            &leaf,
+            LeafKeys {
+                encryption_key: &leaf,
+                card: &card,
+            },
             &init,
             epoch + 10,
             Some(&admission),
@@ -1441,6 +1456,7 @@ fn a_closed_group_refuses_joins_without_admission() {
 
 #[test]
 fn in_an_open_group_the_service_can_join_but_is_visible_and_cannot_pose_as_a_member() {
+    use cityg_core::card::{CardKey, LeafKeys};
     use cityg_core::cbor::{array, bytes, encode, text, uint};
     use cityg_core::crypto::kem_pk_hash;
     use cityg_core::error::CoreError;
@@ -1494,6 +1510,7 @@ fn in_an_open_group_the_service_can_join_but_is_visible_and_cannot_pose_as_a_mem
         bytes(&gid),
         bytes(&victim_leaf.device_pk),
         bytes(&leaf),
+        CardKey::generate(&mut sim.rng).card().value(),
         bytes(&init),
         uint(epoch + 10),
         ciborium::value::Value::Null,
@@ -1523,11 +1540,15 @@ fn in_an_open_group_the_service_can_join_but_is_visible_and_cannot_pose_as_a_mem
         .unwrap_err(),
         CoreError::Invalid("device already a member")
     );
+    let forged_card = CardKey::generate(&mut sim.rng).card();
     let update = UpdateRequest::sign(
         &gid,
         victim,
         &victim_leaf.encryption_key,
-        &leaf,
+        LeafKeys {
+            encryption_key: &leaf,
+            card: &forged_card,
+        },
         &forged.forger,
         &mut sim.rng,
     )

@@ -824,8 +824,13 @@ mod tests {
     fn leaf_node(key: &KemSecret, since: u64) -> LeafNode {
         LeafNode {
             device_pk: vec![1; 8],
+            device_id: [1; 32],
             since,
             encryption_key: key.public_key(),
+            card: crate::card::Card {
+                algorithm: crate::card::CARD_ML_DSA_65,
+                public_key: vec![2; 8],
+            },
             admission_hash: [0; 32],
             updated: since,
         }

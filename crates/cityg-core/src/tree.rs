@@ -29,11 +29,13 @@ use std::ops::Range;
 
 use ciborium::value::Value;
 
+use crate::card::{Card, LeafKeys};
 use crate::cbor::{
     array, bytes, encode, expect_array, expect_bytes, expect_u32, expect_uint, uint,
 };
 use crate::crypto::{Digest, h_l};
 use crate::error::{CoreError, CoreResult};
+use crate::objects::device_id;
 
 /// Largest supported tree: `2^MAX_HEIGHT` leaves.
 pub const MAX_HEIGHT: u8 = 24;
@@ -451,53 +453,103 @@ impl Shape {
     }
 }
 
-/// A member's leaf.
+/// A member's leaf (docs/specs-v0.5-draft.md section 4.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeafNode {
     /// ML-DSA-65 device key.
     pub device_pk: Vec<u8>,
+    /// `device_id` of that key in its group, which the leaf's summary names.
+    pub device_id: Digest,
     /// Epoch the occupancy began.
     pub since: u64,
     /// X-Wing leaf key.
     pub encryption_key: Vec<u8>,
+    /// The card the member signs its messages with.
+    pub card: Card,
     /// Hash of the admission it entered with (`ZERO32` for the creator).
     pub admission_hash: Digest,
-    /// Epoch its leaf key last changed.
+    /// Epoch its leaf key and card last changed.
     pub updated: u64,
 }
 
 impl LeafNode {
-    /// CBOR `[device_pk, since, encryption_key, admission_hash, updated]`.
+    /// The leaf of a device of group `gid`.
+    pub fn new(
+        gid: &Digest,
+        device_pk: &[u8],
+        since: u64,
+        keys: LeafKeys<'_>,
+        admission_hash: Digest,
+        updated: u64,
+    ) -> CoreResult<Self> {
+        Ok(Self {
+            device_pk: device_pk.to_vec(),
+            device_id: device_id(gid, device_pk)?,
+            since,
+            encryption_key: keys.encryption_key.to_vec(),
+            card: keys.card.clone(),
+            admission_hash,
+            updated,
+        })
+    }
+
+    /// CBOR `[device_pk, since, encryption_key, card, admission_hash,
+    /// updated]`.
     #[must_use]
     pub fn value(&self) -> Value {
         array(vec![
             bytes(&self.device_pk),
             uint(self.since),
             bytes(&self.encryption_key),
+            self.card.value(),
             bytes(&self.admission_hash),
             uint(self.updated),
         ])
     }
 
-    /// Read a leaf node.
-    pub fn from_value(value: Value) -> CoreResult<Self> {
+    /// The leaf's summary, which its hash takes: `[device_id, since,
+    /// H_L("tree/leaf-key", [encryption_key]), card, admission_hash,
+    /// updated]`. A reader that checks a card needs no more.
+    pub fn summary(&self) -> CoreResult<Value> {
+        Ok(array(vec![
+            bytes(&self.device_id),
+            uint(self.since),
+            bytes(&self.key_hash()?),
+            self.card.value(),
+            bytes(&self.admission_hash),
+            uint(self.updated),
+        ]))
+    }
+
+    /// `H_L("tree/leaf-key", [encryption_key])`.
+    pub fn key_hash(&self) -> CoreResult<Digest> {
+        leaf_key_hash(&self.encryption_key)
+    }
+
+    /// Read a leaf node of group `gid`.
+    pub fn from_value(value: Value, gid: &Digest) -> CoreResult<Self> {
         const WHAT: &str = "leaf node";
-        let mut items = expect_array(value, 5, WHAT)?.into_iter();
+        let mut items = expect_array(value, 6, WHAT)?.into_iter();
         let mut next = || items.next().ok_or(CoreError::Malformed(WHAT));
         let device_pk = expect_bytes(next()?, WHAT)?;
         let since = expect_uint(&next()?, WHAT)?;
         let encryption_key = expect_bytes(next()?, WHAT)?;
+        let card = Card::from_value(next()?, WHAT)?;
         let admission_hash = expect_bytes(next()?, WHAT)?
             .try_into()
             .map_err(|_| CoreError::Malformed(WHAT))?;
         let updated = expect_uint(&next()?, WHAT)?;
-        Ok(Self {
-            device_pk,
+        Self::new(
+            gid,
+            &device_pk,
             since,
-            encryption_key,
+            LeafKeys {
+                encryption_key: &encryption_key,
+                card: &card,
+            },
             admission_hash,
             updated,
-        })
+        )
     }
 
     /// The occupancy of this leaf.
@@ -530,7 +582,14 @@ impl ParentNode {
 }
 
 fn leaf_hash(leaf: Option<&LeafNode>) -> CoreResult<Digest> {
-    h_l("tree/leaf", vec![leaf.map_or(Value::Null, LeafNode::value)])
+    let summary = leaf.map(LeafNode::summary).transpose()?;
+    h_l("tree/leaf", vec![summary.unwrap_or(Value::Null)])
+}
+
+/// `H_L("tree/leaf-key", [encryption_key])`: how a leaf's summary and the
+/// registry's map of keys name a leaf key.
+pub fn leaf_key_hash(encryption_key: &[u8]) -> CoreResult<Digest> {
+    h_l("tree/leaf-key", vec![bytes(encryption_key)])
 }
 
 fn parent_hash(content: Option<&Digest>, left: &Digest, right: &Digest) -> CoreResult<Digest> {
@@ -1056,8 +1115,13 @@ mod tests {
     fn leaf(tag: u8, since: u64) -> LeafNode {
         LeafNode {
             device_pk: vec![tag; 4],
+            device_id: [tag; 32],
             since,
             encryption_key: vec![tag; 3],
+            card: Card {
+                algorithm: crate::card::CARD_ML_DSA_65,
+                public_key: vec![tag; 5],
+            },
             admission_hash: [tag; 32],
             updated: since,
         }

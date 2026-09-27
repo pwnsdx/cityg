@@ -21,7 +21,7 @@
 //!   kind 0 genesis, 1 member, 2 entrant (the last field is set for kind 2)
 //! SealBody   := ["city-g/seal-body/v5", [[district, H(district commit)], ...],
 //!                [[part, H(city task)], ...], eviction_policy or null,
-//!                [nonce, creator_pk, encryption_key, root_pk] or null]
+//!                [nonce, creator_pk, encryption_key, card, root_pk] or null]
 //! Seal       := [SealHeader, SealBody, tag, external_pk, signature]
 //!   seal_hash := H(SealHeader), body_hash := H(SealBody)
 //!   signature := Sign(sealer, CBOR_det([seal_hash, tag, external_pk]), ctx SEAL)
@@ -35,6 +35,7 @@ use ciborium::value::Value;
 use cityg_pqc::SignatureContext;
 use rand_core::CryptoRngCore;
 
+use crate::card::Card;
 use crate::cbor::{array, bytes, decode, encode, expect_array, expect_label, text, uint};
 use crate::codec::{Fields, Signed, nullable, open_signed, sign_fields};
 use crate::crypto::{Digest, Wrap, h};
@@ -528,6 +529,8 @@ pub struct Genesis {
     pub nonce: [u8; 32],
     pub creator_pk: Vec<u8>,
     pub encryption_key: Vec<u8>,
+    /// The creator's card (docs/specs-v0.5-draft.md section 4.1).
+    pub card: Card,
     pub root_pk: Vec<u8>,
 }
 
@@ -563,6 +566,7 @@ impl SealBody {
                     bytes(&genesis.nonce),
                     bytes(&genesis.creator_pk),
                     bytes(&genesis.encryption_key),
+                    genesis.card.value(),
                     bytes(&genesis.root_pk),
                 ])
             }),
@@ -595,11 +599,12 @@ impl SealBody {
         let genesis = match fields.optional()? {
             None => None,
             Some(value) => {
-                let mut genesis = Fields::new(expect_array(value, 4, WHAT)?, WHAT);
+                let mut genesis = Fields::new(expect_array(value, 5, WHAT)?, WHAT);
                 Some(Genesis {
                     nonce: genesis.digest()?,
                     creator_pk: genesis.bytes()?,
                     encryption_key: genesis.bytes()?,
+                    card: Card::from_value(genesis.next()?, WHAT)?,
                     root_pk: genesis.bytes()?,
                 })
             }

@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
+use crate::card::{Card, CardKey, LeafKeys};
 use crate::commit::{
     CityTask, DistrictCommit, EntrantInit, Genesis, Seal, SealBody, SealHeader, SealKind, SealProof,
 };
@@ -90,6 +91,9 @@ pub const LEAF_TAKEN: CoreError = CoreError::Unauthorized("leaf key the member d
 /// A member of the group.
 pub struct Member {
     identity: DeviceIdentity,
+    /// The card the member signs its messages with
+    /// (docs/specs-v0.5-draft.md section 4.1).
+    card: CardKey,
     occupancy: Occupancy,
     path: MemberPath,
     /// The root secret of the current epoch, which an island follower does
@@ -100,6 +104,8 @@ pub struct Member {
     seal_hash: Digest,
     secrets: EpochSecrets,
     pending_leaf: Option<KemSecret>,
+    /// The card drawn with the pending leaf key.
+    pending_card: Option<CardKey>,
     /// It followed a window by repair, and holds no valid path until the
     /// window of its update (docs/specs-v0.5-draft.md section 3.7).
     repaired: bool,
@@ -139,6 +145,7 @@ impl Member {
             None
         };
         let leaf_key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng);
         let hedge = task_hedge(leaf_key.seed(), &gid, 0)?;
         let root_secret = fresh_secret(&hedge, rng)?;
         let root_pk = node_key(&root_secret)?.public_key();
@@ -146,7 +153,10 @@ impl Member {
             &gid,
             divisions,
             identity.public_key(),
-            &leaf_key.public_key(),
+            LeafKeys {
+                encryption_key: &leaf_key.public_key(),
+                card: &card.card(),
+            },
             &root_pk,
             policy.as_ref(),
         )?;
@@ -156,6 +166,7 @@ impl Member {
                 nonce,
                 creator_pk: identity.public_key().to_vec(),
                 encryption_key: leaf_key.public_key(),
+                card: card.card(),
                 root_pk,
             }),
             ..SealBody::default()
@@ -203,6 +214,7 @@ impl Member {
         ));
         let member = Self {
             identity,
+            card,
             occupancy: creator,
             path,
             root: root_secret,
@@ -219,6 +231,7 @@ impl Member {
             seal_hash,
             secrets,
             pending_leaf: None,
+            pending_card: None,
             repaired: false,
         };
         Ok((member, seal))
@@ -383,6 +396,9 @@ impl Member {
         path.set_path(secrets);
         if leaf_changed {
             self.pending_leaf = None;
+            if let Some(card) = self.pending_card.take() {
+                self.card = card;
+            }
         }
         // A repair leaves no valid path; the window of an update re-keys it.
         if matches!(packet.top, Some(Top::Repair(_))) {
@@ -574,18 +590,30 @@ impl Member {
 
     /// Request a new leaf key (post-compromise security): the next window
     /// re-keys the member's path and every node it taints.
+    /// A fresh card goes with the new leaf key.
     pub fn update_request(&mut self, rng: &mut impl CryptoRngCore) -> CoreResult<UpdateRequest> {
         let key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng);
         let request = UpdateRequest::sign(
             &self.header.gid,
             self.occupancy,
             self.path.leaf_public_key(),
-            &key.public_key(),
+            LeafKeys {
+                encryption_key: &key.public_key(),
+                card: &card.card(),
+            },
             &self.identity,
             rng,
         )?;
         self.pending_leaf = Some(key);
+        self.pending_card = Some(card);
         Ok(request)
+    }
+
+    /// The member's card, which its leaf holds.
+    #[must_use]
+    pub fn card(&self) -> Card {
+        self.card.card()
     }
 
     /// Propose the removal of `target` (as an admin, or of oneself), urgent
@@ -1197,6 +1225,8 @@ impl Member {
         let returning = Returning {
             leaf_key: self.path_leaf_key(),
             pending_leaf: self.pending_leaf,
+            card: self.card,
+            pending_card: self.pending_card,
             identity: self.identity,
             occupancy: self.occupancy,
             init_key,
@@ -1211,12 +1241,16 @@ impl Member {
     /// welcomed by a member or to seal the window itself.
     pub fn re_enter(self, rng: &mut impl CryptoRngCore) -> CoreResult<(Returning, ReEntryRequest)> {
         let leaf_key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng);
         let init_key = KemSecret::generate(rng);
         let request = ReEntryRequest::sign(
             &self.header.gid,
             self.occupancy,
             self.path.leaf_public_key(),
-            &leaf_key.public_key(),
+            LeafKeys {
+                encryption_key: &leaf_key.public_key(),
+                card: &card.card(),
+            },
             &init_key.public_key(),
             &self.identity,
             rng,
@@ -1226,6 +1260,8 @@ impl Member {
             occupancy: self.occupancy,
             leaf_key,
             pending_leaf: None,
+            card,
+            pending_card: None,
             init_key,
             request: request.reference(),
             anchor: self.header,
@@ -1261,6 +1297,7 @@ impl core::fmt::Debug for EntrantSealed {
 pub struct Joiner {
     identity: DeviceIdentity,
     leaf_key: KemSecret,
+    card: CardKey,
     init_key: KemSecret,
     request: JoinRequest,
     anchor: EpochHeader,
@@ -1286,11 +1323,15 @@ impl Joiner {
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Self> {
         let leaf_key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng);
         let init_key = KemSecret::generate(rng);
         let request = JoinRequest::sign(
             &anchor.gid,
             &identity,
-            &leaf_key.public_key(),
+            LeafKeys {
+                encryption_key: &leaf_key.public_key(),
+                card: &card.card(),
+            },
             &init_key.public_key(),
             not_after_epoch,
             admission,
@@ -1299,6 +1340,7 @@ impl Joiner {
         Ok(Self {
             identity,
             leaf_key,
+            card,
             init_key,
             request,
             anchor,
@@ -1431,7 +1473,7 @@ impl Joiner {
     /// Enter the epoch a member sealed, with its welcome.
     pub fn enter(self, entry: &Entry) -> CoreResult<Member> {
         let (occupancy, opened) = self.open(entry)?;
-        Ok(opened.into_member(self.identity, occupancy))
+        Ok(opened.into_member(self.identity, occupancy, self.card))
     }
 
     fn open(&self, entry: &Entry) -> CoreResult<(Occupancy, Opened)> {
@@ -1444,6 +1486,7 @@ impl Joiner {
             since: last.proof.header.epoch,
         };
         let expected = self.leaf_key.public_key();
+        let card = self.card.card();
         let admission_hash = self.request.token();
         let opened = open_entry(
             &EnterInput {
@@ -1456,7 +1499,11 @@ impl Joiner {
                 anchor: &self.anchor,
                 entry,
             },
-            |leaf| leaf.encryption_key == expected && leaf.admission_hash == admission_hash,
+            |leaf| {
+                leaf.encryption_key == expected
+                    && leaf.card == card
+                    && leaf.admission_hash == admission_hash
+            },
         )?;
         Ok((occupancy, opened))
     }
@@ -1486,6 +1533,7 @@ impl Joiner {
                     since: task.epoch,
                 },
                 leaf_key: self.leaf_key,
+                card: self.card,
                 request: reference,
                 anchor: &self.anchor,
             },
@@ -1506,6 +1554,9 @@ pub struct Returning {
     /// For a jump, the leaf key of an update the member requested before it
     /// left, which a window it missed may have applied.
     pending_leaf: Option<KemSecret>,
+    card: CardKey,
+    /// The card drawn with the pending leaf key.
+    pending_card: Option<CardKey>,
     init_key: KemSecret,
     request: Digest,
     anchor: EpochHeader,
@@ -1545,9 +1596,13 @@ impl Returning {
     /// or the pending one if a window the member missed applied its update)
     /// or a re-entry a member sealed (the new leaf key).
     pub fn enter(self, entry: &Entry) -> CoreResult<Member> {
-        let opened = self.open(entry)?;
+        let (opened, pending) = self.open(entry)?;
         let occupancy = self.occupancy;
-        Ok(opened.into_member(self.identity, occupancy))
+        let card = match self.pending_card {
+            Some(card) if pending => card,
+            _ => self.card,
+        };
+        Ok(opened.into_member(self.identity, occupancy, card))
     }
 
     /// Check an entry and open it without entering (docs/specs-v0.5-draft.md
@@ -1556,7 +1611,8 @@ impl Returning {
         self.open(entry).map(|_| ())
     }
 
-    fn open(&self, entry: &Entry) -> CoreResult<Opened> {
+    /// Open an entry; says whether the leaf holds the pending leaf key.
+    fn open(&self, entry: &Entry) -> CoreResult<(Opened, bool)> {
         let re_entry = self.re_entry;
         let entry_epoch = entry
             .links
@@ -1570,14 +1626,17 @@ impl Returning {
             .leaf
             .as_ref()
             .map(|leaf| leaf.encryption_key.as_slice());
-        let leaf_key = match &self.pending_leaf {
-            Some(pending) if !re_entry && in_tree == Some(pending.public_key().as_slice()) => {
-                pending
+        let (leaf_key, card, pending) = match (&self.pending_leaf, &self.pending_card) {
+            (Some(pending), Some(card))
+                if !re_entry && in_tree == Some(pending.public_key().as_slice()) =>
+            {
+                (pending, card, true)
             }
-            _ => &self.leaf_key,
+            _ => (&self.leaf_key, &self.card, false),
         };
         let expected = leaf_key.public_key();
-        open_entry(
+        let card = card.card();
+        let opened = open_entry(
             &EnterInput {
                 device_pk: self.identity.public_key(),
                 occupancy: self.occupancy,
@@ -1588,8 +1647,13 @@ impl Returning {
                 anchor: &self.anchor,
                 entry,
             },
-            |leaf| leaf.encryption_key == expected && (!re_entry || leaf.updated == entry_epoch),
-        )
+            |leaf| {
+                leaf.encryption_key == expected
+                    && leaf.card == card
+                    && (!re_entry || leaf.updated == entry_epoch)
+            },
+        )?;
+        Ok((opened, pending))
     }
 
     /// Seal the window as its entrant (a re-entry with nobody online).
@@ -1609,6 +1673,7 @@ impl Returning {
                 identity: self.identity,
                 occupancy: self.occupancy,
                 leaf_key: self.leaf_key,
+                card: self.card,
                 request: self.request,
                 anchor: &self.anchor,
             },
@@ -1653,9 +1718,10 @@ struct Opened {
 }
 
 impl Opened {
-    fn into_member(self, identity: DeviceIdentity, occupancy: Occupancy) -> Member {
+    fn into_member(self, identity: DeviceIdentity, occupancy: Occupancy, card: CardKey) -> Member {
         Member {
             identity,
+            card,
             occupancy,
             path: self.path,
             root: self.root,
@@ -1664,6 +1730,7 @@ impl Opened {
             seal_hash: self.seal_hash,
             secrets: self.secrets,
             pending_leaf: None,
+            pending_card: None,
             repaired: false,
         }
     }
@@ -1784,6 +1851,7 @@ struct EntrantInput<'a> {
     identity: DeviceIdentity,
     occupancy: Occupancy,
     leaf_key: KemSecret,
+    card: CardKey,
     request: Digest,
     anchor: &'a EpochHeader,
 }
@@ -1948,6 +2016,7 @@ fn seal_as_entrant(
     let seal_hash = sealed.seal.header.hash()?;
     let member = Member {
         identity: input.identity,
+        card: input.card,
         occupancy: input.occupancy,
         path: member_path,
         root: root_secret,
@@ -1956,6 +2025,7 @@ fn seal_as_entrant(
         seal_hash,
         secrets: sealed.secrets,
         pending_leaf: None,
+        pending_card: None,
         repaired: false,
     };
     Ok(EntrantSealed {

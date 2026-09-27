@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::card::LeafKeys;
 use crate::commit::{Change, CityTask, DistrictCommit, Seal, SealKind};
 use crate::crypto::{Digest, ZERO32, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
@@ -181,7 +182,10 @@ impl PublicState {
                 header.subcity_bits,
             )?,
             &genesis.creator_pk,
-            &genesis.encryption_key,
+            LeafKeys {
+                encryption_key: &genesis.encryption_key,
+                card: &genesis.card,
+            },
             &genesis.root_pk,
             policy.as_ref(),
         )?;
@@ -233,22 +237,13 @@ pub fn genesis_tree(
     gid: &Digest,
     divisions: Divisions,
     creator_pk: &[u8],
-    encryption_key: &[u8],
+    keys: LeafKeys<'_>,
     root_pk: &[u8],
     policy: Option<&GroupPolicy>,
 ) -> CoreResult<(PublicTree, Registry)> {
     let creator = Occupancy { leaf: 0, since: 0 };
     let mut tree = PublicTree::new(1, divisions)?;
-    tree.set_leaf(
-        0,
-        Some(LeafNode {
-            device_pk: creator_pk.to_vec(),
-            since: 0,
-            encryption_key: encryption_key.to_vec(),
-            admission_hash: ZERO32,
-            updated: 0,
-        }),
-    )?;
+    tree.set_leaf(0, Some(LeafNode::new(gid, creator_pk, 0, keys, ZERO32, 0)?))?;
     tree.set_parent(
         NodeId { level: 1, index: 0 },
         Some(ParentNode {
@@ -482,13 +477,17 @@ pub fn check_entry(
             if entries {
                 join.verify(&state.gid, epoch, admins, state.registry.is_open())?;
             }
-            Ok(Some(LeafNode {
-                device_pk: join.device_pk.clone(),
-                since: epoch,
-                encryption_key: join.encryption_key.clone(),
+            Ok(Some(LeafNode::new(
+                &state.gid,
+                &join.device_pk,
+                epoch,
+                LeafKeys {
+                    encryption_key: &join.encryption_key,
+                    card: &join.card,
+                },
                 admission_hash,
-                updated: epoch,
-            }))
+                epoch,
+            )?))
         }
         Request::Removal(proposal) => {
             let current = current.ok_or(CoreError::Invalid("removal of a blank leaf"))?;
@@ -519,6 +518,7 @@ pub fn check_entry(
             }
             Ok(Some(LeafNode {
                 encryption_key: update.encryption_key.clone(),
+                card: update.card.clone(),
                 updated: epoch,
                 ..current.clone()
             }))
@@ -533,6 +533,7 @@ pub fn check_entry(
             }
             Ok(Some(LeafNode {
                 encryption_key: re_entry.encryption_key.clone(),
+                card: re_entry.card.clone(),
                 updated: epoch,
                 ..current.clone()
             }))

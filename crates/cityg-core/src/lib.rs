@@ -40,6 +40,7 @@
 //!   proof system that checks them ([`dispute`]).
 
 pub mod audit;
+pub mod card;
 pub mod cbor;
 mod codec;
 pub mod commit;
