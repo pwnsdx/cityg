@@ -29,6 +29,7 @@ use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::cbor::{array, bytes, encode, text, uint};
+use crate::commit::SealHeader;
 use crate::crypto::{
     Digest, PROFILE, Secret, ZERO32, derive_secret, digest_eq, expand_label32, extract, h, h_l,
     hedged_encapsulate, mac,
@@ -71,6 +72,26 @@ impl GroupContext {
     /// `H(GroupContext_n)`.
     pub fn hash(&self) -> CoreResult<Digest> {
         Ok(h(&self.encode()?))
+    }
+
+    /// The group context of the epoch that a seal header creates, whose
+    /// confirmed transcript hash binds the header to the previous epoch's
+    /// interim transcript hash it names.
+    pub fn of_seal(header: &SealHeader) -> CoreResult<Self> {
+        Ok(Self {
+            gid: header.gid,
+            epoch: header.epoch,
+            tree_hash: header.tree_hash,
+            registry_hash: header.registry_hash,
+            height: header.height,
+            district_bits: header.district_bits,
+            island_bits: header.island_bits,
+            subcity_bits: header.subcity_bits,
+            confirmed_transcript_hash: confirmed_transcript_hash(
+                &header.prev_interim,
+                &header.hash()?,
+            )?,
+        })
     }
 }
 

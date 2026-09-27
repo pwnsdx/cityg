@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::audit::{AuditRecord, records};
+use crate::authorizer::{AuthorizerCheckpoint, CheckpointedEpoch};
 use crate::card::Card;
 use crate::commit::{Change, CityTask, DistrictCommit, Seal, SealKind};
 use crate::crypto::{Digest, Wrap, ZERO32, kem_pk_hash};
@@ -35,7 +36,7 @@ use crate::packet::{
 use crate::registry::RegistryHeader;
 use crate::rekey::{Step, WindowIndex};
 use crate::roles::{WelcomeKind, WelcomeTask, WindowTask, WindowWork};
-use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
+use crate::schedule::{GroupContext, confirmed_transcript_hash, interim_transcript_hash};
 use crate::top::{RelayElement, Repair, Top, TopTask};
 use crate::tree::{
     CityPart, LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode, Shape, leaf_key_hash,
@@ -309,6 +310,9 @@ pub struct DeliveryService {
     /// The proof system that checks disputes, if the service has one.
     verifier: Option<Box<dyn DisputeVerifier>>,
     messages: MessageStore,
+    /// The authorizer's checkpoints, by epoch (docs/specs-v0.5-draft.md
+    /// section 4.9).
+    authorizer_checkpoints: BTreeMap<u64, AuthorizerCheckpoint>,
 }
 
 impl core::fmt::Debug for DeliveryService {
@@ -355,6 +359,7 @@ impl DeliveryService {
             convicted: BTreeSet::new(),
             verifier: None,
             messages: MessageStore::default(),
+            authorizer_checkpoints: BTreeMap::new(),
         })
     }
 
@@ -2332,12 +2337,74 @@ impl DeliveryService {
             .clone();
         Ok(Entry {
             links: self.links(anchor, stored.seal.header.epoch)?,
+            checkpoint: None,
             welcome,
             steps: data.steps.clone(),
             leaf: data.leaf.clone(),
             nodes: data.nodes.clone(),
             top: None,
         })
+    }
+
+    /// Keep the authorizer's checkpoint of a sealed epoch, after checking it
+    /// against the authorizer in force and the epoch's seal.
+    pub fn submit_authorizer_checkpoint(
+        &mut self,
+        checkpoint: AuthorizerCheckpoint,
+    ) -> CoreResult<()> {
+        let key = self
+            .state
+            .policy
+            .as_ref()
+            .and_then(GroupPolicy::authorizer_pk)
+            .ok_or(CoreError::Invalid("the group has no authorizer"))?;
+        checkpoint.verify(&self.state.gid, key)?;
+        let seal = &self.window(checkpoint.epoch)?.seal;
+        checkpoint.check_epoch(
+            &GroupContext::of_seal(&seal.header)?,
+            &seal.tag,
+            &seal.external_pk,
+        )?;
+        self.authorizer_checkpoints
+            .insert(checkpoint.epoch, checkpoint);
+        Ok(())
+    }
+
+    /// The authorizer's checkpoint of `epoch`, if it signed one.
+    #[must_use]
+    pub fn authorizer_checkpoint(&self, epoch: u64) -> Option<&AuthorizerCheckpoint> {
+        self.authorizer_checkpoints.get(&epoch)
+    }
+
+    /// A checkpointed epoch, for a joiner that trusts the authorizer.
+    pub fn checkpointed_epoch(&self, epoch: u64) -> CoreResult<CheckpointedEpoch> {
+        let checkpoint = self
+            .authorizer_checkpoints
+            .get(&epoch)
+            .ok_or(CoreError::Invalid("no authorizer checkpoint of this epoch"))?
+            .clone();
+        let stored = self.window(epoch)?;
+        Ok(CheckpointedEpoch {
+            checkpoint,
+            seal: stored.seal.header.clone(),
+            registry: stored.registry.clone(),
+            external_pk: stored.seal.external_pk.clone(),
+        })
+    }
+
+    /// The entry of `request` for a joiner that trusts the authorizer: the
+    /// authorizer's checkpoint of the epoch it enters, instead of a chain
+    /// of seals (docs/specs-v0.5-draft.md section 4.9).
+    pub fn checkpointed_entry(&self, request: &Digest) -> CoreResult<Entry> {
+        let epoch = self
+            .windows
+            .iter()
+            .find(|stored| stored.entries.contains_key(request))
+            .map(|stored| stored.seal.header.epoch)
+            .ok_or(CoreError::Invalid("no window welcomes this request"))?;
+        let mut entry = self.entry(request, epoch)?;
+        entry.checkpoint = Some(self.checkpointed_epoch(epoch)?);
+        Ok(entry)
     }
 
     /// The entry of `request` by island (docs/specs-v0.5-draft.md section

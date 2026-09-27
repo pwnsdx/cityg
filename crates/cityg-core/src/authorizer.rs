@@ -1,19 +1,27 @@
 //! The authorized mode (docs/specs-v0.5-draft.md section 4.9): the
 //! group's authorizer, which holds the place of MLS's authentication
-//! service, signs batches of the joins it authorizes, and may remove
-//! members.
+//! service, signs batches of the joins it authorizes and a checkpoint of
+//! each epoch, and may remove members.
 //!
 //! ```text
-//! AuthorizationBatch := ["city-g/authorization-batch/v5", gid, epoch, root, count, signature]
-//!   root             := MTH("authorized", [H(JoinRequest_1), ..., H(JoinRequest_count)])
-//! Authorization      := [batch, index, path]                  path: MTH inclusion proof
-//! authorizer_pk_hash := H_L("authorizer", [authorizer_pk])
+//! AuthorizationBatch   := ["city-g/authorization-batch/v5", gid, epoch, root, count, signature]
+//!   root               := MTH("authorized", [H(JoinRequest_1), ..., H(JoinRequest_count)])
+//! Authorization        := [batch, index, path]                path: MTH inclusion proof
+//! AuthorizerCheckpoint := ["city-g/authorizer-checkpoint/v5", gid, epoch, H(GroupContext_n),
+//!                          confirmation_tag_n, kem_pk_hash(external_pk_n), signature]
+//! authorizer_pk_hash   := H_L("authorizer", [authorizer_pk])
 //! ```
 //!
-//! The batch is signed with the authorizer's ML-DSA-65 key under its label.
+//! Both are signed with the authorizer's ML-DSA-65 key under their labels.
 //! A join in an authorized group carries no admission: the DS attaches its
 //! authorization, the batch of the window and the proof of the request's
 //! hash in it. One signature covers every join of a window.
+//!
+//! The authorizer follows the group's public state, checks each window as
+//! the DS does and signs the checkpoint of the epoch it creates. A joiner
+//! that trusts it enters with that checkpoint instead of a chain of seals
+//! ([`CheckpointedEpoch`]); a member may require it before it accepts a
+//! window.
 
 use std::sync::Arc;
 
@@ -22,15 +30,22 @@ use rand_core::CryptoRngCore;
 
 use crate::cbor::{bytes, text, uint};
 use crate::codec::{Signed, open_signed, sign_fields};
-use crate::crypto::{Digest, h_l};
+use crate::commit::{CityTask, DistrictCommit, Seal, SealHeader};
+use crate::crypto::{Digest, h_l, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::DeviceIdentity;
 use crate::merkle;
 use crate::objects::{JoinRequest, RemoveProposal, Urgency};
-use crate::tree::Occupancy;
+use crate::registry::RegistryHeader;
+use crate::schedule::{GroupContext, interim_transcript_hash};
+use crate::tree::{Divisions, Occupancy, Shape};
+use crate::window::{EpochHeader, PublicState, Requests, check_window};
 
 /// Label of authorization batches.
 pub const BATCH_LABEL: &str = "city-g/authorization-batch/v5";
+
+/// Label of authorizer checkpoints.
+pub const CHECKPOINT_LABEL: &str = "city-g/authorizer-checkpoint/v5";
 
 /// Label of the Merkle tree of a batch.
 const AUTHORIZED_LABEL: &str = "authorized";
@@ -166,10 +181,185 @@ impl Authorization {
     }
 }
 
-/// A group's authorizer: its key, and what it signs.
+/// The authorizer's checkpoint of an epoch: it checked the window that
+/// created it, and signs its group context, its confirmation tag and its
+/// external key, which the seal carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizerCheckpoint {
+    pub gid: Digest,
+    pub epoch: u64,
+    /// `H(GroupContext_n)`.
+    pub context_hash: Digest,
+    /// `confirmation_tag_n`.
+    pub tag: Digest,
+    /// `kem_pk_hash(external_pk_n)`.
+    pub external_pk_hash: Digest,
+    signed: Signed,
+}
+
+impl AuthorizerCheckpoint {
+    fn sign(
+        gid: &Digest,
+        seal: &Seal,
+        identity: &DeviceIdentity,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Self> {
+        let signed = sign_fields(
+            vec![
+                text(CHECKPOINT_LABEL),
+                bytes(gid),
+                uint(seal.header.epoch),
+                bytes(&GroupContext::of_seal(&seal.header)?.hash()?),
+                bytes(&seal.tag),
+                bytes(&kem_pk_hash(&seal.external_pk)?),
+            ],
+            identity,
+            SignatureContext::AUTHORIZER_CHECKPOINT,
+            rng,
+        )?;
+        Self::decode(&signed.encoded)
+    }
+
+    /// Parse a checkpoint.
+    pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
+        let (mut fields, signed) = open_signed(
+            encoded,
+            CHECKPOINT_LABEL,
+            6,
+            MAX_BATCH_BYTES,
+            "authorizer checkpoint",
+        )?;
+        Ok(Self {
+            gid: fields.digest()?,
+            epoch: fields.uint()?,
+            context_hash: fields.digest()?,
+            tag: fields.digest()?,
+            external_pk_hash: fields.digest()?,
+            signed,
+        })
+    }
+
+    /// Encoded signed checkpoint.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.signed.encoded
+    }
+
+    /// Check the authorizer's signature.
+    pub fn verify(&self, gid: &Digest, authorizer_pk: &[u8]) -> CoreResult<()> {
+        if self.gid != *gid {
+            return Err(CoreError::Invalid(
+                "authorizer checkpoint for another group",
+            ));
+        }
+        self.signed.verify(
+            authorizer_pk,
+            SignatureContext::AUTHORIZER_CHECKPOINT,
+            "authorizer checkpoint",
+        )
+    }
+
+    /// Check that the checkpoint is that of the epoch whose group context
+    /// is `context`, with the tag and the external key a member computed
+    /// or a seal carries.
+    pub fn check_epoch(
+        &self,
+        context: &GroupContext,
+        tag: &Digest,
+        external_pk: &[u8],
+    ) -> CoreResult<()> {
+        if self.epoch != context.epoch
+            || self.context_hash != context.hash()?
+            || self.tag != *tag
+            || self.external_pk_hash != kem_pk_hash(external_pk)?
+        {
+            return Err(CoreError::Invalid("authorizer checkpoint of another epoch"));
+        }
+        Ok(())
+    }
+}
+
+/// An epoch as a joiner that trusts the authorizer receives it, instead of
+/// a chain of seals: the authorizer's checkpoint, and the seal header, the
+/// registry header and the external key that the checkpoint binds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckpointedEpoch {
+    pub checkpoint: AuthorizerCheckpoint,
+    pub seal: SealHeader,
+    pub registry: RegistryHeader,
+    pub external_pk: Vec<u8>,
+}
+
+impl CheckpointedEpoch {
+    /// The header of the epoch, for a joiner that trusts the authorizer
+    /// whose key is `authorizer_pk`, which the epoch's registry must name,
+    /// and the epoch's group context, whose confirmed transcript hash the
+    /// joiner checks its welcome's tag against.
+    pub fn header(
+        &self,
+        gid: &Digest,
+        authorizer_pk: &[u8],
+    ) -> CoreResult<(EpochHeader, GroupContext)> {
+        self.checkpoint.verify(gid, authorizer_pk)?;
+        let context = GroupContext::of_seal(&self.seal)?;
+        self.checkpoint
+            .check_epoch(&context, &self.checkpoint.tag, &self.external_pk)?;
+        if context.gid != *gid
+            || self.registry.hash()? != context.registry_hash
+            || self.registry.authorizer != Some(authorizer_pk_hash(authorizer_pk)?)
+        {
+            return Err(CoreError::Invalid("authorizer checkpoint"));
+        }
+        let shape = Shape::new(
+            context.height,
+            Divisions::new(
+                context.district_bits,
+                context.island_bits,
+                context.subcity_bits,
+            )?,
+        )?;
+        let header = EpochHeader {
+            gid: *gid,
+            epoch: context.epoch,
+            shape,
+            tree_hash: context.tree_hash,
+            registry: self.registry.clone(),
+            interim: interim_transcript_hash(
+                &context.confirmed_transcript_hash,
+                &self.checkpoint.tag,
+            )?,
+            external_pk: self.external_pk.clone(),
+        };
+        Ok((header, context))
+    }
+
+    /// Size in bytes as a deployment would send it.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        self.checkpoint.encoded().len()
+            + self.seal.encode().map_or(0, |seal| seal.len())
+            + self.registry.encoded_len()
+            + self.external_pk.len()
+            + 3
+    }
+}
+
+/// What the authorizer checks a window with: its district commits, its
+/// city tasks, its seal and its requests, as the DS keeps them.
+#[derive(Clone, Copy, Debug)]
+pub struct SealedWindow<'a> {
+    pub commits: &'a [DistrictCommit],
+    pub city_tasks: &'a [CityTask],
+    pub seal: &'a Seal,
+    pub requests: &'a Requests,
+}
+
+/// A group's authorizer: its key, what it signs, and the public state it
+/// follows to check windows.
 pub struct Authorizer {
     gid: Digest,
     identity: DeviceIdentity,
+    state: Option<PublicState>,
 }
 
 impl core::fmt::Debug for Authorizer {
@@ -182,7 +372,61 @@ impl Authorizer {
     /// The authorizer of group `gid`, with its key.
     #[must_use]
     pub const fn new(gid: Digest, identity: DeviceIdentity) -> Self {
-        Self { gid, identity }
+        Self {
+            gid,
+            identity,
+            state: None,
+        }
+    }
+
+    /// Follow the group from a public state it trusts, such as the state
+    /// in force when an admin named it.
+    pub fn follow_from(&mut self, state: PublicState) -> CoreResult<()> {
+        if state.gid != self.gid {
+            return Err(CoreError::Invalid("state of another group"));
+        }
+        self.state = Some(state);
+        Ok(())
+    }
+
+    /// The epoch of the state it follows.
+    #[must_use]
+    pub fn epoch(&self) -> Option<u64> {
+        self.state.as_ref().map(|state| state.epoch)
+    }
+
+    /// Check the next window as the DS does, every entry included (its
+    /// joins carry authorizations under the key in force), apply it, and
+    /// sign the checkpoint of the epoch it creates, if the new registry
+    /// still names this authorizer. It signs one checkpoint per epoch: the
+    /// state it follows moves past it.
+    pub fn checkpoint(
+        &mut self,
+        window: &SealedWindow<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<AuthorizerCheckpoint> {
+        let state = self
+            .state
+            .as_ref()
+            .ok_or(CoreError::Invalid("the authorizer follows no state"))?;
+        let outcome = check_window(
+            state,
+            window.commits,
+            window.city_tasks,
+            window.seal,
+            window.requests,
+            true,
+        )?;
+        let mut next = state.clone();
+        next.apply(&outcome)?;
+        if next.registry.header()?.authorizer != Some(authorizer_pk_hash(self.public_key())?) {
+            return Err(CoreError::Unauthorized(
+                "the group names another authorizer",
+            ));
+        }
+        let checkpoint = AuthorizerCheckpoint::sign(&self.gid, window.seal, &self.identity, rng)?;
+        self.state = Some(next);
+        Ok(checkpoint)
     }
 
     /// Its public key, which an admin names in the group policy.

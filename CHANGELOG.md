@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Protocol: the v0.5 draft, stage 3 (parity), specified; parts 3a and 3b implemented
+### Protocol: the v0.5 draft, stage 3 (parity), specified; parts 3a to 3c implemented
 
 - Stage 3 of the draft is specified in detail (section 4 of
   [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
   E-18), from the research notes on parity and on the message plane; its
-  first two parts are implemented. Four parts, in the order of their
+  first three parts are implemented. Four parts, in the order of their
   implementation:
   - **leaves with cards**: a card, the key that signs messages, beside the
     leaf key, and changed with it; the leaf hash takes the leaf's summary
@@ -126,11 +126,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take `Admitters`; `RemoveProposal::proposer` is optional; `JoinRequest`
   carries its `authorization`; `EntrantEvidence::Join` and `EntryProofs`
   carry the authorizer's key.
+- **Authorizer checkpoints.** The authorizer follows the group's public
+  state from a state it trusts, checks each window as the DS does, every
+  join's authorization included, and signs the checkpoint of the epoch it
+  creates (`AuthorizerCheckpoint`: the hash of the group context, the
+  confirmation tag and the external key's hash), one per epoch and only
+  while the registry names it. The DS keeps the checkpoints, and serves a
+  joiner that trusts the authorizer (`Joiner::trust_authorizer`) an entry
+  with the checkpointed epoch instead of a chain of seals
+  (`CheckpointedEpoch`, `checkpointed_entry`). A member may require the
+  checkpoint of each epoch before it accepts the window
+  (`Member::require_checkpoints`, `process_checkpointed`); a window that
+  names another authorizer brings the key, and the requirement lapses if
+  the group leaves the authorized mode. `GroupContext::of_seal` gives an
+  epoch's group context from its seal header.
+- Breaking: `Entry` gains `checkpoint`; a member that entered by a
+  checkpoint holds no header of the epoch before.
 - Tests in `crates/cityg-core/tests/authorized.rs`: an authorized group
   admits the joins its authorizer signs, window by window; nobody lets in
   a join the authorizer did not sign (the DS, a committer, an auditor); the
   authorizer removes members urgently; an authorized joiner seals the
-  window when nobody is online.
+  window when nobody is online; the authorizer checkpoints the windows it
+  checks, and refuses one whose joins lost their authorizations; a member
+  that requires checkpoints waits for the authorizer's; a joiner enters
+  with the authorizer's checkpoint instead of four seals.
 - Tests in `crates/cityg-core/tests/messages.rs` and in the module: members
   exchange messages that the DS cannot attribute; a seal closes the log of
   the epoch it ends, which members check; a card is checked against the

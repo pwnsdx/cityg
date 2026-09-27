@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 //! City-G protocol core, profile `city-g/v0.5-draft`, stages 1 and 2 but
-//! the proof system of disputes, and of stage 3 the cards, unique keys and
-//! the message plane (`docs/specs-v0.5-draft.md`, a delta on `city-g/v0.4`,
-//! `docs/specs.md`): end-to-end encrypted groups of up to millions of
-//! members, whose tree is split into districts under a city of sub-cities
-//! and a top, re-keyed once per window by district commits and city tasks
-//! that members and the window's joiners perform, and read by island
-//! through relays.
+//! the proof system of disputes, and of stage 3 the cards, unique keys, the
+//! message plane and the authorized mode (`docs/specs-v0.5-draft.md`, a
+//! delta on `city-g/v0.4`, `docs/specs.md`): end-to-end encrypted groups of
+//! up to millions of members, whose tree is split into districts under a
+//! city of sub-cities and a top, re-keyed once per window by district
+//! commits and city tasks that members and the window's joiners perform,
+//! and read by island through relays.
 //!
 //! The crate performs no I/O. Every input of randomness comes from a
 //! caller-provided [`rand_core::CryptoRngCore`], so that runs are
@@ -31,6 +31,9 @@
 //! * packets, seal links and entries, whole or by island ([`packet`]), and
 //!   the top of an island follower's path: relay elements, flat elements,
 //!   refreshes, and repairs ([`top`]);
+//! * labelled Merkle trees in the manner of RFC 6962 ([`merkle`]);
+//! * the authorized mode: the authorizer's batches of joins, its removals
+//!   and its checkpoints, on which joiners anchor ([`authorizer`]);
 //! * cards, the keys that sign messages ([`card`]), and the message plane:
 //!   a secret tree with a chain per sender, messages whose sender only
 //!   members see, burst chains signed by cards, key commitments, the

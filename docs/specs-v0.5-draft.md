@@ -3,9 +3,9 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, and implemented as far as part 3b: cards in leaves, unique keys and the message plane. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, and implemented as far as part 3c: cards in leaves, unique keys, the message plane and the authorized mode. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
-| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2, parts 3a and 3b of stage 3; the proof system of disputes is plugged in, not included) |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2, parts 3a to 3c of stage 3; the proof system of disputes is plugged in, not included) |
 | Design | [design.md](design.md) (decisions E-15 to E-18) |
 | Research | the three stages, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (section 3.6); îlots, relays and the maintained city, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (sections 2.4 to 2.8); urgent and ordinary removals and the parity profile, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md) (section 3); symbolic models of relays and îlots, [`research/formal-parity/`](research/formal-parity/README.md) (all research notes in French) |
 | Conformance | None yet: no test vectors (section 7) |
@@ -53,7 +53,7 @@ earlier ones.
 | --- | --- | --- | --- |
 | 1. Relays and cadence | Members read the tree by island: the root secret comes from a relay of their island, a flat element or a refresh. Urgent and ordinary removals. Districts and the roles of v0.4 do not change. | At a million members, 1.7 changes per second and 5-minute windows, following the group costs about 94 KB per day, against 1.8 MB for whole paths with the same windows, and 44 MB for v0.4 with a window every 5 seconds per departure (research model, section 2.11). | Specified (section 2) and implemented |
 | 2. Tasks | Islands become the districts; the city is re-keyed by sub-city tasks and a top task; joiners perform tasks first; the sealer draws nothing; entries by island; repairs; disputes. | No committer role beyond small tasks; a task cuts off at most 256 members; the heaviest task of a burst takes 42 ms instead of 0.6 s; a joiner no longer reads the upper levels. | Specified (section 3); disputes lack their proof system |
-| 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, cards in leaves hashed by their summary, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Specified (section 4); parts 3a and 3b implemented |
+| 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, cards in leaves hashed by their summary, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Specified (section 4); parts 3a to 3c implemented |
 
 <a id="2-stage-1"></a>
 ## 2. Stage 1: islands, relays and cadence
@@ -1148,11 +1148,25 @@ under their labels.
   group context; it signs the confirmation tag and the external key that
   the seal carries, which it cannot compute. It needs no secret, and signs
   at most one checkpoint per epoch.
+  * The authorizer starts from a public state it trusts, such as the one
+    in force when an admin named it, and signs a checkpoint only while the
+    registry after the window names it.
   * A joiner that trusts the authorizer's key checks this checkpoint and,
     with its welcome, the tag, instead of a chain of seals (research model
     `authorizer_anchor.pv`; unsigned, `authorizer_anchor_unsigned.pv`).
     Without an answer from the authorizer, it falls back to the chain of
-    seals from the last checkpoint it trusts.
+    seals from the last checkpoint it trusts. Its entry carries
+
+    ```text
+    CheckpointedEpoch := [AuthorizerCheckpoint, SealHeader_n, RegistryHeader_n, external_pk_n]
+    ```
+
+    The joiner checks the signature, recomputes `GroupContext_n` from the
+    seal header (its `confirmed_transcript_hash_n` from `prev_interim` and
+    `seal_hash_n`) and checks its hash, the registry's hash against the
+    context, the external key's hash, and that the registry names the
+    authorizer; `interim_transcript_hash_n` follows from the tag. It holds
+    no header of epoch `n - 1`.
   * A member that follows MAY require the checkpoint of epoch `n` before it
     accepts the window that creates it. It has `H(GroupContext_n)` from
     the header, and computes the tag and the external key: it downloads
@@ -1162,7 +1176,9 @@ under their labels.
     (research models `authorizer_follow.pv`, and
     `authorizer_follow_unchecked.pv` without the check). It pays in
     liveness, since it waits for the checkpoint, and in bytes: a
-    checkpoint per window.
+    checkpoint per window. A window that names another authorizer carries
+    the policy, whose key the member requires from then on; the
+    requirement lapses if the group leaves the authorized mode.
 * **Removals.** A `RemoveProposal` whose `proposer` is `null` is signed by
   the authorizer; it is urgent (section 2.9).
 * **Trust.** The authorizer holds the place of MLS's authentication
@@ -1336,8 +1352,8 @@ Nothing of v0.4 decodes under this draft: every label changed.
 * **Assignment under load**: how many tasks a joiner takes, and when a DS
   prefers a volunteer with a good network.
 * **Stage 3**, specified in section 4: cards in leaves and their summary
-  hash, unique keys (part 3a) and the message plane (part 3b) are
-  implemented; the authorized mode and the membership log are not. FN-DSA-512 cards
+  hash, unique keys (part 3a), the message plane (part 3b) and the
+  authorized mode (part 3c) are implemented; the membership log is not. FN-DSA-512 cards
   wait for FIPS 206. The research models of the message plane and of
   parity (`research/formal-messages/`, `research/formal-parity/`) cover
   the sender hidden, burst chains, cards checked against the epoch's leaf,

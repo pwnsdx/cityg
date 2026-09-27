@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ciborium::value::Value;
 
-use crate::cbor::{array, bytes, uint};
+use crate::cbor::{array, bytes, encode, uint};
 use crate::crypto::{Digest, h_l};
 use crate::error::{CoreError, CoreResult};
 use crate::objects::{AdmissionMode, Admitters};
@@ -47,25 +47,32 @@ pub struct RegistryHeader {
 }
 
 impl RegistryHeader {
+    fn fields(&self) -> Vec<Value> {
+        vec![
+            array(
+                self.admins
+                    .iter()
+                    .map(|(occupancy, key)| array(vec![occupancy.value(), bytes(key)]))
+                    .collect(),
+            ),
+            bytes(&self.devices_root),
+            bytes(&self.admissions_root),
+            bytes(&self.keys_root),
+            self.policy.as_ref().map_or(Value::Null, |p| bytes(p)),
+            uint(self.admission.code()),
+            self.authorizer.as_ref().map_or(Value::Null, |a| bytes(a)),
+        ]
+    }
+
     /// `registry_hash`.
     pub fn hash(&self) -> CoreResult<Digest> {
-        h_l(
-            "registry",
-            vec![
-                array(
-                    self.admins
-                        .iter()
-                        .map(|(occupancy, key)| array(vec![occupancy.value(), bytes(key)]))
-                        .collect(),
-                ),
-                bytes(&self.devices_root),
-                bytes(&self.admissions_root),
-                bytes(&self.keys_root),
-                self.policy.as_ref().map_or(Value::Null, |p| bytes(p)),
-                uint(self.admission.code()),
-                self.authorizer.as_ref().map_or(Value::Null, |a| bytes(a)),
-            ],
-        )
+        h_l("registry", self.fields())
+    }
+
+    /// Size in bytes of its fields as a deployment would send them.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        encode(&array(self.fields())).map_or(0, |encoded| encoded.len())
     }
 
     /// Whether the group is open: a join needs no admission.

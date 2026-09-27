@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
+use crate::authorizer::{AuthorizerCheckpoint, authorizer_pk_hash};
 use crate::card::{Card, CardKey, LeafKeys};
 use crate::commit::{
     CityTask, DistrictCommit, EntrantInit, Genesis, Seal, SealBody, SealHeader, SealKind, SealProof,
@@ -111,6 +112,9 @@ pub struct Member {
     messages: EpochMessages,
     /// That of the previous epoch, until the member has read its messages.
     previous_messages: Option<EpochMessages>,
+    /// The authorizer whose checkpoint the member requires before it
+    /// accepts a window (docs/specs-v0.5-draft.md section 4.9).
+    checkpoint_key: Option<Vec<u8>>,
     pending_leaf: Option<KemSecret>,
     /// The card drawn with the pending leaf key.
     pending_card: Option<CardKey>,
@@ -246,6 +250,7 @@ impl Member {
             secrets,
             messages,
             previous_messages: None,
+            checkpoint_key: None,
             pending_leaf: None,
             pending_card: None,
             repaired: false,
@@ -455,6 +460,41 @@ impl Member {
     /// element of its island, and then holds only its island path, or from a
     /// refresh, and then holds its whole path again.
     pub fn process(&mut self, packet: &Packet) -> CoreResult<()> {
+        self.follow_window(packet, None)
+    }
+
+    /// Require, before accepting a window, the checkpoint of the epoch it
+    /// creates by the authorizer whose key is `authorizer_pk`, which the
+    /// registry must name (docs/specs-v0.5-draft.md section 4.9): no join
+    /// the authorizer did not authorize passes, even with the DS and a
+    /// committer in collusion. The member then follows windows with
+    /// [`Member::process_checkpointed`]; the requirement lapses if the
+    /// group leaves the authorized mode.
+    pub fn require_checkpoints(&mut self, authorizer_pk: Vec<u8>) -> CoreResult<()> {
+        if self.header.registry.authorizer != Some(authorizer_pk_hash(&authorizer_pk)?) {
+            return Err(CoreError::Invalid("the group names another authorizer"));
+        }
+        self.checkpoint_key = Some(authorizer_pk);
+        Ok(())
+    }
+
+    /// Follow a window as [`Member::process`] does, once the authorizer's
+    /// checkpoint of the epoch it creates checks: the member computes the
+    /// group context, the tag and the external key, and downloads the
+    /// signature alone.
+    pub fn process_checkpointed(
+        &mut self,
+        packet: &Packet,
+        checkpoint: &AuthorizerCheckpoint,
+    ) -> CoreResult<()> {
+        self.follow_window(packet, Some(checkpoint))
+    }
+
+    fn follow_window(
+        &mut self,
+        packet: &Packet,
+        checkpoint: Option<&AuthorizerCheckpoint>,
+    ) -> CoreResult<()> {
         let header = &packet.header;
         if header.gid != self.header.gid
             || header.prev_interim != self.header.interim
@@ -523,6 +563,29 @@ impl Member {
             };
             entrant.evidence.verify(&self.header, &proof)?;
         }
+        // The authorizer's checkpoint, if the member requires it; a window
+        // that names another authorizer brings its policy, and the key.
+        let checkpoint_key = match &self.checkpoint_key {
+            None => None,
+            Some(_) if registry.authorizer.is_none() => None,
+            Some(key) => {
+                let key = packet
+                    .registry
+                    .policy_object
+                    .as_ref()
+                    .and_then(GroupPolicy::authorizer_pk)
+                    .unwrap_or(key);
+                if registry.authorizer != Some(authorizer_pk_hash(key)?) {
+                    return Err(CoreError::Invalid("the group names another authorizer"));
+                }
+                let checkpoint = checkpoint.ok_or(CoreError::Invalid(
+                    "the authorizer's checkpoint is required",
+                ))?;
+                checkpoint.verify(&self.header.gid, key)?;
+                checkpoint.check_epoch(&context, &packet.tag, &external_pk)?;
+                Some(key.to_vec())
+            }
+        };
         path.set_path(secrets);
         if leaf_changed {
             self.pending_leaf = None;
@@ -561,6 +624,7 @@ impl Member {
         self.root = root;
         self.secrets = epoch_secrets;
         self.seal_hash = seal_hash;
+        self.checkpoint_key = checkpoint_key;
         Ok(())
     }
 
@@ -1439,6 +1503,9 @@ pub struct Joiner {
     init_key: KemSecret,
     request: JoinRequest,
     anchor: EpochHeader,
+    /// The authorizer's key, for a joiner that trusts it: it may enter with
+    /// the authorizer's checkpoint instead of a chain of seals.
+    authorizer_pk: Option<Vec<u8>>,
 }
 
 impl core::fmt::Debug for Joiner {
@@ -1482,7 +1549,16 @@ impl Joiner {
             init_key,
             request,
             anchor,
+            authorizer_pk: None,
         })
+    }
+
+    /// Trust the authorizer whose key is `authorizer_pk` (from the joiner's
+    /// invitation, say): the joiner may then enter with its checkpoint of
+    /// the epoch it enters, instead of the chain of seals from its anchor
+    /// (docs/specs-v0.5-draft.md section 4.9).
+    pub fn trust_authorizer(&mut self, authorizer_pk: Vec<u8>) {
+        self.authorizer_pk = Some(authorizer_pk);
     }
 
     /// The join request.
@@ -1615,13 +1691,9 @@ impl Joiner {
     }
 
     fn open(&self, entry: &Entry) -> CoreResult<(Occupancy, Opened)> {
-        let last = entry
-            .links
-            .last()
-            .ok_or(CoreError::Invalid("entry without a seal"))?;
         let occupancy = Occupancy {
             leaf: entry.leaf.index,
-            since: last.proof.header.epoch,
+            since: entry.epoch()?,
         };
         let expected = self.leaf_key.public_key();
         let card = self.card.card();
@@ -1635,6 +1707,7 @@ impl Joiner {
                 init_key: &self.init_key,
                 request: self.request.reference(),
                 anchor: &self.anchor,
+                authorizer_pk: self.authorizer_pk.as_deref(),
                 entry,
             },
             |leaf| {
@@ -1786,6 +1859,7 @@ impl Returning {
                 init_key: &self.init_key,
                 request: self.request,
                 anchor: &self.anchor,
+                authorizer_pk: None,
                 entry,
             },
             |leaf| {
@@ -1846,6 +1920,9 @@ struct EnterInput<'a> {
     init_key: &'a KemSecret,
     request: Digest,
     anchor: &'a EpochHeader,
+    /// The authorizer's key, if the entrant trusts it for a checkpointed
+    /// entry.
+    authorizer_pk: Option<&'a [u8]>,
     entry: &'a Entry,
 }
 
@@ -1855,7 +1932,8 @@ struct Opened {
     path: MemberPath,
     root: Secret,
     header: EpochHeader,
-    previous: EpochHeader,
+    /// The header of the epoch before, unless the entry was checkpointed.
+    previous: Option<EpochHeader>,
     seal_hash: Digest,
     secrets: EpochSecrets,
 }
@@ -1881,11 +1959,12 @@ impl Opened {
             path: self.path,
             root: self.root,
             header: self.header,
-            previous: Some(self.previous),
+            previous: self.previous,
             seal_hash: self.seal_hash,
             secrets: self.secrets,
             messages,
             previous_messages: None,
+            checkpoint_key: None,
             pending_leaf: None,
             pending_card: None,
             repaired: false,
@@ -1900,12 +1979,37 @@ fn open_entry(
     expected_leaf: impl Fn(&LeafNode) -> bool,
 ) -> CoreResult<Opened> {
     let entry = input.entry;
-    let (last, before) = entry
-        .links
-        .split_last()
-        .ok_or(CoreError::Invalid("entry without a seal"))?;
-    let previous = follow_all(input.anchor, before)?;
-    let header = previous.follow(last)?;
+    // The epoch it enters: by the chain of seals from the anchor, or by the
+    // checkpoint of an authorizer the entrant trusts (section 4.9).
+    let (header, previous, seal_hash, confirmed, tag) = match &entry.checkpoint {
+        Some(checkpointed) => {
+            let authorizer_pk = input.authorizer_pk.ok_or(CoreError::Unauthorized(
+                "a checkpoint of an authorizer the entrant does not trust",
+            ))?;
+            if !entry.links.is_empty() {
+                return Err(CoreError::Invalid("entry with seals and a checkpoint"));
+            }
+            let (header, context) = checkpointed.header(&input.anchor.gid, authorizer_pk)?;
+            (
+                header,
+                None,
+                checkpointed.seal.hash()?,
+                context.confirmed_transcript_hash,
+                checkpointed.checkpoint.tag,
+            )
+        }
+        None => {
+            let (last, before) = entry
+                .links
+                .split_last()
+                .ok_or(CoreError::Invalid("entry without a seal"))?;
+            let previous = follow_all(input.anchor, before)?;
+            let header = previous.follow(last)?;
+            let seal_hash = last.proof.header.hash()?;
+            let confirmed = confirmed_transcript_hash(&previous.interim, &seal_hash)?;
+            (header, Some(previous), seal_hash, confirmed, last.proof.tag)
+        }
+    };
     entry.leaf.verify(&header.tree_hash)?;
     let leaf = entry
         .leaf
@@ -1985,12 +2089,10 @@ fn open_entry(
     }
     let joiner = welcome.open(input.init_key, input.jump.then(|| path.leaf_key()))?;
     let secrets_of_epoch = EpochSecrets::from_joiner_secret(&joiner)?;
-    let seal_hash = last.proof.header.hash()?;
-    let confirmed = confirmed_transcript_hash(&previous.interim, &seal_hash)?;
     secrets_of_epoch
-        .check_confirmation_tag(&confirmed, &last.proof.tag)
+        .check_confirmation_tag(&confirmed, &tag)
         .map_err(|_| CoreError::Invalid("welcome does not match the seal"))?;
-    if secrets_of_epoch.external_key()?.public_key() != last.proof.external_pk {
+    if secrets_of_epoch.external_key()?.public_key() != header.external_pk {
         return Err(CoreError::Invalid("welcome does not match the seal"));
     }
     path.set_path(secrets);
@@ -2194,6 +2296,7 @@ fn seal_as_entrant(
         secrets,
         messages,
         previous_messages: None,
+        checkpoint_key: None,
         pending_leaf: None,
         pending_card: None,
         repaired: false,

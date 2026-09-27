@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::authorizer::CheckpointedEpoch;
 use crate::commit::{SealHeader, SealKind, SealProof};
 use crate::crypto::{Digest, KEM_WRAP_BYTES, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
@@ -419,8 +420,13 @@ pub type EntrySteps = BTreeMap<u8, (u64, Step)>;
 /// and a top (docs/specs-v0.5-draft.md section 3.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// Seals from the verifier's anchor to the epoch it enters.
+    /// Seals from the verifier's anchor to the epoch it enters; none when
+    /// the entry carries the authorizer's checkpoint of that epoch.
     pub links: Vec<SealLink>,
+    /// For a joiner that trusts the authorizer: the checkpointed epoch it
+    /// enters, instead of a chain of seals (docs/specs-v0.5-draft.md
+    /// section 4.9).
+    pub checkpoint: Option<CheckpointedEpoch>,
     pub welcome: Welcome,
     /// The steps of its path, up to the root, or up to its island root for
     /// an entry by island.
@@ -444,6 +450,19 @@ pub struct EntryTop {
 }
 
 impl Entry {
+    /// The epoch it enters: that of its last seal, or of its checkpoint.
+    pub fn epoch(&self) -> CoreResult<u64> {
+        self.links
+            .last()
+            .map(|link| link.proof.header.epoch)
+            .or_else(|| {
+                self.checkpoint
+                    .as_ref()
+                    .map(|checkpointed| checkpointed.seal.epoch)
+            })
+            .ok_or(CoreError::Invalid("entry without a seal"))
+    }
+
     /// Size in bytes as a deployment would send it.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
@@ -467,7 +486,12 @@ impl Entry {
         let top = self.top.as_ref().map_or(1, |top| {
             top.root.encryption_key.len() + 16 + top.top.encoded_len()
         });
+        let checkpoint = self
+            .checkpoint
+            .as_ref()
+            .map_or(1, CheckpointedEpoch::encoded_len);
         links
+            + checkpoint
             + self.welcome.encode().map_or(0, |encoded| encoded.len())
             + steps
             + self.leaf.encoded_len().unwrap_or_default()

@@ -7,11 +7,12 @@
 mod common;
 
 use cityg_core::audit::{self, Verdict};
-use cityg_core::authorizer::{Authorizer, authorizer_pk_hash};
+use cityg_core::authorizer::{Authorizer, SealedWindow, authorizer_pk_hash};
 use cityg_core::card::{CardKey, LeafKeys};
 use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::kem::KemSecret;
+use cityg_core::member::Joiner;
 use cityg_core::objects::{AdmissionMode, JoinRequest, PolicyTerms, Request};
 use cityg_core::tree::Occupancy;
 use cityg_core::window::check_entry;
@@ -244,4 +245,182 @@ fn an_authorized_joiner_seals_the_window_when_nobody_is_online() {
     assert!(seal.header.entrant.is_some());
     let entrant: Occupancy = task.sealer;
     assert!(sim.ds.state().tree.is_member(entrant));
+}
+
+/// The authorizer checks the window of `epoch` as the DS keeps it, and
+/// signs its checkpoint, which the DS keeps.
+fn checkpoint(sim: &mut Sim, authorizer: &mut Authorizer, epoch: u64) {
+    let stored = sim.ds.window(epoch).unwrap().clone();
+    let checkpoint = authorizer
+        .checkpoint(
+            &SealedWindow {
+                commits: &stored.commits,
+                city_tasks: &stored.city_tasks,
+                seal: &stored.seal,
+                requests: &stored.requests,
+            },
+            &mut sim.rng,
+        )
+        .unwrap();
+    sim.ds.submit_authorizer_checkpoint(checkpoint).unwrap();
+}
+
+#[test]
+fn the_authorizer_checkpoints_the_windows_it_checks() {
+    let (mut sim, mut authorizer) = authorized_group(105);
+    authorizer.follow_from(sim.ds.state().clone()).unwrap();
+    sim.request_open_joins(2);
+    authorize_all(&mut sim, &authorizer);
+    let before = sim.ds.state().clone();
+    sim.run_window();
+    let epoch = sim.ds.epoch();
+    // A window whose joins lost their authorizations does not pass the
+    // authorizer's check: the commits bind the requests, not their proofs.
+    let stored = sim.ds.window(epoch).unwrap().clone();
+    let stripped: cityg_core::window::Requests = stored
+        .requests
+        .values()
+        .cloned()
+        .map(|request| match request {
+            Request::Join(mut join) => {
+                join.authorization = None;
+                Request::Join(join)
+            }
+            other => other,
+        })
+        .collect();
+    let unchecked = SealedWindow {
+        commits: &stored.commits,
+        city_tasks: &stored.city_tasks,
+        seal: &stored.seal,
+        requests: &stripped,
+    };
+    assert_eq!(
+        authorizer.checkpoint(&unchecked, &mut sim.rng).unwrap_err(),
+        CoreError::Unauthorized("join without authorization")
+    );
+    assert_eq!(authorizer.epoch(), Some(epoch - 1));
+    checkpoint(&mut sim, &mut authorizer, epoch);
+    assert_eq!(authorizer.epoch(), Some(epoch));
+    // It signs one checkpoint per epoch.
+    let again = SealedWindow {
+        requests: &stored.requests,
+        ..unchecked
+    };
+    assert!(authorizer.checkpoint(&again, &mut sim.rng).is_err());
+    // The DS keeps it; one moved to another epoch is refused.
+    let signed = sim.ds.authorizer_checkpoint(epoch).unwrap().clone();
+    assert_eq!(signed.tag, stored.seal.tag);
+    let mut moved = signed;
+    moved.epoch -= 1;
+    assert!(sim.ds.submit_authorizer_checkpoint(moved).is_err());
+    assert!(sim.ds.checkpointed_epoch(epoch - 1).is_err());
+    // A key the group does not name signs nothing.
+    let mut posing = Authorizer::new(before.gid, DeviceIdentity::generate(&mut sim.rng));
+    posing.follow_from(before).unwrap();
+    assert_eq!(
+        posing.checkpoint(&again, &mut sim.rng).unwrap_err(),
+        CoreError::Unauthorized("the group names another authorizer")
+    );
+}
+
+#[test]
+fn a_member_that_requires_checkpoints_waits_for_the_authorizers() {
+    let (mut sim, mut authorizer) = authorized_group(106);
+    authorizer.follow_from(sim.ds.state().clone()).unwrap();
+    let careful = *sim.members.keys().nth(1).unwrap();
+    let key = authorizer.public_key().to_vec();
+    let posing = DeviceIdentity::generate(&mut sim.rng);
+    assert!(
+        sim.members
+            .get_mut(&careful)
+            .unwrap()
+            .require_checkpoints(posing.public_key().to_vec())
+            .is_err()
+    );
+    sim.members
+        .get_mut(&careful)
+        .unwrap()
+        .require_checkpoints(key)
+        .unwrap();
+    // The simulation leaves it be; it follows by hand.
+    sim.absent.insert(careful);
+    sim.request_open_joins(1);
+    authorize_all(&mut sim, &authorizer);
+    sim.run_window();
+    let epoch = sim.ds.epoch();
+    let packet = sim.ds.packet(epoch, careful).unwrap();
+    let member = sim.members.get_mut(&careful).unwrap();
+    assert_eq!(
+        member.process(&packet).unwrap_err(),
+        CoreError::Invalid("the authorizer's checkpoint is required")
+    );
+    checkpoint(&mut sim, &mut authorizer, epoch);
+    let signed = sim.ds.authorizer_checkpoint(epoch).unwrap().clone();
+    let member = sim.members.get_mut(&careful).unwrap();
+    // A checkpoint of the epoch before does not do.
+    let mut stale = signed.clone();
+    stale.epoch -= 1;
+    assert!(member.process_checkpointed(&packet, &stale).is_err());
+    member.process_checkpointed(&packet, &signed).unwrap();
+    sim.absent.remove(&careful);
+    sim.assert_agreement();
+}
+
+#[test]
+fn a_joiner_enters_with_the_authorizers_checkpoint_instead_of_seals() {
+    let (mut sim, mut authorizer) = authorized_group(107);
+    sim.set_joiner_tasks(false);
+    authorizer.follow_from(sim.ds.state().clone()).unwrap();
+    // A joiner anchored at the current epoch, which several windows will
+    // pass before its own.
+    let anchor = sim.anchor();
+    let mut joiner = Joiner::new(
+        DeviceIdentity::generate(&mut sim.rng),
+        None,
+        sim.ds.epoch() + 50,
+        anchor,
+        &mut sim.rng,
+    )
+    .unwrap();
+    for _ in 0..3 {
+        sim.request_open_joins(1);
+        authorize_all(&mut sim, &authorizer);
+        sim.run_window();
+        let epoch = sim.ds.epoch();
+        checkpoint(&mut sim, &mut authorizer, epoch);
+    }
+    let reference = sim
+        .ds
+        .submit_join(joiner.request().clone(), sim.now)
+        .unwrap();
+    authorize_all(&mut sim, &authorizer);
+    sim.run_window();
+    let epoch = sim.ds.epoch();
+    checkpoint(&mut sim, &mut authorizer, epoch);
+    // Its entry carries the checkpoint of its epoch, not the four seals
+    // since its anchor.
+    let entry = sim.ds.checkpointed_entry(&reference).unwrap();
+    assert!(entry.links.is_empty());
+    let chained = sim.ds.entry(&reference, joiner.anchor().epoch).unwrap();
+    assert_eq!(chained.links.len(), 4);
+    assert!(entry.encoded_len() < chained.encoded_len());
+    // Only a joiner that trusts the authorizer's key takes it.
+    assert!(joiner.check_entry(&entry).is_err());
+    joiner.trust_authorizer(DeviceIdentity::generate(&mut sim.rng).public_key().to_vec());
+    assert!(joiner.check_entry(&entry).is_err());
+    joiner.trust_authorizer(authorizer.public_key().to_vec());
+    let member = joiner.enter(&entry).unwrap();
+    assert_eq!(member.epoch(), epoch);
+    assert_eq!(
+        member.epoch_authenticator(),
+        sim.member(common::CREATOR).epoch_authenticator()
+    );
+    assert!(member.previous_header().is_none());
+    sim.ds.set_online(member.occupancy(), true);
+    sim.members.insert(member.occupancy(), member);
+    sim.request_open_joins(1);
+    authorize_all(&mut sim, &authorizer);
+    sim.run_window();
+    sim.assert_agreement();
 }
