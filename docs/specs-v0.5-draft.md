@@ -320,17 +320,27 @@ urgent removal `WINDOW_URGENT`.
   island root included, before anyone seals `r_n` to it: the relay
   element, the flat element and the refresh of that window are all under
   keys the removed member never knew (test
-  `a_removed_member_opens_no_top_of_the_window_that_removes_it`). Sealing
-  the root secret to an island root the window did not re-key is the
-  attack of `ilot_removal_unrekeyed.pv`.
+  `a_removed_member_opens_no_top_of_the_window_that_removes_it`, model
+  [`formal/island_removal.pv`](formal/island_removal.pv)). Sealing the root
+  secret to an island root the window did not re-key is the attack of
+  `ilot_removal_unrekeyed.pv`, and a relay that seals under its island
+  root's former secret that of
+  [`formal/island_removal_stale_relay.pv`](formal/island_removal_stale_relay.pv).
 * **The upper levels are still maintained.** Every window re-keys the
   upper levels along the paths it changes, as in v0.4; only the reading
   changes. A window that skipped them would leave nodes a removed member
   knows (`ilot_city_stale.pv`, and the maintained city, `ilot_city_maintained.pv`).
 * **Flat makers** check the island root keys against their header (section
-  2.4).
+  2.4): a key the DS chose gives it the root secret, and a removed member
+  brings the init secret ([`formal/flat_unchecked.pv`](formal/flat_unchecked.pv)).
 * **Refreshes** are checked by the tag, or against the root secret the
-  member holds (section 2.5): stale or forged steps are detected.
+  member holds (section 2.5): stale or forged steps are detected
+  ([`formal/refresh_checked.pv`](formal/refresh_checked.pv); without the
+  check, [`formal/refresh_unchecked.pv`](formal/refresh_unchecked.pv)). A
+  member only opens wraps with its upper secrets, and checks the tag of
+  every window, so a wrong refresh that went unnoticed would make it fail
+  later, not accept another epoch; the check makes it ask for another
+  refresh at once.
 * **Forward secrecy and post-compromise security** come from the init
   chain and leaf updates, as in v0.4 (§9, E-5). An island follower holds a
   subset of what a path follower holds, and erases its upper secrets
@@ -494,11 +504,15 @@ Nothing of v0.4 decodes under this draft: every label changed.
 <a id="7-open-items"></a>
 ## 7. Open items
 
-* **A formal model of stage 1 as specified.** The symbolic models of
-  [`research/formal-parity/`](research/formal-parity/README.md) cover the
-  relay and its tag, the island that is not re-keyed, and the maintained
-  city; the refresh and the flat elements of this section are not modelled
-  yet.
+* **The formal models of stage 1.** The symbolic model
+  ([`formal/`](formal/README.md)) covers the tops of the window that
+  removes a member, the keys of flat elements and the refresh; that of
+  [`research/formal-parity/`](research/formal-parity/README.md) the relay
+  and its tag, the island that is not re-keyed and the maintained city;
+  CryptoVerif ([`research/formal-computational/`](research/formal-computational/README.md))
+  the relay and flat items, the tag check and the maintained city. Neither
+  models the DS's choice of tops, relay rotation or the epochs of a
+  refresh's steps.
 * **The proof of the tree**, and its adaptive argument (research note
   [`research/preuve-arbre-2026-09-26.md`](research/preuve-arbre-2026-09-26.md)).
 * **Relay choice.** Rotating among online members spreads the work; a DS

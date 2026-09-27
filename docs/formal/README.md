@@ -5,8 +5,10 @@ design choices of City-G, recorded in the [design note](../design.md) and
 studied in the research note
 [`grands-groupes-2026-09-25.md`](../research/grands-groupes-2026-09-25.md)
 (in French). It checks the choices the [specification](../specs.md) relies
-on, against the adversaries of its section 2.1. It is not a model of the
-whole specification (section 19 of the specification).
+on, against the adversaries of its section 2.1, and stage 1 of the draft
+profile [`city-g/v0.5-draft`](../specs-v0.5-draft.md) (its section 2):
+islands read through relay elements, flat elements and refreshes. It is not
+a model of the whole specification (section 19 of the specification).
 
 ## Running it
 
@@ -51,7 +53,22 @@ window; the scenarios call its seal the city commit.
 | [`catch_up_stolen_key.pv`](catch_up_stolen_key.pv) | The attacker holds M's device key, not M's state. A welcomes any catch-up of M signed with that key for the epoch; the welcome is sealed to the request's init key and to M's leaf key, which A takes from the tree. The attacker records a catch-up with an init key of its own. M jumps too. | Proved: the message A sends in epoch 2 stays secret. Reachable, as intended: M's own jump. |
 | [`catch_up_init_only.pv`](catch_up_init_only.pv) | The same catch-ups, welcomed to the request's init key alone. | Attack: the attacker reads epoch 2, and could in every window, without changing the tree. Reachable: M's own jump. |
 
-The results bear on seven decisions of the design note:
+Five more scenarios model stage 1 of the v0.5 draft, on a tree of
+height 3 with islands of two leaves. The *top* of a window gives an island
+follower the root secret: a relay element, sealed by a member of its island
+under the island root's secret; a flat element, the root secret wrapped to
+the island root's key; or a refresh, the last step of each level above its
+island.
+
+| Scenario | What it checks | Expected result |
+| --- | --- | --- |
+| [`island_removal.pv`](island_removal.pv) | Window 2 removes M, which knows its path and the init secret of epoch 1: it re-keys M's island root and every ancestor. A, of M's island, and B, of another, follow the window (B by refresh) and seal relay elements; B also makes the flat element of the island of D, who is offline, with the key of the group context it checked with the tag. D comes back through the flat element. | Proved: M opens no top of the window that removes it. Reachable (sanity): D accepts epoch 2. |
+| [`island_removal_stale_relay.pv`](island_removal_stale_relay.pv) | A seals the root secret under the secret its island root had before the window. | Attack: M opens the relay element. |
+| [`flat_unchecked.pv`](flat_unchecked.pv) | B wraps the flat element to a key the delivery service gives it. | Attack: the service gives a key of its own, and M brings the init secret. |
+| [`refresh_checked.pv`](refresh_checked.pv) | A, an island follower, refreshes its path on its own before a role that needs it, and compares the root it recovers with the root secret it holds. The service holds every wrap of two windows and what a removed member knew, and forges wraps. | Proved: A holds the secrets of its upper levels only if they are the real ones. Reachable (sanity): A refreshes. |
+| [`refresh_unchecked.pv`](refresh_unchecked.pv) | A does not compare the roots. | Attack: A holds secrets the service drew, or the stale root the removed member knows. |
+
+The results bear on eight decisions of the design note:
 
 * **Taint rule (E-4).** Removing a member re-keys the nodes it tainted.
   Updating re-keys them too.
@@ -72,6 +89,14 @@ The results bear on seven decisions of the design note:
   changes nothing in the tree, so its welcome is sealed to the member's
   leaf key too: a device key stolen without the member's state does not
   jump.
+* **Islands (E-15).** The window that removes a member re-keys its island
+  root, and the tops are sealed after it, so a removed member opens none
+  of them. A flat maker takes the island root keys from a state it checked
+  against its header. A refresh on its own is checked against the root
+  secret the member holds: stale or forged steps lead to another root. A
+  wrong refresh would only make the member fail later, since it opens
+  wraps with the secrets and every window's tag is checked; the check
+  makes it ask for another refresh at once.
 
 ## Abstractions and limits
 
@@ -80,9 +105,17 @@ The results bear on seven decisions of the design note:
   multi-recipient lattice KEMs that the research note discusses: such
   attacks are outside this model.
 * **Small trees.** Each scenario uses two windows and trees of two to four
-  leaves, written out with districts of two leaves. Chains of secrets inside
-  a larger district, the plans of section 7.3 of the specification and the
-  recovery of a path from its last steps are not modelled.
+  leaves, written out with districts of two leaves, or eight leaves in
+  islands of two for stage 1. Chains of secrets inside a larger district
+  and the plans of section 7.3 of the specification are not modelled. The
+  recovery of a path from its last steps is modelled for a refresh only,
+  without the epochs of its steps: the check against the root secret does
+  not need them.
+* **Contexts.** A wrap and a relay element bind their window and node in
+  the specification; here a wrap binds nothing and a relay key binds its
+  window and island, which gives the attacker more replays, not fewer.
+  Relay rotation, the delivery service's choice of tops and the
+  relay-then-flat-then-refresh fallback are not modelled.
 * **Committer assignment.** It is given: a member accepts a district commit
   only from the committer the window assigned. The delivery service's
   queues, windows, placement, the enforcement of recorded removals at

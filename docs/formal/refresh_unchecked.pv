@@ -1,0 +1,33 @@
+(* Scenario REFRESH_UNCHECKED (profile v0.5-draft, stage 1): the refresh
+   of refresh_checked.pv, by a member that does not compare the root it
+   recovers with the root secret it holds.
+
+   Expected: attack. The network replays the stale step of window 1, and A
+   holds r1, which the removed M knows, as its root; or it forges a wrap to
+   the public key of i0, and A holds secrets the network drew. A would only
+   open wraps with them, and every window's tag is checked, so it could not
+   be misled into an epoch; but it would fail at its next role instead of
+   asking for another refresh. Reachable (sanity): A refreshes. *)
+
+event RealPath(key, key).
+event Refreshed(key, key).
+query p: key, r: key; event(Refreshed(p, r)) ==> event(RealPath(p, r)).
+query p: key, r: key; event(Refreshed(p, r)).
+
+process
+  new t0: key; new t1: key; new q1: key; new q2: key;
+  new w1: key; new w2: key; new w3: key;
+  (* Window 1: the path of i1, P wrapped to i0, the root chained from P. *)
+  let p1 = chain(t1) in
+  let r1 = chain(p1) in
+  out(c, (node_pk(t0), wrap(node_pk(t0), w1, p1), wrap(node_pk(q1), w2, r1)));
+  (* Window 2: M removed under Q; the root chained from Q's side, wrapped
+     to P. M knew q1 and r1. *)
+  let r2 = chain(q2) in
+  out(c, (q1, r1, wrap(node_pk(p1), w3, r2)));
+  event RealPath(p1, r2);
+  (* A walks the refresh up from its island root. *)
+  in(c, (s2: bitstring, s3: bitstring));
+  let p = up(t0, s2) in
+  let r = up(p, s3) in
+  event Refreshed(p, r)

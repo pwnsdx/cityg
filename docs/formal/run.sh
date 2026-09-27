@@ -31,6 +31,11 @@ EXPECTED=(
   "open_group: false true"
   "catch_up_stolen_key: true false"
   "catch_up_init_only: false false"
+  "island_removal: true false"
+  "island_removal_stale_relay: false false"
+  "flat_unchecked: false false"
+  "refresh_checked: true false"
+  "refresh_unchecked: false false"
 )
 
 for line in "${EXPECTED[@]}"; do

@@ -339,6 +339,30 @@ def island_removal(rekeyed, top):
     return t, "msg2"
 
 
+def island_tops(relay_source, flat_target):
+    """Stage 1 of the v0.5 draft, as docs/formal/island_removal.pv: îlots i0
+    (A and M), i1 (B) and i2 (D, offline) under P and Q. Window 2 removes
+    M, which gives the service its path of epoch 1 (t0, p1, r1) and epoch 1,
+    and re-keys M's path. A seals the root secret under the secret of i0
+    (relay_source), B under that of i1, and B wraps it to the key of i2
+    (flat_target) for D; a refresh is made of the window's wraps."""
+    t = Trace()
+    t.leak("epoch1", "t0", "p1", "r1", "leaf_M")
+    t.epoch_secrets(1)
+    t.wrap("t0n", "leaf_A")
+    t.derive("p2", "t0n")
+    t.wrap("p2", "t1")
+    t.derive("r2", "p2")
+    t.wrap("r2", "q1")
+    t.relay_seal("r2", relay_source)
+    t.relay_seal("r2", "t1")
+    t.wrap("r2", flat_target)
+    if flat_target == "ds_key":
+        t.leak("ds_key")
+    t.window(2, "init1", "r2")
+    return t, "msg2"
+
+
 def city(maintained, second_colludes):
     """The city above the îlots: node P above îlots k and j, node Q above
     îlot l. Window 2 removes M1 (îlot k), window 3 removes M2 (îlot l); the
@@ -419,6 +443,12 @@ TRACES = [
      "ilot_removal_unrekeyed.pv", False),
     ("îlot removal, relay and refresh", lambda: island_removal(True, "relay"),
      "islands.rs: a_removed_member_opens_no_top...", True),
+    ("island tops of a removal", lambda: island_tops("t0n", "t2"),
+     "docs/formal/island_removal.pv", True),
+    ("island tops, stale relay key", lambda: island_tops("t0", "t2"),
+     "island_removal_stale_relay.pv", False),
+    ("island tops, unchecked flat key", lambda: island_tops("t0n", "ds_key"),
+     "flat_unchecked.pv", False),
     ("city maintained", lambda: city(True, True),
      "ilot_city_maintained.pv, city_maintained.ocv", True),
     ("city stale", lambda: city(False, True), "ilot_city_stale.pv, city_stale.ocv", False),

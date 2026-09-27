@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an `Urgency`; `Packet` gains `top`; `MemberPath` returns `PathSecrets`,
   with the epoch of each secret. The ML-DSA known-answer test keeps its
   original context string.
+- Symbolic model of stage 1 ([`docs/formal/`](docs/formal/README.md)):
+  five ProVerif scenarios, run by `run.sh` and the formal-model CI job. The
+  window that removes a member leaves it no top to open, while a relay
+  that seals under its island root's former secret, or a flat maker that
+  takes the island key from the delivery service, gives the removed member
+  the epoch; a refresh on its own leads only to the real path when checked
+  against the root secret, and to secrets the service chose otherwise. The
+  safety predicate mirrors the three removal scenarios (31 traces).
 - Scenario tests in `crates/cityg-core/tests/islands.rs`: relays, a flat
   element for an island with nobody online, a relay that sends garbage,
   replays through relays, flat elements and refreshes, a sealer that

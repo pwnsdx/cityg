@@ -381,7 +381,11 @@ window, and a member read a wrap per such level only to learn the root
 secret. A relay is a member of the island: it learns nothing, and the
 service can neither read nor forge its element. The tag makes a hostile
 relay a delay, not a fork (research model `ilot_relay.pv`; without the tag,
-`ilot_relay_unchecked.pv`), and a refresh needs no one online. Following a
+`ilot_relay_unchecked.pv`), and a refresh needs no one online. The window
+that removes a member re-keys its island root before any top is sealed
+(model `island_removal.pv`); flat makers take island keys from their
+checked state (`flat_unchecked.pv`), and a refresh on its own is checked
+against the root secret the member holds (`refresh_checked.pv`). Following a
 million-member group with 5-minute windows drops from 1.8 MB to about 94 KB
 per day (research note îlots, section 4).
 

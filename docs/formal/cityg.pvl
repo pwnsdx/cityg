@@ -5,6 +5,9 @@
    sealed per window, districts re-keyed by committers that need not belong
    to them, a sealer re-keying the city above them, taints, district
    welcomes and anchored joins.
+   The scenarios named island_*, flat_* and refresh_* model stage 1 of
+   profile city-g/v0.5-draft (docs/specs-v0.5-draft.md, section 2): islands
+   read through relay elements, flat elements and refreshes.
    Primitives are ideal: the X-Wing wrap of a secret is one ideal public-key
    encryption, ML-DSA-65 an unforgeable signature, BLAKE3 and its keyed modes
    one-way functions. Trees are written out in each scenario. *)
@@ -85,3 +88,27 @@ fun kem_ss(kpk, key): key.
 reduc forall sk: key, r: key; decaps(sk, kem_ct(kempk(sk), r)) = kem_ss(kempk(sk), r).
 fun senc(key, key): bitstring.             (* ChaCha20-Poly1305 of a secret *)
 reduc forall k: key, m: key; sdec(k, senc(k, m)) = m.
+
+(* ---------- Islands (docs/specs-v0.5-draft.md, section 2) ---------- *)
+
+const N3: bitstring.               (* a third epoch *)
+const I0, I1, I2: bitstring.       (* islands *)
+const L_relay: bitstring.
+
+(* A node's secret chained from its child's (docs/specs.md, section 7). *)
+letfun chain(s: key) = kdf(s, L_path).
+
+(* The key of a relay element: derived from the secret of the island root
+   and the element's context (window and island); ChaCha20-Poly1305 of the
+   root secret is senc. *)
+letfun relay_key(s: key, ctx: bitstring) = kdf(s, (L_relay, ctx)).
+
+(* One step of a refresh, from the level below: a Wrap of the node's secret
+   to the key of the level below, or a Chain from it. *)
+fun wrap_step(bitstring): bitstring [data].
+const chain_step: bitstring.
+fun up(key, bitstring): key
+reduc forall s: key, r: key, m: key;
+    up(s, wrap_step(wrap(kempk(kdf(s, L_node)), r, m))) = m
+otherwise forall s: key;
+    up(s, chain_step) = kdf(s, L_path).

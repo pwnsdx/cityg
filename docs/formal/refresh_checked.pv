@@ -1,0 +1,45 @@
+(* Scenario REFRESH_CHECKED (profile v0.5-draft, stage 1): a refresh on its
+   own, checked against the root secret the member holds.
+
+   Height 3, islands of two leaves (c = 1): A's island i0 = (1,0), P = (2,0)
+   over i0 and i1, Q = (2,1), root = (3,0).
+   Window 1 re-keyed the path of i1: P got p1, wrapped to i0, and the root
+   was chained from P: r1 = chain(p1).
+   Window 2 removed M, a member under Q, which knew the secret of Q and r1:
+   the root got a secret r2 chained from Q's side and wrapped to P.
+   A is an island follower of epoch 2: it holds the secret t0 of i0 and r2,
+   and erased the secret of P. Before a role that needs its whole path, it
+   asks the delivery service, the network here, for a refresh as of epoch
+   2 (docs/specs-v0.5-draft.md, section 2.5): one step per level above its
+   island, a Wrap to the level below or a Chain from it, walked up from t0.
+   The network holds every wrap of both windows, what M knew, and makes
+   wraps of its own to any public key.
+
+   Expected: proved. A holds the secrets of P and the root only if they are
+   those of epoch 2: the stale step of window 1 (the Chain of the root)
+   leads to r1, and a forged step to a secret of the network, never to r2.
+   Reachable (sanity): A refreshes. *)
+
+event RealPath(key, key).
+event Refreshed(key, key).
+query p: key, r: key; event(Refreshed(p, r)) ==> event(RealPath(p, r)).
+query p: key, r: key; event(Refreshed(p, r)).
+
+process
+  new t0: key; new t1: key; new q1: key; new q2: key;
+  new w1: key; new w2: key; new w3: key;
+  (* Window 1: the path of i1, P wrapped to i0, the root chained from P. *)
+  let p1 = chain(t1) in
+  let r1 = chain(p1) in
+  out(c, (node_pk(t0), wrap(node_pk(t0), w1, p1), wrap(node_pk(q1), w2, r1)));
+  (* Window 2: M removed under Q; the root chained from Q's side, wrapped
+     to P. M knew q1 and r1. *)
+  let r2 = chain(q2) in
+  out(c, (q1, r1, wrap(node_pk(p1), w3, r2)));
+  event RealPath(p1, r2);
+  (* A walks the refresh up from its island root. *)
+  in(c, (s2: bitstring, s3: bitstring));
+  let p = up(t0, s2) in
+  let r = up(p, s3) in
+  if r = r2 then
+  event Refreshed(p, r)

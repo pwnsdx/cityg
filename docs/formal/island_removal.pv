@@ -1,0 +1,80 @@
+(* Scenario ISLAND_REMOVAL (profile v0.5-draft, stage 1): the tops of the
+   window that removes a member.
+
+   Eight leaves, islands of two leaves (c = 1), height 3:
+     island i0 = (1,0) over A and M, i1 = (1,1) over B, i2 = (1,2) over D,
+     P = (2,0) over i0 and i1, Q = (2,1) over i2 and i3, root = (3,0).
+   In epoch 1, M holds its leaf key and its path: t0 (i0), p1 (P), the root
+   r1, and the epoch secret of epoch 1, hence its init secret. The attacker
+   has all of it.
+
+   Window 2 removes M: its leaf is blanked and the window re-keys its path
+   up to the root: a fresh secret for i0, wrapped to A's leaf; P chained
+   from it and wrapped to i1; the root chained from P and wrapped to Q.
+   Its tops (docs/specs-v0.5-draft.md, sections 2.3 to 2.5):
+   * A, the relay of i0, follows the window and seals r2 under the new
+     secret of i0;
+   * B, the relay of i1, follows it by refresh (the wrap of P to i1, then a
+     Chain), seals r2 under the secret of i1, and makes the flat element of
+     i2, whose member D is offline: r2 wrapped to the key of i2 that B takes
+     from the group context it checked with the tag;
+   * a refresh is made of the window's wraps, which are public here.
+   D comes back and takes r2 from the flat element. A message is sent in
+   the real epoch 2.
+
+   Expected: proved. The removed M opens no top of the window that removes
+   it (test a_removed_member_opens_no_top_of_the_window_that_removes_it).
+   As in ilot_removal.pv, the property is about the real epoch: a member
+   that checks only the tag can still be led into another epoch by M and
+   the delivery service (the fork of docs/specs.md, section 2.3).
+   Reachable (sanity): D accepts epoch 2 through the flat element. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event DAccepts(key).
+query es: key; event(DAccepts(es)).
+
+process
+  new lsA: key; new lsM: key; new lsB: key; new lsD: key;
+  new t0: key; new t1: key; new t2: key; new p1: key; new q1: key; new r1: key;
+  new es1: key;
+  let init1 = init_secret(es1) in
+  (* M's state of epoch 1, and the public keys. *)
+  out(c, (lsM, t0, p1, r1, es1));
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), leaf_pk(lsD), node_pk(t1), node_pk(t2), node_pk(q1)));
+  (* Window 2: M's path re-keyed. *)
+  new t0n: key; new w1: key; new w2: key; new w3: key;
+  let p2 = chain(t0n) in
+  let r2 = chain(p2) in
+  let gc2 = (N2, node_pk(t0n), node_pk(t1), node_pk(t2), node_pk(p2), node_pk(q1), node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+  out(c, (wrap(leaf_pk(lsA), w1, t0n), wrap(node_pk(t1), w2, p2), wrap(node_pk(q1), w3, r2),
+          gc2, tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), MA));
+  (
+    (* A: follows the window along its path, then relays for i0. *)
+    in(c, (wa: bitstring, g: bitstring, tg: bitstring));
+    let t = unwrap(leaf_sk(lsA), wa) in
+    let r = chain(chain(t)) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    out(c, senc(relay_key(t, (N2, I0)), r))
+  ) | (
+    (* B: follows by refresh, relays for i1, and makes the flat element of
+       i2 with the key of the context it checked. *)
+    new wf: key;
+    in(c, (wb: bitstring, g: bitstring, tg: bitstring));
+    let r = up(up(t1, wrap_step(wb)), chain_step) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    let (=N2, k0: kpk, k1: kpk, k2: kpk, kp: kpk, kq: kpk, kr: kpk) = g in
+    out(c, (senc(relay_key(t1, (N2, I1)), r), wrap(k2, wf, r)))
+  ) | (
+    (* D: back online, takes the root secret from the flat element of i2. *)
+    in(c, (fl: bitstring, g: bitstring, tg: bitstring));
+    let r = unwrap(node_sk(t2), fl) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    event DAccepts(es)
+  )
