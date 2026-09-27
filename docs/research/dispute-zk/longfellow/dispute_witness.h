@@ -65,16 +65,14 @@ class DisputeWitness {
   using Nat = typename Field::N;
 
  public:
-  // As DisputeCircuit::kPlaces: the matrix seed's bits, t, pk_X.
-  static constexpr size_t kPlaces = 256 + mlkem::kK * mlkem::kN + 1;
-
   explicit DisputeWitness(const Field& f)
       : f_(f), x25519_(f), node_x25519_(f), lattice_(f) {}
 
   // Returns false when the statement does not hold (kReencryptionDiffers
   // needs a re-encryption that fails, the others one that succeeds;
-  // kWrongSecret needs a node key other than pk_v) or when a value does
-  // not match the reference. Tests may force the place of kWrongSecret.
+  // kWrongSecret needs a node key other than pk_v, kWrongSecretShort one
+  // whose matrix seed or X25519 key differs from pk_v's) or when a value
+  // does not match the reference. Tests may force the place of branch 2.
   bool compute(const mlkem::XWingKey& key,
                const uint8_t ct[mlkem::kXWingCtBytes],
                const mlkem::XWingDecapsulation& d, Statement st,
@@ -169,6 +167,8 @@ class DisputeWitness {
       bits(sealed_);
       bits(node_statement_->seed);
       filler.push_back(pk_x_v_);
+    }
+    if (dispute_node_t(st_)) {
       for (size_t i = 0; i < mlkem::kK; ++i) {
         for (size_t l = 0; l < mlkem::kN; ++l) {
           filler.push_back(
@@ -178,12 +178,12 @@ class DisputeWitness {
     }
   }
 
-  // The public inputs that rho gives: the lattice part's, then, for branch
-  // 2, A_v(rho).
+  // The public inputs that rho gives: the lattice part's, then, if the
+  // statement derives t', A_v(rho).
   std::vector<Elt> lattice_public(const Elt& rho) const {
     std::vector<Elt> out = LatticeWitness<Field>::public_inputs(
         *statement_, rho, f_, lattice_mode(st_));
-    if (dispute_opens(st_)) {
+    if (dispute_node_t(st_)) {
       std::vector<Elt> a =
           LatticeWitness<Field>::node_public(node_statement_->a, rho, f_);
       out.insert(out.end(), a.begin(), a.end());
@@ -196,10 +196,10 @@ class DisputeWitness {
     if (dispute_combines(st_)) x25519_.fill_witness(filler);
     for (const auto& bw : keccak_) Sha3Witness::fill_witness(filler, bw, f_);
     lattice_.fill_witness(filler);
+    if (dispute_node_t(st_)) lattice_.fill_node(filler);
     if (dispute_opens(st_)) {
-      lattice_.fill_node(filler);
       node_x25519_.fill_public_key(filler);
-      for (size_t k = 0; k < kPlaces; ++k) {
+      for (size_t k = 0; k < dispute_places(st_); ++k) {
         filler.push_back(k == place_ ? f_.one() : f_.zero());
       }
       filler.push_back(sel_inv_);
@@ -235,6 +235,7 @@ class DisputeWitness {
 
   // Branch 2: X-Wing's key generation from the opened secret's seed,
   // SHAKE256(seed, 96) = d || z || sk_X', ML-KEM's from (d, z), and pk_v.
+  // The PRF calls only if the statement derives t'.
   bool node_key(const std::vector<uint8_t>& pk_v) {
     using namespace mlkem;
     if (pk_v.size() != kXWingPkBytes) return false;
@@ -254,7 +255,7 @@ class DisputeWitness {
         std::memcmp(out + 32, node_.sigma, 32) != 0) {
       return false;
     }
-    for (size_t n = 0; n < 2 * kK; ++n) {
+    for (size_t n = 0; n < (dispute_node_t(st_) ? 2 * kK : 0); ++n) {
       std::memcpy(in, node_.sigma, 32);
       in[32] = static_cast<uint8_t>(n);
       permute(in, 33, 136, 0x1f, out);
@@ -268,11 +269,14 @@ class DisputeWitness {
   }
 
   // The first place where pk' = (rho', t', pk_X') and pk_v differ, unless
-  // forced, and the inverse of the difference there. t' is A_v s' + e',
-  // which is pk''s t when rho' is pk_v's seed.
+  // forced, and the inverse of the difference there; the short statement
+  // leaves t' out. t' is A_v s' + e', which is pk''s t when rho' is pk_v's
+  // seed.
   bool node_place(size_t force_place) {
     using namespace mlkem;
-    if (!lattice_.compute_node(node_statement_->a, node_.s, node_.e)) {
+    const size_t places = dispute_places(st_);
+    if (dispute_node_t(st_) &&
+        !lattice_.compute_node(node_statement_->a, node_.s, node_.e)) {
       return false;
     }
     const std::vector<int32_t>& t = lattice_.node_t();
@@ -282,7 +286,7 @@ class DisputeWitness {
         int bit_v = (node_statement_->seed[k / 8] >> (k % 8)) & 1;
         return LatticeWitness<Field>::of_int(bit_n - bit_v, f_);
       }
-      if (k < kPlaces - 1) {
+      if (k < places - 1) {
         size_t l = k - 256;
         return LatticeWitness<Field>::of_int(
             t[l] - node_statement_->t[l / kN][l % kN], f_);
@@ -290,10 +294,10 @@ class DisputeWitness {
       return f_.subf(node_x25519_.pk_, pk_x_v_);
     };
     place_ = force_place;
-    for (size_t k = 0; k < kPlaces && place_ == SIZE_MAX; ++k) {
+    for (size_t k = 0; k < places && place_ == SIZE_MAX; ++k) {
       if (diff(k) != f_.zero()) place_ = k;
     }
-    if (place_ >= kPlaces) return false;
+    if (place_ >= places) return false;
     Elt dp = diff(place_);
     sel_inv_ = dp == f_.zero() ? dp : f_.invertf(dp);
     return dp != f_.zero();

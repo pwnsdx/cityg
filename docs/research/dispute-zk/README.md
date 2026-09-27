@@ -42,7 +42,7 @@ sumcheck and Ligero, are single messages that anyone can verify.
 | X25519, without setup | The same statement as a Longfellow circuit over `F_{2^255-19}`: the state after each step of both ladders is a witness, so that each step is checked on its own and the circuit is 9 layers deep. | [`longfellow/x25519_circuit.h`](longfellow/x25519_circuit.h), `x25519_circuit_test` |
 | Hashing, without setup | 26 chained Keccak-f[1600] permutations over `GF(2^128)`, with Longfellow's SHA-3 circuit, which takes the state every 6 rounds as a witness; one permutation over `F_{2^255-19}`. | [`longfellow/keccak_chain_test.cc`](longfellow/keccak_chain_test.cc) |
 | Lattice, without setup | ML-KEM-768 in the normal domain over `F_{2^255-19}`: the key binding `t = A s + e` with `s`, `e` small and of bounded norm, the decryption, and the re-encryption, each an identity between polynomials checked at a point `rho` that the verifier draws after the prover has committed to the witness; the prover supplies each quotient by `q`, each offset of `Compress` and each product's high half. | [`longfellow/lattice_circuit.h`](longfellow/lattice_circuit.h), `dispute_test` |
-| The whole dispute, without setup | Four statements over `F_{2^255-19}`, in one circuit each. *The wrap does not open* (branch 1): the lattice part's key binding and decryption, `G`, X25519, the combiner, `ExpandLabel` (BLAKE3) and ChaCha20's first block, whose first 32 bytes, the wrap's Poly1305 key, are revealed so that the verifier computes the tag itself. *The wrap opens to the wrong secret* (branch 2): as the first up to the wrap's key and nonce, then ChaCha20's second block opens the sealed secret, `ExpandLabel` seeds its node key, X-Wing's key generation gives that key (SHAKE256, `G`, six PRF calls, `t' = A_v s' + e'` with the public matrix of `pk_v`, a third X25519 ladder), and the key differs from the published `pk_v` at a place that the proof does not reveal. *The re-encryption differs*: the re-encryption with the noise of the seven PRF calls differs from the ciphertext in a coefficient that the proof does not reveal. *The whole decapsulation*, as a reference: the first statement and a re-encryption that gives the ciphertext back. The member's seed stays out of every statement. | [`longfellow/dispute_circuit.h`](longfellow/dispute_circuit.h), `dispute_test` |
+| The whole dispute, without setup | Five statements over `F_{2^255-19}`, in one circuit each. *The wrap does not open* (branch 1): the lattice part's key binding and decryption, `G`, X25519, the combiner, `ExpandLabel` (BLAKE3) and ChaCha20's first block, whose first 32 bytes, the wrap's Poly1305 key, are revealed so that the verifier computes the tag itself. *The wrap opens to the wrong secret* (branch 2): as the first up to the wrap's key and nonce, then ChaCha20's second block opens the sealed secret, `ExpandLabel` seeds its node key, X-Wing's key generation gives that key (SHAKE256, `G`, six PRF calls, `t' = A_v s' + e'` with the public matrix of `pk_v`, a third X25519 ladder), and the key differs from the published `pk_v` at a place that the proof does not reveal. Its *short* statement, for the common case where the key's matrix seed or X25519 key differs from `pk_v`'s, stops before the six PRF calls and `t'`. *The re-encryption differs*: the re-encryption with the noise of the seven PRF calls differs from the ciphertext in a coefficient that the proof does not reveal. *The whole decapsulation*, as a reference: the first statement and a re-encryption that gives the ciphertext back. The member's seed stays out of every statement. | [`longfellow/dispute_circuit.h`](longfellow/dispute_circuit.h), `dispute_test` |
 | The verifier's public checks | `ct_X` is the canonical u-coordinate of a point of prime order `l` (RFC 7748's ladder with the unclamped scalar `l` ends with `z = 0`), and `pk_v` is canonically encoded; otherwise the committer is convicted without a proof. | [`longfellow/x25519_check.h`](longfellow/x25519_check.h) |
 | Decryption failures | The decryption failure rate of ML-KEM-768 for the worst key that the lattice part's norm bounds admit, computed exactly in the model of the Kyber team's scripts. Needs numpy. | [`decryption_failure.py`](decryption_failure.py) |
 
@@ -211,7 +211,7 @@ done
 
 `DISPUTE_STATEMENT` and the benchmarks' argument pick the statement: 0 is
 the first branch, 1 the whole decapsulation, 2 the re-encryption that
-differs, 3 the second branch. The first run of `DISABLED_Serialized`
+differs, 3 the second branch, 4 its short statement. The first run of `DISABLED_Serialized`
 compiles the circuit and writes it, compressed; the second loads it in a
 fresh process, then proves and verifies.
 
@@ -329,6 +329,7 @@ machine ran Longfellow's ECDSA benchmark in 55 and 34 ms:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | The wrap does not open (branch 1) | 2 | 87,855 (1,181) | 1,716,288 | 587,116 B | 1.41 s | 0.99 s |
 | The wrap opens to the wrong secret (branch 2) | 10 | 171,133 (2,463) | 5,922,950 | 805,484 B | 3.72 s | 2.26 s |
+| The same, short, when the matrix seed or `pk_X` differs | 4 | 111,991 (1,686) | 2,873,383 | 650,444 B | 1.86 s | 1.19 s |
 | The re-encryption differs | 8 | 100,409 (1,555) | 4,161,118 | 628,908 B | 2.53 s | 1.52 s |
 | The whole decapsulation (reference) | 9 | 150,575 (2,209) | 5,227,062 | 753,292 B | 3.23 s | 1.98 s |
 | Lattice part alone: key binding and decryption | 0 | 28,453 (275) | 108,963 | 332,972 B | | |
@@ -352,6 +353,12 @@ machine ran Longfellow's ECDSA benchmark in 55 and 34 ms:
   `pk_v`, which the verifier derives from `pk_v`'s seed: if the node key's
   seed differs from it, the keys differ anyway; if not, that matrix is the
   node key's.
+* The short statement of the second branch was measured in a later
+  session, where the ECDSA benchmark ran in 52.4 and 31.5 ms; there, the
+  full statement took 3.46 s and 2.08 s. The short one takes half the
+  terms, 54% of the prover's time and 57% of the verifier's. A committer
+  that seals another secret than `pk_v`'s gives a different matrix seed,
+  so the full statement is only needed when `t` alone differs.
 * The witness takes 1.9 ms for the first branch and 3.3 ms for the second.
   For the first statement, the prover spends 0.73 s on Ligero's
   commitment, 0.55 s on sumcheck and 0.14 s on Ligero's proof; the
@@ -381,6 +388,7 @@ loads it, then proves and verifies:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Branch 1 | 20,605,926 B | 576,978 B | 0.21 s | 20 MB | 104 MB | 50 MB |
 | Branch 2 | 71,086,190 B | 1,506,552 B | 0.72 s | 41 MB | 251 MB | 90 MB |
+| Branch 2, short | 34,491,354 B | 873,600 B | 0.34 s | 26 MB | 143 MB | 70 MB |
 | The re-encryption differs | 49,936,046 B | 1,001,097 B | 0.52 s | 32 MB | 172 MB | 57 MB |
 | The whole decapsulation | 62,735,246 B | 1,337,812 B | 0.64 s | 38 MB | 228 MB | 119 MB |
 
@@ -389,7 +397,8 @@ loads it, then proves and verifies:
   measured from its own start.
 * Measured in the process that compiled the circuit, the peaks counted the
   heap that the compiler leaves behind: 289 to 837 MB. The compiler itself
-  peaks at 420 MB for the first branch and 1,360 MB for the second.
+  peaks at 420 MB for the first branch, 685 MB for the second's short
+  statement and 1,360 MB for its full one.
 
 ### Decryption failures
 
@@ -435,7 +444,7 @@ gate, whatever the statement. Without setup and in one field, each branch
 of a dispute takes one message, which anyone can verify, on a machine that
 runs Longfellow's ECDSA benchmark at a Pixel 9's speed: 573 KB, 1.41 s to
 prove and 0.99 s to verify for the first; 787 KB, 3.72 s and 2.26 s for the
-second. With the circuit loaded from its serialized form, the prover needs
-104 and 251 MB. What remains is a measurement on a phone, a lighter second
-branch for the common case where the node key's seed already differs from
-`pk_v`'s, and a human review.
+second, or 635 KB and 1.86 s in the common case where its short statement
+applies. With the circuit loaded from its serialized form, the prover
+needs 104 to 251 MB. What remains is a measurement on a phone and a human
+review.

@@ -3,9 +3,9 @@
 | | |
 | --- | --- |
 | Date | 2026-09-27 |
-| Nature | Note de recherche. Elle poursuit la note [litige entier](litige-entier-2026-09-26.md). Elle prouve la branche 2 du litige, « le wrap s'ouvre sur un mauvais secret ». Elle calcule exactement le taux d'échec du déchiffrement sous la borne de norme, et corrige l'estimation de la note précédente. Elle code les contrôles publics du vérifieur, et mesure la mémoire avec le circuit sérialisé. Rien de tout cela ne fait partie du profil `city-g/v0.4`. |
+| Nature | Note de recherche. Elle poursuit la note [litige entier](litige-entier-2026-09-26.md). Elle prouve la branche 2 du litige, « le wrap s'ouvre sur un mauvais secret », avec un énoncé court pour le cas courant. Elle calcule exactement le taux d'échec du déchiffrement sous la borne de norme, et corrige l'estimation de la note précédente. Elle code les contrôles publics du vérifieur, et mesure la mémoire avec le circuit sérialisé. Rien de tout cela ne fait partie du profil `city-g/v0.4`. |
 | Question | Que coûte la branche 2, et que vaut la borne de norme ? |
-| Compagnons | [`dispute-zk/longfellow/`](dispute-zk/longfellow/) : les circuits, témoins, tests et bancs d'essai des quatre énoncés, et le contrôle public de `ct_X` ([`x25519_check.h`](dispute-zk/longfellow/x25519_check.h)). [`dispute-zk/decryption_failure.py`](dispute-zk/decryption_failure.py) : le taux d'échec exact. [`bench/src/bin/wrap_vector.rs`](bench/src/bin/wrap_vector.rs) : un wrap de `cityg-core` et la clé de nœud de son secret. |
+| Compagnons | [`dispute-zk/longfellow/`](dispute-zk/longfellow/) : les circuits, témoins, tests et bancs d'essai des cinq énoncés, et le contrôle public de `ct_X` ([`x25519_check.h`](dispute-zk/longfellow/x25519_check.h)). [`dispute-zk/decryption_failure.py`](dispute-zk/decryption_failure.py) : le taux d'échec exact. [`bench/src/bin/wrap_vector.rs`](bench/src/bin/wrap_vector.rs) : un wrap de `cityg-core` et la clé de nœud de son secret. |
 | Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Les mesures viennent de la machine virtuelle des notes précédentes (4 vCPU, Intel Xeon à 2,10 GHz). Ce jour-là, elle fait tourner le banc ECDSA de Longfellow en 55 et 34 ms, contre 53,3 et 33,5 ms sur Pixel 9. Aucun téléphone n'a été mesuré. Une relecture cryptographique humaine reste nécessaire. |
 
 ## 0. Résumé
@@ -15,16 +15,16 @@
    - Le circuit ouvre le secret scellé avec le deuxième bloc de ChaCha20, puis dérive sa clé de nœud : `ExpandLabel`, SHAKE256, `G`, six PRF, une identité de réseau avec la matrice publique de `pk_v`, une échelle X25519. Il montre enfin que cette clé diffère de `pk_v`, à une place qu'il tait.
    - Il ne vérifie pas l'étiquette et ne révèle pas la clé Poly1305 : si l'étiquette est fausse, le wrap ne s'ouvre pas, et c'est la branche 1. L'énoncé condamne dans les deux cas.
    - Sur un wrap de `cityg-core`, le témoin retrouve la clé de nœud que calcule `cityg-core`. Si `pk_v` est faux dans sa graine, dans `t` ou dans `pk_X`, le committer est condamné ; avec le vrai `pk_v`, il ne l'est pas.
+   - Dans le cas courant, où le committer a scellé un autre secret que celui de `pk_v`, un énoncé court suffit : 635 Ko, et un peu plus de la moitié du temps de l'énoncé complet.
 2. **La borne de norme était trop lâche.**
    - Calculé exactement, comme le font les scripts de Kyber, le taux d'échec de la pire clé sous `|s|² + |e|² ≤ 2047` est `2^−98,9`, et non `2^−129` comme l'estimait la note précédente.
    - Le circuit borne désormais `|s|²` et `|e|²` séparément, par 1 100 chacun. La pire clé admise échoue alors avec une probabilité `2^−121,2` par chiffré, et une clé honnête sort de la borne avec une probabilité `2^−62,9`.
 3. **La mémoire était surestimée.**
    - Sérialisé, le circuit pèse de 563 Ko à 1,44 Mo une fois compressé. Chargé par un processus qui ne l'a pas compilé, il occupe de 20 à 41 Mo.
-   - Le prouveur culmine alors à 104 Mo pour la branche 1 et à 251 Mo pour la branche 2. La note précédente comptait de 315 à 740 Mo, en y incluant le tas que le compilateur laisse au processus.
+   - Le prouveur culmine alors à 104 Mo pour la branche 1 et à 251 Mo pour la branche 2, 143 Mo avec l'énoncé court. La note précédente comptait de 315 à 740 Mo, en y incluant le tas que le compilateur laisse au processus.
 4. **Les contrôles publics sont codés.** Le vérifieur contrôle que `ct_X` est dans le sous-groupe d'ordre premier et que `pk_v` est encodé canoniquement. Sinon, il condamne sans preuve.
 5. **Ce qui reste :**
    - un vrai téléphone ;
-   - une branche 2 allégée pour le cas courant ;
    - une relecture humaine.
 
 ## 1. La branche 2
@@ -96,6 +96,33 @@ commun  : comme la branche 1 jusqu'à k, n = ExpandLabel(ss, "wrap key" | "wrap 
 - **Le témoin se calcule en 3,3 ms**, contre 1,9 ms pour la branche 1.
 - **Les trois autres énoncés** gagnent 11 entrées et 47 termes, pour la seconde borne de norme (section 2). Leurs temps restent dans le bruit de ceux de la note précédente.
 
+### 1.4 L'énoncé court, pour le cas courant
+
+- **Le cas courant.**
+  - Un committer qui scelle un autre secret que celui de `pk_v` donne une clé `pk'` dont la graine de matrice `ρ'` diffère de `ρ_v`, sauf avec une probabilité `2^−256`.
+  - Un `pk_v` forgé à partir de la bonne clé, mais avec une autre clé X25519, donne `pk_X' ≠ pk_X,v`.
+- **Ce qu'il garde et ce qu'il laisse.**
+  - L'énoncé court s'arrête à `G(d ‖ 3)` et à l'échelle de `pk_X'`. Sa sélection cachée porte sur 257 places : les 256 bits de `ρ'`, puis `pk_X'`.
+  - Il laisse les six PRF, l'identité `t' = A_v s' + e'`, les 768 coefficients de `t_v` et les neuf évaluations de `A_v`.
+  - L'échelle ne coûte qu'environ 18 000 termes : la moitié X25519 du litige, qui en a deux, en compte 35 511. La garder couvre le second cas pour presque rien.
+- **Ce qu'il dit de plus** : que les clés diffèrent en `ρ` ou en `pk_X`. `pk'` est la clé publique qu'un committer honnête aurait publiée ; ce qu'on en apprend ne touche pas au secret.
+- **Quel énoncé prouver.** Le membre calcule tout en clair, puis prouve le premier cas qui s'applique :
+  1. le rechiffrement échoue : « le rechiffrement diffère » ;
+  2. l'étiquette est fausse : la branche 1 ;
+  3. `ρ'` ou `pk_X'` diffère de `pk_v` : la branche 2 courte ;
+  4. `t'` diffère : la branche 2 complète.
+
+  Sinon, le wrap est bon.
+- **Son coût**, mesuré dans une même session contre l'énoncé complet. Dans cette session, la machine fait tourner le banc ECDSA de Longfellow en 52,4 et 31,5 ms, un peu plus vite que pour la section 1.3 (55 et 34 ms) :
+
+| Énoncé | Keccak-f | Entrées (publiques) | Termes | Preuve | Prouveur | Vérifieur |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Branche 2 complète | 10 | 171 133 (2 463) | 5 922 950 | 805 484 o | 3,46 s | 2,08 s |
+| Branche 2 courte | 4 | 111 991 (1 686) | 2 873 383 | 650 444 o | 1,86 s | 1,19 s |
+
+- **Moitié moins de termes, 54 % du temps à prouver, 57 % à vérifier.** La preuve de 635 Ko monte en 0,52 s sur la 4G émulée.
+- **Le témoin se calcule en 2,4 ms**, contre 3,1 ms pour l'énoncé complet dans la même session.
+
 ## 2. Le taux d'échec du déchiffrement, calculé
 
 ### 2.1 La méthode
@@ -150,14 +177,15 @@ Le circuit ne dépend pas du litige : il se compile une fois, chez qui construit
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Branche 1 | 20 605 926 o | 576 978 o | 0,21 s | 20 Mo | 104 Mo | 50 Mo |
 | Branche 2 | 71 086 190 o | 1 506 552 o | 0,72 s | 41 Mo | 251 Mo | 90 Mo |
+| Branche 2 courte | 34 491 354 o | 873 600 o | 0,34 s | 26 Mo | 143 Mo | 70 Mo |
 | Le rechiffrement diffère | 49 936 046 o | 1 001 097 o | 0,52 s | 32 Mo | 172 Mo | 57 Mo |
 | La décapsulation entière | 62 735 246 o | 1 337 812 o | 0,64 s | 38 Mo | 228 Mo | 119 Mo |
 
 - **Les colonnes.** « Circuit chargé » est la mémoire résidente après chargement et calcul du témoin. Prouveur et vérifieur sont des pics, mesurés chacun depuis son début. Le chargement monte brièvement à 38 Mo pour la branche 1 et à 107 Mo pour la branche 2.
 - **La correction.**
   - La note précédente mesurait dans le processus qui venait de compiler le circuit. Son tas restait au processus, d'où 315 Mo pour le prouveur de la branche 1, et 585 à 740 Mo pour les autres énoncés.
-  - La compilation elle-même culmine à 420 Mo pour la branche 1 et à 1 360 Mo pour la branche 2.
-- **Pour un téléphone**, il faudrait donc de l'ordre de 100 à 250 Mo. Les trois circuits qu'un membre peut avoir à prouver pèsent 2,9 Mo compressés, livrés avec l'application.
+  - La compilation elle-même culmine à 420 Mo pour la branche 1, à 685 Mo pour la branche 2 courte et à 1 360 Mo pour la complète.
+- **Pour un téléphone**, il faudrait donc de l'ordre de 100 à 250 Mo. Les quatre circuits qu'un membre peut avoir à prouver pèsent 3,8 Mo compressés, livrés avec l'application.
 
 ## 5. Les vérifications
 
@@ -166,18 +194,16 @@ Le circuit ne dépend pas du litige : il se compile une fois, chez qui construit
   - Un `pk_v` pris d'un autre secret, ou faux d'un coefficient de `t̂`, ou faux dans `pk_X`, donne une preuve qui se vérifie. La place choisie tombe dans la bonne partie : `ρ`, `t` ou `pk_X`.
   - Le vrai `pk_v` n'a pas de témoin. Forcée sur une place où les clés concordent, la preuve échoue.
   - Un `pk_v` non canonique est rejeté avant toute preuve.
+  - L'énoncé court condamne un `pk_v` faux dans sa graine ou dans `pk_X`, à une place dans la bonne partie. Faux dans `t` seulement, il n'a pas de témoin : l'énoncé complet est nécessaire.
 - **Chaque énoncé** se prouve, se vérifie, et échoue contre l'énoncé d'une autre instance.
 - **Les vérifications de la note précédente** passent toujours : références X-Wing et `cityg-core`, partie réseau en clair, témoins faux, wrap altéré.
 
 ## 6. Ce qui reste
 
 - **Un vrai téléphone.** Les circuits se chargent désormais en 0,2 à 0,7 s, et le prouveur tient en 104 à 251 Mo : c'est à mesurer sur un appareil.
-- **Une branche 2 allégée pour le cas courant.**
-  - Un committer qui scelle un autre secret que celui de `pk_v` donne presque sûrement `ρ' ≠ ρ_v`.
-  - Un énoncé réservé à ce cas s'arrêterait à `G(d ‖ 3)` : 4 permutations au lieu de 10, de l'ordre de 2,9 millions de termes au lieu de 5,9.
-  - Il dirait en quelle partie les clés diffèrent, ce qui ne touche pas au secret. Le cas `ρ' = ρ_v` garderait l'énoncé complet.
+- **La branche 2 allégée pour le cas courant** est faite (section 1.4) : 2,9 millions de termes au lieu de 5,9.
 - **Des leviers.**
-  - Longfellow tourne ici sur un cœur.
+  - Longfellow n'a pas de parallélisme : il tourne ici sur un cœur. L'engagement Ligero, près de la moitié du temps du prouveur de la branche 1, encode pourtant ses lignes indépendamment les unes des autres.
   - Le partage en deux corps reste à chiffrer pour la branche 1, et ne paierait pas pour la branche 2. Les 6 144 bits de PRF de la clé de nœud devraient y passer au réseau : à environ 1 500 termes par bit, ce lien coûterait plus que Keccak.
 - **Une relecture cryptographique humaine**, en particulier des sections 1.2 et 2.
 
@@ -185,7 +211,7 @@ Le circuit ne dépend pas du litige : il se compile une fois, chez qui construit
 
 | Problème | État | Ce qui reste |
 | --- | --- | --- |
-| 2. Preuves de litige | Les deux branches, sans mise en place, dans un seul corps. Branche 1 : 573 Ko, 1,41 s pour prouver, 0,99 s pour vérifier. Branche 2 : 787 Ko, 3,72 s et 2,26 s. Temps d'une machine au rythme d'un Pixel 9 ; prouveur en 104 à 251 Mo avec le circuit sérialisé. Le chiffré invalide se condamne à part, en 614 Ko. Le taux d'échec de la pire clé admise est de `2^−121,2`. | Un vrai téléphone ; la branche 2 allégée ; une relecture |
+| 2. Preuves de litige | Les deux branches, sans mise en place, dans un seul corps. Branche 1 : 573 Ko, 1,41 s pour prouver, 0,99 s pour vérifier. Branche 2 : 787 Ko, 3,72 s et 2,26 s, et, dans le cas courant, 635 Ko et un peu plus de la moitié du temps. Temps d'une machine au rythme d'un Pixel 9 ; prouveur en 104 à 251 Mo avec le circuit sérialisé. Le chiffré invalide se condamne à part, en 614 Ko. Le taux d'échec de la pire clé admise est de `2^−121,2`. | Un vrai téléphone ; une relecture |
 
 L'ordre des problèmes ouverts ne change pas :
 1. la preuve de l'arbre ;
@@ -195,8 +221,8 @@ L'ordre des problèmes ouverts ne change pas :
 ## 8. Reproduire
 
 - **Construire** Longfellow avec le correctif et le répertoire [`dispute-zk/longfellow/`](dispute-zk/longfellow/), comme l'indique [`dispute-zk/README.md`](dispute-zk/README.md), cible `dispute_test`.
-- **Les tests** : `dispute_test` vérifie les références, la partie réseau, les quatre énoncés, le wrap altéré et chaque place de la branche 2.
-- **Les temps** : `dispute_test --gtest_filter=-* --benchmark_filter=BM_Dispute`. Les arguments 0 à 3 sont la branche 1, la décapsulation entière, le rechiffrement qui diffère et la branche 2.
+- **Les tests** : `dispute_test` vérifie les références, la partie réseau, les cinq énoncés, le wrap altéré et chaque place de la branche 2.
+- **Les temps** : `dispute_test --gtest_filter=-* --benchmark_filter=BM_Dispute`. Les arguments 0 à 4 sont la branche 1, la décapsulation entière, le rechiffrement qui diffère, la branche 2 et sa version courte.
 - **La mémoire** : `DISPUTE_STATEMENT=3 DISPUTE_CIRCUIT=/tmp/branche2.zst dispute_test --gtest_also_run_disabled_tests --gtest_filter=Dispute.DISABLED_Serialized`, deux fois. La première écrit le circuit, la seconde le charge et mesure.
 - **Le taux d'échec** : `python3 docs/research/dispute-zk/decryption_failure.py`, avec numpy, en quelques minutes.
 - **Le vecteur** : `cargo run --release --manifest-path docs/research/bench/Cargo.toml --bin wrap_vector`.

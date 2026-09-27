@@ -211,7 +211,7 @@ Depuis (note [les deux branches](litige-deux-branches-2026-09-27.md), section 1.
 | --- | --- | --- |
 | 2. Preuves de litige | L'énoncé entier de la branche 1, sans mise en place : 573 Ko, 1,49 s pour prouver, 0,97 s pour vérifier, sur une machine au rythme d'un Pixel 9. Le chiffré invalide se condamne à part, en 615 Ko. | La branche 2 ; le taux d'échec sous la borne de norme ; un vrai téléphone ; une relecture |
 
-Depuis (note [les deux branches](litige-deux-branches-2026-09-27.md)) : la branche 2 tient en 787 Ko et 3,72 s, le taux d'échec est calculé, et le prouveur tient en 104 à 251 Mo avec le circuit sérialisé. Restent un vrai téléphone, une branche 2 allégée pour le cas courant, et une relecture.
+Depuis (note [les deux branches](litige-deux-branches-2026-09-27.md)) : la branche 2 tient en 787 Ko et 3,72 s, le taux d'échec est calculé, et le prouveur tient en 104 à 251 Mo avec le circuit sérialisé. La branche 2 a aussi un énoncé court pour le cas courant, en 635 Ko. Restent un vrai téléphone et une relecture.
 
 L'ordre des problèmes ouverts ne change pas :
 1. la preuve de l'arbre ;

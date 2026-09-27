@@ -279,6 +279,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `pk_v`, and a hidden place shows where the keys differ; 787 KB, 3.72 s
     to prove and 2.26 s to verify, at a Pixel 9's speed; it checks no tag
     and reveals no Poly1305 key, since a wrong tag convicts as well;
+  - a short statement of the second branch for the common case, where the
+    committer sealed another secret: the node key's matrix seed or X25519
+    key differs from `pk_v`'s, so it stops before the six PRF calls and
+    `t'`: half the terms, 635 KB and 54% of the full statement's proving
+    time; the full one remains for a `pk_v` wrong in `t` alone;
   - the decryption failure rate of ML-KEM-768 for the worst key of bounded
     norm, computed exactly by
     [`docs/research/dispute-zk/decryption_failure.py`](docs/research/dispute-zk/decryption_failure.py):

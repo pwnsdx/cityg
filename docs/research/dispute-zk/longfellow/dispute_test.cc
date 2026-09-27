@@ -708,6 +708,8 @@ const char* statement_name(Statement st) {
       return "the wrap does not open (G, X25519, combiner)";
     case Statement::kWrongSecret:
       return "the wrap opens to the wrong secret";
+    case Statement::kWrongSecretShort:
+      return "the wrap opens to the wrong secret, short";
     case Statement::kWholeDecapsulation:
       return "the whole decapsulation (and its re-encryption)";
     case Statement::kReencryptionDiffers:
@@ -733,7 +735,7 @@ std::unique_ptr<Circuit<F25519>> make_dispute_circuit(Statement st) {
 
 // Each statement's circuit, compiled once for the tests.
 const Circuit<F25519>* dispute_circuit(Statement st) {
-  static std::unique_ptr<Circuit<F25519>> circuits[4];
+  static std::unique_ptr<Circuit<F25519>> circuits[5];
   std::unique_ptr<Circuit<F25519>>& c = circuits[static_cast<size_t>(st)];
   if (c == nullptr) c = make_dispute_circuit(st);
   return c.get();
@@ -743,12 +745,14 @@ const Circuit<F25519>* dispute_circuit(Statement st) {
 // pk_X and ct_X as field elements, three strings of 256 bits and
 // ExpandLabel's inputs (two blocks of 16 words and a length on 32 bits,
 // twice); then the Poly1305 key's 8 words (branch 1), or the sealed
-// secret's 256 bits and pk_v, 256 bits of its seed, pk_X,v and the 768
-// coefficients of t_v (branch 2). Or only H(ek).
+// secret's 256 bits and pk_v, 256 bits of its seed, pk_X,v and, unless the
+// statement is short, the 768 coefficients of t_v (branch 2). Or only
+// H(ek).
 size_t fixed_public(Statement st) {
   if (!dispute_combines(st)) return 1 + 256;
   size_t n = 1 + 2 + 3 * 256 + 2 * (32 + 32);
-  return n + (dispute_opens(st) ? 256 + 256 + 1 + 768 : 8);
+  if (!dispute_opens(st)) return n + 8;
+  return n + 256 + 256 + 1 + (dispute_node_t(st) ? 768 : 0);
 }
 
 // Fiat-Shamir starts from the statement: the public key, the ciphertext,
@@ -835,7 +839,9 @@ bool verify_dispute(const DisputeProof& dp, const Instance& in,
 // In the order of DISPUTE_STATEMENT and of the benchmarks' arguments.
 const Statement kStatements[] = {
     Statement::kWrap, Statement::kWholeDecapsulation,
-    Statement::kReencryptionDiffers, Statement::kWrongSecret};
+    Statement::kReencryptionDiffers, Statement::kWrongSecret,
+    Statement::kWrongSecretShort};
+constexpr size_t kNumStatements = sizeof(kStatements) / sizeof(kStatements[0]);
 
 // The node key of a secret, as cityg-core's node_key derives it.
 std::vector<uint8_t> node_public_key(const uint8_t secret[32]) {
@@ -901,7 +907,7 @@ std::unique_ptr<Instance> wrong_secret_instance(uint64_t n,
 // or with a wrap that opens to the wrong secret.
 std::unique_ptr<Instance> statement_instance(Statement st, uint64_t n) {
   if (st == Statement::kReencryptionDiffers) return tweaked_instance(n, 700);
-  if (st == Statement::kWrongSecret) return wrong_secret_instance(n);
+  if (dispute_opens(st)) return wrong_secret_instance(n);
   return n < 3 ? vector_instance(n) : random_instance(n);
 }
 
@@ -964,6 +970,9 @@ TEST(Dispute, AReencryptionThatDiffers) {
 TEST(Dispute, TheWrapOpensToTheWrongSecret) {
   check_statement(Statement::kWrongSecret);
 }
+TEST(Dispute, TheWrapOpensToTheWrongSecretShort) {
+  check_statement(Statement::kWrongSecretShort);
+}
 
 // Branch 2 on cityg-core's wrap. The witness opens the vector's secret and
 // derives cityg-core's node key from it; the proof finds where pk_v
@@ -1011,6 +1020,43 @@ TEST(Dispute, TheWrongSecretAtEachPlace) {
   ASSERT_NE(odd, nullptr);
   EXPECT_FALSE(NodeStatement(odd->wrap.pk_v.data()).t_canonical);
   EXPECT_FALSE(dw.compute(odd->key, odd->ct, odd->d, st, odd->wrap));
+}
+
+// The short statement of branch 2 on the same wraps: it convicts when the
+// matrix seed or pk_X differs, at a place among those 257 that it does not
+// reveal; when only t differs, it has no witness, and the full statement
+// is needed.
+TEST(Dispute, TheShortStatementCoversTheSeedAndPkX) {
+  set_log_level(ERROR);
+  const Statement st = Statement::kWrongSecretShort;
+  DisputeProof dp;
+  dp.st = st;
+  dp.circuit = dispute_circuit(st);
+  const size_t seed_end = 256;
+  for (Wrong wrong : {Wrong::kSeed, Wrong::kPkX}) {
+    auto in = wrong_secret_instance(0, wrong);
+    ASSERT_NE(in, nullptr);
+    DWitness dw(f25519);
+    ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, st, in->wrap));
+    EXPECT_EQ(hex(dw.node().rho, 32), kWrap.node_rho);
+    EXPECT_EQ(hex(dw.node_pk_x(), 32), kWrap.node_pk_x);
+    if (wrong == Wrong::kSeed) EXPECT_LT(dw.place(), seed_end);
+    if (wrong == Wrong::kPkX) EXPECT_EQ(dw.place(), seed_end);
+    ASSERT_TRUE(prove_dispute(dp, *in, dw));
+    EXPECT_TRUE(verify_dispute(dp, *in, dw));
+  }
+  auto only_t = wrong_secret_instance(0, Wrong::kT);
+  ASSERT_NE(only_t, nullptr);
+  DWitness dw(f25519);
+  EXPECT_FALSE(dw.compute(only_t->key, only_t->ct, only_t->d, st,
+                          only_t->wrap));
+  auto honest = wrong_secret_instance(0, Wrong::kNothing);
+  ASSERT_NE(honest, nullptr);
+  EXPECT_FALSE(dw.compute(honest->key, honest->ct, honest->d, st,
+                          honest->wrap));
+  EXPECT_FALSE(dw.compute(honest->key, honest->ct, honest->d, st,
+                          honest->wrap, seed_end));
+  EXPECT_FALSE(prove_dispute(dp, *honest, dw));
 }
 
 TEST(Dispute, WrongWitnessesGiveNoProof) {
@@ -1091,15 +1137,20 @@ void reset_peak_rss() {
   }
 }
 
+// The statement that DISPUTE_STATEMENT names by its index in kStatements,
+// 0 to 4; the first by default.
+Statement env_statement() {
+  const char* env = getenv("DISPUTE_STATEMENT");
+  size_t m = env == nullptr ? 0 : static_cast<size_t>(atoi(env));
+  return kStatements[m % kNumStatements];
+}
+
 // The memory of the compiler, the prover and the verifier, each measured
-// from its own start, for the statement DISPUTE_STATEMENT (0 to 3, in the
-// order of kStatements) alone, so that a process measures one statement.
-// Run with --gtest_also_run_disabled_tests.
+// from its own start, for the statement DISPUTE_STATEMENT alone, so that a
+// process measures one statement. Run with --gtest_also_run_disabled_tests.
 TEST(Dispute, DISABLED_Memory) {
   set_log_level(ERROR);
-  const char* env = getenv("DISPUTE_STATEMENT");
-  size_t m = env == nullptr ? 0 : static_cast<size_t>(atoi(env)) % 4;
-  const Statement st = kStatements[m];
+  const Statement st = env_statement();
   reset_peak_rss();
   std::unique_ptr<Circuit<F25519>> circuit = make_dispute_circuit(st);
   long compiled = peak_rss_mb();
@@ -1130,9 +1181,7 @@ TEST(Dispute, DISABLED_Memory) {
 // --gtest_also_run_disabled_tests.
 TEST(Dispute, DISABLED_Serialized) {
   set_log_level(ERROR);
-  const char* env = getenv("DISPUTE_STATEMENT");
-  const Statement st =
-      kStatements[env == nullptr ? 0 : static_cast<size_t>(atoi(env)) % 4];
+  const Statement st = env_statement();
   const char* path = getenv("DISPUTE_CIRCUIT");
   if (path == nullptr) GTEST_SKIP() << "DISPUTE_CIRCUIT is not set";
   FILE* file = fopen(path, "rb");
@@ -1213,7 +1262,7 @@ void BM_DisputeProver(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_DisputeProver)
-    ->DenseRange(0, 3)
+    ->DenseRange(0, kNumStatements - 1)
     ->Iterations(3)
     ->Unit(benchmark::kMillisecond);
 
@@ -1234,7 +1283,7 @@ void BM_DisputeVerifier(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_DisputeVerifier)
-    ->DenseRange(0, 3)
+    ->DenseRange(0, kNumStatements - 1)
     ->Iterations(3)
     ->Unit(benchmark::kMillisecond);
 
@@ -1246,7 +1295,9 @@ void BM_DisputeWitness(benchmark::State& state) {
     benchmark::DoNotOptimize(dw.compute(in->key, in->ct, in->d, st, in->wrap));
   }
 }
-BENCHMARK(BM_DisputeWitness)->DenseRange(0, 3)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_DisputeWitness)
+    ->DenseRange(0, kNumStatements - 1)
+    ->Unit(benchmark::kMillisecond);
 
 }  // namespace
 }  // namespace proofs

@@ -22,6 +22,10 @@
 //     which convicts the committer as well. Ten permutations (G, the
 //     combiner, SHAKE256 of the seed, G of ML-KEM's key generation and six
 //     PRF), five compressions, one block and a third X25519 ladder.
+//   - kWrongSecretShort, branch 2 when pk' differs from pk_v in its matrix
+//     seed rho' or in its X25519 key, which is what a committer that seals
+//     another secret gives: as kWrongSecret, without the six PRF and t'.
+//     Four permutations.
 //   - kWholeDecapsulation: as kWrap, and the re-encryption of m' with the
 //     noise of PRF(r', N) = SHAKE256(r' || N), N = 0 to 6, gives the
 //     ciphertext back. Nine permutations.
@@ -55,6 +59,7 @@ namespace proofs {
 enum class Statement {
   kWrap,                 // branch 1: the wrap does not open
   kWrongSecret,          // branch 2: it opens to the wrong secret
+  kWrongSecretShort,     // branch 2, when rho' or pk_X' differs
   kWholeDecapsulation,   // branch 1, with the re-encryption
   kReencryptionDiffers,  // the ciphertext is invalid
 };
@@ -64,6 +69,7 @@ inline Reencryption lattice_mode(Statement st) {
   switch (st) {
     case Statement::kWrap:
     case Statement::kWrongSecret:
+    case Statement::kWrongSecretShort:
       return Reencryption::kNone;
     case Statement::kWholeDecapsulation:
       return Reencryption::kEqual;
@@ -80,7 +86,21 @@ inline bool dispute_combines(Statement st) {
 
 // Whether it opens the wrap (branch 2), or reveals its Poly1305 key.
 inline bool dispute_opens(Statement st) {
+  return st == Statement::kWrongSecret || st == Statement::kWrongSecretShort;
+}
+
+// Whether it derives the node key's t', with six PRF and an identity of the
+// lattice part.
+inline bool dispute_node_t(Statement st) {
   return st == Statement::kWrongSecret;
+}
+
+// Branch 2: the places where pk' and pk_v may differ, the 256 bits of the
+// matrix seed, the 768 coefficients of t if the statement derives it, and
+// pk_X.
+inline size_t dispute_places(Statement st) {
+  if (!dispute_opens(st)) return 0;
+  return 256 + (dispute_node_t(st) ? 3 * 256 : 0) + 1;
 }
 
 // The Keccak-f[1600] permutations of each statement.
@@ -90,6 +110,8 @@ inline size_t dispute_permutations(Statement st) {
       return 2;  // G, the combiner
     case Statement::kWrongSecret:
       return 10;  // G, the combiner, SHAKE256, G, PRF(sigma, 0..5)
+    case Statement::kWrongSecretShort:
+      return 4;  // G, the combiner, SHAKE256, G
     case Statement::kWholeDecapsulation:
       return 9;  // G, PRF(r', 0..6), the combiner
     case Statement::kReencryptionDiffers:
@@ -110,9 +132,6 @@ class DisputeCircuit {
   using X25519 = X25519Circuit<LogicCircuit, Field>;
   using Lattice = LatticeCircuit<LogicCircuit>;
   static constexpr size_t kBits = 256;
-  // Branch 2: the places where pk' and pk_v may differ, the 256 bits of
-  // the matrix seed, the 768 coefficients of t, and pk_X.
-  static constexpr size_t kPlaces = kBits + Lattice::kK * Lattice::kN + 1;
 
   // ExpandLabel's input, two blocks of 16 words, and the second block's
   // length as 32 bits.
@@ -128,13 +147,14 @@ class DisputeCircuit {
     ExpandInput key_info, nonce_info;  // "wrap key", "wrap nonce"
     std::array<EltW, 8> poly1305_key;  // the revealed words, branch 1
     // Branch 2: the sealed secret's 256 bits, then pk_v: the bits of its
-    // matrix seed, its X25519 key and t_v = NTT^-1(t_hat_v), in [0, q).
+    // matrix seed, its X25519 key and, if the statement derives t',
+    // t_v = NTT^-1(t_hat_v), in [0, q).
     std::vector<EltW> sealed, seed_v;
     EltW pk_x_v;
     std::vector<EltW> t_v;
     // Depend on rho, the point of the lattice part: they come last.
     typename Lattice::Public lattice;
-    typename Lattice::NodePublic node;  // branch 2
+    typename Lattice::NodePublic node;  // with t_v
 
     template <class Next>
     void read(Next&& next, Statement st) {
@@ -163,10 +183,10 @@ class DisputeCircuit {
         take(sealed, kBits);
         take(seed_v, kBits);
         pk_x_v = next();
-        take(t_v, Lattice::kK * Lattice::kN);
       }
+      if (dispute_node_t(st)) take(t_v, Lattice::kK * Lattice::kN);
       lattice.read(next, lattice_mode(st));
-      if (dispute_opens(st)) node.read(next);
+      if (dispute_node_t(st)) node.read(next);
     }
   };
 
@@ -174,9 +194,9 @@ class DisputeCircuit {
     std::unique_ptr<typename X25519::Witness> x25519;
     std::vector<std::unique_ptr<typename Sha3::BlockWitness>> keccak;
     typename Lattice::Witness lattice;
-    // Branch 2: t' = A_v s' + e', the ladder of pk_X' and the inverse of
-    // its last z_2, a one-hot selection of the place where pk' and pk_v
-    // differ, and the inverse of that difference.
+    // Branch 2: t' = A_v s' + e' if the statement derives it, the ladder
+    // of pk_X' and the inverse of its last z_2, a one-hot selection of the
+    // place where pk' and pk_v differ, and the inverse of that difference.
     typename Lattice::NodeWitness node;
     typename X25519::Ladder node_ladder;
     EltW node_inv;
@@ -198,11 +218,11 @@ class DisputeCircuit {
       }
       auto next = [&] { return lc.eltw_input(); };
       lattice.read(next, lattice_mode(st));
+      if (dispute_node_t(st)) node.read(next);
       if (dispute_opens(st)) {
-        node.read(next);
         node_ladder.input(lc);
         node_inv = next();
-        sel.resize(kPlaces);
+        sel.resize(dispute_places(st));
         for (auto& x : sel) x = next();
         sel_inv = next();
       }
@@ -315,9 +335,11 @@ class DisputeCircuit {
     lane(gk, 8) = lc_.template vbit<64>(uint64_t{0x80} << 56);
     sha3_.keccak_f_1600(gk, *w.keccak[block++]);
     // PRF(sigma', N), N = 0 to 5, gives s' and e'; t' = A_v s' + e'.
-    std::vector<EltW> node_prf = prfs(gk, 2 * Lattice::kK, w, block);
-    std::vector<EltW> t =
-        lattice_.node_key(p.lattice, p.node, w.node, node_prf);
+    std::vector<EltW> t;
+    if (dispute_node_t(st_)) {
+      std::vector<EltW> node_prf = prfs(gk, 2 * Lattice::kK, w, block);
+      t = lattice_.node_key(p.lattice, p.node, w.node, node_prf);
+    }
     // sk_X' is bytes 64 to 95 of SHAKE256's output.
     BitW sk[X25519::kSkBits];
     for (size_t i = 0; i < X25519::kSkBits; ++i) sk[i] = bit(x, 512 + i);
@@ -326,17 +348,21 @@ class DisputeCircuit {
     // pk' = (t', rho', pk_X') differs from pk_v at the selected place: the
     // difference there has an inverse. If rho' differs from pk_v's seed,
     // then so does pk', whatever t' the matrix A_v gives; if it does not,
-    // A_v is the matrix of pk', and t' its t.
+    // A_v is the matrix of pk', and t' its t. The short statement selects
+    // among rho' and pk_X' alone.
+    const size_t places = w.sel.size();
     for (const EltW& s : w.sel) lc_.assert_is_bit(s);
-    lc_.assert_eq(lc_.add(0, kPlaces, [&](size_t i) { return w.sel[i]; }),
+    lc_.assert_eq(lc_.add(0, places, [&](size_t i) { return w.sel[i]; }),
                   lc_.konst(1));
     EltW diff = lc_.add(0, kBits, [&](size_t i) {
       return lc_.mul(w.sel[i], lc_.sub(lc_.eval(bit(gk, i)), p.seed_v[i]));
     });
-    diff = lc_.add(diff, lc_.add(0, t.size(), [&](size_t l) {
-      return lc_.mul(w.sel[kBits + l], lc_.sub(t[l], p.t_v[l]));
-    }));
-    diff = lc_.add(diff, lc_.mul(w.sel[kPlaces - 1], lc_.sub(pk_x, p.pk_x_v)));
+    if (!t.empty()) {
+      diff = lc_.add(diff, lc_.add(0, t.size(), [&](size_t l) {
+        return lc_.mul(w.sel[kBits + l], lc_.sub(t[l], p.t_v[l]));
+      }));
+    }
+    diff = lc_.add(diff, lc_.mul(w.sel[places - 1], lc_.sub(pk_x, p.pk_x_v)));
     lc_.assert_eq(lc_.mul(diff, w.sel_inv), lc_.konst(1));
   }
 
