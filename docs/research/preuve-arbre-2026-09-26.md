@@ -138,6 +138,8 @@ Avantage ≤ (Q n)^2 · (ε_CCA(X-Wing) + ε_AEAD(ChaCha20-Poly1305)) + Q · ε_
 
 Le facteur `(Qn)^2` est la perte de TTKEM avec des oracles aléatoires. À un million de membres et `2^30` opérations, il retire 100 bits, et il en reste 92 à ML-KEM-768 (note [preuves et mesures](preuves-et-mesures-2026-09-26.md), section 4.2).
 
+Depuis (note [l'argument adaptatif](argument-adaptatif-2026-09-27.md), section 7) : le théorème de TTKEM compte en fait les sommets du graphe, `2N²` pour `N` secrets, et City-G en tire bien moins que `Qn`. Pour un million de membres pendant dix ans, `N ≈ 2^33` : la perte tombe à `2^67`, et il reste 125 bits à ML-KEM-768.
+
 ## 4. L'esquisse de la preuve
 
 La preuve passe du jeu réel à un jeu où le secret défié est un aléa indépendant de tout ce que voit l'adversaire.
@@ -191,6 +193,8 @@ Dans les deux lemmes, l'adversaire connaît l'init de l'époque précédente. C'
    - aux sauts.
 
    Le prédicat est prêt et chaque pas a son lemme ; il reste l'hybride global, avec l'ordre des remplacements et la devinette. C'est un travail de la taille d'un article.
+
+   Depuis (note [l'argument adaptatif](argument-adaptatif-2026-09-27.md)) : l'hybride global est ramené au jeu GSD modifié d'Alwen, Jost et Mularczyk, dont le théorème porte l'ordre des remplacements et la devinette. Il faut à City-G deux oracles de plus, `Encap` et `SEnc`, et deux lemmes, de simulation et combinatoire, qui couvrent les fenêtres à plusieurs committers, les entrants, les sauts et les relais. Restent à écrire en entier les extensions et l'invariant de cohérence, puis à les mécaniser.
 2. **Les initiés.** Pour la confidentialité, le prédicat compte déjà comme fuité tout ce qu'un committer ou un scelleur corrompu tire, et le pas 1 l'empêche de signer au nom d'un autre. Restent hors de la preuve :
    - la solidité des audits, où une entrée invalide échappe avec une probabilité d'environ `e^-AUDIT_K` (spécification, section 15) ;
    - celle des preuves de litige, qui désignent le fautif.

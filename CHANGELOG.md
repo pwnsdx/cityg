@@ -85,6 +85,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Research
 
+- The adaptive argument of the proof of the tree, in
+  [`docs/research/argument-adaptatif-2026-09-27.md`](docs/research/argument-adaptatif-2026-09-27.md)
+  (in French): the game reduced to the modified generalized selective
+  decryption game of Alwen, Jost and Mularczyk (Crypto 2022), whose theorem
+  carries the order of replacements and the guessing; two more oracles for
+  external inits, jumps and relays; a simulation lemma and a combinatorial
+  lemma resting on an invariant of coherence. The loss, counted in secrets
+  drawn rather than as `(Qn)²`: `2^67` for a million members over ten
+  years, 125 bits left to ML-KEM-768 instead of 92. The safety predicate
+  gains three traces of stage 1 and checks that every trace is an acyclic
+  GSD hypergraph whose challenge is a sink; the cost model of the open
+  problems counts the secrets.
+
 - A message plane for very large groups, proposed in
   [`docs/research/plan-de-messages-2026-09-26.md`](docs/research/plan-de-messages-2026-09-26.md)
   (in French) and not part of profile `city-g/v0.4`:

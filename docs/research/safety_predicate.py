@@ -16,11 +16,26 @@ the closure.
                        from k: k gives s
   welcome(j, i, l)     the joiner secret j sealed to the init key i, and for
                        a catch-up to the leaf key l too: j needs them all
+  relay_seal(s, k)     s sealed (AEAD) under a key derived from k, as a
+                       relay element seals the root under the island root
 
 Each trace mirrors a formal model, symbolic (ProVerif) or computational
-(CryptoVerif), and the script checks that the predicate calls the epoch
-safe exactly when the model proves its secret. It exits with status 1 if
-one of them disagrees.
+(CryptoVerif), or a scenario test, and the script checks that the predicate
+calls the epoch safe exactly when the model proves its secret. It exits
+with status 1 if one of them disagrees.
+
+The note `argument-adaptatif-2026-09-27.md` reduces the game to the
+modified GSD game of Alwen, Jost and Mularczyk (Crypto 2022). Each rule
+here is one of its oracles, or of the two this note adds:
+
+  derive -> Hash, extract -> Join-Hash, wrap -> Enc (with Dec for the
+  ciphertexts the service makes up), external init -> Encap, relay_seal ->
+  SEnc, and the welcome of a catch-up -> two Encap, a Join-Hash and an
+  SEnc.
+
+The script translates every trace into that hypergraph and checks what
+the GSD theorem requires of it: the graph is acyclic and the challenged
+secret is a sink. gsd-exp of the game is the closure computed here.
 
 Run: python3 docs/research/safety_predicate.py
 """
@@ -29,24 +44,40 @@ import sys
 
 
 class Trace:
-    """What the adversary sees and holds: rules and leaks."""
+    """What the adversary sees and holds: rules and leaks. Each rule is
+    (secret, inputs, GSD oracle)."""
 
     def __init__(self):
         self.rules = []
         self.leaked = set()
 
     def derive(self, out, source):
-        self.rules.append((out, (source,)))
+        self.rules.append((out, (source,), "Hash"))
 
     def extract(self, out, salt, ikm):
-        self.rules.append((out, (salt, ikm)))
+        self.rules.append((out, (salt, ikm), "Join-Hash"))
 
     def wrap(self, secret, key_source):
-        self.rules.append((secret, (key_source,)))
+        self.rules.append((secret, (key_source,), "Enc"))
+
+    def encap(self, out, key_source):
+        """out := a secret hashed from an X-Wing encapsulation to the key
+        pair derived from key_source (an external init)."""
+        self.rules.append((out, (key_source,), "Encap"))
+
+    def relay_seal(self, secret, key_source):
+        self.rules.append((secret, (key_source,), "SEnc"))
 
     def welcome(self, joiner, init_key, leaf_key=None):
-        inputs = (init_key,) if leaf_key is None else (init_key, leaf_key)
-        self.rules.append((joiner, inputs))
+        if leaf_key is None:
+            self.wrap(joiner, init_key)
+            return
+        # A catch-up: two encapsulations, their secrets combined by Extract,
+        # and the joiner secret sealed under a key derived from the result.
+        self.encap(f"ss_{init_key}", init_key)
+        self.encap(f"ss_{leaf_key}", leaf_key)
+        self.extract(f"welcome_{joiner}", f"ss_{init_key}", f"ss_{leaf_key}")
+        self.relay_seal(joiner, f"welcome_{joiner}")
 
     def leak(self, *secrets):
         self.leaked.update(secrets)
@@ -72,7 +103,7 @@ class Trace:
     def entrant_window(self, n, root):
         """A window an entrant seals: an external init, encapsulated to the
         external key of epoch n - 1, replaces init_{n-1}."""
-        self.derive(f"external_init{n}", f"external{n - 1}")
+        self.encap(f"external_init{n}", f"external{n - 1}")
         self.window(n, f"external_init{n}", root)
 
     def known(self):
@@ -80,7 +111,7 @@ class Trace:
         changed = True
         while changed:
             changed = False
-            for out, inputs in self.rules:
+            for out, inputs, _ in self.rules:
                 if out not in known and all(source in known for source in inputs):
                     known.add(out)
                     changed = True
@@ -88,6 +119,34 @@ class Trace:
 
     def safe(self, secret):
         return secret not in self.known()
+
+    def gsd_shape(self, challenge):
+        """What the GSD theorem requires of the translated hypergraph: it is
+        acyclic, and the challenged secret is a sink. Returns the oracles
+        used, or raises."""
+        parents = {}
+        for out, inputs, _ in self.rules:
+            parents.setdefault(out, set()).update(inputs)
+        state = {}
+
+        def visit(node):
+            if state.get(node) == "done":
+                return
+            if state.get(node) == "open":
+                raise ValueError(f"cycle through {node}")
+            state[node] = "open"
+            for parent in parents.get(node, ()):
+                visit(parent)
+            state[node] = "done"
+
+        for node in list(parents):
+            visit(node)
+        if any(challenge in inputs for _, inputs, _ in self.rules):
+            raise ValueError(f"the challenge {challenge} is not a sink")
+        for out, inputs, oracle in self.rules:
+            if (len(inputs) == 2) != (oracle == "Join-Hash"):
+                raise ValueError(f"{out}: an AND edge that is not a Join-Hash")
+        return {oracle for _, _, oracle in self.rules}
 
 
 # ---------- the profile (docs/formal/, and its computational counterparts) ----------
@@ -247,12 +306,37 @@ def relay(root_known):
     """A relay item and a flat item carry the window secret of an îlot, under
     the relay key and to the X-Wing key of the îlot's root."""
     t = Trace()
-    t.derive("relay_key", "root_i")
-    t.wrap("r", "relay_key")
+    t.relay_seal("r", "root_i")
     t.wrap("r", "root_i")
     if root_known:
         t.leak("root_i")
     return t, "r"
+
+
+def island_removal(rekeyed, top):
+    """Stage 1 of the v0.5 draft. Îlot j holds A and M, îlot i holds B;
+    window 2 removes M, which gives the service the secrets of epoch 1 and
+    the old root of j. The window re-keys j (or not), and the root secret
+    reaches the îlots by the top: flat elements to the îlot roots, or a
+    relay element for j, the refresh of A (the latest wraps above j) and a
+    flat element for i."""
+    t = Trace()
+    t.leak("epoch1", "sj1", "leaf_M")
+    t.epoch_secrets(1)
+    sj = "sj2" if rekeyed else "sj1"
+    if rekeyed:
+        t.wrap("sj2", "leaf_A")
+    t.wrap("p2", sj)
+    t.wrap("p2", "si")
+    t.derive("r2", "p2")
+    if top == "flat":
+        t.wrap("r2", sj)
+        t.wrap("r2", "si")
+    else:
+        t.relay_seal("r2", sj)
+        t.wrap("r2", "si")
+    t.window(2, "init1", "r2")
+    return t, "msg2"
 
 
 def city(maintained, second_colludes):
@@ -329,6 +413,12 @@ TRACES = [
     ("weak generator, unhedged", lambda: weak_rng(False), "weak_rng_unhedged.ocv", False),
     ("relay", lambda: relay(False), "ilot_relay.pv, relay.ocv", True),
     ("relay, root known", lambda: relay(True), "relay_known_root.ocv", False),
+    ("îlot removal, flat elements", lambda: island_removal(True, "flat"),
+     "ilot_removal.pv", True),
+    ("îlot removal, îlot not re-keyed", lambda: island_removal(False, "flat"),
+     "ilot_removal_unrekeyed.pv", False),
+    ("îlot removal, relay and refresh", lambda: island_removal(True, "relay"),
+     "islands.rs: a_removed_member_opens_no_top...", True),
     ("city maintained", lambda: city(True, True),
      "ilot_city_maintained.pv, city_maintained.ocv", True),
     ("city stale", lambda: city(False, True), "ilot_city_stale.pv, city_stale.ocv", False),
@@ -342,14 +432,18 @@ def main():
     print("The safety predicate of the proof sketch, against the formal models")
     print(f"  {'trace':<32} {'secret':<7} {'predicate':<9} {'models':<9} agree")
     disagree = 0
+    oracles = set()
     for name, build, models, proved in TRACES:
         trace, secret = build()
         safe = trace.safe(secret)
         agree = safe == proved
         disagree += not agree
+        oracles |= trace.gsd_shape(secret)
         print(f"  {name:<32} {secret:<7} {'safe' if safe else 'exposed':<9}"
               f" {'proved' if proved else 'attack':<9} {'yes' if agree else 'NO'}   {models}")
     print(f"  {len(TRACES)} traces, {len(TRACES) - disagree} agree with their models")
+    print(f"  as GSD hypergraphs: all acyclic, each challenge a sink; oracles used:"
+          f" {', '.join(sorted(oracles))}")
     return 1 if disagree else 0
 
 

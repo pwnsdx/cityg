@@ -245,6 +245,8 @@ Le nouvel ordre :
 
 La note [preuves et mesures](preuves-et-mesures-2026-09-26.md) reprend cet ordre : elle mesure le litige, prouve l'authentification du relais et des témoins, écrit le plan de preuve de l'arbre et recommande HKDF pour `Extract`. Elle trouve aussi une faille du saut de la v0.4 sous clé d'appareil volée, et la corrige.
 
+Depuis : la preuve de l'arbre sous corruptions adaptatives est ramenée au jeu GSD modifié (note [l'argument adaptatif](argument-adaptatif-2026-09-27.md)), et l'étape 1 du profil candidat est spécifiée et implémentée ([brouillon v0.5](../specs-v0.5-draft.md)).
+
 ## 8. Modèles et reproductibilité
 
 - `docs/research/formal-computational/run.sh [chemin/de/cryptoverif]` : les 14 modèles en une vingtaine de secondes. Le job des modèles formels de la CI construit CryptoVerif 2.13, somme de contrôle vérifiée, et les lance ; le script de CI locale les lance quand `cryptoverif` est installé.

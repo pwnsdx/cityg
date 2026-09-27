@@ -186,6 +186,7 @@ La note [problèmes ouverts](problemes-ouverts-2026-09-26.md) les reprend dans c
 1. **Une preuve calculatoire.**
    - *Pourquoi.* Toutes les garanties de la section 4 reposent sur un modèle symbolique à primitives idéales. Trois points n'ont pas d'équivalent dans les analyses de MLS : des clés d'arbre stables pendant des fenêtres, protégées par la seule chaîne d'init ; des fenêtres d'entrant dont le secret de commit est une constante publique ; des secrets tirés par des entrants, que la règle des taches suit.
    - *Prochain pas.* Un modèle [CryptoVerif](https://bblanche.gitlabpages.inria.fr/CryptoVerif/) du calendrier de clés d'une fenêtre (init, secret de commit, joiner secret, tag), puis une preuve par jeux de la règle des taches, dans le cadre des analyses de TreeKEM ([Alwen et al., Crypto 2020](https://eprint.iacr.org/2019/1189)).
+   - *Depuis* ([l'argument adaptatif](argument-adaptatif-2026-09-27.md)) : la preuve de l'arbre entier est ramenée au jeu GSD modifié d'Alwen, Jost et Mularczyk, avec une perte `2N²` comptée en secrets, soit `2^67` pour un million de membres pendant dix ans.
 2. **Les preuves de litige pour X-Wing.**
    - *Pourquoi.* Elles désignent le client qui envoie une enveloppe fausse. Sans elles, la réparation marche, mais le fautif reste inconnu, et un client hostile peut couper un îlot à chaque tâche qu'il reçoit.
    - *Où on en est.* Modélisées comme des preuves idéales de déchiffrement (`wrap_dispute.pv`) ; le litige économique, qui révélerait le secret partagé de l'encapsulation, est rejeté (`wrap_dispute_replay.pv`).

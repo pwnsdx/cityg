@@ -18,7 +18,12 @@ It prints:
      corruptions lose, for a group of n members after Q operations: (Q n)^2
      with random oracles, Q^log2(n) in the standard model (Tainted TreeKEM,
      IEEE S&P 2021), and the bits of security a loss L leaves of the kappa a
-     primitive offers, kappa - log2(L).
+     primitive offers, kappa - log2(L);
+  5. the same loss counted as the GSD theorem counts it, 2 N^2 for a graph
+     of N secrets (Tainted TreeKEM, Theorem 3), with N the secrets City-G
+     draws over the life of a group: the new node secrets of every window,
+     its fresh draws, leaf keys, init keys and the key schedule
+     (`argument-adaptatif-2026-09-27.md`).
 
 Keccak permutations are counted from the byte lengths of FIPS 203 and of
 X-Wing; the matrix A of ML-KEM is sampled from the public seed rho of the
@@ -230,6 +235,49 @@ def report_adaptive():
     print()
 
 
+def distinct_ancestors(height, changed, level):
+    """Expected number of distinct ancestors at `level` of `changed` leaves
+    drawn uniformly among 2^height."""
+    bins = 2 ** (height - level)
+    return bins * (1 - (1 - 1 / bins) ** changed)
+
+
+def secrets_per_window(height, district_bits, changed):
+    """Vertices a window adds to the GSD graph: the new node secrets (every
+    ancestor of a changed leaf), for each fresh draw its random input and the
+    Extract that hedges it, a leaf key per changed leaf, an init key for half
+    of them (the joins), and eight of the key schedule (commit, joiner, epoch,
+    init, msg, confirm, external, the tag)."""
+    nodes = sum(distinct_ancestors(height, changed, level) for level in range(1, height + 1))
+    fresh = distinct_ancestors(height, changed, 1)
+    if height > district_bits:
+        fresh += distinct_ancestors(height, changed, district_bits + 1)
+    return nodes + 2 * fresh + 1.5 * changed + 8
+
+
+def report_secret_count():
+    print("5. The same loss counted in secrets: 2 N^2 for a GSD graph of N secrets (Tainted TreeKEM, Th. 3)")
+    print(f"   {'members':>9} {'window':>7} {'years':>5} {'secrets N':>10} {'loss 2 N^2':>11}"
+          f" {'bits left, ML-KEM-768':>21} {'bits left, X25519':>17} {'(Q n)^2, Q = changes':>21}")
+    rate = 1.7                                 # changes per second per million members
+    for log_n in (20, 24):
+        for window in (60, 300):
+            for years in (1, 10, 50):
+                changed = rate * (2 ** log_n / 2 ** 20) * window
+                windows = years * 365.25 * 86400 / window
+                n_secrets = windows * secrets_per_window(log_n, 12, changed)
+                bits = 1 + 2 * math.log2(n_secrets)
+                changes = rate * (2 ** log_n / 2 ** 20) * years * 365.25 * 86400
+                old = 2 * (math.log2(changes) + log_n)
+                x25519 = f"{128 - bits:.0f}" if bits < 128 else "none"
+                print(f"   {'2^%d' % log_n:>9} {'%d s' % window:>7} {years:>5} {'2^%.1f' % math.log2(n_secrets):>10}"
+                      f" {'2^%.0f' % bits:>11} {192 - bits:>21.0f} {x25519:>17} {'2^%.0f' % old:>21}")
+    print("   (a window re-keys about D log2(n/D) nodes for its D changed leaves, far fewer than the n")
+    print("   secrets per operation the bound (Q n)^2 allows; relay and flat elements add edges, not")
+    print("   vertices. X-Wing holds if either ML-KEM-768 or X25519 does)")
+    print()
+
+
 def main():
     print("Cost model of the open problems beyond v0.4.")
     print()
@@ -237,6 +285,7 @@ def main():
     report_witnesses()
     report_cards()
     report_adaptive()
+    report_secret_count()
 
 
 if __name__ == "__main__":
