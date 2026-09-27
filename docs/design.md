@@ -9,7 +9,8 @@
 
 The research note says why this design and what it costs. This note
 records its decisions (E-1 to E-14 for v0.4, E-15 and E-16 for stage 1 of
-the v0.5 draft), what each one costs, and what was left out.
+the v0.5 draft, E-17 for its stage 2), what each one costs, and what was
+left out.
 
 ## Starting point
 
@@ -419,12 +420,41 @@ delay of a removal by nothing but the next commit.
 **Cost.** A member that leaves may read what is sent for up to
 `WINDOW_ORDINARY` after its request.
 
+<a id="e-17"></a>
+### E-17 — Tasks: sub-cities, joiners, repairs (v0.5 draft, stage 2)
+
+**Decision.** The city is re-keyed by *city tasks*, one per sub-city of
+`2^S` districts (`S = 8`) and one for the top, over the new roots of the
+tier below; the task holding the root draws the root secret, and the
+sealer draws nothing: it follows the tasks along its path and signs.
+Districts default to islands (`L = c = 8`). A district commit or a city
+task may be performed by a joiner of the window, `[leaf, n]` as an entrant
+already is, which checks the state against its chain of seals and hedges
+with its leaf seed; the DS gives tasks to joiners first. Entries carry the
+island path and a top. A member a faulty task cut off is repaired with the
+root secret wrapped to its leaf key, and updates. Disputes name the faulty
+performer (their proof system is still open).
+
+**Why.** In v0.4 the sealer re-keys the whole city: in a burst of 100,000
+joins and 100,000 departures at a million members, the heaviest role took
+0.6 s and a faulty district commit cut off 4,096 members. Joiners are
+online by definition and become members of the epoch anyway, so the work
+of a window is the price of their entry (research note îlots, section
+2.3). With tasks of a district or a sub-city, the heaviest task takes 42 ms
+and a faulty one cuts off at most 256 members, repaired within the window.
+
+**Cost.** A joiner that performs a task first follows the chain of seals
+from its anchor; its hedge rests on its own leaf seed, not on a group
+secret. Every task binds the state it was built on. The DS learns which
+joiners stay online.
+
 ## Parameters
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `L` (`district_bits`) | 12 | A district holds `2^L` leaves; fixed at genesis |
+| `L` (`district_bits`) | 12 | A district holds `2^L` leaves; fixed at genesis; 8 in stage 2 of the v0.5 draft |
 | `c` (`island_bits`) | 8 | An island holds `2^c` leaves, `c <= L`; fixed at genesis (v0.5 draft) |
+| `S` (`subcity_bits`) | 8 | A sub-city holds `2^S` districts; fixed at genesis (v0.5 draft, stage 2) |
 | `WINDOW_MAX` | 60 s | Longest window; `WINDOW_ORDINARY` in the v0.5 draft, 5 minutes for a million members |
 | `WINDOW_REMOVAL` | 5 s | Window length when a removal is pending; `WINDOW_URGENT` in the v0.5 draft, for urgent removals only |
 | `UPDATE_INTERVAL` | 7 days | A member updates its leaf key at least this often (post-compromise security; forward secrecy comes from the init chain) |

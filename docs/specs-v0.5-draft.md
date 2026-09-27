@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stages 2 and 3 (sections 3 and 4) are outlined, with their labels reserved, and not implemented. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes; stage 3 (section 4) is outlined, with its labels reserved. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
 | Implementation | [`crates/cityg-core`](../crates/cityg-core) (stage 1) |
 | Design | [design.md](design.md) (decisions E-15 and E-16) |
@@ -36,7 +36,7 @@ windows and roles, and changes how members read the tree:
 
 1. [Three stages](#1-stages)
 2. [Stage 1: islands, relays and cadence](#2-stage-1)
-3. [Stage 2: island tasks (outline)](#3-stage-2)
+3. [Stage 2: tasks](#3-stage-2)
 4. [Stage 3: parity (outline)](#4-stage-3)
 5. [Label registry](#5-labels)
 6. [Changes from v0.4](#6-changes)
@@ -52,7 +52,7 @@ earlier ones.
 | Stage | What changes | What it brings | In this draft |
 | --- | --- | --- | --- |
 | 1. Relays and cadence | Members read the tree by island: the root secret comes from a relay of their island, a flat element or a refresh. Urgent and ordinary removals. Districts and the roles of v0.4 do not change. | At a million members, 1.7 changes per second and 5-minute windows, following the group costs about 94 KB per day, against 1.8 MB for whole paths with the same windows, and 44 MB for v0.4 with a window every 5 seconds per departure (research model, section 2.11). | Specified (section 2) and implemented |
-| 2. Island tasks | Islands become the districts; committers and the sealer become tasks; joiners re-key their own paths and share the city; disputes proved in zero knowledge and repairs. | No visible committer role; a task cuts off at most 256 members; the heaviest task of a burst takes 42 ms instead of 0.6 s; a joiner no longer reads the upper levels. | Outline (section 3) |
+| 2. Tasks | Islands become the districts; the city is re-keyed by sub-city tasks and a top task; joiners perform tasks first; the sealer draws nothing; entries by island; repairs; disputes. | No committer role beyond small tasks; a task cuts off at most 256 members; the heaviest task of a burst takes 42 ms instead of 0.6 s; a joiner no longer reads the upper levels. | Specified (section 3); disputes lack their proof system |
 | 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, split leaves, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Outline (section 4) |
 
 <a id="2-stage-1"></a>
@@ -406,31 +406,244 @@ of 5 minutes, islands of `2^8`:
   tasks per member per day, spread over the members online.
 
 <a id="3-stage-2"></a>
-## 3. Stage 2: island tasks (outline)
+## 3. Stage 2: tasks
 
-Not specified in detail and not implemented. From the research synthesis
-(sections 3.3 and 3.6) and the notes on re-keys by the server and on
-disputes:
+Stage 2 splits the work of a window into *tasks* that members of the
+previous epoch and the window's joiners perform, so that no client re-keys
+more than a sub-city, and a faulty task cuts off at most one district. The
+tree, the key schedule, the windows and the reading of stage 1 do not
+change. From the research synthesis (sections 3.3 and 3.6), the îlots note
+(sections 2.2 to 2.8) and the notes on re-keys by the server and disputes.
 
-* **Islands become the districts** (`L = c`). A district commit becomes an
-  *island task*; the levels above the islands are re-keyed by *city tasks*,
-  in sub-cities of 256 islands, one of which draws the top four levels and
-  `r_n`; the seal becomes a task for a member of the previous epoch.
-* **Joiners do the work.** A joiner that takes a leaf a departure frees
-  re-keys its own path (8 wraps); tasks go first to the window's joiners,
-  who are online by definition, then to members online.
-* **Entries** carry the island path and a top: a joiner no longer reads
-  the upper levels.
-* **Disputes.** A member that cannot open a wrap proves it in zero
-  knowledge, without revealing its key or a past secret: the statements
-  measured in the research notes (the wrap opens badly, it opens on a wrong
-  secret, the whole decapsulation, the re-encryption differs). The DS then
-  excludes the faulty client from tasks.
-* **Repairs.** Any member holding `r_n` seals it to the root of an island
-  a city task cut off (a flat element), or to the leaf keys of the members
-  an island task cut off, at most 256.
+### 3.1 Sub-cities
 
-Labels reserved for it: section 5.5.
+```text
+subcity_bits (S)  := 8 by default, fixed at genesis, S >= 1
+sub-city k        := the subtree of 2^S districts under node (L + S, k)
+top               := the levels L + S + 1 .. height, when height > L + S
+```
+
+* Stage 2 sets the defaults to `L = c = 8`: a district is an island of 256
+  leaves, and a district commit re-keys one island. A group MAY keep
+  `c < L`.
+* `subcity_bits` is bound where `island_bits` is: the seal header, the
+  group context and checkpoints, after `island_bits`.
+* A tree no taller than `L` has no city. A tree of height `L < height <= L
+  + S` has one sub-city, whose root is the tree root, and no top. A taller
+  tree has `2^(height - L - S)` sub-cities and a top. For a million members
+  (`height = 20`), the sub-cities hold the city levels 9 to 16 and the top
+  the levels 17 to 20.
+
+### 3.2 City tasks
+
+The city of v0.4 §7.3, which the sealer re-keyed alone, is re-keyed by one
+*city task* per sub-city of the window, and one for the top:
+
+```text
+CityTask := ["city-g/city-task/v5", gid, epoch, part, height, prev_part_hash,
+             performer, nodes, wraps, part_hash, signature]
+  part   := k (sub-city k) or null (the top)
+  nodes  := [[level, index, public_key or null], ...]       in plan order
+  wraps  := [Wrap, ...]                                     in plan order
+```
+
+Signed by its performer (section 3.3) under `CITY_TASK`
+(`city-g/city-task/v5`).
+
+* **Sub-cities of a window.** Those holding a district of the window or a
+  forced city node at levels `L + 1` to `L + S` (v0.4 §10.2).
+* **The top of a window.** When `height > L + S` and the window has a
+  sub-city, or a forced node above `L + S`.
+* **Plans** (v0.4 §7.3). The plan of sub-city `k` re-keys every ancestor,
+  at levels `L + 1` to `min(L + S, height)`, of the root of each district
+  of the window in the sub-city, and every forced city node of those levels
+  in it with its ancestors up to the sub-city root; its boundary is level
+  `L + 1`. The top's plan re-keys every ancestor, at levels `L + S + 1` to
+  `height`, of the root of each sub-city of the window, and every forced
+  node above `L + S` with its ancestors up to the root; its boundary is
+  level `L + S + 1`.
+* **Keys of wrap targets.** As v0.4 §7.3, with the new key of a district
+  root from its district commit in a sub-city task, and the new key of a
+  sub-city root from its city task in the top's.
+* **The root secret.** The task whose plan holds the root draws `r_n`: the
+  top's, else sub-city 0's, else, with no city, the district commit.
+* **Hashes.** `prev_part_hash` is the hash of the part's root (node `(L +
+  S, k)`, or the tree root for the top) in the tree before the window,
+  grown to the window's height; `part_hash` is its hash after the
+  window's district commits and the task's nodes, each node tainted by the
+  performer. They bind a task to the state it was built on, as
+  `prev_district_hash` binds a district commit.
+
+A verifier (the DS, the sealer) checks a city task as a district commit
+(v0.4 §10.3): its fields, its performer, its plan with the new roots of
+the tier below, its hashes, and its signature.
+
+### 3.3 Performers
+
+A district commit's `committer` and a city task's `performer` are an
+occupancy:
+
+* **a member**: `[leaf, since]`, a member of epoch `n - 1` that the window
+  does not affect (v0.4 §10.5), with the device key of the tree;
+* **a joiner**: `[leaf, n]`, where `leaf` is the leaf of a join of the
+  window, with the device key of that join request, as for an entrant
+  (v0.4 §10.5). Its join MUST be among the window's changes.
+
+A joiner holds no group secret before its welcome. Before its task, it
+follows the chain of seals from its anchor to epoch `n - 1` (v0.4 §12.9,
+step 3) and checks the public state it is shown against the last header
+(v0.4 §12.3). Its fresh secrets are hedged (v0.4 §7.1) with
+
+```text
+hedge := ExpandLabel(leaf_seed, "task hedge", CBOR_det([gid, epoch]), 32)
+```
+
+where `leaf_seed` is the seed of the leaf key of its join request, instead
+of `init_n-1`, which it does not know. A member hedges with `init_n-1`, as
+in v0.4.
+
+The nodes a task re-keys are tainted by its performer: a joiner's taints
+follow the occupancy `[leaf, n]` it takes (v0.4 §10.6).
+
+### 3.4 Assigning tasks
+
+Replaces the member window of v0.4 §14.4.
+
+* **Joiners first.** Joiners are online when they ask to join. The DS
+  gives each district of the window to a joiner of the window that takes a
+  leaf of the district, if there is one, else to a joiner with no task,
+  else to a volunteer of the district, else to volunteers in turn.
+* **City tasks** go to joiners with no task, then to volunteers.
+* **The sealer** is a volunteer: a member of epoch `n - 1` that the window
+  does not affect. Welcomes are assigned as in v0.4 §11.
+* **Failover.** A task not submitted in time goes to another performer, as
+  a district in v0.4 §14.4; the replaced performer's task is refused.
+* **Entrant windows** do not change: the entrant performs every task and
+  seals (v0.4 §12.7).
+
+### 3.5 Sealing
+
+The sealer:
+
+1. checks every district commit and city task of the window (v0.4 §10.3
+   and section 3.2), and the joins of their joiner performers;
+2. follows the tasks along its own path, from its leaf to the root, as a
+   member follows a whole packet (v0.4 §7.4), and obtains `r_n`; an island
+   follower refreshes first (section 2.5);
+3. computes the key schedule and the confirmation tag, and signs the seal
+   (v0.4 §10.4).
+
+It draws nothing. The seal body lists the tasks:
+
+```text
+SealBody := ["city-g/seal-body/v5", [[district, H(district commit)], ...],
+             [[part, H(city task)], ...], group_policy or null, genesis or null]
+```
+
+in district order, then sub-city order with the top last. It replaces
+`city_nodes` and `city_wraps`. The DS checks a seal as in v0.4 §10.4,
+with every city task in place of the city's nodes and wraps (item 6).
+
+A window is applied as in v0.4 §10.6, every node of a city task taking its
+performer's taint.
+
+### 3.6 Entries by island
+
+An entry (v0.4 §13.4) carries, instead of the whole path:
+
+* the steps of the entrant's path up to its island root, with the parents
+  of that part of its path, which it checks as in v0.4 §12.9;
+* the root's node (its key and taint), whose content hash is the last step
+  of the entry's leaf proof;
+* a top for the window it enters (section 2.8): its island's relay
+  element, else its flat element, else a refresh.
+
+The entrant takes `r_n` from the top and MUST check that the root's key
+derives from it (`KemKey(r_n, "tree node key")`). It then follows as an
+island follower. An entry with a refresh is the entry of v0.4.
+
+### 3.7 Repairs
+
+A member whose packet it cannot follow with any top (section 2.8), because
+a task's wrap to it does not open, asks the DS for a repair:
+
+```text
+Repair := ["city-g/repair/v5", gid, epoch, leaf, wrap]
+  wrap := r_n wrapped (v0.4 §7.2) from the root (height, 0) to the leaf (0, leaf)
+```
+
+* **Who makes it.** Any member of epoch `n` holding `r_n` that the DS
+  asks, with the leaf key of the tree of epoch `n`, checked against its
+  header. A task that cuts off a district costs at most `2^L` repairs;
+  one that cuts off a sub-city, one flat element per island (section 2.4).
+* **Unsigned**, like a flat element: the member opens it with its leaf
+  key, derives the epoch, and checks the tag.
+* **After a repair**, the member holds `r_n` but no valid path: it MUST
+  ask for an update at once (v0.4 §12.6), and follows by repair until the
+  window of its update re-keys its path.
+
+### 3.8 Disputes
+
+A member that cannot open a wrap addressed to it proves so without
+revealing its key or a past secret:
+
+```text
+Dispute := ["city-g/dispute/v5", gid, epoch, task, wrap_index, branch, proof,
+            member, signature]
+  task   := H(district commit) or H(city task)
+  branch := 1 (the wrap does not open under the member's key in its context)
+          | 2 (it opens to a secret whose node key is not the published one)
+```
+
+signed by the member under `DISPUTE`. `proof` is a zero-knowledge proof of
+the branch's statement, over the member's key and the wrap in its context
+(research notes on disputes: `litige-entier`, `litige-deux-branches`).
+
+* The DS checks the signature, that the wrap is addressed to a node the
+  member holds, and the proof. It then excludes the performer from tasks,
+  and the next window treats the performer as affected: it re-keys every
+  node the performer taints (v0.4 §10.2).
+* **Not fixed by this draft**: the proof system and the encoding of
+  `proof`. Until they are, a DS MAY exclude a performer on repairs it made
+  necessary, without conviction.
+
+### 3.9 Security considerations
+
+* **Joiners draw secrets of the epoch they enter.** A joiner performer
+  knows the secrets of the nodes it re-keys, `r_n` for the task that holds
+  the root. It is a member of epoch `n`: it learns no more than its welcome
+  gives it. Without `init_n-1`, `r_n` does not give the epoch.
+* **The hedge of a joiner** rests on the seed of its leaf key, which no
+  member of the group knows: a weak generator at task time alone exposes
+  nothing to an outsider, as with the `init_n-1` hedge of members.
+* **A joiner shown a false state** builds a task on it; the prev hashes
+  bind the task to that state, so the DS and the sealer refuse it.
+* **A faulty task** (wraps that do not open, or open to wrong secrets)
+  cuts off at most its district, or for a city task the districts below
+  it; the tag check keeps the cut-off members from accepting a wrong epoch.
+  Repairs restore them within the window; disputes name the performer and
+  the taint rule re-keys what it drew.
+* **Taints** follow performers, joiners included: removing or updating a
+  performer re-keys every node it drew (E-4).
+* **The sealer draws nothing** and learns nothing its own path does not
+  give it.
+* **Forks.** Tasks bind the state they were built on; relay elements bind
+  the transcript (section 2.3).
+
+### 3.10 Parameters and costs
+
+| Name | Value |
+| --- | --- |
+| `L` (`district_bits`), `c` (`island_bits`) | 8 and 8 by default (v0.4: `L = 12`) |
+| `S` (`subcity_bits`) | 8 by default, fixed at genesis |
+
+**Modelled** (research note îlots, section 2.3; synthesis, section 5). A
+million members, 1.7 changes per second, 5-minute windows: a joiner that
+takes a freed leaf re-keys its path in its island, 8 wraps; an island task
+with several changes, 9 wraps on average, at most 181 (42 ms) in a burst
+of 100,000 joins and 100,000 departures; the city costs 175 KB per
+sub-city. The heaviest task of such a burst takes 42 ms, against 0.6 s for
+a v0.4 district of `2^12`.
 
 <a id="4-stage-3"></a>
 ## 4. Stage 3: parity (outline)
@@ -475,7 +688,8 @@ framing.
 
 ### 5.3 Derivation labels
 
-Those of v0.4 §17.2, and `relay key` and `relay nonce` (section 2.3).
+Those of v0.4 §17.2, `relay key` and `relay nonce` (section 2.3), and
+`task hedge` (section 3.3).
 
 ### 5.4 Encoded objects and signature contexts
 
@@ -485,16 +699,16 @@ Every object label of v0.4 ends in `/v5` instead of `/v4`:
 `city-g/group-policy/v5`, `city-g/update/v5`, `city-g/catch-up/v5`,
 `city-g/re-entry/v5`, `city-g/checkpoint/v5`, `city-g/district-commit/v5`,
 `city-g/seal/v5`, `city-g/seal-body/v5`, `city-g/welcome/v5`, and the new
-unsigned `city-g/relay/v5`.
+unsigned `city-g/relay/v5`; for stage 2, `city-g/city-task/v5` and
+`city-g/dispute/v5` (signed) and `city-g/repair/v5` (unsigned).
 
 The FIPS 204 context of every signed object is its label, as in v0.4
 §17.3; the seal is signed under `city-g/seal/v5`.
 
-### 5.5 Reserved for stages 2 and 3
+### 5.5 Reserved for stage 3
 
 | Kind | Labels |
 | --- | --- |
-| Encoded objects, stage 2 | `city-g/island-task/v5`, `city-g/city-task/v5`, `city-g/dispute/v5`, `city-g/repair/v5` |
 | Encoded objects and signature contexts, stage 3 | `city-g/authorization-batch/v5`, `city-g/authorizer-checkpoint/v5` |
 | Labelled hashes, stage 3 | `tree/leaf-key`, `msg-chain`, `msg-commit`, `membership-log` |
 | Derivation labels, stage 3 | `sender data`, `encryption`, `exporter`, `authenticator` |
@@ -516,6 +730,12 @@ The FIPS 204 context of every signed object is its label, as in v0.4
 | §13.1 | Island packets: the steps up to the island root, and a top (section 2.8) |
 | §14.2 | `WINDOW_ORDINARY` and `WINDOW_URGENT` replace `WINDOW_MAX` and `WINDOW_REMOVAL` (section 2.9) |
 | §14.5 | Top tasks: relays and flat elements, kept with the window (section 2.8) |
+| §5.1, §6, §9, §10.4 | Stage 2: the shape gains `subcity_bits`, bound in the seal header, the group context and checkpoints (section 3.1); defaults `L = c = 8` |
+| §7.3 | Stage 2: the city is re-keyed by city tasks, one per sub-city and one for the top (section 3.2) |
+| §10.3, §10.5 | Stage 2: a committer may be a joiner of the window, `[leaf, n]` (section 3.3) |
+| §10.4, §12.5 | Stage 2: the seal body lists city tasks instead of the city's nodes and wraps; the sealer draws nothing (section 3.5) |
+| §13.4 | Stage 2: entries by island (section 3.6) |
+| §14.4 | Stage 2: joiners perform tasks first (section 3.4); repairs and disputes (sections 3.7 and 3.8) |
 
 Nothing of v0.4 decodes under this draft: every label changed.
 
@@ -541,5 +761,13 @@ Nothing of v0.4 decodes under this draft: every label changed.
   entries carry the island path (stage 2).
 * **Encodings** of island packets and top tasks, and test vectors, as for
   the objects v0.4 leaves open (v0.4 §19).
+* **The proof system of disputes** (section 3.8): the statements are
+  measured in the research notes, in Longfellow; the encoding of `proof`,
+  its verifier in the DS, and the size limits remain to be fixed.
+* **The formal models of stage 2**: joiner performers and their hedge, city
+  tasks bound to the prior state, repairs. The taint rule for tasks and the
+  maintained city are modelled (`taint.pv`, `ilot_city_maintained.pv`).
+* **Assignment under load**: how many tasks a joiner takes, and when a DS
+  prefers a volunteer with a good network.
 * Everything v0.4 §19 lists, except the lighter structure for continuous
   churn, which this stage begins.
