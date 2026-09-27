@@ -1,14 +1,15 @@
 //! A wrap made by `cityg-core`, with its key schedule, for the C++
 //! reference of the dispute proof in `docs/research/dispute-zk/longfellow/`
 //! (`dispute_test.cc`, `kWrap`): fixed inputs, the wrap's context, the
-//! `ExpandLabel` input, the shared secret, the wrap's key and nonce, and the
-//! sealed secret.
+//! `ExpandLabel` input, the shared secret, the wrap's key and nonce, the
+//! sealed secret, and three slices of the node key that the secret gives
+//! (`node_key`): the first 32 bytes of `t`, `rho` and the X25519 key.
 //!
 //! Run: `cargo run --release --manifest-path docs/research/bench/Cargo.toml
 //! --bin wrap_vector`
 
 use cityg_core::cbor::{array, bytes, encode, text, uint};
-use cityg_core::crypto::{expand_label_into, kem_pk_hash, unwrap, wrap};
+use cityg_core::crypto::{expand_label_into, kem_pk_hash, node_key, unwrap, wrap};
 use cityg_core::kem::KemSecret;
 use cityg_core::tree::NodeId;
 use rand_core::{CryptoRng, RngCore};
@@ -121,4 +122,11 @@ fn main() {
     println!("wrap key    {}", hex(&wrap_key));
     println!("wrap nonce  {}", hex(&wrap_nonce));
     println!("sealed      {}", hex(&wrapped.sealed));
+
+    // The key of the node whose secret the wrap carries: X-Wing's public
+    // key, ML-KEM's t then rho, then X25519's key.
+    let node_pk = node_key(&secret).expect("node key").public_key();
+    println!("node t head {}", hex(&node_pk[..32]));
+    println!("node rho    {}", hex(&node_pk[1152..1184]));
+    println!("node pk_X   {}", hex(&node_pk[1184..]));
 }

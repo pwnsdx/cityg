@@ -1,6 +1,8 @@
 // A City-G wrap's key schedule in the clear: its context and ExpandLabel
-// inputs in deterministic CBOR, ExpandLabel (BLAKE3 in keyed mode) and the
-// Poly1305 key of its ChaCha20-Poly1305 seal. Research code.
+// inputs in deterministic CBOR, ExpandLabel (BLAKE3 in keyed mode), the
+// Poly1305 key of its ChaCha20-Poly1305 seal, the keystream that opens the
+// sealed secret, and the seed of the node key that the secret gives.
+// Research code.
 
 #ifndef PRIVACY_PROOFS_ZK_LIB_CIRCUITS_TESTS_X25519_WRAP_REFERENCE_H_
 #define PRIVACY_PROOFS_ZK_LIB_CIRCUITS_TESTS_X25519_WRAP_REFERENCE_H_
@@ -95,6 +97,26 @@ inline bool blocks(const std::vector<uint8_t>& info, Blocks& b) {
   return true;
 }
 
+// An input of at most 64 bytes: one block and its length.
+inline bool block(const std::vector<uint8_t>& info,
+                  std::array<uint32_t, 16>& m0, uint32_t& len0) {
+  if (info.size() > 64) return false;
+  uint8_t buf[64] = {0};
+  std::memcpy(buf, info.data(), info.size());
+  for (size_t i = 0; i < 16; ++i) {
+    m0[i] = 0;
+    for (size_t j = 0; j < 4; ++j) m0[i] |= uint32_t{buf[4 * i + j]} << (8 * j);
+  }
+  len0 = static_cast<uint32_t>(info.size());
+  return true;
+}
+
+// DeriveSecret-like input of the node key: ExpandLabel(secret,
+// "tree node key", [], 32), 37 bytes.
+inline std::vector<uint8_t> node_info() {
+  return expand_info("tree node key", {}, 32);
+}
+
 inline std::array<uint32_t, 8> words(const uint8_t b[32]) {
   std::array<uint32_t, 8> w;
   for (size_t i = 0; i < 8; ++i) {
@@ -109,15 +131,26 @@ inline void bytes_of(const std::vector<uint32_t>& w, uint8_t* out, size_t n) {
 }
 
 // The key schedule of a wrap from its shared secret, recording the
-// witness: ExpandLabel(ss, "wrap key", context, 32), ExpandLabel(ss,
-// "wrap nonce", context, 12), then ChaCha20's first block, whose first 32
-// bytes are the Poly1305 key.
+// witness: ExpandLabel(ss, "wrap key", context, 32) and ExpandLabel(ss,
+// "wrap nonce", context, 12), then, for branch 1, ChaCha20's first block,
+// whose first 32 bytes are the Poly1305 key, or, for branch 2, the opening
+// of the sealed secret and the seed of its node key.
 struct Schedule {
   Blocks key_info, nonce_info;
   uint8_t key[32], nonce[12], poly1305_key[32];
   arx::ArxClear clear;  // the witness, and the Poly1305 key's words
 
+  // The key and nonce, then the Poly1305 key.
   bool compute(const uint8_t ss[32], const std::vector<uint8_t>& context) {
+    if (!expand(ss, context)) return false;
+    arx::Arx<arx::ArxClear> a(clear);
+    a.poly1305_key(words(key), nonce_words(), {});
+    bytes_of(clear.outputs, poly1305_key, 32);
+    return true;
+  }
+
+  // The key and nonce alone.
+  bool expand(const uint8_t ss[32], const std::vector<uint8_t>& context) {
     if (!blocks(expand_info("wrap key", context, 32), key_info)) return false;
     if (!blocks(expand_info("wrap nonce", context, 12), nonce_info)) {
       return false;
@@ -125,19 +158,57 @@ struct Schedule {
     clear = arx::ArxClear();
     arx::Arx<arx::ArxClear> a(clear);
     std::array<uint32_t, 8> s = words(ss);
-    std::vector<uint32_t> k =
-        a.keyed_hash2(s, key_info.m0, key_info.m1, key_info.len1, 8);
-    std::vector<uint32_t> n =
-        a.keyed_hash2(s, nonce_info.m0, nonce_info.m1, nonce_info.len1, 3);
-    bytes_of(k, key, 32);
-    bytes_of(n, nonce, 12);
-    std::array<uint32_t, 8> kw;
-    for (size_t i = 0; i < 8; ++i) kw[i] = k[i];
-    a.poly1305_key(kw, {n[0], n[1], n[2]}, {});
-    bytes_of(clear.outputs, poly1305_key, 32);
+    bytes_of(a.keyed_hash2(s, key_info.m0, key_info.m1, key_info.len1, 8), key,
+             32);
+    bytes_of(a.keyed_hash2(s, nonce_info.m0, nonce_info.m1, nonce_info.len1, 3),
+             nonce, 12);
     return true;
   }
+
+  // Branch 2, after expand(): the keystream of block 1 opens the sealed
+  // secret, whose ExpandLabel(., "tree node key", [], 32) seeds the node
+  // key. The witness goes on the same tape.
+  uint8_t opened[32], node_seed[32];
+  std::array<uint32_t, 16> node_m0;
+  uint32_t node_len0;
+
+  bool open(const uint8_t sealed_ct[32]) {
+    arx::Arx<arx::ArxClear> a(clear);
+    std::array<uint32_t, 8> stream = a.keystream(words(key), 1, nonce_words());
+    std::vector<uint32_t> sw(stream.begin(), stream.end());
+    uint8_t ks[32];
+    bytes_of(sw, ks, 32);
+    for (size_t i = 0; i < 32; ++i) opened[i] = sealed_ct[i] ^ ks[i];
+    if (!block(node_info(), node_m0, node_len0)) return false;
+    std::vector<uint32_t> seed =
+        a.keyed_hash1(words(opened), node_m0, node_len0, 8);
+    bytes_of(seed, node_seed, 32);
+    return true;
+  }
+
+ private:
+  std::array<uint32_t, 3> nonce_words() const {
+    std::array<uint32_t, 3> w;
+    for (size_t i = 0; i < 3; ++i) {
+      w[i] = 0;
+      for (size_t j = 0; j < 4; ++j) {
+        w[i] |= uint32_t{nonce[4 * i + j]} << (8 * j);
+      }
+    }
+    return w;
+  }
 };
+
+// The seed of the node key of `secret`: ExpandLabel(secret, "tree node
+// key", [], 32), as cityg-core's node_key.
+inline void node_seed(const uint8_t secret[32], uint8_t out[32]) {
+  arx::ArxClear clear;
+  arx::Arx<arx::ArxClear> a(clear);
+  std::array<uint32_t, 16> m0;
+  uint32_t len0;
+  block(node_info(), m0, len0);
+  bytes_of(a.keyed_hash1(words(secret), m0, len0, 8), out, 32);
+}
 
 }  // namespace wrapref
 }  // namespace proofs

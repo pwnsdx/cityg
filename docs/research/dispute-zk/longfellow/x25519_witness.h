@@ -33,6 +33,18 @@ class X25519Witness {
     Nat un = Nat::of_bytes(ct);
     if (!(un < f_.m_)) return false;
     u_ = f_.to_montgomery(un);
+    compute_public_key(sk);
+    Elt x2, z2;
+    ladder(u_, ss_ladder_, x2, z2);
+    inv_ = (z2 == f_.zero()) ? f_.zero() : f_.invertf(z2);
+    ss_ = f_.mulf(x2, inv_);
+    Nat ssn = f_.from_montgomery(ss_);
+    for (size_t i = 0; i < 255; ++i) ss_bits_[i] = ssn.bit(i);
+    return true;
+  }
+
+  // The ladder of X25519(sk, 9) alone, for X25519Circuit::public_key.
+  void compute_public_key(const uint8_t sk[32]) {
     for (size_t i = 0; i < 256; ++i) {
       sk_[i] = (sk[i / 8] >> (i % 8)) & 1;
     }
@@ -42,17 +54,16 @@ class X25519Witness {
     k[254] = 1;
     k[255] = 0;
     for (size_t t = 0; t < kSteps; ++t) swap_[t] = k[t + 1] ^ k[t];
-
     Elt x2, z2;
     ladder(f_.of_scalar(9), pk_ladder_, x2, z2);
-    pk_ = f_.mulf(x2, f_.invertf(z2));
+    pk_inv_ = f_.invertf(z2);
+    pk_ = f_.mulf(x2, pk_inv_);
+  }
 
-    ladder(u_, ss_ladder_, x2, z2);
-    inv_ = (z2 == f_.zero()) ? f_.zero() : f_.invertf(z2);
-    ss_ = f_.mulf(x2, inv_);
-    Nat ssn = f_.from_montgomery(ss_);
-    for (size_t i = 0; i < 255; ++i) ss_bits_[i] = ssn.bit(i);
-    return true;
+  // The private inputs of public_key: the ladder, then the inverse.
+  void fill_public_key(DenseFiller<Field>& filler) const {
+    fill_ladder(filler, pk_ladder_);
+    filler.push_back(pk_inv_);
   }
 
   // The public inputs, in the order of the circuit: pk, then u.
@@ -76,7 +87,7 @@ class X25519Witness {
   void pk_bytes(uint8_t out[32]) const { f_.to_bytes_field(out, pk_); }
   void ss_bytes(uint8_t out[32]) const { f_.to_bytes_field(out, ss_); }
 
-  Elt pk_, u_, ss_, inv_;
+  Elt pk_, u_, ss_, inv_, pk_inv_;
   unsigned sk_[256], ss_bits_[255], swap_[kSteps];
   Ladder pk_ladder_, ss_ladder_;
 

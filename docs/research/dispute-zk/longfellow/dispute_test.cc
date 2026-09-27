@@ -31,15 +31,21 @@
 #include "circuits/tests/x25519/lattice_witness.h"
 #include "circuits/tests/x25519/mlkem_reference.h"
 #include "circuits/tests/x25519/wrap_reference.h"
+#include "circuits/tests/x25519/x25519_check.h"
+#include "proto/circuit_io.h"
+#include "proto/circuit_reader.h"
+#include "proto/circuit_writer.h"
 #include "random/secure_random_engine.h"
 #include "random/transcript.h"
 #include "sumcheck/circuit.h"
 #include "util/log.h"
+#include "util/readbuffer.h"
 #include "zk/zk_proof.h"
 #include "zk/zk_prover.h"
 #include "zk/zk_verifier.h"
 #include "benchmark/benchmark.h"
 #include "gtest/gtest.h"
+#include "zstd.h"
 
 namespace proofs {
 namespace {
@@ -209,6 +215,9 @@ struct WrapVector {
   const char *seed, *eseed, *gid, *secret, *pk_hash, *context, *info_key,
       *shared, *wrap_key, *wrap_nonce, *sealed;
   uint64_t epoch, node_level, node_index, target_level, target_index;
+  // Three slices of node_key(secret)'s public key: t's first 32 bytes,
+  // rho, and pk_X.
+  const char *node_t_head, *node_rho, *node_pk_x;
 };
 
 const WrapVector kWrap = {
@@ -230,7 +239,10 @@ const WrapVector kWrap = {
     "8d33d336e8fc2571fa1ccfcf",
     "d7033865a7d37255afd9b6b6b84d9390148286da9b98ee96ef034a8369db6e4b"
     "2d9e9a56b9e4679f4ff6033ed7b6c5e5",
-    1000003, 3, 41, 2, 82};
+    1000003, 3, 41, 2, 82,
+    "3c90bba7aa95feabb22dd78c68314af5f2a735367221191a86ec541c95a1e82a",
+    "3c4ee0cecaee87fe1ac500bfc59399c50485c6f5a44e9a9f87cf12d359981587",
+    "7653a22e5afa36b330634b2565d08154c9736ebc8af1881c231aedd00e9ce82d"};
 
 std::vector<uint8_t> vector_context() {
   std::vector<uint8_t> gid = unhex(kWrap.gid), pk_hash = unhex(kWrap.pk_hash);
@@ -268,19 +280,59 @@ TEST(Wrap, ReferenceMatchesCitygCore) {
   // tag of a wrap whose ciphertext was altered.
   std::vector<uint8_t> tag = poly1305_tag(otk, context, sealed.data(), 32);
   EXPECT_EQ(hex(tag.data(), 16), hex(sealed.data() + 32, 16));
+  // Block 1 of the keystream opens the secret, and the node key it seeds is
+  // cityg-core's node_key.
+  ASSERT_TRUE(sch.open(sealed.data()));
+  EXPECT_EQ(hex(sch.opened, 32), kWrap.secret);
+  XWingKey node = xwing_keygen(sch.node_seed, openssl_x25519);
+  EXPECT_EQ(hex(node.pk, 32), kWrap.node_t_head);
+  EXPECT_EQ(hex(node.pk + 1152, 32), kWrap.node_rho);
+  EXPECT_EQ(hex(node.pk_x, 32), kWrap.node_pk_x);
+  uint8_t seed2[32];
+  wrapref::node_seed(secret.data(), seed2);
+  EXPECT_EQ(hex(seed2, 32), hex(sch.node_seed, 32));
+
   sealed[3] ^= 1;
   tag = poly1305_tag(otk, context, sealed.data(), 32);
   EXPECT_NE(hex(tag.data(), 16), hex(sealed.data() + 32, 16));
 }
 
+// The public check of ct_X: honest ones pass; the dishonest ones of
+// x25519_dleq.py fail, which are the points of order 2, 4 and 8, a point of
+// mixed order, a point of the twist and a non-canonical encoding.
+TEST(Wrap, PublicCheckOfCtX) {
+  std::mt19937_64 rng(7748);
+  for (size_t i = 0; i < 20; ++i) {
+    uint8_t ek[32], ct_x[32];
+    for (auto& b : ek) b = rng() & 0xff;
+    mlkem::x25519_base(openssl_x25519, ek, ct_x);
+    EXPECT_TRUE(ct_x_in_prime_subgroup(f25519, ct_x));
+  }
+  std::vector<uint8_t> honest = unhex(
+      "ac9c25c71789068801508e09f0e8e7b2ed723ee6dac9b41dd08ef8db2cf69c03");
+  EXPECT_TRUE(ct_x_in_prime_subgroup(f25519, honest.data()));
+  for (const char* bad :
+       {"0000000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "e616d26d06476919e9fae28f7b388bdd5233d38e71dfdfe2a8e6d3af03b6993b",
+        "0200000000000000000000000000000000000000000000000000000000000000",
+        "f6ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"}) {
+    std::vector<uint8_t> ct_x = unhex(bad);
+    EXPECT_FALSE(ct_x_in_prime_subgroup(f25519, ct_x.data())) << bad;
+  }
+}
+
 // A dispute's instance: an X-Wing key, a ciphertext, its decapsulation,
-// and the wrap's context.
+// and the wrap: its context and, for branch 2, its sealed secret and pk_v.
 struct Instance {
   mlkem::XWingKey key;
   uint8_t ct[mlkem::kXWingCtBytes];
   uint8_t ss[32];
   mlkem::XWingDecapsulation d;
-  std::vector<uint8_t> context;
+  DisputeWrap wrap;
+  std::vector<uint8_t> sealed;  // the sealed secret, then its tag
 };
 
 // The context is the vector's, with SHA3-256(pk) standing for the hash of
@@ -294,10 +346,9 @@ std::unique_ptr<Instance> make_instance(const uint8_t seed[32],
   std::vector<uint8_t> gid = unhex(kWrap.gid);
   uint8_t pk_hash[32];
   mlkem::sha3_256(in->key.pk, mlkem::kXWingPkBytes, pk_hash);
-  in->context = wrapref::wrap_context(gid.data(), kWrap.epoch,
-                                      kWrap.node_level, kWrap.node_index,
-                                      kWrap.target_level, kWrap.target_index,
-                                      pk_hash);
+  in->wrap.context = wrapref::wrap_context(
+      gid.data(), kWrap.epoch, kWrap.node_level, kWrap.node_index,
+      kWrap.target_level, kWrap.target_index, pk_hash);
   return in;
 }
 
@@ -305,7 +356,7 @@ std::unique_ptr<Instance> make_instance(const uint8_t seed[32],
 std::unique_ptr<Instance> wrap_instance() {
   std::vector<uint8_t> seed = unhex(kWrap.seed), eseed = unhex(kWrap.eseed);
   auto in = make_instance(seed.data(), eseed.data());
-  in->context = vector_context();
+  in->wrap.context = vector_context();
   return in;
 }
 
@@ -403,7 +454,7 @@ TEST(Lattice, AcceptsHonestWitnesses) {
 constexpr size_t kN = 256, kK = 3;
 constexpr size_t kOffS = 0;
 constexpr size_t kOffNorm = 2 * kK * kN * 3;
-constexpr size_t kOffKKey = kOffNorm + 11;
+constexpr size_t kOffKKey = kOffNorm + 22;
 constexpr size_t kOffHKey = kOffKKey + kK * kN * 12;
 constexpr size_t kOffM = kOffHKey + kK * 255;
 constexpr size_t kOffDDec = kOffM + kN;
@@ -471,7 +522,7 @@ TEST(Lattice, WitnessForgedForAKnownPointFailsElsewhere) {
   // s_0[0] + 1, with bits b0 + 2 b1 + 4 b2 = s + 4.
   int32_t v = s[0][0] + 5;
   for (size_t b = 0; b < 3; ++b) w[kOffS + b] = f25519.of_scalar((v >> b) & 1);
-  // The norm grows by 2 s + 1; the slack shrinks by as much.
+  // The norm of s grows by 2 s + 1; its slack shrinks by as much.
   int64_t slack = 0;
   for (size_t b = 0; b < 11; ++b) {
     slack |= int64_t{w[kOffNorm + b] == f25519.one()} << b;
@@ -651,46 +702,74 @@ TEST(Lattice, ZkProverVerifier) {
 using Dispute = DisputeCircuit<LogicCircuit, F25519>;
 using DWitness = DisputeWitness<F25519>;
 
-const char* mode_name(Reencryption mode) {
-  switch (mode) {
-    case Reencryption::kNone:
-      return "the wrap (G, X25519, combiner)";
-    case Reencryption::kEqual:
+const char* statement_name(Statement st) {
+  switch (st) {
+    case Statement::kWrap:
+      return "the wrap does not open (G, X25519, combiner)";
+    case Statement::kWrongSecret:
+      return "the wrap opens to the wrong secret";
+    case Statement::kWholeDecapsulation:
       return "the whole decapsulation (and its re-encryption)";
-    case Reencryption::kDiffers:
+    case Statement::kReencryptionDiffers:
       return "a re-encryption that differs";
   }
   return "";
 }
 
-std::unique_ptr<Circuit<F25519>> make_dispute_circuit(Reencryption mode) {
+std::unique_ptr<Circuit<F25519>> make_dispute_circuit(Statement st) {
   QuadCircuit<F25519> Q(f25519);
   const CompilerBackendType cbk(&Q);
   const LogicCircuit lc(&cbk, f25519);
   Dispute::Public p;
-  p.read([&] { return lc.eltw_input(); }, mode);
+  p.read([&] { return lc.eltw_input(); }, st);
   Q.private_input();
   auto w = std::make_unique<Dispute::Witness>();
-  w->input(lc, mode);
-  Dispute(lc, f25519, mode).assert_dispute(p, *w);
+  w->input(lc, st);
+  Dispute(lc, f25519, st).assert_dispute(p, *w);
   auto c = Q.mkcircuit(/*nc=*/1);
-  dump_info(mode_name(mode), Q);
+  dump_info(statement_name(st), Q);
   return c;
 }
 
-// The public inputs before the lattice part's: the constant one, then pk_X
-// and ct_X as field elements, three strings of 256 bits, ExpandLabel's
-// inputs (two blocks of 16 words and a length on 32 bits, twice) and the
-// Poly1305 key's 8 words; or only H(ek).
-size_t fixed_public(Reencryption mode) {
-  return dispute_combines(mode) ? 1 + 2 + 3 * 256 + 2 * (32 + 32) + 8
-                                : 1 + 256;
+// Each statement's circuit, compiled once for the tests.
+const Circuit<F25519>* dispute_circuit(Statement st) {
+  static std::unique_ptr<Circuit<F25519>> circuits[4];
+  std::unique_ptr<Circuit<F25519>>& c = circuits[static_cast<size_t>(st)];
+  if (c == nullptr) c = make_dispute_circuit(st);
+  return c.get();
+}
+
+// The public inputs before those that rho gives: the constant one, then
+// pk_X and ct_X as field elements, three strings of 256 bits and
+// ExpandLabel's inputs (two blocks of 16 words and a length on 32 bits,
+// twice); then the Poly1305 key's 8 words (branch 1), or the sealed
+// secret's 256 bits and pk_v, 256 bits of its seed, pk_X,v and the 768
+// coefficients of t_v (branch 2). Or only H(ek).
+size_t fixed_public(Statement st) {
+  if (!dispute_combines(st)) return 1 + 256;
+  size_t n = 1 + 2 + 3 * 256 + 2 * (32 + 32);
+  return n + (dispute_opens(st) ? 256 + 256 + 1 + 768 : 8);
+}
+
+// Fiat-Shamir starts from the statement: the public key, the ciphertext,
+// the wrap's context and, for branch 2, its sealed secret and pk_v.
+std::vector<uint8_t> dispute_digest(const Instance& in, Statement st) {
+  std::vector<uint8_t> buf(in.key.pk, in.key.pk + mlkem::kXWingPkBytes);
+  buf.insert(buf.end(), in.ct, in.ct + mlkem::kXWingCtBytes);
+  buf.insert(buf.end(), in.wrap.context.begin(), in.wrap.context.end());
+  if (dispute_opens(st)) {
+    buf.insert(buf.end(), in.wrap.sealed.begin(), in.wrap.sealed.end());
+    buf.insert(buf.end(), in.wrap.pk_v.begin(), in.wrap.pk_v.end());
+  }
+  std::vector<uint8_t> digest(32);
+  mlkem::sha3_256(buf.data(), buf.size(), digest.data());
+  return digest;
 }
 
 struct DisputeProof {
-  Reencryption mode;
+  Statement st;
   size_t block_enc = 0;  // Ligero's row length; 0: the smallest proof
-  std::unique_ptr<Circuit<F25519>> circuit;
+  const Circuit<F25519>* circuit = nullptr;
   ConvolutionFactory factory{f25519};
   RSFactory rsf{factory, f25519};
   std::unique_ptr<ZkProof<F25519>> proof;
@@ -701,7 +780,7 @@ struct DisputeProof {
 bool prove_dispute(DisputeProof& dp, const Instance& in, const DWitness& dw,
                    size_t flip = SIZE_MAX) {
   const Circuit<F25519>& c = *dp.circuit;
-  const size_t fixed = fixed_public(dp.mode);
+  const size_t fixed = fixed_public(dp.st);
   Dense<F25519> W(1, c.ninputs);
   DenseFiller<F25519> filler(W);
   filler.push_back(f25519.one());
@@ -718,7 +797,7 @@ bool prove_dispute(DisputeProof& dp, const Instance& in, const DWitness& dw,
                  ? std::make_unique<ZkProof<F25519>>(c, kRate, kQueries)
                  : std::make_unique<ZkProof<F25519>>(c, kRate, kQueries,
                                                      dp.block_enc);
-  std::vector<uint8_t> digest = statement_digest(in);
+  std::vector<uint8_t> digest = dispute_digest(in, dp.st);
   Transcript tp(digest.data(), digest.size());
   SecureRandomEngine rng;
   ZkProver<F25519, RSFactory> prover(c, f25519, dp.rsf);
@@ -729,12 +808,12 @@ bool prove_dispute(DisputeProof& dp, const Instance& in, const DWitness& dw,
   return prover.prove(*dp.proof, W, tp);
 }
 
-// The verifier knows the statement: the public key, the ciphertext and,
-// in these tests only, the shared secret.
+// The verifier knows the statement: the public key, the ciphertext, the
+// wrap and, in these tests only, the shared secret.
 bool verify_dispute(const DisputeProof& dp, const Instance& in,
                     const DWitness& dw) {
   const Circuit<F25519>& c = *dp.circuit;
-  std::vector<uint8_t> digest = statement_digest(in);
+  std::vector<uint8_t> digest = dispute_digest(in, dp.st);
   Transcript tv(digest.data(), digest.size());
   std::unique_ptr<ZkVerifier<F25519, RSFactory>> v =
       dp.block_enc == 0
@@ -753,76 +832,196 @@ bool verify_dispute(const DisputeProof& dp, const Instance& in,
   return verifier.verify(*dp.proof, P, tv);
 }
 
-const Reencryption kModes[] = {Reencryption::kNone, Reencryption::kEqual,
-                               Reencryption::kDiffers};
+// In the order of DISPUTE_STATEMENT and of the benchmarks' arguments.
+const Statement kStatements[] = {
+    Statement::kWrap, Statement::kWholeDecapsulation,
+    Statement::kReencryptionDiffers, Statement::kWrongSecret};
 
-// An instance for each mode: honest, or with a re-encryption that fails.
-std::unique_ptr<Instance> mode_instance(Reencryption mode, uint64_t n) {
-  if (mode == Reencryption::kDiffers) return tweaked_instance(n, 700);
+// The node key of a secret, as cityg-core's node_key derives it.
+std::vector<uint8_t> node_public_key(const uint8_t secret[32]) {
+  uint8_t seed[32];
+  wrapref::node_seed(secret, seed);
+  mlkem::XWingKey k = mlkem::xwing_keygen(seed, openssl_x25519);
+  return std::vector<uint8_t>(k.pk, k.pk + mlkem::kXWingPkBytes);
+}
+
+// Where the published pk_v differs from the node key of the sealed secret.
+enum class Wrong { kNothing, kSeed, kT, kPkX, kNotCanonical };
+
+// Branch 2: the committer seals a secret in the wrap, and publishes as pk_v
+// the node key of another secret (kSeed), the secret's node key with one
+// coefficient of t_hat, or pk_X, changed, or the node key of another
+// secret with a coefficient of t_hat encoded above q (kNotCanonical).
+// Instance 0 is cityg-core's wrap, whose sealed secret is the vector's.
+std::unique_ptr<Instance> wrong_secret_instance(uint64_t n,
+                                                Wrong wrong = Wrong::kSeed) {
+  auto in = n == 0 ? wrap_instance() : random_instance(n);
+  std::mt19937_64 rng(n + 1000);
+  uint8_t secret[32];
+  if (n == 0) {
+    std::vector<uint8_t> s = unhex(kWrap.secret);
+    std::memcpy(secret, s.data(), 32);
+  } else {
+    for (auto& b : secret) b = rng() & 0xff;
+  }
+  wrapref::Schedule sch;
+  if (!sch.expand(in->ss, in->wrap.context)) return nullptr;
+  in->sealed = openssl_seal(sch.key, sch.nonce, in->wrap.context, secret, 32);
+  std::memcpy(in->wrap.sealed.data(), in->sealed.data(), 32);
+
+  std::vector<uint8_t>& pk_v = in->wrap.pk_v;
+  uint8_t other[32];
+  std::memcpy(other, secret, 32);
+  other[0] ^= 1;
+  const bool another = wrong == Wrong::kSeed || wrong == Wrong::kNotCanonical;
+  pk_v = node_public_key(another ? other : secret);
+  uint8_t* t1 = pk_v.data() + 384;  // t_hat_1
+  mlkem::Poly t_hat = mlkem::byte_decode(t1, 12);
+  if (wrong == Wrong::kT) {
+    t_hat[17] = (t_hat[17] + 1) % mlkem::kQ;
+    mlkem::byte_encode(t_hat, 12, t1);
+  } else if (wrong == Wrong::kNotCanonical) {
+    // The same value modulo q, on 12 bits.
+    for (size_t l = 0; l < mlkem::kN; ++l) {
+      if (t_hat[l] < 4096 - mlkem::kQ) {
+        t_hat[l] += mlkem::kQ;
+        break;
+      }
+    }
+    mlkem::byte_encode(t_hat, 12, t1);
+  } else if (wrong == Wrong::kPkX) {
+    uint8_t scalar[32];
+    for (auto& b : scalar) b = rng() & 0xff;
+    mlkem::x25519_base(openssl_x25519, scalar, pk_v.data() + mlkem::kEkBytes);
+  }
+  return in;
+}
+
+// An instance for each statement: honest, with a re-encryption that fails,
+// or with a wrap that opens to the wrong secret.
+std::unique_ptr<Instance> statement_instance(Statement st, uint64_t n) {
+  if (st == Statement::kReencryptionDiffers) return tweaked_instance(n, 700);
+  if (st == Statement::kWrongSecret) return wrong_secret_instance(n);
   return n < 3 ? vector_instance(n) : random_instance(n);
 }
 
-void check_mode(Reencryption mode) {
+void check_statement(Statement st) {
   set_log_level(INFO);
   DisputeProof dp;
-  dp.mode = mode;
-  dp.circuit = make_dispute_circuit(mode);
-  auto in = mode_instance(mode, 0);
+  dp.st = st;
+  dp.circuit = dispute_circuit(st);
+  auto in = statement_instance(st, 0);
+  ASSERT_NE(in, nullptr);
   DWitness dw(f25519);
-  ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, mode, in->context));
+  ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, st, in->wrap));
   ASSERT_TRUE(prove_dispute(dp, *in, dw));
   std::vector<uint8_t> buf;
   dp.proof->write(buf, f25519);
   log(INFO, "dispute, %s: %zu inputs (%zu public), proof %zu bytes",
-      mode_name(mode), dp.circuit->ninputs, dp.circuit->npub_in, buf.size());
+      statement_name(st), dp.circuit->ninputs, dp.circuit->npub_in,
+      buf.size());
   EXPECT_TRUE(verify_dispute(dp, *in, dw));
 
   // Another statement: the same proof does not verify.
-  auto other = mode_instance(mode, 2);
+  auto other = statement_instance(st, 2);
+  ASSERT_NE(other, nullptr);
   DWitness dw2(f25519);
-  ASSERT_TRUE(dw2.compute(other->key, other->ct, other->d, mode,
-                          other->context));
+  ASSERT_TRUE(dw2.compute(other->key, other->ct, other->d, st, other->wrap));
   EXPECT_FALSE(verify_dispute(dp, *other, dw2));
 }
 
-TEST(Dispute, TheWrap) { check_mode(Reencryption::kNone); }
+TEST(Dispute, TheWrap) { check_statement(Statement::kWrap); }
 
 // The wrap that cityg-core made, and the same wrap with its ciphertext
 // altered: the proof is the same, and the tag that the verifier computes
 // from the revealed Poly1305 key tells them apart.
 TEST(Dispute, TheWrapConvictsAnAlteredWrap) {
   set_log_level(ERROR);
-  const Reencryption mode = Reencryption::kNone;
+  const Statement st = Statement::kWrap;
   DisputeProof dp;
-  dp.mode = mode;
-  dp.circuit = make_dispute_circuit(mode);
+  dp.st = st;
+  dp.circuit = dispute_circuit(st);
   auto in = wrap_instance();
   DWitness dw(f25519);
-  ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, mode, in->context));
+  ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, st, in->wrap));
   ASSERT_TRUE(prove_dispute(dp, *in, dw));
   ASSERT_TRUE(verify_dispute(dp, *in, dw));
   std::vector<uint8_t> sealed = unhex(kWrap.sealed);
   std::vector<uint8_t> tag =
-      poly1305_tag(dw.poly1305_key(), in->context, sealed.data(), 32);
+      poly1305_tag(dw.poly1305_key(), in->wrap.context, sealed.data(), 32);
   EXPECT_EQ(hex(tag.data(), 16), hex(sealed.data() + 32, 16));
   sealed[17] ^= 0x80;
-  tag = poly1305_tag(dw.poly1305_key(), in->context, sealed.data(), 32);
+  tag = poly1305_tag(dw.poly1305_key(), in->wrap.context, sealed.data(), 32);
   EXPECT_NE(hex(tag.data(), 16), hex(sealed.data() + 32, 16));
 }
-TEST(Dispute, TheWholeDecapsulation) { check_mode(Reencryption::kEqual); }
+
+TEST(Dispute, TheWholeDecapsulation) {
+  check_statement(Statement::kWholeDecapsulation);
+}
 TEST(Dispute, AReencryptionThatDiffers) {
-  check_mode(Reencryption::kDiffers);
+  check_statement(Statement::kReencryptionDiffers);
+}
+TEST(Dispute, TheWrapOpensToTheWrongSecret) {
+  check_statement(Statement::kWrongSecret);
+}
+
+// Branch 2 on cityg-core's wrap. The witness opens the vector's secret and
+// derives cityg-core's node key from it; the proof finds where pk_v
+// differs from that key, in the matrix seed, in t or in pk_X. An honest
+// pk_v, or one that no key generation gives, has no witness, and a place
+// where the keys agree gives no proof.
+TEST(Dispute, TheWrongSecretAtEachPlace) {
+  set_log_level(ERROR);
+  const Statement st = Statement::kWrongSecret;
+  DisputeProof dp;
+  dp.st = st;
+  dp.circuit = dispute_circuit(st);
+  const size_t seed_end = 256, t_end = 256 + 768;
+  for (Wrong wrong : {Wrong::kSeed, Wrong::kT, Wrong::kPkX}) {
+    auto in = wrong_secret_instance(0, wrong);
+    ASSERT_NE(in, nullptr);
+    EXPECT_EQ(hex(in->sealed.data(), in->sealed.size()), kWrap.sealed);
+    DWitness dw(f25519);
+    ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, st, in->wrap));
+    EXPECT_EQ(hex(dw.opened(), 32), kWrap.secret);
+    EXPECT_EQ(hex(dw.node().ek, 32), kWrap.node_t_head);
+    EXPECT_EQ(hex(dw.node().rho, 32), kWrap.node_rho);
+    EXPECT_EQ(hex(dw.node_pk_x(), 32), kWrap.node_pk_x);
+    const size_t place = dw.place();
+    if (wrong == Wrong::kSeed) EXPECT_LT(place, seed_end);
+    if (wrong == Wrong::kT) {
+      EXPECT_GE(place, seed_end);
+      EXPECT_LT(place, t_end);
+    }
+    if (wrong == Wrong::kPkX) EXPECT_EQ(place, t_end);
+    ASSERT_TRUE(prove_dispute(dp, *in, dw));
+    EXPECT_TRUE(verify_dispute(dp, *in, dw));
+  }
+  auto honest = wrong_secret_instance(0, Wrong::kNothing);
+  ASSERT_NE(honest, nullptr);
+  DWitness dw(f25519);
+  EXPECT_FALSE(dw.compute(honest->key, honest->ct, honest->d, st,
+                          honest->wrap));
+  // Forced to select pk_X, where the keys agree: the difference has no
+  // inverse.
+  EXPECT_FALSE(dw.compute(honest->key, honest->ct, honest->d, st,
+                          honest->wrap, t_end));
+  EXPECT_FALSE(prove_dispute(dp, *honest, dw));
+  auto odd = wrong_secret_instance(0, Wrong::kNotCanonical);
+  ASSERT_NE(odd, nullptr);
+  EXPECT_FALSE(NodeStatement(odd->wrap.pk_v.data()).t_canonical);
+  EXPECT_FALSE(dw.compute(odd->key, odd->ct, odd->d, st, odd->wrap));
 }
 
 TEST(Dispute, WrongWitnessesGiveNoProof) {
   set_log_level(ERROR);
-  const Reencryption mode = Reencryption::kNone;
+  const Statement st = Statement::kWrap;
   DisputeProof dp;
-  dp.mode = mode;
-  dp.circuit = make_dispute_circuit(mode);
+  dp.st = st;
+  dp.circuit = dispute_circuit(st);
   auto in = random_instance(7);
   DWitness dw(f25519);
-  ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, mode, in->context));
+  ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, st, in->wrap));
   // A bit of sk_X, a bit of G's last state, a bit of the combiner's last
   // state, the first bit of s, the last carry of ChaCha20.
   const size_t x25519_inputs = 256 + 2 * 4 * 255 + 1 + 255;
@@ -841,13 +1040,13 @@ TEST(Dispute, WrongWitnessesGiveNoProof) {
 // --gtest_also_run_disabled_tests.
 TEST(Dispute, DISABLED_RowLengths) {
   set_log_level(ERROR);
-  for (Reencryption mode : kModes) {
+  for (Statement st : kStatements) {
     DisputeProof dp;
-    dp.mode = mode;
-    dp.circuit = make_dispute_circuit(mode);
-    auto in = mode_instance(mode, 1);
+    dp.st = st;
+    dp.circuit = dispute_circuit(st);
+    auto in = statement_instance(st, 1);
     DWitness dw(f25519);
-    ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, mode, in->context));
+    ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, st, in->wrap));
     for (size_t be : {size_t{0}, size_t{4096}, size_t{8192}, size_t{16384},
                       size_t{32768}}) {
       dp.block_enc = be;
@@ -864,7 +1063,7 @@ TEST(Dispute, DISABLED_RowLengths) {
       };
       printf("%s, block_enc %zu (%zu): prover %.0f ms, verifier %.0f ms, "
              "proof %zu bytes\n",
-             mode_name(mode), be, dp.proof->param.block_enc, ms(t1 - t0),
+             statement_name(st), be, dp.proof->param.block_enc, ms(t1 - t0),
              ms(t2 - t1), buf.size());
     }
   }
@@ -893,45 +1092,120 @@ void reset_peak_rss() {
 }
 
 // The memory of the compiler, the prover and the verifier, each measured
-// from its own start, for the mode DISPUTE_MODE (0, 1 or 2) alone, so that
-// a process measures one mode. Run with --gtest_also_run_disabled_tests.
+// from its own start, for the statement DISPUTE_STATEMENT (0 to 3, in the
+// order of kStatements) alone, so that a process measures one statement.
+// Run with --gtest_also_run_disabled_tests.
 TEST(Dispute, DISABLED_Memory) {
   set_log_level(ERROR);
-  const char* env = getenv("DISPUTE_MODE");
-  size_t m = env == nullptr ? 0 : static_cast<size_t>(atoi(env)) % 3;
-  for (Reencryption mode : {kModes[m]}) {
-    reset_peak_rss();
-    DisputeProof dp;
-    dp.mode = mode;
-    dp.circuit = make_dispute_circuit(mode);
-    long compiled = peak_rss_mb();
-    auto in = mode_instance(mode, 1);
-    DWitness dw(f25519);
-    ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, mode, in->context));
-    reset_peak_rss();
-    long base = peak_rss_mb();
-    ASSERT_TRUE(prove_dispute(dp, *in, dw));
-    long prover = peak_rss_mb();
-    reset_peak_rss();
-    EXPECT_TRUE(verify_dispute(dp, *in, dw));
-    long verifier = peak_rss_mb();
-    printf("%s: compiler %ld MB; with the circuit loaded (%ld MB), prover "
-           "%ld MB, verifier %ld MB\n",
-           mode_name(mode), compiled, base, prover, verifier);
+  const char* env = getenv("DISPUTE_STATEMENT");
+  size_t m = env == nullptr ? 0 : static_cast<size_t>(atoi(env)) % 4;
+  const Statement st = kStatements[m];
+  reset_peak_rss();
+  std::unique_ptr<Circuit<F25519>> circuit = make_dispute_circuit(st);
+  long compiled = peak_rss_mb();
+  DisputeProof dp;
+  dp.st = st;
+  dp.circuit = circuit.get();
+  auto in = statement_instance(st, 1);
+  DWitness dw(f25519);
+  ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, st, in->wrap));
+  reset_peak_rss();
+  long base = peak_rss_mb();
+  ASSERT_TRUE(prove_dispute(dp, *in, dw));
+  long prover = peak_rss_mb();
+  reset_peak_rss();
+  EXPECT_TRUE(verify_dispute(dp, *in, dw));
+  long verifier = peak_rss_mb();
+  printf("%s: compiler %ld MB; with the circuit loaded (%ld MB), prover "
+         "%ld MB, verifier %ld MB\n",
+         statement_name(st), compiled, base, prover, verifier);
+}
+
+// The circuit as a phone would get it: serialized and compressed with zstd,
+// as Longfellow's mdoc circuits are, then loaded by a process that never
+// compiled it. With DISPUTE_CIRCUIT naming a file that does not exist, the
+// test compiles the circuit of DISPUTE_STATEMENT and writes it there; run
+// again, it loads it, proves and verifies, and prints the memory at each
+// step; without DISPUTE_CIRCUIT, it is skipped. Run with
+// --gtest_also_run_disabled_tests.
+TEST(Dispute, DISABLED_Serialized) {
+  set_log_level(ERROR);
+  const char* env = getenv("DISPUTE_STATEMENT");
+  const Statement st =
+      kStatements[env == nullptr ? 0 : static_cast<size_t>(atoi(env)) % 4];
+  const char* path = getenv("DISPUTE_CIRCUIT");
+  if (path == nullptr) GTEST_SKIP() << "DISPUTE_CIRCUIT is not set";
+  FILE* file = fopen(path, "rb");
+  if (file == nullptr) {
+    std::unique_ptr<Circuit<F25519>> c = make_dispute_circuit(st);
+    std::vector<uint8_t> bytes;
+    CircuitWriter<F25519>(f25519, FieldID::NONE).to_bytes(*c, bytes);
+    std::vector<uint8_t> z(ZSTD_compressBound(bytes.size()));
+    size_t zl =
+        ZSTD_compress(z.data(), z.size(), bytes.data(), bytes.size(), 16);
+    ASSERT_FALSE(ZSTD_isError(zl));
+    file = fopen(path, "wb");
+    ASSERT_NE(file, nullptr);
+    ASSERT_EQ(fwrite(z.data(), 1, zl, file), zl);
+    fclose(file);
+    printf("%s: circuit %zu bytes, %zu with zstd\n", statement_name(st),
+           bytes.size(), zl);
+    return;
   }
+  reset_peak_rss();
+  long start = peak_rss_mb();
+  auto t0 = std::chrono::steady_clock::now();
+  std::vector<uint8_t> z;
+  uint8_t buf[1 << 16];
+  for (size_t n; (n = fread(buf, 1, sizeof(buf), file)) > 0;) {
+    z.insert(z.end(), buf, buf + n);
+  }
+  fclose(file);
+  std::unique_ptr<Circuit<F25519>> circuit;
+  {
+    std::vector<uint8_t> bytes(ZSTD_getFrameContentSize(z.data(), z.size()));
+    size_t n = ZSTD_decompress(bytes.data(), bytes.size(), z.data(), z.size());
+    ASSERT_EQ(n, bytes.size());
+    ReadBuffer rb(bytes);
+    circuit = CircuitReader<F25519>(f25519, FieldID::NONE)
+                  .from_bytes(rb, /*enforce_circuit_id=*/true);
+    ASSERT_NE(circuit, nullptr);
+  }
+  z = std::vector<uint8_t>();
+  double load_ms = std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - t0)
+                       .count();
+  long loading = peak_rss_mb();
+  DisputeProof dp;
+  dp.st = st;
+  dp.circuit = circuit.get();
+  auto in = statement_instance(st, 1);
+  DWitness dw(f25519);
+  ASSERT_TRUE(dw.compute(in->key, in->ct, in->d, st, in->wrap));
+  reset_peak_rss();
+  long loaded = peak_rss_mb();
+  ASSERT_TRUE(prove_dispute(dp, *in, dw));
+  long prover = peak_rss_mb();
+  reset_peak_rss();
+  EXPECT_TRUE(verify_dispute(dp, *in, dw));
+  long verifier = peak_rss_mb();
+  printf("%s: at start %ld MB; loading %.0f ms and %ld MB, loaded %ld MB; "
+         "prover %ld MB, verifier %ld MB\n",
+         statement_name(st), start, load_ms, loading, loaded, prover,
+         verifier);
 }
 
 // ---------- benchmarks ----------
 
 void BM_DisputeProver(benchmark::State& state) {
   set_log_level(ERROR);
-  const Reencryption mode = kModes[state.range(0)];
+  const Statement st = kStatements[state.range(0)];
   DisputeProof dp;
-  dp.mode = mode;
-  dp.circuit = make_dispute_circuit(mode);
-  auto in = mode_instance(mode, 1);
+  dp.st = st;
+  dp.circuit = dispute_circuit(st);
+  auto in = statement_instance(st, 1);
   DWitness dw(f25519);
-  if (!dw.compute(in->key, in->ct, in->d, mode, in->context)) {
+  if (!dw.compute(in->key, in->ct, in->d, st, in->wrap)) {
     state.SkipWithError("witness");
   }
   for (auto s : state) {
@@ -939,19 +1213,19 @@ void BM_DisputeProver(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_DisputeProver)
-    ->DenseRange(0, 2)
+    ->DenseRange(0, 3)
     ->Iterations(3)
     ->Unit(benchmark::kMillisecond);
 
 void BM_DisputeVerifier(benchmark::State& state) {
   set_log_level(ERROR);
-  const Reencryption mode = kModes[state.range(0)];
+  const Statement st = kStatements[state.range(0)];
   DisputeProof dp;
-  dp.mode = mode;
-  dp.circuit = make_dispute_circuit(mode);
-  auto in = mode_instance(mode, 1);
+  dp.st = st;
+  dp.circuit = dispute_circuit(st);
+  auto in = statement_instance(st, 1);
   DWitness dw(f25519);
-  if (!dw.compute(in->key, in->ct, in->d, mode, in->context)) {
+  if (!dw.compute(in->key, in->ct, in->d, st, in->wrap)) {
     state.SkipWithError("witness");
   }
   prove_dispute(dp, *in, dw);
@@ -960,20 +1234,19 @@ void BM_DisputeVerifier(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_DisputeVerifier)
-    ->DenseRange(0, 2)
+    ->DenseRange(0, 3)
     ->Iterations(3)
     ->Unit(benchmark::kMillisecond);
 
 void BM_DisputeWitness(benchmark::State& state) {
-  const Reencryption mode = kModes[state.range(0)];
-  auto in = mode_instance(mode, 1);
+  const Statement st = kStatements[state.range(0)];
+  auto in = statement_instance(st, 1);
   for (auto s : state) {
     DWitness dw(f25519);
-    benchmark::DoNotOptimize(
-        dw.compute(in->key, in->ct, in->d, mode, in->context));
+    benchmark::DoNotOptimize(dw.compute(in->key, in->ct, in->d, st, in->wrap));
   }
 }
-BENCHMARK(BM_DisputeWitness)->DenseRange(0, 2)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_DisputeWitness)->DenseRange(0, 3)->Unit(benchmark::kMillisecond);
 
 }  // namespace
 }  // namespace proofs

@@ -270,6 +270,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     ([`docs/research/bench/src/bin/wrap_vector.rs`](docs/research/bench/src/bin/wrap_vector.rs)),
     whose altered version the proof convicts, in
     [`docs/research/dispute-zk/longfellow/`](docs/research/dispute-zk/longfellow/).
+- Both branches of a wrap dispute, in
+  [`docs/research/litige-deux-branches-2026-09-27.md`](docs/research/litige-deux-branches-2026-09-27.md)
+  (in French):
+  - the second branch, a wrap that opens to a secret whose node key is
+    not the published `pk_v`: ChaCha20's second block opens the secret,
+    X-Wing's key generation derives its node key with the public matrix of
+    `pk_v`, and a hidden place shows where the keys differ; 787 KB, 3.72 s
+    to prove and 2.26 s to verify, at a Pixel 9's speed; it checks no tag
+    and reveals no Poly1305 key, since a wrong tag convicts as well;
+  - the decryption failure rate of ML-KEM-768 for the worst key of bounded
+    norm, computed exactly by
+    [`docs/research/dispute-zk/decryption_failure.py`](docs/research/dispute-zk/decryption_failure.py):
+    `2^-98.9` under the earlier joint bound, not the estimated `2^-129`;
+    the lattice part now bounds each half of the key, for `2^-121.2`;
+  - the verifier's public checks of `ct_X` (prime-order subgroup) and of
+    `pk_v` (canonical encoding), coded and tested;
+  - the circuits serialized and compressed with zstd (0.6 to 1.5 MB) and
+    loaded by a fresh process: the prover needs 104 MB for the first
+    branch and 251 MB for the second, not the 315 to 740 MB measured with
+    the compiler's heap;
+  - [`docs/research/bench/src/bin/wrap_vector.rs`](docs/research/bench/src/bin/wrap_vector.rs)
+    also prints slices of the node key that the wrap's secret gives.
 
 ## [0.4.0] — initial version
 

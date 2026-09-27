@@ -30,6 +30,8 @@
    - un vrai téléphone ;
    - une relecture humaine.
 
+   Depuis (note [les deux branches](litige-deux-branches-2026-09-27.md)) : la branche 2 est prouvée, en 787 Ko et 3,72 s. Le taux d'échec est calculé, et il corrige la section 1.2 : la borne est désormais posée sur `|s|²` et `|e|²` séparément. La mémoire est mesurée avec le circuit sérialisé.
+
 ## 1. L'énoncé, révisé
 
 ### 1.1 Trois énoncés
@@ -67,7 +69,8 @@ Un troisième énoncé, « la décapsulation entière », sert de repère : c'es
   - Sans cette borne, une clé aux coefficients plus grands augmenterait le taux d'échec du déchiffrement. Un échec fait différer le rechiffrement : le membre pourrait alors accuser un committer honnête.
   - Une clé honnête a `|s|² + |e|² ≈ 1536`, avec un écart type de 48 ; la borne 2047 est à plus de dix écarts types.
   - Sous la borne, dans le modèle habituel de l'erreur de déchiffrement, sa variance croît d'au plus 28 %, quand toute la norme va dans `s` : 7 454 au lieu de 5 818.
-  - Le taux d'échec honnête de ML-KEM-768 est `2^−164,8` ([FIPS 203](https://csrc.nist.gov/pubs/fips/203/final)). Une estimation gaussienne le porte vers `2^−129` pour la pire clé admise. Il reste à le calculer exactement, comme le font les scripts de Kyber.
+  - Le taux d'échec honnête de ML-KEM-768 est `2^−164,8` ([FIPS 203](https://csrc.nist.gov/pubs/fips/203/final)). Une estimation gaussienne le portait vers `2^−129` pour la pire clé admise.
+  - **Corrigé depuis** (note [les deux branches](litige-deux-branches-2026-09-27.md), section 2). Calculé exactement, comme le font les scripts de Kyber, le taux de la pire clé sous cette borne est `2^−98,9`. L'estimation mettait à l'échelle la variance totale, surtout faite d'un arrondi borné qui ne pèse pas dans la queue. Le circuit borne désormais `|s|²` et `|e|²` par 1 100 chacun : la pire clé admise échoue avec `2^−121,2`.
 
 ### 1.3 Pourquoi le rechiffrement sort de l'énoncé courant
 
@@ -150,6 +153,8 @@ Rate 1/7 et 132 requêtes, environ 109 bits de sécurité statistique selon Long
 | Le rechiffrement diffère | 8 | 100 398 (1 555) | 4 161 071 | 629 324 o | 2,56 s | 1,55 s |
 | La décapsulation entière (repère) | 9 | 150 564 (2 209) | 5 227 015 | 753 836 o | 3,39 s | 2,01 s |
 
+Depuis (note [les deux branches](litige-deux-branches-2026-09-27.md), section 1.3) : avec la seconde borne de norme, chaque énoncé gagne 11 entrées et 47 termes, et les temps restent dans le bruit de ceux-ci. La branche 2 s'y ajoute.
+
 - **Le témoin se calcule en 2 ms.**
 - **Ce qui coûte, pour le premier énoncé.**
   - Chez le prouveur, l'engagement Ligero prend 0,73 s, le sumcheck 0,55 s, la preuve Ligero 0,14 s.
@@ -160,6 +165,7 @@ Rate 1/7 et 132 requêtes, environ 109 bits de sécurité statistique selon Long
   - Le circuit ne dépend pas du litige : il se compile une fois, en 2,5 s et 419 Mo pour le premier énoncé, et se livre sérialisé, comme les circuits mdoc de Longfellow.
   - Circuit chargé, le prouveur culmine à 315 Mo et le vérifieur à 289 Mo.
   - Pour les deux autres énoncés, il faut 585 à 740 Mo.
+  - **Corrigé depuis** (note [les deux branches](litige-deux-branches-2026-09-27.md), section 4) : ces pics comptaient le tas que le compilateur laisse au processus. Chargé sérialisé par un processus neuf, le circuit du premier énoncé occupe 20 Mo, et son prouveur culmine à 104 Mo.
 - **Sur un téléphone.** Par l'étalonnage de la note précédente, ces temps sont proches de ceux d'un Pixel 9, et environ 0,6 fois ceux-là sur un iPhone 15 Plus. Sur la 4G émulée, 573 Ko montent en 0,47 s, plus un aller-retour.
 
 ### 4.2 Les voies comparées
@@ -187,13 +193,13 @@ Rate 1/7 et 132 requêtes, environ 109 bits de sécurité statistique selon Long
 
 ## 6. Ce qui reste
 
-- **La branche 2**, « le wrap s'ouvre sur un mauvais secret ».
+- **La branche 2**, « le wrap s'ouvre sur un mauvais secret ». Faite depuis (note [les deux branches](litige-deux-branches-2026-09-27.md)), sans Poly1305.
   - Il faut ouvrir le wrap dans le circuit : Poly1305 modulo `2^130 − 5`, et un bloc de ChaCha20 de plus.
   - Il faut aussi dériver la clé de nœud du secret : `ExpandLabel`, puis une génération X-Wing. Celle-ci coûte une permutation SHAKE256, `G`, six PRF, le produit par la matrice publique de `pk_v` quand son `ρ` concorde, et une échelle X25519.
   - Ce serait de l'ordre de la décapsulation entière, soit 4 à 5 millions de termes.
-- **Le taux d'échec du déchiffrement** pour la pire clé de norme bornée, calculé exactement.
+- **Le taux d'échec du déchiffrement** pour la pire clé de norme bornée, calculé exactement. Fait depuis : `2^−98,9` sous cette borne, `2^−121,2` sous les deux bornes qui la remplacent.
 - **Un vrai téléphone**, avec le circuit sérialisé.
-- **Le contrôle public de `ct_X`**, codé chez le vérifieur. Il est décrit, pas écrit.
+- **Le contrôle public de `ct_X`**, codé chez le vérifieur. Il est décrit, pas écrit. Codé depuis, avec celui de `pk_v`.
 - **Des leviers.**
   - Longfellow tourne ici sur un cœur.
   - Un partage en deux corps reste à chiffrer : Keccak, `ExpandLabel` et ChaCha20 dans GF(2^128), liés par MAC à `m'` et `ss_X`, soit 511 bits.
@@ -204,6 +210,8 @@ Rate 1/7 et 132 requêtes, environ 109 bits de sécurité statistique selon Long
 | Problème | État | Ce qui reste |
 | --- | --- | --- |
 | 2. Preuves de litige | L'énoncé entier de la branche 1, sans mise en place : 573 Ko, 1,49 s pour prouver, 0,97 s pour vérifier, sur une machine au rythme d'un Pixel 9. Le chiffré invalide se condamne à part, en 615 Ko. | La branche 2 ; le taux d'échec sous la borne de norme ; un vrai téléphone ; une relecture |
+
+Depuis (note [les deux branches](litige-deux-branches-2026-09-27.md)) : la branche 2 tient en 787 Ko et 3,72 s, le taux d'échec est calculé, et le prouveur tient en 104 à 251 Mo avec le circuit sérialisé. Restent un vrai téléphone, une branche 2 allégée pour le cas courant, et une relecture.
 
 L'ordre des problèmes ouverts ne change pas :
 1. la preuve de l'arbre ;

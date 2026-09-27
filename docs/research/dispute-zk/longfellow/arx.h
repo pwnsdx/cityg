@@ -1,6 +1,7 @@
 // The end of a wrap dispute's statement: ExpandLabel, which is BLAKE3 in
-// keyed mode on inputs of one chunk, and the first block of ChaCha20,
-// which gives the wrap's Poly1305 key. Research code.
+// keyed mode on inputs of one chunk, the first block of ChaCha20, which
+// gives the wrap's Poly1305 key, and the second, whose keystream opens the
+// sealed secret. Research code.
 //
 // The functions are written once, over a backend. ArxClear computes in the
 // clear and records the witness of each addition modulo 2^32: the 32 bits
@@ -94,15 +95,46 @@ class Arx {
     return std::vector<Word>(o1.begin(), o1.begin() + n);
   }
 
+  // BLAKE3's keyed hash of a one-block input (at most 64 bytes): its first
+  // n output words. len0 is the block's length.
+  std::vector<Word> keyed_hash1(const std::array<Word, 8>& key,
+                                const std::array<Msg, 16>& m0,
+                                const Word& len0, size_t n) {
+    std::array<Word, 16> o =
+        compress(key, m0, len0, kKeyedHash | kChunkStart | kChunkEnd | kRoot);
+    return std::vector<Word>(o.begin(), o.begin() + n);
+  }
+
   // The first block of ChaCha20 (RFC 8439), counter 0; its words 0 to 7,
   // the Poly1305 key, are checked against out.
   void poly1305_key(const std::array<Word, 8>& key,
                     const std::array<Word, 3>& nonce,
                     const std::array<Msg, 8>& out) {
     std::array<Word, 16> init;
+    std::array<Word, 16> s = rounds(key, 0, nonce, init);
+    for (size_t i = 0; i < 8; ++i) b_.feed_forward(s[i], init[i], out[i]);
+  }
+
+  // The first 32 bytes of ChaCha20's block `counter`, as 8 words.
+  std::array<Word, 8> keystream(const std::array<Word, 8>& key,
+                                uint32_t counter,
+                                const std::array<Word, 3>& nonce) {
+    std::array<Word, 16> init;
+    std::array<Word, 16> s = rounds(key, counter, nonce, init);
+    std::array<Word, 8> out;
+    for (size_t i = 0; i < 8; ++i) out[i] = b_.add(s[i], init[i]);
+    return out;
+  }
+
+ private:
+  // ChaCha20's 20 rounds on the block (key, counter, nonce); init gets the
+  // block before them.
+  std::array<Word, 16> rounds(const std::array<Word, 8>& key, uint32_t counter,
+                              const std::array<Word, 3>& nonce,
+                              std::array<Word, 16>& init) {
     for (size_t i = 0; i < 4; ++i) init[i] = k(kChaCha[i]);
     for (size_t i = 0; i < 8; ++i) init[4 + i] = key[i];
-    init[12] = k(0);
+    init[12] = k(counter);
     for (size_t i = 0; i < 3; ++i) init[13 + i] = nonce[i];
     std::array<Word, 16> s = init;
     for (size_t i = 0; i < 10; ++i) {
@@ -118,10 +150,9 @@ class Arx {
         s[j] = b_.checkpoint(s[j]);
       }
     }
-    for (size_t i = 0; i < 8; ++i) b_.feed_forward(s[i], init[i], out[i]);
+    return s;
   }
 
- private:
   Word k(uint32_t x) { return b_.konst(x); }
 
   void g(std::array<Word, 16>& v, size_t a, size_t b, size_t c, size_t d,

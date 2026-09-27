@@ -99,19 +99,22 @@ class LatticeWitness {
                const mlkem::PolyVec& e, const mlkem::Decapsulation& d,
                Reencryption mode, size_t force_sel = SIZE_MAX) {
     values_.clear();
+    out_ = &values_;
     ok_ = true;
     for (const auto* v : {&s, &e}) {
       for (size_t j = 0; j < kK; ++j) {
         for (size_t l = 0; l < kN; ++l) push_bits((*v)[j][l] + 4, 3);
       }
     }
-    int64_t norm = 0;
-    for (size_t j = 0; j < kK; ++j) {
-      for (size_t l = 0; l < kN; ++l) {
-        norm += int64_t{s[j][l]} * s[j][l] + int64_t{e[j][l]} * e[j][l];
+    for (const auto* v : {&s, &e}) {
+      int64_t norm = 0;
+      for (size_t j = 0; j < kK; ++j) {
+        for (size_t l = 0; l < kN; ++l) {
+          norm += int64_t{(*v)[j][l]} * (*v)[j][l];
+        }
       }
+      push_bits(1100 - norm, 11);
     }
-    push_bits(2047 - norm, 11);
 
     // Key binding.
     std::vector<std::vector<int64_t>> k(kK), h(kK);
@@ -222,7 +225,7 @@ class LatticeWitness {
       push_split(num % kQ, 12, kQ - 2048);
       Elt prod = f_.mulf(of_int(diff, f_), of_int(diff - two_d, f_));
       if (prod == f_.zero()) ok_ = false;
-      values_.push_back(prod == f_.zero() ? prod : f_.invertf(prod));
+      out_->push_back(prod == f_.zero() ? prod : f_.invertf(prod));
     }
 
     // The PRF outputs, as bits, for the circuit that takes them as inputs.
@@ -233,6 +236,64 @@ class LatticeWitness {
       }
     }
     return ok_;
+  }
+
+  // Branch 2: the witness of t' = A_v s' + e' (mod q), in the order of
+  // LatticeCircuit::NodeWitness::read; node_t() gets t''s coefficients.
+  bool compute_node(const mlkem::Matrix& a_v, const mlkem::PolyVec& s2,
+                    const mlkem::PolyVec& e2) {
+    std::vector<Elt>* saved = out_;
+    node_values_.clear();
+    out_ = &node_values_;
+    ok_ = true;
+    node_t_.clear();
+    std::vector<std::vector<int64_t>> x(kK), h(kK);
+    for (size_t i = 0; i < kK; ++i) {
+      Wide acc{};
+      for (size_t j = 0; j < kK; ++j) mul_add(acc, a_v[i][j], s2[j]);
+      x[i] = negacyclic(acc);
+      h[i] = high(acc);
+      for (size_t l = 0; l < kN; ++l) {
+        x[i][l] += e2[i][l];
+        node_t_.push_back(mlkem::mod_q(x[i][l]));
+      }
+    }
+    for (size_t i = 0; i < kK; ++i) {
+      for (size_t l = 0; l < kN; ++l) {
+        push_split(node_t_[kN * i + l], 12, kQ - 2048);
+      }
+    }
+    for (size_t i = 0; i < kK; ++i) {
+      for (size_t l = 0; l < kN; ++l) {
+        push_bits((x[i][l] - node_t_[kN * i + l]) / kQ + 2048, 12);
+      }
+    }
+    for (size_t i = 0; i < kK; ++i) push_high(h[i]);
+    out_ = saved;
+    return ok_;
+  }
+
+  void fill_node(DenseFiller<Field>& filler) const {
+    for (const Elt& x : node_values_) filler.push_back(x);
+  }
+
+  const std::vector<int32_t>& node_t() const { return node_t_; }
+
+  // A_v(rho), the public inputs of LatticeCircuit::NodePublic.
+  static std::vector<Elt> node_public(const mlkem::Matrix& a_v, const Elt& rho,
+                                      const Field& f) {
+    std::vector<Elt> out;
+    for (size_t i = 0; i < kK; ++i) {
+      for (size_t j = 0; j < kK; ++j) {
+        Elt r = f.zero(), pw = f.one();
+        for (size_t l = 0; l < kN; ++l) {
+          f.add(r, f.mulf(pw, of_int(a_v[i][j][l], f)));
+          pw = f.mulf(pw, rho);
+        }
+        out.push_back(r);
+      }
+    }
+    return out;
   }
 
   // The private inputs, in the order of LatticeCircuit::Witness::read.
@@ -338,7 +399,7 @@ class LatticeWitness {
   void push_bits(int64_t x, size_t n) {
     if (x < 0 || x >= (int64_t{1} << n)) ok_ = false;
     for (size_t b = 0; b < n; ++b) {
-      values_.push_back(f_.of_scalar((x >> b) & 1));
+      out_->push_back(f_.of_scalar((x >> b) & 1));
     }
   }
 
@@ -353,12 +414,14 @@ class LatticeWitness {
   }
 
   void push_high(const std::vector<int64_t>& h) {
-    for (int64_t x : h) values_.push_back(of_int(x, f_));
+    for (int64_t x : h) out_->push_back(of_int(x, f_));
   }
 
   const Field& f_;
   bool ok_ = true;
-  std::vector<Elt> values_;
+  std::vector<Elt> values_, node_values_;
+  std::vector<Elt>* out_ = &values_;  // where the push functions write
+  std::vector<int32_t> node_t_;
   std::vector<uint8_t> prf_bits_;
   std::vector<int32_t> m_;
 };

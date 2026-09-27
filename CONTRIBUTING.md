@@ -127,9 +127,10 @@ We are especially interested in:
   and 552 KB, see
   [`docs/research/litige-sans-mise-en-place-2026-09-26.md`](docs/research/litige-sans-mise-en-place-2026-09-26.md)),
   then the whole first branch in one field (573 KB, 1.49 s to prove, see
-  [`docs/research/litige-entier-2026-09-26.md`](docs/research/litige-entier-2026-09-26.md));
-  what remains is the second branch, the decryption failure rate of keys
-  of bounded norm, and a measurement on a phone.
+  [`docs/research/litige-entier-2026-09-26.md`](docs/research/litige-entier-2026-09-26.md)),
+  and the second branch (787 KB, 3.72 s to prove, see
+  [`docs/research/litige-deux-branches-2026-09-27.md`](docs/research/litige-deux-branches-2026-09-27.md));
+  what remains is a measurement on a phone.
 
 ## Review
 
