@@ -29,8 +29,9 @@ with X25519) and ML-DSA-65.
 > include. Of stage 3, it implements cards in leaves, unique keys, the
 > message plane (messages whose sender the delivery service does not see,
 > signed once per burst by the sender's card, and logged in the next seal)
-> and the authorized mode, where an authorizer signs each window's joins in
-> one batch and checkpoints each epoch. The membership log, the networked
+> the authorized mode, where an authorizer signs each window's joins in one
+> batch and checkpoints each epoch, and the membership log of each window.
+> The networked
 > delivery service and the clients do not exist yet
 > ([specification, section 19](docs/specs.md#19-open-items)). There are no
 > test vectors and no independent human cryptographic review: **for
@@ -233,8 +234,7 @@ Fourteen more, in French, look at what comes next; the fifth gathers them
 into a candidate profile for the next version, in three stages, and the
 following ones work on its open problems. None of them is part of profile
 v0.4; the [v0.5 draft](docs/specs-v0.5-draft.md) specifies the three
-stages, and `cityg-core` implements the first two and three of the four
-parts of the third.
+stages, and `cityg-core` implements all three.
 
 | Note | Question | What it finds |
 | --- | --- | --- |

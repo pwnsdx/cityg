@@ -39,6 +39,7 @@ use crate::dispute::{Dispute, DisputeContent, DisputeStatement, classify};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::DeviceIdentity;
 use crate::kem::KemSecret;
+use crate::membership::{self, MembershipLog};
 use crate::message::{
     Delivered, Dropped, EpochMessages, Message, MessageLog, Received, sender_card,
 };
@@ -115,6 +116,9 @@ pub struct Member {
     /// The authorizer whose checkpoint the member requires before it
     /// accepts a window (docs/specs-v0.5-draft.md section 4.9).
     checkpoint_key: Option<Vec<u8>>,
+    /// The log of the changes of the window that created the current epoch
+    /// (section 4.10).
+    membership_log: MembershipLog,
     pending_leaf: Option<KemSecret>,
     /// The card drawn with the pending leaf key.
     pending_card: Option<CardKey>,
@@ -189,6 +193,11 @@ impl Member {
         };
         let tree_hash = tree.tree_hash()?;
         let registry_header = registry.header()?;
+        let membership_log = MembershipLog::of(&membership::genesis(
+            &gid,
+            identity.public_key(),
+            &card.card(),
+        )?)?;
         let header = SealHeader {
             gid,
             epoch: 0,
@@ -204,6 +213,7 @@ impl Member {
             body_hash: body.hash()?,
             time_ms,
             message_log: MessageLog::empty()?,
+            membership_log,
             entrant: None,
         };
         let seal_hash = header.hash()?;
@@ -251,6 +261,7 @@ impl Member {
             messages,
             previous_messages: None,
             checkpoint_key: None,
+            membership_log,
             pending_leaf: None,
             pending_card: None,
             repaired: false,
@@ -419,6 +430,15 @@ impl Member {
     /// read (docs/specs-v0.5-draft.md section 4.3).
     pub fn forget_previous_messages(&mut self) {
         self.previous_messages = None;
+    }
+
+    /// The log of the changes of the window that created the current epoch,
+    /// which its seal header carries: the member checks against it the
+    /// records the DS serves ([`MembershipLog::check`]), as MLS has every
+    /// member see every change (docs/specs-v0.5-draft.md section 4.10).
+    #[must_use]
+    pub const fn membership_log(&self) -> MembershipLog {
+        self.membership_log
     }
 
     /// The member's leaf key.
@@ -625,6 +645,7 @@ impl Member {
         self.secrets = epoch_secrets;
         self.seal_hash = seal_hash;
         self.checkpoint_key = checkpoint_key;
+        self.membership_log = header.membership_log;
         Ok(())
     }
 
@@ -1934,6 +1955,8 @@ struct Opened {
     header: EpochHeader,
     /// The header of the epoch before, unless the entry was checkpointed.
     previous: Option<EpochHeader>,
+    /// The log of the changes of the window that created the epoch.
+    membership_log: MembershipLog,
     seal_hash: Digest,
     secrets: EpochSecrets,
 }
@@ -1965,6 +1988,7 @@ impl Opened {
             messages,
             previous_messages: None,
             checkpoint_key: None,
+            membership_log: self.membership_log,
             pending_leaf: None,
             pending_card: None,
             repaired: false,
@@ -1981,7 +2005,7 @@ fn open_entry(
     let entry = input.entry;
     // The epoch it enters: by the chain of seals from the anchor, or by the
     // checkpoint of an authorizer the entrant trusts (section 4.9).
-    let (header, previous, seal_hash, confirmed, tag) = match &entry.checkpoint {
+    let (header, previous, seal_hash, confirmed, tag, membership_log) = match &entry.checkpoint {
         Some(checkpointed) => {
             let authorizer_pk = input.authorizer_pk.ok_or(CoreError::Unauthorized(
                 "a checkpoint of an authorizer the entrant does not trust",
@@ -1996,6 +2020,7 @@ fn open_entry(
                 checkpointed.seal.hash()?,
                 context.confirmed_transcript_hash,
                 checkpointed.checkpoint.tag,
+                checkpointed.seal.membership_log,
             )
         }
         None => {
@@ -2007,7 +2032,14 @@ fn open_entry(
             let header = previous.follow(last)?;
             let seal_hash = last.proof.header.hash()?;
             let confirmed = confirmed_transcript_hash(&previous.interim, &seal_hash)?;
-            (header, Some(previous), seal_hash, confirmed, last.proof.tag)
+            (
+                header,
+                Some(previous),
+                seal_hash,
+                confirmed,
+                last.proof.tag,
+                last.proof.header.membership_log,
+            )
         }
     };
     entry.leaf.verify(&header.tree_hash)?;
@@ -2101,6 +2133,7 @@ fn open_entry(
         root,
         header,
         previous,
+        membership_log,
         seal_hash,
         secrets: secrets_of_epoch,
     })
@@ -2297,6 +2330,7 @@ fn seal_as_entrant(
         messages,
         previous_messages: None,
         checkpoint_key: None,
+        membership_log: sealed.seal.header.membership_log,
         pending_leaf: None,
         pending_card: None,
         repaired: false,

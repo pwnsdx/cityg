@@ -7,13 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Protocol: the v0.5 draft, stage 3 (parity), specified; parts 3a to 3c implemented
+### Protocol: the v0.5 draft, stage 3 (parity), specified and implemented
 
 - Stage 3 of the draft is specified in detail (section 4 of
   [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
-  E-18), from the research notes on parity and on the message plane; its
-  first three parts are implemented. Four parts, in the order of their
-  implementation:
+  E-18), from the research notes on parity and on the message plane, and
+  implemented. Four parts, in the order of their implementation:
   - **leaves with cards**: a card, the key that signs messages, beside the
     leaf key, and changed with it; the leaf hash takes the leaf's summary
     (`device_id`, the leaf key's hash, the card), so that a reader checks a
@@ -68,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests in `crates/cityg-core/tests/parity.rs`: a leaf holds its member's
   card, which an update replaces; a leaf's hash takes its summary; no leaf
   key or card is set twice, whoever builds the window; an audit finds a
-  key already in use.
+  key already in use; members check the changes of a window against its
+  log, and the DS refuses a seal whose log differs.
 - **The message plane, implemented** (part 3b, `cityg_core::message`): from
   `msg_secret`, which a member erases once it has derived them, the sender
   data, encryption, exporter and authenticator secrets; a secret tree over
@@ -142,6 +142,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   epoch's group context from its seal header.
 - Breaking: `Entry` gains `checkpoint`; a member that entered by a
   checkpoint holds no header of the epoch before.
+- **The membership log, implemented** (part 3d, section 4.10,
+  `cityg_core::membership`): each seal header carries the log of its
+  window's changes, `[count, root]`, a Merkle tree over one record per
+  change in change order (`[kind, leaf, device_id, card_prefix]`, about 50
+  bytes): the device and card that leave the leaf for a removal or an
+  eviction, those the leaf holds after the window otherwise; the genesis
+  seal logs the creator's join. The sealer computes it, the DS checks it
+  with the rest of the window and serves the records and their proofs
+  (`membership_records`, `membership_proof`), and members check them
+  against the log of the header they accepted (`Member::membership_log`,
+  `MembershipLog::check`). Like the message log, it is in the header rather
+  than the body, which members do not download.
+- Breaking: `SealHeader` gains `membership_log`.
 - Tests in `crates/cityg-core/tests/authorized.rs`: an authorized group
   admits the joins its authorizer signs, window by window; nobody lets in
   a join the authorizer did not sign (the DS, a committer, an auditor); the

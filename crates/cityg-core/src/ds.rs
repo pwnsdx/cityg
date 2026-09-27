@@ -24,6 +24,7 @@ use crate::crypto::{Digest, Wrap, ZERO32, kem_pk_hash};
 use crate::dispute::{Dispute, DisputeStatement, DisputeVerifier};
 use crate::error::{CoreError, CoreResult};
 use crate::member::{CatchUps, PendingRemoval};
+use crate::membership::{self, MembershipRecord};
 use crate::message::{Message, MessageLog, inclusion_proof};
 use crate::objects::{
     AdmissionMode, Authorizer, CatchUpRequest, ChangeKind, Checkpoint, Eviction, GroupPolicy,
@@ -211,6 +212,9 @@ pub struct StoredWindow {
     repair_makers: BTreeMap<u32, (Occupancy, usize)>,
     /// Disputes that convicted a performer of the window.
     disputes: Vec<Dispute>,
+    /// The records of the window's changes, which its seal logs
+    /// (docs/specs-v0.5-draft.md section 4.10).
+    membership: Vec<MembershipRecord>,
 }
 
 impl StoredWindow {
@@ -1523,6 +1527,7 @@ impl DeliveryService {
         };
         // What refers to the state before the window.
         let audits = records(&self.state, &open.window, &commits, &open.requests)?;
+        let membership = membership::records(&self.state, &open.window, &open.requests)?;
         let sealer = if open.sealer.entrant {
             let reference = seal
                 .header
@@ -1668,8 +1673,21 @@ impl DeliveryService {
             repairs: BTreeMap::new(),
             repair_makers: BTreeMap::new(),
             disputes: Vec::new(),
+            membership,
         });
         Ok(epoch)
+    }
+
+    /// The records of the changes of the window that created `epoch`, which
+    /// a member checks against the log of its seal header.
+    pub fn membership_records(&self, epoch: u64) -> CoreResult<&[MembershipRecord]> {
+        Ok(&self.window(epoch)?.membership)
+    }
+
+    /// The proof that the `index`-th record of the window that created
+    /// `epoch` is in its seal's membership log.
+    pub fn membership_proof(&self, epoch: u64, index: usize) -> CoreResult<Vec<Digest>> {
+        membership::inclusion_proof(&self.window(epoch)?.membership, index)
     }
 
     /// The relays and flat elements of the window that created `epoch`,

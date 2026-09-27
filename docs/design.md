@@ -501,7 +501,11 @@ download, not in the body; the DS closes it when it gives the sealer its
 work, not when the window opens, so that the window's tasks do not stop
 the messages. A receiver whose sender's burst fails or expires stops
 reading that sender in the epoch, since every later signature covers the
-dropped messages.
+dropped messages. The membership log is in the seal header for the same
+reason as the message log. The authorizer checks each window from a public
+state it follows and signs only while the registry names it; a joiner that
+trusts it enters with its checkpoint, the seal header, the registry header
+and the external key, instead of a chain of seals.
 
 ## Parameters
 

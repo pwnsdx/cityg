@@ -15,6 +15,7 @@ use crate::crypto::{Digest, ZERO32, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::check_device_key;
 use crate::kem::validate_public_key;
+use crate::membership::{self, MembershipLog};
 use crate::message::MessageLog;
 use crate::objects::{
     Admitters, ChangeKind, GroupPolicy, JoinRequest, Request, device_id, group_id,
@@ -168,6 +169,12 @@ impl PublicState {
             || !seal.body.districts.is_empty()
             || !seal.body.city.is_empty()
             || header.message_log != MessageLog::empty()?
+            || header.membership_log
+                != MembershipLog::of(&membership::genesis(
+                    &header.gid,
+                    &genesis.creator_pk,
+                    &genesis.card,
+                )?)?
         {
             return Err(CoreError::Invalid("genesis seal"));
         }
@@ -1199,6 +1206,12 @@ pub fn check_window(
     )?;
     if state.registry.header_with(&registry)?.hash()? != header.registry_hash {
         return Err(CoreError::Invalid("registry hash"));
+    }
+    // The log of the window's changes (docs/specs-v0.5-draft.md section
+    // 4.10).
+    if MembershipLog::of(&membership::records(state, &window, requests)?)? != header.membership_log
+    {
+        return Err(CoreError::Invalid("seal membership log"));
     }
     if seal.body.hash()? != header.body_hash || seal.body.genesis.is_some() {
         return Err(CoreError::Invalid("seal body"));

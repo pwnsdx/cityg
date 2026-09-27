@@ -1,5 +1,5 @@
 //! Stage 3 of the v0.5 draft (docs/specs-v0.5-draft.md section 4): cards in
-//! leaves, hashed by their summary, and unique keys.
+//! leaves, hashed by their summary, unique keys, and the membership log.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -337,4 +337,109 @@ fn an_audit_finds_a_leaf_key_or_card_already_in_use() {
         check_record(&previous, &record(change, request, proofs)).unwrap(),
         Verdict::Fraud("a leaf key or card already in use")
     );
+}
+
+#[test]
+fn members_check_the_changes_of_a_window_against_its_log() {
+    use cityg_core::commit::Seal;
+    use cityg_core::membership::{MembershipLog, genesis};
+    use cityg_core::objects::Urgency;
+    use cityg_core::tree::Occupancy;
+
+    let mut sim = Sim::new(2, 85);
+    // The genesis seal logs the creator's join.
+    let creator = sim.member(common::CREATOR);
+    let first = genesis(
+        creator.gid(),
+        creator.identity().public_key(),
+        &creator.card(),
+    )
+    .unwrap();
+    creator.membership_log().check(&first).unwrap();
+    sim.request_joins(3);
+    sim.run_window();
+    // A window with a removal, an update and a join.
+    let members: Vec<Occupancy> = sim.members.keys().copied().collect();
+    let (removed, updater) = (members[1], members[2]);
+    let old_leaf = sim.ds.state().tree.member(removed).unwrap().clone();
+    let removal = sim.members[&common::CREATOR]
+        .remove_proposal(removed, Urgency::Urgent, &mut sim.rng)
+        .unwrap();
+    sim.ds.submit_removal(removal, sim.now).unwrap();
+    let update = sim
+        .members
+        .get_mut(&updater)
+        .unwrap()
+        .update_request(&mut sim.rng)
+        .unwrap();
+    sim.ds.submit_update(update.clone(), sim.now).unwrap();
+    sim.request_joins(1);
+    sim.run_window();
+    let epoch = sim.ds.epoch();
+    let records = sim.ds.membership_records(epoch).unwrap().to_vec();
+    // One record per change, in change order: the leaving device and card,
+    // the updated card, the joining device.
+    assert_eq!(records.len(), 3);
+    let removal = records
+        .iter()
+        .find(|record| record.kind == ChangeKind::Removal)
+        .unwrap();
+    assert_eq!(
+        (removal.leaf, removal.device_id),
+        (removed.leaf, old_leaf.device_id)
+    );
+    assert!(removal.names_card(&old_leaf.card).unwrap());
+    let updated = records
+        .iter()
+        .find(|record| record.kind == ChangeKind::Update)
+        .unwrap();
+    assert_eq!(updated.leaf, updater.leaf);
+    assert!(updated.names_card(&update.card).unwrap());
+    assert_eq!(sim.member(updater).card(), update.card);
+    let joined = records
+        .iter()
+        .find(|record| record.kind == ChangeKind::Join)
+        .unwrap();
+    let newcomer = sim.ds.state().tree.leaf(joined.leaf).unwrap();
+    assert_eq!(joined.device_id, newcomer.device_id);
+    let leaves: Vec<u32> = records.iter().map(|record| record.leaf).collect();
+    assert!(leaves.windows(2).all(|pair| pair[0] <= pair[1]));
+    // Every member checks them against the log of its seal header; a record
+    // changed or left out does not pass.
+    for member in sim.members.values() {
+        member.membership_log().check(&records).unwrap();
+    }
+    let log: MembershipLog = sim.member(common::CREATOR).membership_log();
+    let mut altered = records.clone();
+    altered[0].leaf += 1;
+    assert!(log.check(&altered).is_err());
+    assert!(log.check(&records[1..]).is_err());
+    // One record, with its proof.
+    let proof = sim.ds.membership_proof(epoch, 1).unwrap();
+    log.verify_inclusion(1, &records[1], &proof).unwrap();
+    assert!(log.verify_inclusion(1, &records[0], &proof).is_err());
+    // A seal whose log differs from the window's changes is refused.
+    sim.request_joins(1);
+    let task = sim.open_window();
+    sim.commit_open(&task);
+    let seal = sim.seal_open(&task);
+    let mut header = seal.header.clone();
+    header.membership_log.count += 1;
+    let forged = Seal::sign(
+        header,
+        seal.body.clone(),
+        seal.tag,
+        seal.external_pk.clone(),
+        sim.members[&task.sealer].identity(),
+        &mut sim.rng,
+    )
+    .unwrap();
+    assert_eq!(
+        sim.ds.submit_seal(forged).unwrap_err(),
+        CoreError::Invalid("seal membership log")
+    );
+    let epoch = sim.ds.submit_seal(seal).unwrap();
+    sim.follow(epoch);
+    sim.welcome_and_enter(epoch);
+    sim.assert_agreement();
 }

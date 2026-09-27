@@ -14,6 +14,7 @@ use crate::commit::{
 use crate::crypto::{Digest, commit_secret};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::DeviceIdentity;
+use crate::membership::{self, MembershipLog};
 use crate::message::MessageLog;
 use crate::objects::GroupPolicy;
 use crate::rekey::{self, KeySource, NewRoots, Rekeyed, generate, plan_district, plan_part};
@@ -350,6 +351,7 @@ pub fn finish_seal(
         body_hash: body.hash()?,
         time_ms: draft.time_ms,
         message_log: draft.message_log,
+        membership_log: MembershipLog::of(&membership::records(state, window, draft.requests)?)?,
         entrant: draft.entrant,
     };
     let confirmed = confirmed_transcript_hash(&state.interim, &header.hash()?)?;

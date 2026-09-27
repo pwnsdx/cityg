@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 //! City-G protocol core, profile `city-g/v0.5-draft`, stages 1 and 2 but
 //! the proof system of disputes, and of stage 3 the cards, unique keys, the
-//! message plane and the authorized mode (`docs/specs-v0.5-draft.md`, a
+//! message plane, the authorized mode and the membership log
+//! (`docs/specs-v0.5-draft.md`, a
 //! delta on `city-g/v0.4`, `docs/specs.md`): end-to-end encrypted groups of
 //! up to millions of members, whose tree is split into districts under a
 //! city of sub-cities and a top, re-keyed once per window by district
@@ -31,7 +32,8 @@
 //! * packets, seal links and entries, whole or by island ([`packet`]), and
 //!   the top of an island follower's path: relay elements, flat elements,
 //!   refreshes, and repairs ([`top`]);
-//! * labelled Merkle trees in the manner of RFC 6962 ([`merkle`]);
+//! * labelled Merkle trees in the manner of RFC 6962 ([`merkle`]), and the
+//!   membership log, a record of each window's changes ([`membership`]);
 //! * the authorized mode: the authorizer's batches of joins, its removals
 //!   and its checkpoints, on which joiners anchor ([`authorizer`]);
 //! * cards, the keys that sign messages ([`card`]), and the message plane:
@@ -62,6 +64,7 @@ pub mod error;
 pub mod identity;
 pub mod kem;
 pub mod member;
+pub mod membership;
 pub mod merkle;
 pub mod message;
 pub mod objects;
