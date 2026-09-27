@@ -18,12 +18,13 @@ use cityg_core::crypto::wrap;
 use cityg_core::ds::TopChoice;
 use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
+use cityg_core::kem::KemSecret;
 use cityg_core::member::Joiner;
-use cityg_core::objects::Urgency;
+use cityg_core::objects::{JoinRequest, Request, Urgency};
 use cityg_core::roles::{WindowTask, WindowWork, build_district};
 use cityg_core::top::{RelayContext, RelayElement, Top};
 use cityg_core::tree::{CityPart, Divisions, NodeId, Occupancy};
-use cityg_core::window::{check_committer, check_sealer};
+use cityg_core::window::{Requests, check_committer, check_sealer};
 use common::Sim;
 
 /// A group of `size` members with districts, islands and sub-cities of two.
@@ -633,6 +634,58 @@ fn a_member_welcomes_a_join_only_from_its_own_commit_or_a_joiners() {
             )
             .is_err()
     );
+    sim.welcome_and_enter(epoch);
+    assert!(sim.joiners.is_empty());
+    sim.assert_agreement();
+}
+
+#[test]
+fn a_welcomer_takes_the_init_key_of_the_request_the_commit_names() {
+    let mut sim = group(72, 16);
+    remove_in(&mut sim, 1);
+    sim.run_window();
+    sim.request_joins(1);
+    let task = sim.open_window();
+    let welcomer = task.welcomes[0].welcomer;
+    let epoch = sim.complete_window(&task);
+    let stored = sim.ds.window(epoch).unwrap().clone();
+    // The service hands the welcomer, for the join the commit names, a
+    // join of its own with its init key. Requests are filed under their own
+    // reference: the named one is not among them, and the welcomer refuses
+    // rather than seal the joiner secret to the service's key.
+    let named = task.welcomes[0].request;
+    let device = DeviceIdentity::generate(&mut sim.rng);
+    let own = JoinRequest::sign(
+        &stored.seal.header.gid,
+        &device,
+        &KemSecret::generate(&mut sim.rng).public_key(),
+        &KemSecret::generate(&mut sim.rng).public_key(),
+        epoch + 10,
+        None,
+        &mut sim.rng,
+    )
+    .unwrap();
+    let handed: Requests = stored
+        .requests
+        .values()
+        .filter(|request| request.reference() != named)
+        .cloned()
+        .chain([Request::Join(own)])
+        .collect();
+    assert!(handed.get(&named).is_none());
+    let welcome = |requests: &Requests, sim: &mut Sim| {
+        sim.members[&welcomer].welcomes(
+            sim.ds.state(),
+            &stored.seal,
+            &stored.commits,
+            &stored.task,
+            requests,
+            &stored.catch_ups,
+            &mut sim.rng,
+        )
+    };
+    assert!(welcome(&handed, &mut sim).is_err());
+    assert!(welcome(&stored.requests, &mut sim).is_ok());
     sim.welcome_and_enter(epoch);
     assert!(sim.joiners.is_empty());
     sim.assert_agreement();

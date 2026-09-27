@@ -69,7 +69,7 @@ island.
 | [`refresh_checked.pv`](refresh_checked.pv) | A, an island follower, refreshes its path on its own before a role that needs it, and compares the root it recovers with the root secret it holds. The service holds every wrap of two windows and what a removed member knew, and forges wraps. | Proved: A holds the secrets of its upper levels only if they are the real ones. Reachable (sanity): A refreshes. |
 | [`refresh_unchecked.pv`](refresh_unchecked.pv) | A does not compare the roots. | Attack: A holds secrets the service drew, or the stale root the removed member knows. |
 
-Five more model stage 2. A *performer* re-keys a part of the tree for a
+Ten more model stage 2. A *performer* re-keys a part of the tree for a
 window: a member of the previous epoch or a joiner of the window. A weak
 generator gives the attacker every value it draws; a *hedge* is a secret
 mixed into them. The primitives gain one rule: whoever knows the coins of
@@ -82,6 +82,11 @@ an encapsulation opens it, since the KEM is deterministic given them.
 | [`task_hedge_init.pv`](task_hedge_init.pv) | P, a member of epoch 1, hedges with the init secret of epoch 1, as in v0.4. | Attack: M knows that init secret and predicts the root. |
 | [`city_task_bound.pv`](city_task_bound.pv) | Window 2 removes M. C1 commits district 1; P performs the city task over the district roots the delivery service shows it, which may be a key of the service's own, and signs the hash of the roots it wrapped to. S, the sealer, checks the signatures and that hash against the commits, follows the task and seals. | Proved: M does not read the epoch S seals. Reachable (sanity): S seals. |
 | [`city_task_unbound.pv`](city_task_unbound.pv) | S checks the task's signature only. | Attack: the service shows P a key of its own, opens the root, and M brings the init secret. |
+| [`repair.pv`](repair.pv) | Window 2 removes M, which knows the init secret of epoch 1. A faulty task cut A off. R follows the window and wraps its root secret to the leaf key the service names, taken from the group context of epoch 2 that R checked with the tag; the service asks for as many repairs as it likes. | Proved: M does not read epoch 2. Reachable (sanity): A accepts epoch 2 by its repair. |
+| [`repair_unchecked.pv`](repair_unchecked.pv) | R wraps to a leaf key the service gives it. | Attack: the service gives a key of its own, opens the root secret, and M brings the init secret. |
+| [`welcome_joiner.pv`](welcome_joiner.pv) | J, an admitted joiner, commits the district of K's join and names K's request by its hash; S seals one commit of the district, signed by an admitted joiner. W, a member that did not commit the district, welcomes a change of a commit the seal lists, to the init key of the request that hashes to the change's reference; the service hands W commits and requests of its choice. | Proved: the joiner secret reaches no device outside the tree. Reachable (sanity): K enters. |
+| [`welcome_unlisted.pv`](welcome_unlisted.pv) | W does not check that the seal lists the commit. | Attack: the service makes a commit of its own that names a request of its own. |
+| [`welcome_request_unbound.pv`](welcome_request_unbound.pv) | W takes the init key from the request the service hands for the change, without checking its hash, as cityg-core did until requests were filed under their own reference. | Attack: the service hands a request of its own for K's. |
 
 The results bear on nine decisions of the design note:
 
@@ -116,7 +121,13 @@ The results bear on nine decisions of the design note:
   encapsulations with its leaf seed: hedging the secrets alone leaves them
   to whoever predicts the coins, and the init secret of the previous epoch
   is known to the member a window removes. A city task binds the roots it
-  wraps to, and the sealer checks that binding against the commits.
+  wraps to, and the sealer checks that binding against the commits. A
+  repair's maker takes the leaf key from a context it checked with the tag,
+  as a flat maker does. A member that welcomes the entries of a district
+  that a joiner commits needs no more than the seal: the commit must be one
+  the seal lists, and the init key must come from the request that hashes
+  to the change's reference, which binds the welcome to the request the
+  sealer and the joiner checked.
 
 ## Abstractions and limits
 
@@ -138,9 +149,10 @@ The results bear on nine decisions of the design note:
   relay-then-flat-then-refresh fallback are not modelled.
 * **Tasks.** A task is written as the wraps that matter to the property,
   and its part hash as the hash of the keys it wraps to; plans, the tier
-  below a sub-city and the top, welcomes of the districts that joiners
-  commit, repairs and disputes are not modelled. A weak generator is one
-  whose every output the attacker reads.
+  below a sub-city and the top, and disputes are not modelled. A repair is
+  its wrap, without the request that asks for it; a welcome is its checks
+  on the commit and the request, and a request is the init key it names.
+  A weak generator is one whose every output the attacker reads.
 * **Committer assignment.** It is given: a member accepts a district commit
   only from the committer the window assigned. The delivery service's
   queues, windows, placement, the enforcement of recorded removals at

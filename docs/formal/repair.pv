@@ -1,0 +1,52 @@
+(* Scenario REPAIR (profile v0.5-draft, stage 2): the repair of a member
+   that a faulty task cut off.
+
+   Window 2 removes M, which holds the init secret of epoch 1 and every
+   secret it knew; the attacker has them. A faulty task gave A a wrap that
+   does not open, so A cannot follow window 2. R, a member of epoch 2,
+   follows the window, then makes A's repair (docs/specs-v0.5-draft.md,
+   section 3.7): the root secret r2 wrapped to A's leaf key, which R takes
+   from the group context of epoch 2 that it checked with the tag. The
+   delivery service asks R for as many repairs as it likes, to either leaf
+   of that context. A opens the repair with its leaf key, derives the epoch
+   and checks the tag. A message is sent in epoch 2.
+
+   Expected: proved: M does not read epoch 2, the one that removes it.
+   Reachable (sanity): A accepts epoch 2 by its repair. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event AAccepts(key).
+query es: key; event(AAccepts(es)).
+
+process
+  new lsA: key; new lsR: key; new es1: key; new r2: key;
+  let init1 = init_secret(es1) in
+  (* M's state of epoch 1, and the leaf keys. *)
+  out(c, (es1, leaf_pk(lsA), leaf_pk(lsR)));
+  (* Window 2: its context binds the tree, A's leaf key included; r2
+     reaches R along its path. *)
+  let gc2 = (N2, leaf_pk(lsA), leaf_pk(lsR), node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+  new wr: key;
+  out(c, (wrap(leaf_pk(lsR), wr, r2), gc2, tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), MA));
+  (
+    (* R follows window 2, then wraps its root secret to a leaf key of the
+       context it checked, the one the service names. *)
+    ! new wrep: key;
+    in(c, (x: bitstring, g: bitstring, tg: bitstring, first: bool));
+    let r = unwrap(leaf_sk(lsR), x) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    let (=N2, ka: kpk, kr: kpk, kroot: kpk) = g in
+    if first then out(c, wrap(ka, wrep, r)) else out(c, wrap(kr, wrep, r))
+  ) | (
+    (* A opens its repair. *)
+    in(c, (rp: bitstring, g: bitstring, tg: bitstring));
+    let r = unwrap(leaf_sk(lsA), rp) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    event AAccepts(es)
+  )

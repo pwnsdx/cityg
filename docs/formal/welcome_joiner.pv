@@ -1,0 +1,56 @@
+(* Scenario WELCOME_JOINER (profile v0.5-draft, stage 2): a member welcomes
+   the entries of a district that a joiner commits.
+
+   J, a joiner of window 2 that the admin admitted, commits the district of
+   K, another joiner: its commit names K's join request by its reference,
+   the request's hash, and J signs it. The sealer S seals one commit for the
+   district, signed by a joiner the admin admitted (sections 3.3 and 3.4),
+   and lists its hash in the seal. W, a member that followed window 2 and
+   holds its joiner secret, did not commit the district: it welcomes a join
+   only if it is a change of a commit that the seal lists, and takes the
+   init key from the request that hashes to the change's reference
+   (docs/specs.md section 11). The delivery service hands W commits and
+   requests of its choice, as often as it likes. A message is sent in
+   epoch 2.
+
+   Expected: proved: the joiner secret reaches no device outside the tree.
+   Reachable (sanity): K enters. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event KEnters(key).
+query js: key; event(KEnters(js)).
+
+process
+  new skAdm: skey; new skJ: skey; new skS: skey; new ikK: key; new js2: key;
+  out(c, (spk(skAdm), spk(skJ), spk(skS), kempk(ikK)));
+  (* J's admission, K's join request and J's commit of it. *)
+  let reqK = (N2, kempk(ikK)) in
+  let body = (N2, D1, hash(reqK)) in
+  out(c, (sign(skAdm, (ADMIT, spk(skJ))), reqK, body, sign(skJ, body)));
+  out(c, aenc(msg_key(epoch_secret(js2)), MA));
+  (
+    (* S seals the first commit of D1 by an admitted joiner. *)
+    in(c, (pkj: spkey, adm: bitstring, b: bitstring, sj: bitstring));
+    if checksign(spk(skAdm), (ADMIT, pkj), adm) = true then
+    if checksign(pkj, b, sj) = true then
+    let (=N2, =D1, rf: bitstring) = b in
+    out(c, sign(skS, (N2, hash(b))))
+  ) | (
+    (* W welcomes a change of a listed commit, to the init key of the
+       request that hashes to the change's reference. *)
+    ! new w: key;
+    in(c, (b: bitstring, ss: bitstring, req: bitstring));
+    if checksign(spk(skS), (N2, hash(b)), ss) = true then
+    let (=N2, =D1, rf: bitstring) = b in
+    if hash(req) = rf then
+    let (=N2, ik: kpk) = req in
+    out(c, wrap(ik, w, js2))
+  ) | (
+    (* K opens its welcome. *)
+    in(c, wk: bitstring);
+    let js = unwrap(ikK, wk) in
+    if js = js2 then
+    event KEnters(js)
+  )

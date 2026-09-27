@@ -18,7 +18,7 @@ implements.
 | [design.md](design.md) | Why the protocol is built as it is (decisions E-1 to E-14, and E-15 to E-17 for the v0.5 draft), what each decision costs, and what was left out. |
 | [workflows.md](workflows.md) | Sequence diagrams: creating a group, joining, a window of changes, nobody online, coming back, seeing who joined an open group. |
 | [GLOSSARY.md](GLOSSARY.md) | Terms of the specification. |
-| [formal/](formal/README.md) | ProVerif model of the security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins, windows sealed by an entrant, open groups, catch-ups welcomed to the leaf key; and of the v0.5 draft: in stage 1, the tops of the window that removes a member, the keys of flat elements, refreshes checked against the root; in stage 2, hedges that cover the coins of every encapsulation and city tasks bound to the roots they wrap to. |
+| [formal/](formal/README.md) | ProVerif model of the security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins, windows sealed by an entrant, open groups, catch-ups welcomed to the leaf key; and of the v0.5 draft: in stage 1, the tops of the window that removes a member, the keys of flat elements, refreshes checked against the root; in stage 2, hedges that cover the coins of every encapsulation, city tasks bound to the roots they wrap to, repairs wrapped to a checked leaf key, and welcomes of joiners' districts bound to the seal and to the request's reference. |
 | [security-review-checklist.md](security-review-checklist.md) | Security review of a change or a release. |
 
 ## Research

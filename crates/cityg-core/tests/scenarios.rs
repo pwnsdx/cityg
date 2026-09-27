@@ -253,7 +253,7 @@ mod forged {
             .grown(needed_height(state.tree.height(), Some(leaf)))
             .unwrap();
         let window = WindowShape::new(&state.tree, epoch, shape, changes.iter().copied()).unwrap();
-        let requests: Requests = [(reference, Request::Join(join.clone()))].into();
+        let requests: Requests = [Request::Join(join.clone())].into_iter().collect();
         let occupancy = Occupancy { leaf, since: epoch };
         let (kem_output, init_prev) =
             external_init(&state.gid, epoch, &state.external_pk, &[0; 32], rng).unwrap();
@@ -1150,11 +1150,9 @@ fn audits_expose_a_committer_that_placed_an_invalid_join() {
             request: good.reference(),
         },
     ];
-    let requests: Requests = [
-        (bad.reference(), Request::Join(bad.clone())),
-        (good.reference(), Request::Join(good.clone())),
-    ]
-    .into();
+    let requests: Requests = [Request::Join(bad.clone()), Request::Join(good.clone())]
+        .into_iter()
+        .collect();
     let height = needed_height(state.tree.height(), Some(7));
     let shape = state.tree.shape().grown(height).unwrap();
     let window = WindowShape::new(&state.tree, epoch, shape, changes.iter().copied()).unwrap();

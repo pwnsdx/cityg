@@ -1,0 +1,37 @@
+(* Scenario REPAIR_UNCHECKED (profile v0.5-draft, stage 2): the repair of
+   REPAIR, which R wraps to a leaf key the delivery service gives it
+   instead of the one of the context it checked.
+
+   Expected: attack: the service gives a key of its own, opens the root
+   secret, and M brings the init secret. Reachable (sanity): A accepts
+   epoch 2 by its repair. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event AAccepts(key).
+query es: key; event(AAccepts(es)).
+
+process
+  new lsA: key; new lsR: key; new es1: key; new r2: key;
+  let init1 = init_secret(es1) in
+  out(c, (es1, leaf_pk(lsA), leaf_pk(lsR)));
+  let gc2 = (N2, leaf_pk(lsA), leaf_pk(lsR), node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+  new wr: key;
+  out(c, (wrap(leaf_pk(lsR), wr, r2), gc2, tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), MA));
+  (
+    new wrep: key;
+    in(c, (x: bitstring, g: bitstring, tg: bitstring, ka: kpk));
+    let r = unwrap(leaf_sk(lsR), x) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    out(c, wrap(ka, wrep, r))
+  ) | (
+    in(c, (rp: bitstring, g: bitstring, tg: bitstring));
+    let r = unwrap(leaf_sk(lsA), rp) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    event AAccepts(es)
+  )

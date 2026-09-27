@@ -334,7 +334,7 @@ fn a_large_window_on_a_full_group_matches_the_model() {
             kind: ChangeKind::Removal,
             request: request.reference(),
         });
-        requests.insert(request.reference(), request);
+        requests.insert(request);
         if index < joins {
             let device = DeviceIdentity::generate(&mut rng);
             let id = device_id(&state.gid, device.public_key()).unwrap();
@@ -363,7 +363,7 @@ fn a_large_window_on_a_full_group_matches_the_model() {
                 kind: ChangeKind::Join,
                 request: request.reference(),
             });
-            requests.insert(request.reference(), request);
+            requests.insert(request);
         }
     }
     list.sort();

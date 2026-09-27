@@ -93,13 +93,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   island, and refuses a forged root node, relay element or top of another
   island; one whose relay lied falls back to its whole path; a member that
   a faulty commit cut off is repaired, then updates.
-- Symbolic model of stage 2 ([`docs/formal/`](docs/formal/README.md)): five
-  ProVerif scenarios, 28 in all. A device that hedges with its leaf seed,
+- Symbolic model of stage 2 ([`docs/formal/`](docs/formal/README.md)): ten
+  ProVerif scenarios, 33 in all. A device that hedges with its leaf seed,
   the coins of its encapsulations included, keeps a weak generator from
   giving the window's epoch to the member it removes; hedging the secrets
   alone, or with the previous init secret, does not. A city task that
   binds the roots it wraps to, checked by the sealer against the commits,
-  keeps the delivery service from slipping in a key of its own. The scale test runs the city tasks and checks
+  keeps the delivery service from slipping in a key of its own. A repair
+  wrapped to the leaf key of the context its maker checked gives the epoch
+  to the member alone; wrapped to a key the service gives, to the service.
+  A member that welcomes the entries of a joiner's district needs the seal
+  to list the commit and the init key to come from the request that hashes
+  to the change's reference; without either check, the service reads the
+  epoch.
+- A welcomer given, for the join a commit names, another request than the
+  one that hashes to its reference refuses to welcome (`tasks.rs`).
+- The scale test runs the city tasks and checks
   the cost model with a boundary above the sub-cities
   (`CITYG_SCALE_SUBCITY_BITS`, 8 by default): 33 tasks for 4,096 members
   in sub-cities of eight districts. It draws the leaves of its window from
@@ -174,6 +183,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A device takes the request of a change only if it hashes to the change's
+  reference (specification, section 10.1). `Requests`, the requests of a
+  window by reference, was a map that the caller filled: the delivery
+  service could hand a welcomer, under the reference of a listed join, a
+  join of its own, and the welcomer sealed the joiner secret to the
+  service's init key. Only catch-ups were checked. `Requests` is now a type
+  that files each request under its own reference (`Requests::insert`), so
+  every lookup, in welcomes, entries, committers and sealers, yields the
+  request that hashes to the reference or nothing. Found while modelling
+  the welcomes of stage 2 (`welcome_request_unbound.pv`). Breaking:
+  `Requests::insert` takes the request alone, and a map is built with
+  `collect()` from requests.
 - The hedge against a weak generator covers the coins of every
   encapsulation, and rests on the device's leaf seed (v0.5 draft, section
   3.3). The specification hedged a committer's fresh secrets with its

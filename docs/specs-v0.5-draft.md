@@ -537,7 +537,9 @@ Replaces the member window of v0.4 §14.4.
   that member (v0.4 §11); those of a district that a joiner commits go to
   volunteers in turn. A welcomer welcomes a join or a re-entry only if it
   is a change of a district commit that the seal lists, of its own or of a
-  joiner of the window, instead of its own alone (v0.4 §11). The entries
+  joiner of the window, instead of its own alone (v0.4 §11), and takes the
+  init key from the request that hashes to the change's `request_ref`
+  (v0.4 §10.1). The entries
   of a district that a joiner commits are checked by the joiner, like any
   committer's, and sampled by auditors (v0.4 §15).
 * **Order.** The DS accepts a sub-city task once the district commits of
@@ -616,8 +618,11 @@ Repair := ["city-g/repair/v5", gid, epoch, leaf, wrap]
 
 * **Who makes it.** Any member of epoch `n` holding `r_n` that the DS
   asks, with the leaf key of the tree of epoch `n`, checked against its
-  header. A task that cuts off a district costs at most `2^L` repairs;
-  one that cuts off a sub-city, one flat element per island (section 2.4).
+  header, never a key the DS gives: the DS would open `r_n`, which with
+  the `init_n-1` of a removed member gives the epoch (formal model,
+  `repair.pv`, `repair_unchecked.pv`). A task that cuts off a district
+  costs at most `2^L` repairs; one that cuts off a sub-city, one flat
+  element per island (section 2.4).
 * **Unsigned**, like a flat element: the member opens it with its leaf
   key, derives the epoch, and checks the tag.
 * **After a repair**, the member holds `r_n` but no valid path: it MUST
@@ -684,7 +689,11 @@ the branch's statement, over the member's key and the wrap in its context
   committer does, and audits name it as they name a member (v0.4 §15). A
   faulty joiner can place entries it should not, as a faulty member can in
   v0.4, and is removed the same way. Members welcome such entries only from
-  a commit the seal lists.
+  a commit the seal lists, to the init key of the request that hashes to
+  the change's reference: without the first check the DS makes a commit of
+  its own, without the second it hands a request of its own
+  (`welcome_joiner.pv`, `welcome_unlisted.pv`,
+  `welcome_request_unbound.pv`).
 * **The sealer draws nothing** and learns nothing its own path does not
   give it.
 * **Forks.** Tasks bind the state they were built on; relay elements bind
@@ -844,11 +853,13 @@ Nothing of v0.4 decodes under this draft: every label changed.
 * **The proof system of disputes** (section 3.8): the statements are
   measured in the research notes, in Longfellow; the encoding of `proof`,
   its verifier in the DS, and the size limits remain to be fixed.
-* **The formal models of stage 2**: hedges and city tasks bound to the
-  state they build on are modelled ([`formal/`](formal/README.md),
-  `task_hedge*.pv`, `city_task_*.pv`), as are the taint rule for tasks and
-  the maintained city (`taint.pv`, `ilot_city_maintained.pv`); welcomes by
-  members for joiner districts and repairs are not.
+* **The formal models of stage 2**: hedges, city tasks bound to the state
+  they build on, repairs and welcomes by members for joiner districts are
+  modelled ([`formal/`](formal/README.md), `task_hedge*.pv`,
+  `city_task_*.pv`, `repair*.pv`, `welcome_*.pv`), as are the taint rule
+  for tasks and the maintained city (`taint.pv`,
+  `ilot_city_maintained.pv`); disputes and the requests for repairs are
+  not.
 * **Assignment under load**: how many tasks a joiner takes, and when a DS
   prefers a volunteer with a good network.
 * Everything v0.4 §19 lists, except the lighter structure for continuous

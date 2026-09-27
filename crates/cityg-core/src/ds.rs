@@ -696,7 +696,7 @@ impl DeliveryService {
                 kind: request.kind(),
                 request: request.reference(),
             });
-            requests.insert(request.reference(), request);
+            requests.insert(request);
         }
         let mut emptied: Vec<u32> = subjects.iter().map(|target| target.leaf).collect();
         emptied.sort_unstable();
@@ -732,7 +732,7 @@ impl DeliveryService {
                 kind: request.kind(),
                 request: request.reference(),
             });
-            requests.insert(request.reference(), request);
+            requests.insert(request);
         }
         let joins: Vec<JoinRequest> = self
             .queue
@@ -749,7 +749,7 @@ impl DeliveryService {
                 kind: ChangeKind::Join,
                 request: request.reference(),
             });
-            requests.insert(request.reference(), request);
+            requests.insert(request);
         }
         changes.sort();
         let catch_ups: Vec<CatchUpRequest> = self

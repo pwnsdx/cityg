@@ -25,8 +25,53 @@ use crate::tree::{
     TreeDelta,
 };
 
-/// Requests of a window, by reference.
-pub type Requests = HashMap<Digest, Request>;
+/// Requests of a window, by reference. [`Requests::insert`] files a request
+/// under its own reference `H(encoded)`, and there is no other way in:
+/// whoever hands a device the requests of a window, a lookup by the
+/// reference a change or a welcome names yields the request that hashes to
+/// it, or nothing (docs/specs.md sections 10.1 and 11).
+#[derive(Clone, Debug, Default)]
+pub struct Requests(HashMap<Digest, Request>);
+
+impl Requests {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// File `request` under its reference, which it returns.
+    pub fn insert(&mut self, request: Request) -> Digest {
+        let reference = request.reference();
+        self.0.insert(reference, request);
+        reference
+    }
+
+    /// The request whose reference is `reference`.
+    #[must_use]
+    pub fn get(&self, reference: &Digest) -> Option<&Request> {
+        self.0.get(reference)
+    }
+
+    /// Take out the request whose reference is `reference`.
+    pub fn remove(&mut self, reference: &Digest) -> Option<Request> {
+        self.0.remove(reference)
+    }
+
+    /// The requests, in no particular order.
+    pub fn values(&self) -> impl Iterator<Item = &Request> {
+        self.0.values()
+    }
+}
+
+impl FromIterator<Request> for Requests {
+    fn from_iter<I: IntoIterator<Item = Request>>(iter: I) -> Self {
+        let mut requests = Self::new();
+        for request in iter {
+            requests.insert(request);
+        }
+        requests
+    }
+}
 
 /// What every member keeps of the public state of its epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -796,8 +841,8 @@ pub struct WindowOutcome {
 
 /// The joins of a window, checked against its seal: the occupancy and
 /// device key of every device it let in. The body must hash to the header's
-/// `body_hash`, list exactly `commits`, and every join's request must hash
-/// to its reference.
+/// `body_hash` and list exactly `commits`, and every join's request must be
+/// in `requests` (which holds a request under its own reference only).
 pub fn joins_of(
     seal: &Seal,
     commits: &[DistrictCommit],
@@ -821,9 +866,6 @@ pub fn joins_of(
         let Some(Request::Join(join)) = requests.get(&change.request) else {
             return Err(CoreError::Invalid("missing join request"));
         };
-        if join.reference() != change.request {
-            return Err(CoreError::Invalid("join request"));
-        }
         joins.push((
             Occupancy {
                 leaf: change.leaf,

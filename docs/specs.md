@@ -726,6 +726,11 @@ request_ref)`. The changes of one leaf MUST be one of:
 | removal or eviction, then join | the leaf is occupied by the target | the joiner's leaf: the join takes the leaf the removal empties |
 | update, or re-entry | the leaf is occupied by the member, whose key `replaces` names | the same leaf with the new key and `updated = n` |
 
+A device takes the request of a change from the DS only if it hashes to
+the change's `request_ref` (section 4), and treats any other as missing: the
+DS holds the requests, and a request of its own under a reference it does
+not hash to would otherwise place its keys in a leaf or a welcome.
+
 Catch-up requests are not changes (section 11).
 
 ### 10.2 Structure of a window
@@ -880,8 +885,8 @@ otherwise. In an entrant window, the entrant welcomes everyone but itself.
 A welcomer seals its welcomes once it has followed the window (it then
 knows `joiner_secret_n` as a member of epoch `n - 1`).
 
-**Welcomer's checks.** A welcomer takes the init key from the request, never
-from the DS, and:
+**Welcomer's checks.** A welcomer takes the init key from the request that
+hashes to the change's `request_ref` (section 10.1), never from the DS, and:
 
 * welcomes a join or a re-entry only if it is a change of a district commit
   of its own that the seal lists (so that no device learns an epoch without

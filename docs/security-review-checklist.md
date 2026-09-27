@@ -74,6 +74,15 @@ names the check that backs it.
       before it seals (v0.5 draft, section 3.5).
 - [ ] The delivery service accepts a welcome only from the welcomer the
       window assigned.
+- [ ] Every object a device takes from the delivery service by reference
+      hashes to that reference: `Requests` files a request under its own
+      reference only, catch-ups are checked against theirs, and nothing
+      reads a request or an init key from a map keyed by the caller
+      unchecked (specs.md, section 10.1; models `welcome_*.pv`).
+- [ ] Every key a device encapsulates to for someone else (a flat element,
+      a repair, a welcome's leaf key) comes from a state it checked against
+      its header, never from the delivery service (models `flat_unchecked.pv`,
+      `repair*.pv`).
 
 ## Claims
 

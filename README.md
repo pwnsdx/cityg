@@ -161,7 +161,7 @@ service), secrecy from members of the same epoch, and, in an open group,
 secrecy from whoever joins it. Every join stays visible, and nobody can
 speak as another member. The [symbolic model](docs/formal/README.md) checks
 the choices these properties rest on in 18 ProVerif scenarios, those of
-stage 1 of the v0.5 draft in five more, and those of stage 2 in five more.
+stage 1 of the v0.5 draft in five more, and those of stage 2 in ten more.
 
 ## Numbers
 

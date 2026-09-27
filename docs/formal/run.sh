@@ -41,6 +41,11 @@ EXPECTED=(
   "task_hedge_init: false false"
   "city_task_bound: true false"
   "city_task_unbound: false false"
+  "repair: true false"
+  "repair_unchecked: false false"
+  "welcome_joiner: true false"
+  "welcome_unlisted: false false"
+  "welcome_request_unbound: false false"
 )
 
 for line in "${EXPECTED[@]}"; do
