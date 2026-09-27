@@ -26,7 +26,7 @@ use crate::rekey::Step;
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
 use crate::smm::SmmProof;
 use crate::top::Top;
-use crate::tree::{LeafProof, Occupancy, ParentNode, Shape};
+use crate::tree::{Divisions, LeafProof, Occupancy, ParentNode, Shape};
 use crate::welcome::Welcome;
 use crate::window::EpochHeader;
 
@@ -255,6 +255,7 @@ fn check_successor(previous: &EpochHeader, header: &SealHeader) -> CoreResult<Sh
         || header.prev_interim != previous.interim
         || header.district_bits != previous.shape.district_bits
         || header.island_bits != previous.shape.island_bits
+        || header.subcity_bits != previous.shape.subcity_bits
     {
         return Err(CoreError::Invalid("seal does not follow the epoch"));
     }
@@ -292,7 +293,14 @@ impl EpochHeader {
         Ok(Self {
             gid: *gid,
             epoch: content.epoch,
-            shape: Shape::new(content.height, content.district_bits, content.island_bits)?,
+            shape: Shape::new(
+                content.height,
+                Divisions::new(
+                    content.district_bits,
+                    content.island_bits,
+                    content.subcity_bits,
+                )?,
+            )?,
             tree_hash: content.tree_hash,
             registry,
             interim: content.interim,

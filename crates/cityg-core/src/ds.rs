@@ -1,11 +1,12 @@
-//! An in-memory delivery service (docs/specs.md section 14, with section 2
-//! of docs/specs-v0.5-draft.md).
+//! An in-memory delivery service (docs/specs.md section 14, with sections 2
+//! and 3 of docs/specs-v0.5-draft.md).
 //!
 //! It never draws a group secret and never signs a group object. It records
 //! requests after checking them, closes windows (E-1) at the cadence of
 //! their removals (E-16), places joins (E-11), assigns the roles of a
 //! window among online members or, with nobody online, to an entrant (E-3,
-//! E-7), checks what the roles send back, assigns the relays and flat
+//! E-7): its district commits, its city tasks (E-17) and its seal; checks
+//! what the roles send back, assigns the relays and flat
 //! elements of each window's islands (E-15), serves one packet per member,
 //! whole or by island (E-13, E-15), the chains of seals and the entries of
 //! joiners and returning members (E-8, E-10), keeps the latest wrap of
@@ -15,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::audit::{AuditRecord, records};
-use crate::commit::{Change, DistrictCommit, Seal, SealKind};
+use crate::commit::{Change, CityTask, DistrictCommit, Seal, SealKind};
 use crate::crypto::{Digest, Wrap, ZERO32, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
 use crate::member::{CatchUps, PendingRemoval};
@@ -29,14 +30,16 @@ use crate::packet::{
 };
 use crate::registry::RegistryHeader;
 use crate::rekey::{Step, WindowIndex};
-use crate::roles::{WelcomeKind, WelcomeTask, WindowTask};
+use crate::roles::{WelcomeKind, WelcomeTask, WindowTask, WindowWork};
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
 use crate::top::{RelayElement, Top, TopTask};
-use crate::tree::{LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode, Shape};
+use crate::tree::{
+    CityPart, LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode, Shape,
+};
 use crate::welcome::Welcome;
 use crate::window::{
-    PublicState, Requests, SealerInfo, WindowShape, check_committer, check_district_commit,
-    check_entry, check_sealer, check_window, district_leaves, needed_height,
+    PublicState, Requests, SealerInfo, WindowShape, check_city_task, check_committer,
+    check_district_commit, check_entry, check_sealer, check_window, district_leaves, needed_height,
 };
 
 /// Timing of windows (E-16).
@@ -170,6 +173,7 @@ pub struct StoredWindow {
     pub task: WindowTask,
     pub seal: Seal,
     pub commits: Vec<DistrictCommit>,
+    pub city_tasks: Vec<CityTask>,
     pub requests: Requests,
     pub catch_ups: CatchUps,
     index: WindowIndex,
@@ -240,6 +244,7 @@ struct OpenWindow {
     requests: Requests,
     catch_ups: CatchUps,
     commits: BTreeMap<u32, DistrictCommit>,
+    city_tasks: BTreeMap<CityPart, CityTask>,
 }
 
 /// The delivery service of one group.
@@ -765,7 +770,7 @@ impl DeliveryService {
             .copied()
             .filter(|member| tree.is_member(*member) && !window.affected.contains(member))
             .collect();
-        let (committers, sealer, entrant) = if volunteers.is_empty() {
+        let (committers, city, sealer, entrant) = if volunteers.is_empty() {
             let entrant = changes
                 .iter()
                 .find(|change| matches!(change.kind, ChangeKind::Join | ChangeKind::ReEntry));
@@ -784,7 +789,8 @@ impl DeliveryService {
                 .iter()
                 .map(|district| (*district, occupancy))
                 .collect();
-            (committers, occupancy, Some(entrant.request))
+            let city = window.parts.iter().map(|part| (*part, occupancy)).collect();
+            (committers, city, occupancy, Some(entrant.request))
         } else {
             let mut by_district: BTreeMap<u32, Occupancy> = BTreeMap::new();
             for volunteer in &volunteers {
@@ -802,13 +808,30 @@ impl DeliveryService {
                 });
                 committers.insert(*district, committer);
             }
-            let busy: BTreeSet<Occupancy> = committers.values().copied().collect();
+            let mut busy: BTreeSet<Occupancy> = committers.values().copied().collect();
             let sealer = volunteers
                 .iter()
                 .copied()
                 .find(|volunteer| !busy.contains(volunteer))
                 .unwrap_or(volunteers[0]);
-            (committers, sealer, None)
+            // City tasks: volunteers with no task, then volunteers in turn
+            // (docs/specs-v0.5-draft.md section 3.4).
+            busy.insert(sealer);
+            let mut city = BTreeMap::new();
+            for part in &window.parts {
+                let performer = volunteers
+                    .iter()
+                    .copied()
+                    .find(|volunteer| !busy.contains(volunteer))
+                    .unwrap_or_else(|| {
+                        let chosen = volunteers[next % volunteers.len()];
+                        next += 1;
+                        chosen
+                    });
+                busy.insert(performer);
+                city.insert(*part, performer);
+            }
+            (committers, city, sealer, None)
         };
         let mut welcomes = Vec::new();
         for change in &changes {
@@ -849,6 +872,7 @@ impl DeliveryService {
             height,
             changes,
             committers,
+            city,
             sealer,
             entrant,
             policy: policy.as_ref().map(|policy| policy.encoded().to_vec()),
@@ -875,6 +899,7 @@ impl DeliveryService {
             requests,
             catch_ups: catch_up_map,
             commits: BTreeMap::new(),
+            city_tasks: BTreeMap::new(),
         });
         Ok(Some(task))
     }
@@ -893,6 +918,15 @@ impl DeliveryService {
         self.open
             .as_ref()
             .map(|open| open.commits.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// City tasks received for the open window, sub-cities first.
+    #[must_use]
+    pub fn open_city_tasks(&self) -> Vec<CityTask> {
+        self.open
+            .as_ref()
+            .map(|open| open.city_tasks.values().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -935,6 +969,42 @@ impl DeliveryService {
             }
         }
         open.commits.remove(&district);
+        // The city tasks built on the dropped commit are dropped too: its
+        // sub-city's and the top's.
+        if shape.has_city() {
+            open.city_tasks
+                .remove(&CityPart::SubCity(shape.subcity_of(district)));
+            open.city_tasks.remove(&CityPart::Top);
+        }
+        Ok(open.task.clone())
+    }
+
+    /// Give part `part` of the city of the open window to another performer
+    /// (a performer that failed, docs/specs-v0.5-draft.md section 3.4); a
+    /// task already received is dropped, with the top's built on it.
+    pub fn reassign_city(
+        &mut self,
+        part: CityPart,
+        performer: Occupancy,
+    ) -> CoreResult<WindowTask> {
+        let open = self
+            .open
+            .as_mut()
+            .ok_or(CoreError::Invalid("no open window"))?;
+        if open.task.entrant.is_some()
+            || !self.state.tree.is_member(performer)
+            || open.window.affected.contains(&performer)
+        {
+            return Err(CoreError::Invalid("performer"));
+        }
+        let slot = open
+            .task
+            .city
+            .get_mut(&part)
+            .ok_or(CoreError::Invalid("part not in the window"))?;
+        *slot = performer;
+        open.city_tasks.remove(&part);
+        open.city_tasks.remove(&CityPart::Top);
         Ok(open.task.clone())
     }
 
@@ -951,6 +1021,15 @@ impl DeliveryService {
             .ok_or(CoreError::Invalid("no open window"))?;
         if open.task.committers.get(&commit.district) != Some(&commit.committer) {
             return Err(CoreError::Unauthorized("not the district's committer"));
+        }
+        // The tasks above build on the first commit received: a second one
+        // must be the same.
+        if let Some(kept) = open.commits.get(&commit.district) {
+            return if kept.hash() == commit.hash() {
+                Ok(())
+            } else {
+                Err(CoreError::Invalid("district already committed"))
+            };
         }
         if !open.sealer.entrant && !self.accepts_from(commit.committer) {
             return Err(CoreError::Unauthorized("committer removed"));
@@ -971,6 +1050,69 @@ impl DeliveryService {
         Ok(())
     }
 
+    /// Check and keep a city task of the open window (docs/specs-v0.5-draft.md
+    /// section 3.2), once what it builds on is in: the commits of the
+    /// sub-city's districts, or every sub-city task for the top.
+    pub fn submit_city_task(&mut self, city_task: CityTask) -> CoreResult<()> {
+        let open = self
+            .open
+            .as_ref()
+            .ok_or(CoreError::Invalid("no open window"))?;
+        if open.task.city.get(&city_task.part) != Some(&city_task.performer) {
+            return Err(CoreError::Unauthorized("not the city task's performer"));
+        }
+        if !open.sealer.entrant && !self.accepts_from(city_task.performer) {
+            return Err(CoreError::Unauthorized("performer removed"));
+        }
+        if let Some(kept) = open.city_tasks.get(&city_task.part) {
+            return if kept.hash() == city_task.hash() {
+                Ok(())
+            } else {
+                Err(CoreError::Invalid("city part already performed"))
+            };
+        }
+        let shape = open.window.shape;
+        let ready = match city_task.part {
+            CityPart::SubCity(subcity) => open
+                .window
+                .districts
+                .iter()
+                .filter(|district| shape.subcity_of(**district) == subcity)
+                .all(|district| open.commits.contains_key(district)),
+            CityPart::Top => open
+                .window
+                .parts
+                .iter()
+                .filter(|part| **part != CityPart::Top)
+                .all(|part| open.city_tasks.contains_key(part)),
+        };
+        if !ready {
+            return Err(CoreError::Invalid("city task before what it builds on"));
+        }
+        let performer_pk =
+            check_committer(&self.state, &open.window, city_task.performer, &open.sealer)?;
+        let commits: Vec<DistrictCommit> = open.commits.values().cloned().collect();
+        let tasks: Vec<CityTask> = open.city_tasks.values().cloned().collect();
+        let work = WindowWork {
+            commits: &commits,
+            city_tasks: &tasks,
+            requests: &open.requests,
+        };
+        let (below, before) = work.base(&self.state, &open.window, city_task.part)?;
+        check_city_task(
+            &self.state,
+            &open.window,
+            &city_task,
+            &below,
+            &before,
+            &performer_pk,
+        )?;
+        if let Some(open) = self.open.as_mut() {
+            open.city_tasks.insert(city_task.part, city_task);
+        }
+        Ok(())
+    }
+
     /// Check the seal of the open window, apply the window, and keep what
     /// members, joiners and auditors will ask for. Returns the new epoch.
     pub fn submit_seal(&mut self, seal: Seal) -> CoreResult<u64> {
@@ -980,6 +1122,7 @@ impl DeliveryService {
             .ok_or(CoreError::Invalid("no open window"))?;
         if seal.header.sealer != open.task.sealer
             || open.commits.len() != open.task.committers.len()
+            || open.city_tasks.len() != open.task.city.len()
         {
             return Err(CoreError::Invalid("seal before its district commits"));
         }
@@ -987,7 +1130,15 @@ impl DeliveryService {
             return Err(CoreError::Unauthorized("sealer removed"));
         }
         let commits: Vec<DistrictCommit> = open.commits.values().cloned().collect();
-        let outcome = check_window(&self.state, &commits, &seal, &open.requests, false)?;
+        let city_tasks: Vec<CityTask> = open.city_tasks.values().cloned().collect();
+        let outcome = check_window(
+            &self.state,
+            &commits,
+            &city_tasks,
+            &seal,
+            &open.requests,
+            false,
+        )?;
         if outcome.policy.as_ref().map(|p| p.encoded().to_vec()) != open.task.policy {
             return Err(CoreError::Invalid("seal policy"));
         }
@@ -1031,9 +1182,11 @@ impl DeliveryService {
             all_updates.extend(commit.updates.iter().cloned());
             all_wraps.extend(commit.wraps.iter());
         }
-        index.add(&seal.body.city_updates, &seal.body.city_wraps);
-        all_updates.extend(seal.body.city_updates.iter().cloned());
-        all_wraps.extend(seal.body.city_wraps.iter());
+        for city_task in &city_tasks {
+            index.add(&city_task.updates, &city_task.wraps);
+            all_updates.extend(city_task.updates.iter().cloned());
+            all_wraps.extend(city_task.wraps.iter());
+        }
         for update in &all_updates {
             if update.public_key.is_some() {
                 self.latest.insert(
@@ -1074,6 +1227,7 @@ impl DeliveryService {
             .task
             .committers
             .values()
+            .chain(open.task.city.values())
             .chain(core::iter::once(&open.task.sealer))
         {
             if self.state.tree.is_member(*committer) {
@@ -1104,6 +1258,7 @@ impl DeliveryService {
             task: open.task,
             seal,
             commits,
+            city_tasks,
             requests: open.requests,
             catch_ups: open.catch_ups,
             index,
@@ -1544,6 +1699,7 @@ impl DeliveryService {
             || content.height != height
             || content.district_bits != self.state.tree.district_bits()
             || content.island_bits != self.state.tree.island_bits()
+            || content.subcity_bits != self.state.tree.subcity_bits()
             || content.registry_hash != registry.hash()?
             || content.external_pk_hash != kem_pk_hash(&external_pk)?
         {

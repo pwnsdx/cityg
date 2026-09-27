@@ -8,8 +8,9 @@
 //! follow its whole path, or only its island path and the top of its path
 //! (a relay element, a flat element or a refresh: E-15); it then makes the
 //! relay and flat elements the delivery service asks of it. Any member may
-//! commit a district or seal a window from the public state the delivery
-//! service shows it, once it has checked that state against its header.
+//! commit a district, perform a city task or seal a window from the public
+//! state the delivery service shows it, once it has checked that state
+//! against its header; a sealer draws nothing (E-17).
 //!
 //! A [`Joiner`] enters from a checkpoint; a [`Returning`] member either
 //! jumps to the present with a welcome or re-enters its leaf. Both check
@@ -22,7 +23,7 @@ use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
 use crate::commit::{
-    DistrictCommit, EntrantInit, Genesis, Seal, SealBody, SealHeader, SealKind, SealProof,
+    CityTask, DistrictCommit, EntrantInit, Genesis, Seal, SealBody, SealHeader, SealKind, SealProof,
 };
 use crate::crypto::{
     Digest, Secret, Wrap, ZERO32, commit_secret, digest_eq, fresh_secret, kem_pk_hash, node_key,
@@ -37,17 +38,18 @@ use crate::objects::{
 use crate::packet::{Entry, EntrySteps, Packet, SealLink};
 use crate::rekey::{MemberPath, PathSecrets, WindowIndex};
 use crate::roles::{
-    SealDraft, WelcomeKind, WindowTask, build_city, build_district, finish_seal, with_city,
+    CityTaskInput, SealDraft, WelcomeKind, WindowTask, WindowWork, build_city_task, build_district,
+    finish_seal, with_city,
 };
 use crate::schedule::{
     EpochSecrets, GroupContext, confirmed_transcript_hash, external_init, interim_transcript_hash,
 };
 use crate::top::{RelayContext, RelayElement, Top, flat_element, open_flat};
-use crate::tree::{LeafNode, Occupancy, Shape};
+use crate::tree::{CityPart, Divisions, LeafNode, Occupancy, Shape};
 use crate::welcome::Welcome;
 use crate::window::{
-    EpochHeader, PublicState, Requests, check_districts, check_sealer, district_roots,
-    genesis_tree, joins_of,
+    EpochHeader, PublicState, Requests, check_city_tasks, check_districts, check_sealer,
+    district_roots, genesis_tree, joins_of,
 };
 
 /// A removal the delivery service recorded and has not applied yet.
@@ -94,21 +96,19 @@ impl core::fmt::Debug for Member {
 
 impl Member {
     /// Create a group: the creator at leaf 0, admin, in a tree of two leaves
-    /// with districts of `2^district_bits` leaves and islands of
-    /// `2^island_bits` (`island_bits <= district_bits`). An `open` group
-    /// admits any device without admission (its creator signs that policy at
-    /// genesis); otherwise every join needs an admission. Returns the creator
-    /// and the genesis seal.
+    /// with `divisions` (districts, islands and sub-cities, fixed at
+    /// genesis). An `open` group admits any device without admission (its
+    /// creator signs that policy at genesis); otherwise every join needs an
+    /// admission. Returns the creator and the genesis seal.
     pub fn create(
         identity: DeviceIdentity,
         nonce: [u8; 32],
-        district_bits: u8,
-        island_bits: u8,
+        divisions: Divisions,
         open: bool,
         time_ms: u64,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<(Self, Seal)> {
-        let shape = Shape::new(1, district_bits, island_bits)?;
+        let shape = Shape::new(1, divisions)?;
         let gid = group_id(identity.public_key(), &nonce)?;
         let creator = Occupancy { leaf: 0, since: 0 };
         let policy = if open {
@@ -123,8 +123,7 @@ impl Member {
         let root_pk = node_key(&root_secret)?.public_key();
         let (tree, registry) = genesis_tree(
             &gid,
-            district_bits,
-            island_bits,
+            divisions,
             identity.public_key(),
             &leaf_key.public_key(),
             &root_pk,
@@ -149,8 +148,9 @@ impl Member {
             kind: SealKind::Genesis,
             sealer: creator,
             height: 1,
-            district_bits,
-            island_bits,
+            district_bits: shape.district_bits,
+            island_bits: shape.island_bits,
+            subcity_bits: shape.subcity_bits,
             tree_hash,
             registry_hash: registry_header.hash()?,
             body_hash: body.hash()?,
@@ -165,8 +165,9 @@ impl Member {
             tree_hash,
             registry_hash: header.registry_hash,
             height: 1,
-            district_bits,
-            island_bits,
+            district_bits: shape.district_bits,
+            island_bits: shape.island_bits,
+            subcity_bits: shape.subcity_bits,
             confirmed_transcript_hash: confirmed,
         };
         let commit = commit_secret(&root_secret)?;
@@ -339,6 +340,7 @@ impl Member {
             height: shape.height,
             district_bits: shape.district_bits,
             island_bits: shape.island_bits,
+            subcity_bits: shape.subcity_bits,
             confirmed_transcript_hash: confirmed,
         };
         let commit = commit_secret(&root)?;
@@ -637,6 +639,7 @@ impl Member {
                 height: header.shape.height,
                 district_bits: header.shape.district_bits,
                 island_bits: header.shape.island_bits,
+                subcity_bits: header.shape.subcity_bits,
                 external_pk_hash: kem_pk_hash(&header.external_pk)?,
                 time_ms,
             },
@@ -679,16 +682,57 @@ impl Member {
         Ok(commit)
     }
 
-    /// Seal the window `task` (E-1): check every district commit (signature,
-    /// structure, taints), re-key the city, and sign the seal.
+    /// Perform the city task of `part` (docs/specs-v0.5-draft.md section
+    /// 3.2): re-key the part over the new roots of the tier below, which
+    /// `work` shows, and sign. The member draws with its init secret as
+    /// hedge, and erases what it drew once the task is sent.
+    pub fn commit_city(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+        part: CityPart,
+        work: &WindowWork<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<CityTask> {
+        state.check_against(&self.header)?;
+        if task.city.get(&part) != Some(&self.occupancy) || task.entrant.is_some() {
+            return Err(CoreError::Unauthorized("not the city task's performer"));
+        }
+        let window = task.window(state)?;
+        if window.affected.contains(&self.occupancy) {
+            return Err(CoreError::Unauthorized("performer changed by its window"));
+        }
+        let (below, before) = work.base(state, &window, part)?;
+        let (city_task, drawn) = build_city_task(
+            &CityTaskInput {
+                state,
+                window: &window,
+                part,
+                below: &below,
+                before: &before,
+                performer: self.occupancy,
+            },
+            &self.identity,
+            self.secrets.init_secret(),
+            rng,
+        )?;
+        drop(drawn);
+        Ok(city_task)
+    }
+
+    /// Seal the window `task` (E-1, E-17): check every district commit and
+    /// city task (signature, structure, taints), follow them along the
+    /// member's path to the new root secret, and sign the seal. The sealer
+    /// draws nothing; it must hold its whole path (an island follower
+    /// refreshes first).
     pub fn seal(
         &self,
         state: &PublicState,
         task: &WindowTask,
-        commits: &[DistrictCommit],
-        requests: &Requests,
+        work: &WindowWork<'_>,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Seal> {
+        let (commits, requests) = (work.commits, work.requests);
         state.check_against(&self.header)?;
         if task.sealer != self.occupancy || task.entrant.is_some() {
             return Err(CoreError::Unauthorized("not the window's sealer"));
@@ -704,19 +748,22 @@ impl Member {
         )?;
         let delta = check_districts(state, &window, commits, requests, &sealer, false)?;
         let roots = district_roots(window.shape, commits)?;
-        let city = build_city(state, &window, &roots, self.secrets.init_secret(), rng)?;
-        let root = window.shape.root();
-        let root_secret = if let Some(secret) = city.secret(root) {
-            secret.clone()
-        } else if let ([commit], false) = (commits, window.shape.has_city()) {
-            // Without a city, the root is the district's: the sealer follows
-            // the district commit along its own path, which it must hold
-            // whole (an island follower refreshes first).
+        check_city_tasks(state, &window, work.city_tasks, &roots, &delta, &sealer)?;
+        let root_secret = if commits.is_empty() && window.shape == self.header.shape {
+            self.root.clone()
+        } else {
+            // The sealer follows the tasks along its own path, which it must
+            // hold whole.
             if !self.knows_path() {
                 return Err(CoreError::Invalid("the sealer must refresh its path"));
             }
             let mut index = WindowIndex::default();
-            index.add(&commit.updates, &commit.wraps);
+            for commit in commits {
+                index.add(&commit.updates, &commit.wraps);
+            }
+            for city_task in work.city_tasks {
+                index.add(&city_task.updates, &city_task.wraps);
+            }
             let steps = index.steps(self.occupancy.leaf, window.shape.height)?;
             let secrets =
                 self.path
@@ -725,10 +772,6 @@ impl Member {
                 .secret(window.shape.height)
                 .ok_or(CoreError::Invalid("unknown root secret"))?
                 .clone()
-        } else if commits.is_empty() && window.shape == self.header.shape {
-            self.root.clone()
-        } else {
-            return Err(CoreError::Invalid("window without a new root"));
         };
         let sealed = finish_seal(
             SealDraft {
@@ -738,8 +781,8 @@ impl Member {
                 requests,
                 sealer: &sealer,
                 entrant: None,
-                delta: with_city(delta, &city, self.occupancy),
-                city: &city,
+                delta: with_city(delta, work.city_tasks),
+                city_tasks: work.city_tasks,
                 policy: task.policy()?,
                 time_ms: task.time_ms,
                 init_prev: self.secrets.init_secret(),
@@ -748,7 +791,6 @@ impl Member {
             &self.identity,
             rng,
         )?;
-        drop(city);
         Ok(sealed.seal)
     }
 
@@ -914,6 +956,7 @@ impl Member {
 /// What an entrant produced when it sealed a window.
 pub struct EntrantSealed {
     pub commits: Vec<DistrictCommit>,
+    pub city_tasks: Vec<CityTask>,
     pub seal: Seal,
     pub welcomes: Vec<Welcome>,
     pub member: Member,
@@ -1273,7 +1316,8 @@ fn seal_as_entrant(
         || task
             .committers
             .values()
-            .any(|committer| *committer != input.occupancy)
+            .chain(task.city.values())
+            .any(|performer| *performer != input.occupancy)
         || task.welcomes.iter().any(|w| w.welcomer != input.occupancy)
     {
         return Err(CoreError::Invalid("entrant task"));
@@ -1305,9 +1349,30 @@ fn seal_as_entrant(
         commits.push(commit);
     }
     let delta = check_districts(state, &window, &commits, requests, &sealer, false)?;
-    let roots = district_roots(window.shape, &commits)?;
-    let city = build_city(state, &window, &roots, &init_prev, rng)?;
-    path.extend(city.path_secrets(input.occupancy.leaf));
+    let mut city_tasks: Vec<CityTask> = Vec::with_capacity(window.parts.len());
+    for part in &window.parts {
+        let work = WindowWork {
+            commits: &commits,
+            city_tasks: &city_tasks,
+            requests,
+        };
+        let (below, before) = work.base(state, &window, *part)?;
+        let (city_task, drawn) = build_city_task(
+            &CityTaskInput {
+                state,
+                window: &window,
+                part: *part,
+                below: &below,
+                before: &before,
+                performer: input.occupancy,
+            },
+            &input.identity,
+            &init_prev,
+            rng,
+        )?;
+        path.extend(drawn.path_secrets(input.occupancy.leaf));
+        city_tasks.push(city_task);
+    }
     let root_secret = path
         .get(&window.shape.height)
         .ok_or(CoreError::Invalid("entrant without the root"))?
@@ -1323,8 +1388,8 @@ fn seal_as_entrant(
                 kem_output,
                 request: input.request,
             }),
-            delta: with_city(delta, &city, input.occupancy),
-            city: &city,
+            delta: with_city(delta, &city_tasks),
+            city_tasks: &city_tasks,
             policy: task.policy()?,
             time_ms: task.time_ms,
             init_prev: &init_prev,
@@ -1333,7 +1398,6 @@ fn seal_as_entrant(
         &input.identity,
         rng,
     )?;
-    drop(city);
     let mut welcomes = Vec::new();
     for welcome in &task.welcomes {
         if welcome.request == input.request {
@@ -1404,6 +1468,7 @@ fn seal_as_entrant(
     };
     Ok(EntrantSealed {
         commits,
+        city_tasks,
         seal: sealed.seal,
         welcomes,
         member,

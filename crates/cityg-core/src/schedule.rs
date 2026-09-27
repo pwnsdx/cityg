@@ -1,10 +1,11 @@
 //! Key schedule (docs/specs.md section 9, with the group context of
-//! docs/specs-v0.5-draft.md section 2.1): one epoch per window, keyed by
+//! docs/specs-v0.5-draft.md sections 2.1 and 3.1): one epoch per window, keyed by
 //! the window's root secret and chained through the init secrets:
 //!
 //! ```text
 //! GroupContext_n := CBOR_det(["city-g/group-context/v5", gid, n, tree_hash_n,
 //!                             registry_hash_n, height_n, district_bits, island_bits,
+//!                             subcity_bits,
 //!                             "city-g/v0.5-draft", confirmed_transcript_hash_n])
 //! commit_secret_n := DeriveSecret(root_secret_n, "commit")
 //! joiner_secret_n := ExpandLabel(Extract(init_n-1, commit_secret_n),
@@ -44,6 +45,7 @@ pub struct GroupContext {
     pub height: u8,
     pub district_bits: u8,
     pub island_bits: u8,
+    pub subcity_bits: u8,
     pub confirmed_transcript_hash: Digest,
 }
 
@@ -59,6 +61,7 @@ impl GroupContext {
             uint(u64::from(self.height)),
             uint(u64::from(self.district_bits)),
             uint(u64::from(self.island_bits)),
+            uint(u64::from(self.subcity_bits)),
             text(PROFILE),
             bytes(&self.confirmed_transcript_hash),
         ]))
@@ -211,6 +214,7 @@ mod tests {
             height: 4,
             district_bits: 2,
             island_bits: 1,
+            subcity_bits: 1,
             confirmed_transcript_hash: [5; 32],
         }
     }
@@ -246,6 +250,10 @@ mod tests {
             },
             GroupContext {
                 island_bits: 2,
+                ..base.clone()
+            },
+            GroupContext {
+                subcity_bits: 2,
                 ..base.clone()
             },
             GroupContext {

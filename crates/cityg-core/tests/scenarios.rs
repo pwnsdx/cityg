@@ -121,7 +121,9 @@ fn a_joiner_applies_a_pending_removal_when_nobody_is_online() {
 }
 
 mod forged {
-    use cityg_core::commit::{Change, DistrictCommit, DistrictCommitContent, EntrantInit};
+    use cityg_core::commit::{
+        Change, CityTask, DistrictCommit, DistrictCommitContent, EntrantInit,
+    };
     use cityg_core::crypto::kem_pk_hash;
     use cityg_core::error::CoreError;
     use cityg_core::identity::DeviceIdentity;
@@ -129,12 +131,14 @@ mod forged {
     use cityg_core::objects::{Admission, ChangeKind, JoinRequest, Request, device_id};
     use cityg_core::packet::{EntrantEvidence, EntrantProof, Packet, RegistryUpdate};
     use cityg_core::rekey::{KeySource, WindowIndex, generate, plan_district};
-    use cityg_core::roles::{SealDraft, build_city, finish_seal, with_city};
+    use cityg_core::roles::{
+        CityTaskInput, SealDraft, WindowWork, build_city_task, finish_seal, with_city,
+    };
     use cityg_core::schedule::external_init;
     use cityg_core::tree::{Occupancy, Overlay, TreeDelta};
     use cityg_core::window::{
         PublicState, Requests, SealerInfo, WindowShape, check_districts, check_window,
-        district_leaves, district_roots, keyed_parents, needed_height, prev_district_hash,
+        district_leaves, keyed_parents, needed_height, prev_district_hash,
     };
     use rand_chacha::ChaCha20Rng;
 
@@ -144,6 +148,7 @@ mod forged {
     pub struct Forged {
         pub state: PublicState,
         pub commits: Vec<DistrictCommit>,
+        pub city_tasks: Vec<CityTask>,
         pub seal: cityg_core::commit::Seal,
         pub requests: Requests,
         pub evidence: EntrantEvidence,
@@ -181,7 +186,7 @@ mod forged {
             tree: &state.tree,
             shape,
             leaves: &leaves,
-            roots: None,
+            below: None,
         };
         let drawn = generate(&plan, &keys, &state.gid, window.epoch, hedge, rng).unwrap();
         let delta = TreeDelta {
@@ -266,9 +271,31 @@ mod forged {
             entrant: true,
         };
         let delta = check_districts(state, &window, &commits, &requests, &sealer, false).unwrap();
-        let roots = district_roots(shape, &commits).unwrap();
-        let city = build_city(state, &window, &roots, &init_prev, rng).unwrap();
-        path.extend(city.path_secrets(leaf));
+        let mut city_tasks: Vec<CityTask> = Vec::new();
+        for part in &window.parts {
+            let work = WindowWork {
+                commits: &commits,
+                city_tasks: &city_tasks,
+                requests: &requests,
+            };
+            let (below, before) = work.base(state, &window, *part).unwrap();
+            let (city_task, drawn) = build_city_task(
+                &CityTaskInput {
+                    state,
+                    window: &window,
+                    part: *part,
+                    below: &below,
+                    before: &before,
+                    performer: occupancy,
+                },
+                &forger,
+                &init_prev,
+                rng,
+            )
+            .unwrap();
+            path.extend(drawn.path_secrets(leaf));
+            city_tasks.push(city_task);
+        }
         let root_secret = path[&shape.height].clone();
         let sealed = finish_seal(
             SealDraft {
@@ -281,8 +308,8 @@ mod forged {
                     kem_output,
                     request: reference,
                 }),
-                delta: with_city(delta, &city, occupancy),
-                city: &city,
+                delta: with_city(delta, &city_tasks),
+                city_tasks: &city_tasks,
                 policy: None,
                 time_ms: state.time_ms + 1,
                 init_prev: &init_prev,
@@ -296,7 +323,9 @@ mod forged {
         for commit in &commits {
             index.add(&commit.updates, &commit.wraps);
         }
-        index.add(&sealed.seal.body.city_updates, &sealed.seal.body.city_wraps);
+        for city_task in &city_tasks {
+            index.add(&city_task.updates, &city_task.wraps);
+        }
         let evidence = EntrantEvidence::Join {
             device: state.registry.device_proof(&id).unwrap(),
             admission: state.registry.admission_proof(&join.token()).unwrap(),
@@ -305,6 +334,7 @@ mod forged {
         Forged {
             state: state.clone(),
             commits,
+            city_tasks,
             msg_secret: *sealed.secrets.msg_secret(),
             seal: sealed.seal,
             requests,
@@ -340,6 +370,7 @@ mod forged {
         check_window(
             &forged.state,
             &forged.commits,
+            &forged.city_tasks,
             &forged.seal,
             &forged.requests,
             false,
@@ -611,10 +642,8 @@ fn run_window_keeping_secrets(
         sim.ds.submit_district_commit(commit).unwrap();
         kept.push(drawn);
     }
-    let commits = sim.ds.open_commits();
-    let seal = sim.members[&task.sealer]
-        .seal(sim.ds.state(), &task, &commits, &requests, &mut sim.rng)
-        .unwrap();
+    sim.perform_city_tasks(&task);
+    let seal = sim.seal_open(&task);
     let epoch = sim.ds.submit_seal(seal).unwrap();
     sim.follow(epoch);
     sim.welcome_and_enter(epoch);
@@ -666,10 +695,9 @@ fn removing_a_committer_rekeys_the_nodes_it_drew() {
         .ds
         .window(c_epoch)
         .unwrap()
-        .seal
-        .body
-        .city_wraps
+        .city_tasks
         .iter()
+        .flat_map(|city_task| city_task.wraps.iter())
         .find(|wrapped| wrapped.node == n31 && wrapped.target == root2)
         .unwrap()
         .clone();
@@ -717,25 +745,25 @@ fn removing_a_committer_rekeys_the_nodes_it_drew() {
             .commits
             .iter()
             .flat_map(|commit| commit.wraps.iter())
-            .chain(stored.seal.body.city_wraps.iter());
+            .chain(stored.city_tasks.iter().flat_map(|task| task.wraps.iter()));
         for wrapped in wraps {
             assert!(unwrap(&gid, sim.ds.epoch(), wrapped, &key, &pk).is_err());
         }
     }
     assert!(
         stored
-            .seal
-            .body
-            .city_updates
+            .city_tasks
             .iter()
+            .flat_map(|city_task| city_task.updates.iter())
             .any(|update| update.node == n31)
     );
     // Sanity: without the rule, the window would re-key district 0 and the
     // city path above it only, and wrap the new root to (3, 1), whose
     // secret C holds.
-    let without_rule = cityg_core::rekey::plan_city(
+    let without_rule = cityg_core::rekey::plan_part(
         &before.tree,
         shape,
+        cityg_core::tree::CityPart::SubCity(0),
         &std::collections::BTreeMap::from([(0u32, true)]),
         &std::collections::BTreeSet::new(),
     )
@@ -1130,6 +1158,7 @@ fn audits_expose_a_committer_that_placed_an_invalid_join() {
         height,
         changes,
         committers: window.districts.iter().map(|d| (*d, committer)).collect(),
+        city: window.parts.iter().map(|part| (*part, sealer)).collect(),
         sealer,
         entrant: None,
         policy: None,
@@ -1154,13 +1183,30 @@ fn audits_expose_a_committer_that_placed_an_invalid_join() {
             .0
         })
         .collect();
-    // The honest sealer checks the structure of every district commit, not
-    // every entry (E-12), and seals.
+    // The honest sealer performs the city and checks the structure of every
+    // district commit, not every entry (E-12), and seals.
+    let mut city_tasks = Vec::new();
+    for part in task.city.keys() {
+        let work = cityg_core::roles::WindowWork {
+            commits: &commits,
+            city_tasks: &city_tasks,
+            requests: &requests,
+        };
+        let city_task = sim.members[&sealer]
+            .commit_city(&state, &task, *part, &work, &mut sim.rng)
+            .unwrap();
+        city_tasks.push(city_task);
+    }
+    let work = cityg_core::roles::WindowWork {
+        commits: &commits,
+        city_tasks: &city_tasks,
+        requests: &requests,
+    };
     let seal = sim.members[&sealer]
-        .seal(&state, &task, &commits, &requests, &mut sim.rng)
+        .seal(&state, &task, &work, &mut sim.rng)
         .unwrap();
-    assert!(check_window(&state, &commits, &seal, &requests, true).is_err());
-    let outcome = check_window(&state, &commits, &seal, &requests, false).unwrap();
+    assert!(check_window(&state, &commits, &city_tasks, &seal, &requests, true).is_err());
+    let outcome = check_window(&state, &commits, &city_tasks, &seal, &requests, false).unwrap();
     let mut after = state.clone();
     after.apply(&outcome).unwrap();
     // Every member audits both entries here (20 audits per entry among 7).
@@ -1407,6 +1453,7 @@ fn in_an_open_group_the_service_can_join_but_is_visible_and_cannot_pose_as_a_mem
     cityg_core::window::check_window(
         &forged.state,
         &forged.commits,
+        &forged.city_tasks,
         &forged.seal,
         &forged.requests,
         true,

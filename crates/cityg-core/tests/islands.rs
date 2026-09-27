@@ -12,6 +12,7 @@ use cityg_core::crypto::kem_pk_hash;
 use cityg_core::ds::TopChoice;
 use cityg_core::objects::Urgency;
 use cityg_core::rekey::WindowIndex;
+use cityg_core::roles::WindowWork;
 use cityg_core::top::{RelayContext, RelayElement, Top};
 use cityg_core::tree::Occupancy;
 use common::Sim;
@@ -349,9 +350,14 @@ fn a_sealer_without_a_city_refreshes_its_path_first() {
                 sim.ds.submit_district_commit(commit).unwrap();
             }
             let commits = sim.ds.open_commits();
+            let work = WindowWork {
+                commits: &commits,
+                city_tasks: &[],
+                requests: &requests,
+            };
             assert!(
                 sim.members[&sealer]
-                    .seal(sim.ds.state(), &task, &commits, &requests, &mut sim.rng)
+                    .seal(sim.ds.state(), &task, &work, &mut sim.rng)
                     .is_err()
             );
             let other = *sim
@@ -372,7 +378,7 @@ fn a_sealer_without_a_city_refreshes_its_path_first() {
             member.refresh(&steps).unwrap();
             assert!(member.knows_path());
             let seal = member
-                .seal(sim.ds.state(), &task, &commits, &requests, &mut sim.rng)
+                .seal(sim.ds.state(), &task, &work, &mut sim.rng)
                 .unwrap();
             let epoch = sim.ds.submit_seal(seal).unwrap();
             sim.follow(epoch);
@@ -475,7 +481,9 @@ fn a_removed_member_opens_no_top_of_the_window_that_removes_it() {
     for commit in &stored.commits {
         index.add(&commit.updates, &commit.wraps);
     }
-    index.add(&stored.seal.body.city_updates, &stored.seal.body.city_wraps);
+    for task in &stored.city_tasks {
+        index.add(&task.updates, &task.wraps);
+    }
     let shape = sim.ds.state().tree.shape();
     let mut steps = index.steps(removed.leaf, shape.height).unwrap();
     steps.retain(|level, _| *level <= shape.island_level());

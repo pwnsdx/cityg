@@ -1,5 +1,6 @@
-//! District commits and seals (docs/specs.md section 10, with the seal
-//! header of docs/specs-v0.5-draft.md section 2.1).
+//! District commits, city tasks and seals (docs/specs.md section 10, with
+//! the seal header of docs/specs-v0.5-draft.md sections 2.1 and 3.1, and the
+//! city tasks and seal body of its sections 3.2 and 3.5).
 //!
 //! ```text
 //! DistrictCommit := ["city-g/district-commit/v5", gid, epoch, district, height,
@@ -9,12 +10,17 @@
 //!   node   := [level, index, public_key or null]    in plan order
 //!   wrap   := [level, index, target_level, target_index, kem_ciphertext, sealed]
 //!
+//! CityTask := ["city-g/city-task/v5", gid, epoch, part, height, prev_part_hash,
+//!              performer, nodes, wraps, part_hash, signature]
+//!                                                 ctx CITY_TASK, by the performer
+//!   part := k (sub-city k) or null (the top)
+//!
 //! SealHeader := ["city-g/seal/v5", gid, epoch, prev_interim, kind, sealer, height,
-//!                district_bits, island_bits, tree_hash, registry_hash, body_hash,
-//!                time_ms, [kem_output, request_ref] or null]
+//!                district_bits, island_bits, subcity_bits, tree_hash, registry_hash,
+//!                body_hash, time_ms, [kem_output, request_ref] or null]
 //!   kind 0 genesis, 1 member, 2 entrant (the last field is set for kind 2)
 //! SealBody   := ["city-g/seal-body/v5", [[district, H(district commit)], ...],
-//!                city_nodes, city_wraps, eviction_policy or null,
+//!                [[part, H(city task)], ...], eviction_policy or null,
 //!                [nonce, creator_pk, encryption_key, root_pk] or null]
 //! Seal       := [SealHeader, SealBody, tag, external_pk, signature]
 //!   seal_hash := H(SealHeader), body_hash := H(SealBody)
@@ -36,12 +42,13 @@ use crate::error::{CoreError, CoreResult};
 use crate::identity::{DeviceIdentity, verify_signature};
 use crate::objects::ChangeKind;
 use crate::rekey::NodeUpdate;
-use crate::tree::{NodeId, Occupancy};
+use crate::tree::{CityPart, NodeId, Occupancy};
 
 pub const DISTRICT_COMMIT_LABEL: &str = "city-g/district-commit/v5";
+pub const CITY_TASK_LABEL: &str = "city-g/city-task/v5";
 pub const SEAL_LABEL: &str = "city-g/seal/v5";
 pub const SEAL_BODY_LABEL: &str = "city-g/seal-body/v5";
-/// Upper bound on an encoded district commit.
+/// Upper bound on an encoded district commit or city task.
 pub const MAX_DISTRICT_COMMIT_BYTES: usize = 64 * 1024 * 1024;
 /// Upper bound on an encoded seal.
 pub const MAX_SEAL_BYTES: usize = 64 * 1024 * 1024;
@@ -266,6 +273,131 @@ impl DistrictCommit {
     }
 }
 
+fn part_value(part: CityPart) -> Value {
+    match part {
+        CityPart::SubCity(subcity) => uint(u64::from(subcity)),
+        CityPart::Top => Value::Null,
+    }
+}
+
+fn part_from(value: Option<Value>, what: &'static str) -> CoreResult<CityPart> {
+    match value {
+        None => Ok(CityPart::Top),
+        Some(value) => Ok(CityPart::SubCity(crate::cbor::expect_u32(&value, what)?)),
+    }
+}
+
+/// The re-key of a sub-city or of the top in a window, signed by its
+/// performer (docs/specs-v0.5-draft.md section 3.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CityTask {
+    pub gid: Digest,
+    pub epoch: u64,
+    pub part: CityPart,
+    pub height: u8,
+    pub prev_part_hash: Digest,
+    pub performer: Occupancy,
+    pub updates: Vec<NodeUpdate>,
+    pub wraps: Vec<Wrap>,
+    pub part_hash: Digest,
+    signed: Signed,
+}
+
+/// The content of a city task before it is signed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CityTaskContent {
+    pub gid: Digest,
+    pub epoch: u64,
+    pub part: CityPart,
+    pub height: u8,
+    pub prev_part_hash: Digest,
+    pub performer: Occupancy,
+    pub updates: Vec<NodeUpdate>,
+    pub wraps: Vec<Wrap>,
+    pub part_hash: Digest,
+}
+
+impl CityTask {
+    /// Sign `content` with the performer's device key.
+    pub fn sign(
+        content: CityTaskContent,
+        identity: &DeviceIdentity,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Self> {
+        let signed = sign_fields(
+            vec![
+                text(CITY_TASK_LABEL),
+                bytes(&content.gid),
+                uint(content.epoch),
+                part_value(content.part),
+                uint(u64::from(content.height)),
+                bytes(&content.prev_part_hash),
+                content.performer.value(),
+                updates_value(&content.updates),
+                wraps_value(&content.wraps),
+                bytes(&content.part_hash),
+            ],
+            identity,
+            SignatureContext::CITY_TASK,
+            rng,
+        )?;
+        Ok(Self {
+            gid: content.gid,
+            epoch: content.epoch,
+            part: content.part,
+            height: content.height,
+            prev_part_hash: content.prev_part_hash,
+            performer: content.performer,
+            updates: content.updates,
+            wraps: content.wraps,
+            part_hash: content.part_hash,
+            signed,
+        })
+    }
+
+    /// Parse a city task.
+    pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
+        const WHAT: &str = "city task";
+        let (mut fields, signed) = open_signed(
+            encoded,
+            CITY_TASK_LABEL,
+            10,
+            MAX_DISTRICT_COMMIT_BYTES,
+            WHAT,
+        )?;
+        Ok(Self {
+            gid: fields.digest()?,
+            epoch: fields.uint()?,
+            part: part_from(fields.optional()?, WHAT)?,
+            height: fields.u8()?,
+            prev_part_hash: fields.digest()?,
+            performer: fields.occupancy()?,
+            updates: updates_from(fields.list()?)?,
+            wraps: wraps_from(fields.list()?)?,
+            part_hash: fields.digest()?,
+            signed,
+        })
+    }
+
+    /// Encoded signed task.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.signed.encoded
+    }
+
+    /// `H(encoded)`, which the seal lists.
+    #[must_use]
+    pub fn hash(&self) -> Digest {
+        h(&self.signed.encoded)
+    }
+
+    /// Check the performer's signature under `performer_pk`.
+    pub fn verify_signature(&self, performer_pk: &[u8]) -> CoreResult<()> {
+        self.signed
+            .verify(performer_pk, SignatureContext::CITY_TASK, "city task")
+    }
+}
+
 /// Who sealed a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SealKind {
@@ -294,6 +426,7 @@ pub struct SealHeader {
     pub height: u8,
     pub district_bits: u8,
     pub island_bits: u8,
+    pub subcity_bits: u8,
     pub tree_hash: Digest,
     pub registry_hash: Digest,
     pub body_hash: Digest,
@@ -313,6 +446,7 @@ impl SealHeader {
             uint(u64::from(self.height)),
             uint(u64::from(self.district_bits)),
             uint(u64::from(self.island_bits)),
+            uint(u64::from(self.subcity_bits)),
             bytes(&self.tree_hash),
             bytes(&self.registry_hash),
             bytes(&self.body_hash),
@@ -325,7 +459,7 @@ impl SealHeader {
 
     fn from_value(value: Value) -> CoreResult<Self> {
         const WHAT: &str = "seal header";
-        let items = expect_array(value, 14, WHAT)?;
+        let items = expect_array(value, 15, WHAT)?;
         expect_label(&items[0], SEAL_LABEL, WHAT)?;
         let mut fields = Fields::new(items, WHAT);
         fields.next()?;
@@ -342,6 +476,7 @@ impl SealHeader {
         let height = fields.u8()?;
         let district_bits = fields.u8()?;
         let island_bits = fields.u8()?;
+        let subcity_bits = fields.u8()?;
         let tree_hash = fields.digest()?;
         let registry_hash = fields.digest()?;
         let body_hash = fields.digest()?;
@@ -368,6 +503,7 @@ impl SealHeader {
             height,
             district_bits,
             island_bits,
+            subcity_bits,
             tree_hash,
             registry_hash,
             body_hash,
@@ -396,13 +532,12 @@ pub struct Genesis {
     pub root_pk: Vec<u8>,
 }
 
-/// What the seal adds to the district commits: the city's re-key, and the
-/// window's registry changes that are not in the tree.
+/// What the seal lists and adds: the window's district commits and city
+/// tasks, and the registry changes that are not in the tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SealBody {
     pub districts: Vec<(u32, Digest)>,
-    pub city_updates: Vec<NodeUpdate>,
-    pub city_wraps: Vec<Wrap>,
+    pub city: Vec<(CityPart, Digest)>,
     pub policy: Option<Vec<u8>>,
     pub genesis: Option<Genesis>,
 }
@@ -417,8 +552,12 @@ impl SealBody {
                     .map(|(district, hash)| array(vec![uint(u64::from(*district)), bytes(hash)]))
                     .collect(),
             ),
-            updates_value(&self.city_updates),
-            wraps_value(&self.city_wraps),
+            array(
+                self.city
+                    .iter()
+                    .map(|(part, hash)| array(vec![part_value(*part), bytes(hash)]))
+                    .collect(),
+            ),
             nullable(self.policy.as_deref(), bytes),
             nullable(self.genesis.as_ref(), |genesis| {
                 array(vec![
@@ -433,7 +572,7 @@ impl SealBody {
 
     fn from_value(value: Value) -> CoreResult<Self> {
         const WHAT: &str = "seal body";
-        let items = expect_array(value, 6, WHAT)?;
+        let items = expect_array(value, 5, WHAT)?;
         expect_label(&items[0], SEAL_BODY_LABEL, WHAT)?;
         let mut fields = Fields::new(items, WHAT);
         fields.next()?;
@@ -445,8 +584,14 @@ impl SealBody {
                 Ok((entry.u32()?, entry.digest()?))
             })
             .collect::<CoreResult<_>>()?;
-        let city_updates = updates_from(fields.list()?)?;
-        let city_wraps = wraps_from(fields.list()?)?;
+        let city = fields
+            .list()?
+            .into_iter()
+            .map(|value| {
+                let mut entry = Fields::new(expect_array(value, 2, WHAT)?, WHAT);
+                Ok((part_from(entry.optional()?, WHAT)?, entry.digest()?))
+            })
+            .collect::<CoreResult<_>>()?;
         let policy = fields.optional_bytes()?;
         let genesis = match fields.optional()? {
             None => None,
@@ -462,8 +607,7 @@ impl SealBody {
         };
         Ok(Self {
             districts,
-            city_updates,
-            city_wraps,
+            city,
             policy,
             genesis,
         })
@@ -640,11 +784,47 @@ mod tests {
     }
 
     #[test]
+    fn city_tasks_round_trip_and_verify() {
+        let mut rng = ChaCha20Rng::seed_from_u64(3);
+        let identity = DeviceIdentity::from_seed(&[1; 32]);
+        for part in [CityPart::SubCity(3), CityPart::Top] {
+            let content = CityTaskContent {
+                gid: [1; 32],
+                epoch: 3,
+                part,
+                height: 6,
+                prev_part_hash: [2; 32],
+                performer: Occupancy { leaf: 12, since: 3 },
+                updates: vec![NodeUpdate {
+                    node: NodeId { level: 4, index: 3 },
+                    public_key: Some(vec![7; 3]),
+                }],
+                wraps: vec![Wrap {
+                    node: NodeId { level: 4, index: 3 },
+                    target: NodeId { level: 3, index: 6 },
+                    kem_ciphertext: vec![1; 5],
+                    sealed: vec![2; 6],
+                }],
+                part_hash: [4; 32],
+            };
+            let task = CityTask::sign(content, &identity, &mut rng).unwrap();
+            let decoded = CityTask::decode(task.encoded()).unwrap();
+            assert_eq!(decoded, task);
+            decoded.verify_signature(identity.public_key()).unwrap();
+            let other = DeviceIdentity::from_seed(&[2; 32]);
+            assert!(decoded.verify_signature(other.public_key()).is_err());
+            // Not a district commit, whatever the bytes say.
+            assert!(DistrictCommit::decode(task.encoded()).is_err());
+        }
+    }
+
+    #[test]
     fn seals_round_trip_and_sign_header_tag_and_key() {
         let mut rng = ChaCha20Rng::seed_from_u64(2);
         let identity = DeviceIdentity::from_seed(&[1; 32]);
         let body = SealBody {
             districts: vec![(0, [1; 32]), (3, [2; 32])],
+            city: vec![(CityPart::SubCity(1), [3; 32]), (CityPart::Top, [4; 32])],
             policy: Some(vec![5; 4]),
             ..SealBody::default()
         };
@@ -657,6 +837,7 @@ mod tests {
             height: 5,
             district_bits: 2,
             island_bits: 1,
+            subcity_bits: 1,
             tree_hash: [3; 32],
             registry_hash: [4; 32],
             body_hash: body.hash().unwrap(),

@@ -11,13 +11,14 @@
 
 use std::collections::BTreeMap;
 
+use cityg_core::commit::Seal;
 use cityg_core::ds::{DeliveryService, DsConfig, TopChoice};
 use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::member::{Joiner, Member, Returning};
 use cityg_core::packet::SealLink;
-use cityg_core::roles::WindowTask;
-use cityg_core::tree::Occupancy;
+use cityg_core::roles::{WindowTask, WindowWork};
+use cityg_core::tree::{Divisions, Occupancy};
 use cityg_core::window::EpochHeader;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
@@ -50,20 +51,31 @@ impl Sim {
 
     /// A group created by one member, open or closed.
     pub fn with_policy(bits: u8, seed: u64, open: bool) -> Self {
-        Self::build(bits, bits, seed, open, false)
+        Self::build(Divisions::new(bits, bits, 8).unwrap(), seed, open, false)
     }
 
     /// A closed group with districts of `2^bits` leaves and islands of
     /// `2^island_bits`, whose members follow as island followers.
     pub fn with_islands(bits: u8, island_bits: u8, seed: u64) -> Self {
-        Self::build(bits, island_bits, seed, false, true)
+        Self::build(
+            Divisions::new(bits, island_bits, 8).unwrap(),
+            seed,
+            false,
+            true,
+        )
     }
 
-    fn build(bits: u8, island_bits: u8, seed: u64, open: bool, islands: bool) -> Self {
+    /// A closed group with `divisions`, sub-cities included, whose members
+    /// follow as island followers (docs/specs-v0.5-draft.md section 3).
+    pub fn with_divisions(divisions: Divisions, seed: u64) -> Self {
+        Self::build(divisions, seed, false, true)
+    }
+
+    fn build(divisions: Divisions, seed: u64, open: bool, islands: bool) -> Self {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let identity = DeviceIdentity::generate(&mut rng);
         let (creator, genesis) =
-            Member::create(identity, [7; 32], bits, island_bits, open, 1_000, &mut rng).unwrap();
+            Member::create(identity, [7; 32], divisions, open, 1_000, &mut rng).unwrap();
         let ds = DeliveryService::new(genesis, DsConfig::default()).unwrap();
         let mut members = BTreeMap::new();
         members.insert(creator.occupancy(), creator);
@@ -203,18 +215,41 @@ impl Sim {
                 .unwrap();
             self.ds.submit_district_commit(commit).unwrap();
         }
+        self.perform_city_tasks(task);
+        let seal = self.seal_open(task);
+        self.ds.submit_seal(seal).unwrap()
+    }
+
+    /// The performers of the open window's city tasks perform them,
+    /// sub-cities first, each on what the DS shows (docs/specs-v0.5-draft.md
+    /// section 3.2), and submit them.
+    pub fn perform_city_tasks(&mut self, task: &WindowTask) {
+        let (_, requests, _) = self.ds.open_window_data().unwrap();
+        let requests = requests.clone();
         let commits = self.ds.open_commits();
-        // Without a city, the sealer follows the district commit along its
-        // own path: an island follower refreshes its path first.
-        let city = self
-            .ds
-            .state()
-            .tree
-            .shape()
-            .grown(task.height)
-            .unwrap()
-            .has_city();
-        if !city && !self.members[&task.sealer].knows_path() {
+        for (part, performer) in &task.city {
+            let city_tasks = self.ds.open_city_tasks();
+            let work = WindowWork {
+                commits: &commits,
+                city_tasks: &city_tasks,
+                requests: &requests,
+            };
+            let city_task = self.members[performer]
+                .commit_city(self.ds.state(), task, *part, &work, &mut self.rng)
+                .unwrap();
+            self.ds.submit_city_task(city_task).unwrap();
+        }
+    }
+
+    /// The open window's sealer seals what the DS shows, following the
+    /// tasks along its own path (an island follower refreshes its path
+    /// first). The seal is not submitted.
+    pub fn seal_open(&mut self, task: &WindowTask) -> Seal {
+        let (_, requests, _) = self.ds.open_window_data().unwrap();
+        let requests = requests.clone();
+        let commits = self.ds.open_commits();
+        let city_tasks = self.ds.open_city_tasks();
+        if !self.members[&task.sealer].knows_path() {
             let steps = self.ds.refresh_steps(task.sealer).unwrap();
             self.members
                 .get_mut(&task.sealer)
@@ -222,10 +257,14 @@ impl Sim {
                 .refresh(&steps)
                 .unwrap();
         }
-        let seal = self.members[&task.sealer]
-            .seal(self.ds.state(), task, &commits, &requests, &mut self.rng)
-            .unwrap();
-        self.ds.submit_seal(seal).unwrap()
+        let work = WindowWork {
+            commits: &commits,
+            city_tasks: &city_tasks,
+            requests: &requests,
+        };
+        self.members[&task.sealer]
+            .seal(self.ds.state(), task, &work, &mut self.rng)
+            .unwrap()
     }
 
     /// Every member follows the window of `epoch`; members it removed leave.
@@ -372,6 +411,9 @@ impl Sim {
         };
         for commit in sealed.commits {
             self.ds.submit_district_commit(commit).unwrap();
+        }
+        for city_task in sealed.city_tasks {
+            self.ds.submit_city_task(city_task).unwrap();
         }
         let epoch = self.ds.submit_seal(sealed.seal).unwrap();
         let welcomer = sealed.member.occupancy();

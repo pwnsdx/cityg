@@ -8,16 +8,19 @@
 //!
 //! The group is built directly (every leaf occupied, keyed by one
 //! committer); the window goes through the protocol's functions: entries
-//! checked by the committers, district commits, the city re-key and the
-//! seal, the delivery service's full check, and one packet per member,
-//! whole or by island (`CITYG_SCALE_ISLAND_BITS`, 8 by default).
+//! checked by the committers, district commits, the city tasks (sub-cities
+//! of `2^CITYG_SCALE_SUBCITY_BITS` districts, 8 by default, and the top
+//! above them) and the seal, the delivery service's full check, and one
+//! packet per member, whole or by island (`CITYG_SCALE_ISLAND_BITS`, 8 by
+//! default).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Instant;
 
-use cityg_core::commit::Change;
+use cityg_core::commit::{Change, CityTask};
+use cityg_core::crypto::Digest;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::kem::KemSecret;
 use cityg_core::objects::{
@@ -25,13 +28,16 @@ use cityg_core::objects::{
 };
 use cityg_core::packet::{Packet, RegistryUpdate, SealLink, SealerEvidence};
 use cityg_core::registry::{Registry, RegistryDelta};
-use cityg_core::rekey::{KeySource, LeafChanges, WindowIndex, generate, plan_city, plan_district};
-use cityg_core::roles::{SealDraft, build_city, build_district, finish_seal, with_city};
+use cityg_core::rekey::{
+    KeySource, LeafChanges, NewRoots, WindowIndex, generate, plan_district, plan_part,
+};
+use cityg_core::roles::{
+    CityTaskInput, SealDraft, WindowWork, build_city_task, build_district, finish_seal, with_city,
+};
 use cityg_core::top::{RelayContext, RelayElement, Top, flat_element};
-use cityg_core::tree::{LeafNode, Occupancy, ParentNode, PublicTree};
+use cityg_core::tree::{CityPart, Divisions, LeafNode, Occupancy, PublicTree};
 use cityg_core::window::{
-    PublicState, Requests, WindowShape, check_districts, check_sealer, check_window,
-    district_roots, keyed_parents,
+    PublicState, Requests, WindowShape, check_districts, check_sealer, check_window, keyed_parents,
 };
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
@@ -49,12 +55,44 @@ struct Group {
     committers: BTreeMap<u32, (Occupancy, DeviceIdentity)>,
 }
 
-/// A group of `2^height` members in districts of `2^bits` and islands of
-/// `2^island_bits`, keyed by one committer (the admin at leaf 0).
-fn full_group(height: u8, bits: u8, island_bits: u8, rng: &mut ChaCha20Rng) -> Group {
+/// Key a part of the city over the new roots `below` of the tier under it,
+/// tainted by `performer`; returns the part's new root key.
+fn key_part(
+    tree: &mut PublicTree,
+    part: CityPart,
+    below: &NewRoots,
+    gid: &Digest,
+    performer: Occupancy,
+    rng: &mut ChaCha20Rng,
+) -> Option<Vec<u8>> {
+    let shape = tree.shape();
+    let live = below
+        .iter()
+        .map(|(index, key)| (*index, key.is_some()))
+        .collect();
+    let plan = plan_part(tree, shape, part, &live, &BTreeSet::new()).unwrap();
+    let empty = LeafChanges::new();
+    let keys = KeySource {
+        tree,
+        shape,
+        leaves: &empty,
+        below: Some((shape.part_base(part), below)),
+    };
+    let drawn = generate(&plan, &keys, gid, 0, &[0; 32], rng).unwrap();
+    for (node, parent) in keyed_parents(&drawn.updates, performer) {
+        tree.set_parent(node, parent).unwrap();
+    }
+    tree.parent(shape.part_root(part))
+        .map(|parent| parent.encryption_key.clone())
+}
+
+/// A group of `2^height` members with `divisions`, keyed by one committer
+/// (the admin at leaf 0): its districts, then its sub-cities and its top.
+fn full_group(height: u8, divisions: Divisions, rng: &mut ChaCha20Rng) -> Group {
+    let bits = divisions.district_bits;
     let admin = DeviceIdentity::generate(rng);
     let gid = group_id(admin.public_key(), &[1; 32]).unwrap();
-    let mut tree = PublicTree::new(height, bits, island_bits).unwrap();
+    let mut tree = PublicTree::new(height, divisions).unwrap();
     let shape = tree.shape();
     let admin_occupancy = Occupancy { leaf: 0, since: 0 };
     let mut committers = BTreeMap::new();
@@ -109,7 +147,7 @@ fn full_group(height: u8, bits: u8, island_bits: u8, rng: &mut ChaCha20Rng) -> G
             tree: &tree,
             shape,
             leaves: &mine,
-            roots: None,
+            below: None,
         };
         let drawn = generate(&plan, &keys, &gid, 0, &[0; 32], rng).unwrap();
         for (leaf, node) in &mine {
@@ -123,25 +161,26 @@ fn full_group(height: u8, bits: u8, island_bits: u8, rng: &mut ChaCha20Rng) -> G
             tree.parent(root).map(|p| p.encryption_key.clone()),
         );
     }
-    let live = roots.iter().map(|(d, k)| (*d, k.is_some())).collect();
-    let plan = plan_city(&tree, shape, &live, &BTreeSet::new()).unwrap();
-    let empty = LeafChanges::new();
-    let keys = KeySource {
-        tree: &tree,
-        shape,
-        leaves: &empty,
-        roots: Some(&roots),
-    };
-    let drawn = generate(&plan, &keys, &gid, 0, &[0; 32], rng).unwrap();
-    for update in &drawn.updates {
-        tree.set_parent(
-            update.node,
-            update.public_key.clone().map(|encryption_key| ParentNode {
-                encryption_key,
-                taint: admin_occupancy,
-            }),
-        )
-        .unwrap();
+    let mut subcities = BTreeMap::new();
+    for subcity in 0..shape.subcity_count() {
+        let below: NewRoots = roots
+            .iter()
+            .filter(|(district, _)| shape.subcity_of(**district) == subcity)
+            .map(|(district, key)| (*district, key.clone()))
+            .collect();
+        let part = CityPart::SubCity(subcity);
+        let key = key_part(&mut tree, part, &below, &gid, admin_occupancy, rng);
+        subcities.insert(subcity, key);
+    }
+    if shape.has_top() {
+        key_part(
+            &mut tree,
+            CityPart::Top,
+            &subcities,
+            &gid,
+            admin_occupancy,
+            rng,
+        );
     }
     let mut registry = Registry::new();
     let mut delta = RegistryDelta::default();
@@ -170,8 +209,16 @@ fn full_group(height: u8, bits: u8, island_bits: u8, rng: &mut ChaCha20Rng) -> G
 }
 
 /// The model's count (`mark_levels` and `rekey_cost` of rekey_sim.py):
-/// chained wraps and new keys of re-keying every ancestor of `changed`.
-fn model_count(height: u8, bits: u8, changed: &[u32], blank: &HashSet<u32>) -> (usize, usize) {
+/// chained wraps and new keys of re-keying every ancestor of `changed`,
+/// with a boundary above the leaves, the districts and the sub-cities.
+fn model_count(
+    height: u8,
+    divisions: Divisions,
+    changed: &[u32],
+    blank: &HashSet<u32>,
+) -> (usize, usize) {
+    let bits = divisions.district_bits;
+    let subcity_top = bits + divisions.subcity_bits;
     let mut levels: Vec<HashSet<u32>> = vec![HashSet::new(); usize::from(height) + 1];
     levels[0] = changed.iter().copied().collect();
     for leaf in changed {
@@ -188,7 +235,7 @@ fn model_count(height: u8, bits: u8, changed: &[u32], blank: &HashSet<u32>) -> (
                 .into_iter()
                 .filter(|c| !(k == 1 && blank.contains(c)))
                 .collect();
-            let boundary = k == 1 || k == bits + 1;
+            let boundary = k == 1 || k == bits + 1 || k == subcity_top + 1;
             let chained = !boundary
                 && children
                     .iter()
@@ -223,14 +270,22 @@ fn a_large_window_on_a_full_group_matches_the_model() {
     let island_bits = u8::try_from(env("CITYG_SCALE_ISLAND_BITS", 8))
         .unwrap()
         .min(bits);
+    let subcity_bits = u8::try_from(env("CITYG_SCALE_SUBCITY_BITS", 8)).unwrap();
+    let divisions = Divisions::new(bits, island_bits, subcity_bits).unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(7);
     let start = Instant::now();
-    let group = full_group(height, bits, island_bits, &mut rng);
+    let group = full_group(height, divisions, &mut rng);
     let state = &group.state;
     let n = 1usize << height;
     println!(
-        "group: N = 2^{height} = {n}, {} districts of 2^{bits}, built in {:.1?}",
+        "group: N = 2^{height} = {n}, {} districts of 2^{bits} in {} sub-cities of 2^{subcity_bits}{}, built in {:.1?}",
         state.tree.shape().district_count(),
+        state.tree.shape().subcity_count(),
+        if state.tree.shape().has_top() {
+            " under a top"
+        } else {
+            ""
+        },
         start.elapsed()
     );
 
@@ -342,9 +397,38 @@ fn a_large_window_on_a_full_group_matches_the_model() {
     )
     .unwrap();
     let delta = check_districts(state, &window, &commits, &requests, &sealer, false).unwrap();
-    let roots = district_roots(shape, &commits).unwrap();
-    let city = build_city(state, &window, &roots, &[0; 32], &mut rng).unwrap();
-    let root_secret = city.secret(shape.root()).unwrap().clone();
+    // The city tasks, sub-cities first, then the top; one performer here.
+    let mut city_tasks: Vec<CityTask> = Vec::new();
+    let mut root_secret = None;
+    for part in &window.parts {
+        let work = WindowWork {
+            commits: &commits,
+            city_tasks: &city_tasks,
+            requests: &requests,
+        };
+        let (below, before) = work.base(state, &window, *part).unwrap();
+        let (task, drawn) = build_city_task(
+            &CityTaskInput {
+                state,
+                window: &window,
+                part: *part,
+                below: &below,
+                before: &before,
+                performer: admin_occupancy,
+            },
+            &group.admin,
+            &[0; 32],
+            &mut rng,
+        )
+        .unwrap();
+        if let Some(secret) = drawn.secret(shape.root()) {
+            root_secret = Some(secret.clone());
+        }
+        city_tasks.push(task);
+    }
+    let city_time = start.elapsed();
+    let start = Instant::now();
+    let root_secret = root_secret.unwrap();
     let sealed = finish_seal(
         SealDraft {
             state,
@@ -353,8 +437,8 @@ fn a_large_window_on_a_full_group_matches_the_model() {
             requests: &requests,
             sealer: &sealer,
             entrant: None,
-            delta: with_city(delta, &city, admin_occupancy),
-            city: &city,
+            delta: with_city(delta, &city_tasks),
+            city_tasks: &city_tasks,
             policy: None,
             time_ms: 1,
             init_prev: &[3; 32],
@@ -366,14 +450,17 @@ fn a_large_window_on_a_full_group_matches_the_model() {
     .unwrap();
     let seal_time = start.elapsed();
     let start = Instant::now();
-    let outcome = check_window(state, &commits, &sealed.seal, &requests, true).unwrap();
+    let outcome =
+        check_window(state, &commits, &city_tasks, &sealed.seal, &requests, true).unwrap();
     let check_time = start.elapsed();
     assert_eq!(outcome.epoch, epoch);
 
     // Against the model.
-    let wraps: usize = commits.iter().map(|c| c.wraps.len()).sum::<usize>() + city.wraps.len();
-    let nodes: usize = commits.iter().map(|c| c.updates.len()).sum::<usize>() + city.updates.len();
-    let (model_wraps, model_nodes) = model_count(height, bits, &removed, &HashSet::new());
+    let city_wraps: usize = city_tasks.iter().map(|task| task.wraps.len()).sum();
+    let city_nodes: usize = city_tasks.iter().map(|task| task.updates.len()).sum();
+    let wraps: usize = commits.iter().map(|c| c.wraps.len()).sum::<usize>() + city_wraps;
+    let nodes: usize = commits.iter().map(|c| c.updates.len()).sum::<usize>() + city_nodes;
+    let (model_wraps, model_nodes) = model_count(height, divisions, &removed, &HashSet::new());
     assert_eq!(
         (wraps, nodes),
         (model_wraps, model_nodes),
@@ -399,10 +486,15 @@ fn a_large_window_on_a_full_group_matches_the_model() {
         busiest.wraps.len(),
         human(busiest_model),
     );
+    let city_bytes: usize = city_tasks.iter().map(|task| task.encoded().len()).sum();
     println!(
-        "seal: {} ({} city wraps); sealed (structure check, city, hashes, signature) in {seal_time:.1?}",
+        "city tasks: {} tasks, {} in all ({city_wraps} wraps); performed (structure check, city re-key) in {city_time:.1?}",
+        city_tasks.len(),
+        human(city_bytes as f64),
+    );
+    println!(
+        "seal: {}; sealed (hashes, key schedule, signature) in {seal_time:.1?}",
         human(seal_bytes),
-        city.wraps.len()
     );
     println!(
         "delivery service full check (every entry's signatures and admission): {check_time:.1?}"
@@ -414,7 +506,9 @@ fn a_large_window_on_a_full_group_matches_the_model() {
     for commit in &commits {
         index.add(&commit.updates, &commit.wraps);
     }
-    index.add(&sealed.seal.body.city_updates, &sealed.seal.body.city_wraps);
+    for task in &city_tasks {
+        index.add(&task.updates, &task.wraps);
+    }
     let registry = RegistryUpdate::between(
         &state.registry.header().unwrap(),
         &sealed.header.registry,

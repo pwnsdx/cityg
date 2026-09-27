@@ -33,12 +33,13 @@ docs/formal/run.sh /path/to/proverif       # symbolic model
 | Path | Content |
 | --- | --- |
 | `docs/specs.md` | Specification of `city-g/v0.4`. |
-| `docs/specs-v0.5-draft.md` | Draft of `city-g/v0.5-draft`, a delta on v0.4 in three stages; stage 1 is implemented. |
-| `docs/design.md` | Design decisions E-1 to E-16. |
+| `docs/specs-v0.5-draft.md` | Draft of `city-g/v0.5-draft`, a delta on v0.4 in three stages; stage 1 and the city tasks of stage 2 are implemented. |
+| `docs/design.md` | Design decisions E-1 to E-17. |
 | `crates/cityg-pqc` | ML-DSA-65 (FIPS 204) with per-usage contexts. |
 | `crates/cityg-core` | Protocol core without I/O and an in-memory delivery service. Its module documentation lists the layers, from deterministic CBOR up to members and the delivery service. |
 | `crates/cityg-core/tests/scenarios.rs` | Whole groups on the in-memory delivery service. |
 | `crates/cityg-core/tests/islands.rs` | Island followers, relays, flat elements and refreshes, and urgent and ordinary removals (stage 1 of the v0.5 draft). |
+| `crates/cityg-core/tests/tasks.rs` | City tasks: sub-cities and the top re-keyed by their performers, their order, failover and taints, and a sealer that draws nothing (stage 2 of the v0.5 draft). |
 | `crates/cityg-core/tests/scale.rs` | A large window on a full group, against the cost model (release, `--ignored`). |
 | `docs/formal/` | Symbolic model of the security choices. |
 | `docs/research/` | Research notes (in French), cost models, benchmarks, a zero-knowledge prover, and symbolic and computational models of the proposals. |

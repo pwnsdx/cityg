@@ -165,46 +165,108 @@ impl Occupancy {
     }
 }
 
-/// Dimensions of a tree: `2^height` leaves in districts of `2^district_bits`
-/// leaves, read in islands of `2^island_bits` leaves.
+/// How a group divides its tree, fixed at genesis: districts of
+/// `2^district_bits` leaves, islands of `2^island_bits` leaves
+/// (docs/specs-v0.5-draft.md section 2.1), and sub-cities of
+/// `2^subcity_bits` districts (section 3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Divisions {
+    pub district_bits: u8,
+    pub island_bits: u8,
+    pub subcity_bits: u8,
+}
+
+impl Divisions {
+    /// Check the divisions: `1 <= island_bits <= district_bits`, so that
+    /// every island lies in one district, and `subcity_bits >= 1`.
+    pub fn new(district_bits: u8, island_bits: u8, subcity_bits: u8) -> CoreResult<Self> {
+        if !(1..=MAX_HEIGHT).contains(&district_bits)
+            || !(1..=district_bits).contains(&island_bits)
+            || !(1..=MAX_HEIGHT).contains(&subcity_bits)
+        {
+            return Err(CoreError::Invalid("tree divisions"));
+        }
+        Ok(Self {
+            district_bits,
+            island_bits,
+            subcity_bits,
+        })
+    }
+}
+
+impl Default for Divisions {
+    /// Stage 2 of the v0.5 draft: `L = c = S = 8`.
+    fn default() -> Self {
+        Self {
+            district_bits: 8,
+            island_bits: 8,
+            subcity_bits: 8,
+        }
+    }
+}
+
+/// A part of the city that one city task re-keys: a sub-city of
+/// `2^subcity_bits` districts, or the top above the sub-cities
+/// (docs/specs-v0.5-draft.md section 3.2). Sub-cities come first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CityPart {
+    SubCity(u32),
+    Top,
+}
+
+/// Dimensions of a tree: `2^height` leaves and the group's divisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
     pub height: u8,
     pub district_bits: u8,
     pub island_bits: u8,
+    pub subcity_bits: u8,
 }
 
 impl Shape {
-    /// Check the dimensions: `1 <= island_bits <= district_bits`, so that
-    /// every island lies in one district.
-    pub fn new(height: u8, district_bits: u8, island_bits: u8) -> CoreResult<Self> {
-        if !(1..=MAX_HEIGHT).contains(&height)
-            || !(1..=MAX_HEIGHT).contains(&district_bits)
-            || !(1..=district_bits).contains(&island_bits)
-        {
+    /// A tree of `2^height` leaves with `divisions`.
+    pub fn new(height: u8, divisions: Divisions) -> CoreResult<Self> {
+        let divisions = Divisions::new(
+            divisions.district_bits,
+            divisions.island_bits,
+            divisions.subcity_bits,
+        )?;
+        if !(1..=MAX_HEIGHT).contains(&height) {
             return Err(CoreError::Invalid("tree dimensions"));
         }
         Ok(Self {
             height,
-            district_bits,
-            island_bits,
+            district_bits: divisions.district_bits,
+            island_bits: divisions.island_bits,
+            subcity_bits: divisions.subcity_bits,
         })
     }
 
-    /// The same districts and islands in a tree of `2^height` leaves
-    /// (`height` not smaller than the current one).
+    /// The group's divisions.
+    #[must_use]
+    pub const fn divisions(self) -> Divisions {
+        Divisions {
+            district_bits: self.district_bits,
+            island_bits: self.island_bits,
+            subcity_bits: self.subcity_bits,
+        }
+    }
+
+    /// The same divisions in a tree of `2^height` leaves (`height` not
+    /// smaller than the current one).
     pub fn grown(self, height: u8) -> CoreResult<Self> {
         if height < self.height {
             return Err(CoreError::Invalid("tree growth"));
         }
-        Self::new(height, self.district_bits, self.island_bits)
+        Self::new(height, self.divisions())
     }
 
-    /// Whether `other` has the same districts and islands (both are fixed
-    /// at genesis).
+    /// Whether `other` has the same divisions (fixed at genesis).
     #[must_use]
     pub const fn same_divisions(self, other: Self) -> bool {
-        self.district_bits == other.district_bits && self.island_bits == other.island_bits
+        self.district_bits == other.district_bits
+            && self.island_bits == other.island_bits
+            && self.subcity_bits == other.subcity_bits
     }
 
     /// Number of leaves, `2^height`.
@@ -308,6 +370,71 @@ impl Shape {
         NodeId {
             level: self.island_level(),
             index: island,
+        }
+    }
+
+    /// Level of the sub-city roots: `min(L + S, height)`
+    /// (docs/specs-v0.5-draft.md section 3.1).
+    #[must_use]
+    pub fn subcity_level(self) -> u8 {
+        (self.district_bits + self.subcity_bits).min(self.height)
+    }
+
+    /// Whether the tree has a top above its sub-cities.
+    #[must_use]
+    pub const fn has_top(self) -> bool {
+        self.height > self.district_bits + self.subcity_bits
+    }
+
+    /// Number of sub-cities.
+    #[must_use]
+    pub const fn subcity_count(self) -> u32 {
+        if self.has_top() {
+            1 << (self.height - self.district_bits - self.subcity_bits)
+        } else {
+            1
+        }
+    }
+
+    /// Sub-city of district `district`.
+    #[must_use]
+    pub const fn subcity_of(self, district: u32) -> u32 {
+        if self.has_top() {
+            district >> self.subcity_bits
+        } else {
+            0
+        }
+    }
+
+    /// The part of the city a city node belongs to.
+    #[must_use]
+    pub fn part_of(self, node: NodeId) -> CityPart {
+        if node.level > self.subcity_level() {
+            CityPart::Top
+        } else {
+            CityPart::SubCity(node.ancestor(self.subcity_level()).index)
+        }
+    }
+
+    /// Root node of a part of the city.
+    #[must_use]
+    pub fn part_root(self, part: CityPart) -> NodeId {
+        match part {
+            CityPart::SubCity(subcity) => NodeId {
+                level: self.subcity_level(),
+                index: subcity,
+            },
+            CityPart::Top => self.root(),
+        }
+    }
+
+    /// The level of the nodes whose new roots a part's plan starts from:
+    /// the district roots for a sub-city, the sub-city roots for the top.
+    #[must_use]
+    pub fn part_base(self, part: CityPart) -> u8 {
+        match part {
+            CityPart::SubCity(_) => self.district_level(),
+            CityPart::Top => self.subcity_level(),
         }
     }
 
@@ -446,11 +573,10 @@ pub struct PublicTree {
 }
 
 impl PublicTree {
-    /// An empty tree of `2^height` leaves in districts of `2^district_bits`
-    /// and islands of `2^island_bits`.
-    pub fn new(height: u8, district_bits: u8, island_bits: u8) -> CoreResult<Self> {
+    /// An empty tree of `2^height` leaves with `divisions`.
+    pub fn new(height: u8, divisions: Divisions) -> CoreResult<Self> {
         Ok(Self {
-            shape: Shape::new(height, district_bits, island_bits)?,
+            shape: Shape::new(height, divisions)?,
             leaves: BTreeMap::new(),
             parents: HashMap::new(),
             taints: HashMap::new(),
@@ -481,6 +607,12 @@ impl PublicTree {
     #[must_use]
     pub const fn island_bits(&self) -> u8 {
         self.shape.island_bits
+    }
+
+    /// Sub-cities hold `2^subcity_bits` districts.
+    #[must_use]
+    pub const fn subcity_bits(&self) -> u8 {
+        self.shape.subcity_bits
     }
 
     /// Hash of an empty subtree whose root is at `level`.
@@ -910,11 +1042,11 @@ mod tests {
 
     #[test]
     fn addressing_and_districts() {
-        let shape = Shape::new(5, 2, 1).unwrap();
+        let shape = Shape::new(5, Divisions::new(2, 1, 8).unwrap()).unwrap();
         assert_eq!(shape.district_count(), 8);
         assert_eq!(shape.district_of(13), 3);
         assert_eq!(shape.district_root(3), NodeId { level: 2, index: 3 });
-        let small = Shape::new(2, 4, 3).unwrap();
+        let small = Shape::new(2, Divisions::new(4, 3, 8).unwrap()).unwrap();
         assert_eq!(small.district_count(), 1);
         assert_eq!(small.district_root(0), small.root());
         let node = NodeId::of_leaf(13, 2);
@@ -924,8 +1056,12 @@ mod tests {
         assert_eq!(node.children()[1].parent(), node);
         assert_eq!(node.child_toward(13), NodeId { level: 1, index: 6 });
         assert_eq!(node.leaves(), 12..16);
-        assert!(Shape::new(0, 2, 1).is_err() && Shape::new(25, 2, 1).is_err());
-        assert!(Shape::new(5, 2, 3).is_err() && Shape::new(5, 2, 0).is_err());
+        assert!(
+            Shape::new(0, Divisions::new(2, 1, 8).unwrap()).is_err()
+                && Shape::new(25, Divisions::new(2, 1, 8).unwrap()).is_err()
+        );
+        assert!(Divisions::new(2, 3, 8).is_err() && Divisions::new(2, 0, 8).is_err());
+        assert!(Divisions::new(2, 1, 0).is_err());
         // Islands of two leaves: sixteen of them, the roots at level 1.
         assert!(shape.has_islands() && shape.island_count() == 16);
         assert_eq!(shape.island_of(13), 6);
@@ -934,12 +1070,41 @@ mod tests {
         // tree's root.
         assert!(!small.has_islands() && small.island_count() == 1);
         assert_eq!(small.island_root(0), small.root());
-        assert!(!shape.same_divisions(Shape::new(5, 2, 2).unwrap()));
+        assert!(!shape.same_divisions(Shape::new(5, Divisions::new(2, 2, 8).unwrap()).unwrap()));
+        assert!(!shape.same_divisions(Shape::new(5, Divisions::new(2, 1, 1).unwrap()).unwrap()));
+    }
+
+    #[test]
+    fn sub_cities_and_the_top() {
+        // Districts of four leaves, sub-cities of two districts: a tree of
+        // 32 leaves has eight districts, four sub-cities (roots at level 3)
+        // and a top of levels 4 and 5.
+        let shape = Shape::new(5, Divisions::new(2, 1, 1).unwrap()).unwrap();
+        assert!(shape.has_top() && shape.subcity_level() == 3 && shape.subcity_count() == 4);
+        assert_eq!(shape.subcity_of(5), 2);
+        assert_eq!(
+            shape.part_of(NodeId { level: 3, index: 2 }),
+            CityPart::SubCity(2)
+        );
+        assert_eq!(shape.part_of(NodeId { level: 4, index: 1 }), CityPart::Top);
+        assert_eq!(
+            shape.part_root(CityPart::SubCity(2)),
+            NodeId { level: 3, index: 2 }
+        );
+        assert_eq!(shape.part_root(CityPart::Top), shape.root());
+        assert_eq!(shape.part_base(CityPart::SubCity(0)), 2);
+        assert_eq!(shape.part_base(CityPart::Top), 3);
+        assert!(CityPart::SubCity(9) < CityPart::Top);
+        // No taller than a sub-city: one sub-city, whose root is the root.
+        let low = Shape::new(3, Divisions::new(2, 1, 1).unwrap()).unwrap();
+        assert!(!low.has_top() && low.subcity_count() == 1);
+        assert_eq!(low.part_root(CityPart::SubCity(0)), low.root());
+        assert_eq!(low.part_of(low.root()), CityPart::SubCity(0));
     }
 
     #[test]
     fn hashes_follow_the_content_and_the_cache_is_invalidated() {
-        let mut tree = PublicTree::new(3, 2, 1).unwrap();
+        let mut tree = PublicTree::new(3, Divisions::new(2, 1, 8).unwrap()).unwrap();
         let empty = tree.tree_hash().unwrap();
         tree.set_leaf(5, Some(leaf(1, 1))).unwrap();
         let one = tree.tree_hash().unwrap();
@@ -953,7 +1118,7 @@ mod tests {
         assert_ne!(keyed, one);
         assert_eq!(tree.tainted_by(owner).len(), 3);
         // Recomputing from scratch gives the cached value.
-        let mut fresh = PublicTree::new(3, 2, 1).unwrap();
+        let mut fresh = PublicTree::new(3, Divisions::new(2, 1, 8).unwrap()).unwrap();
         fresh.set_leaf(5, Some(leaf(1, 1))).unwrap();
         for level in 1..=3 {
             fresh
@@ -968,7 +1133,7 @@ mod tests {
 
     #[test]
     fn leaf_proofs_verify_and_detect_changes() {
-        let mut tree = PublicTree::new(4, 2, 1).unwrap();
+        let mut tree = PublicTree::new(4, Divisions::new(2, 1, 8).unwrap()).unwrap();
         let owner = Occupancy { leaf: 0, since: 0 };
         for index in [0u32, 3, 9, 14] {
             tree.set_leaf(index, Some(leaf(u8::try_from(index).unwrap(), 2)))
@@ -1002,7 +1167,7 @@ mod tests {
 
     #[test]
     fn growth_keeps_addresses() {
-        let mut tree = PublicTree::new(2, 3, 2).unwrap();
+        let mut tree = PublicTree::new(2, Divisions::new(3, 2, 8).unwrap()).unwrap();
         tree.set_leaf(1, Some(leaf(1, 0))).unwrap();
         tree.grow_to(4).unwrap();
         assert_eq!(tree.shape().district_count(), 2);
@@ -1014,7 +1179,7 @@ mod tests {
     #[test]
     fn an_overlay_hashes_like_the_applied_tree() {
         let owner = Occupancy { leaf: 1, since: 0 };
-        let mut base = PublicTree::new(2, 2, 1).unwrap();
+        let mut base = PublicTree::new(2, Divisions::new(2, 1, 8).unwrap()).unwrap();
         base.set_leaf(1, Some(leaf(1, 0))).unwrap();
         base.set_leaf(2, Some(leaf(2, 0))).unwrap();
         for node in [
@@ -1061,7 +1226,7 @@ mod tests {
     #[test]
     fn an_overlay_of_pure_growth_matches_growth() {
         let owner = Occupancy { leaf: 0, since: 0 };
-        let mut base = PublicTree::new(1, 3, 2).unwrap();
+        let mut base = PublicTree::new(1, Divisions::new(3, 2, 8).unwrap()).unwrap();
         base.set_leaf(0, Some(leaf(1, 0))).unwrap();
         base.set_parent(NodeId { level: 1, index: 0 }, Some(parent(1, owner)))
             .unwrap();

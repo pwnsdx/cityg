@@ -2,23 +2,28 @@
 //! (docs/specs.md sections 10 and 14).
 //!
 //! Everything here depends on public data only: the delivery service runs
-//! it on every window, a sealer runs it on the district commits it seals,
-//! and an auditor on the entries it samples. The checks of the entries
+//! it on every window, a sealer runs it on the district commits and city
+//! tasks it seals, and an auditor on the entries it samples. The checks of the entries
 //! themselves (signatures and admissions) are optional, so that a sealer
 //! can check the structure of a window without checking every entry (E-12).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::commit::{Change, DistrictCommit, Seal, SealKind};
+use crate::commit::{Change, CityTask, DistrictCommit, Seal, SealKind};
 use crate::crypto::{Digest, ZERO32, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::check_device_key;
 use crate::kem::validate_public_key;
 use crate::objects::{ChangeKind, GroupPolicy, Request, device_id, group_id};
 use crate::registry::{Registry, RegistryDelta, RegistryHeader};
-use crate::rekey::{self, LeafChanges, NodeUpdate, growth_nodes, plan_city, plan_district};
+use crate::rekey::{
+    self, LeafChanges, NewRoots, NodeUpdate, growth_nodes, plan_district, plan_part,
+};
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
-use crate::tree::{LeafNode, NodeId, Occupancy, Overlay, ParentNode, PublicTree, Shape, TreeDelta};
+use crate::tree::{
+    CityPart, Divisions, LeafNode, NodeId, Occupancy, Overlay, ParentNode, PublicTree, Shape,
+    TreeDelta,
+};
 
 /// Requests of a window, by reference.
 pub type Requests = HashMap<Digest, Request>;
@@ -104,8 +109,7 @@ impl PublicState {
             || header.height != 1
             || header.gid != group_id(&genesis.creator_pk, &genesis.nonce)?
             || !seal.body.districts.is_empty()
-            || !seal.body.city_updates.is_empty()
-            || !seal.body.city_wraps.is_empty()
+            || !seal.body.city.is_empty()
         {
             return Err(CoreError::Invalid("genesis seal"));
         }
@@ -126,8 +130,11 @@ impl PublicState {
         }
         let (tree, registry) = genesis_tree(
             &header.gid,
-            header.district_bits,
-            header.island_bits,
+            Divisions::new(
+                header.district_bits,
+                header.island_bits,
+                header.subcity_bits,
+            )?,
             &genesis.creator_pk,
             &genesis.encryption_key,
             &genesis.root_pk,
@@ -179,15 +186,14 @@ impl PublicState {
 /// policy is closed).
 pub fn genesis_tree(
     gid: &Digest,
-    district_bits: u8,
-    island_bits: u8,
+    divisions: Divisions,
     creator_pk: &[u8],
     encryption_key: &[u8],
     root_pk: &[u8],
     policy: Option<&GroupPolicy>,
 ) -> CoreResult<(PublicTree, Registry)> {
     let creator = Occupancy { leaf: 0, since: 0 };
-    let mut tree = PublicTree::new(1, district_bits, island_bits)?;
+    let mut tree = PublicTree::new(1, divisions)?;
     tree.set_leaf(
         0,
         Some(LeafNode {
@@ -241,10 +247,13 @@ pub struct WindowShape {
     pub removed: BTreeSet<Occupancy>,
     /// Nodes to re-key besides the changed paths, by district.
     pub district_forced: BTreeMap<u32, BTreeSet<NodeId>>,
-    /// City nodes to re-key besides the changed paths.
-    pub city_forced: BTreeSet<NodeId>,
+    /// City nodes to re-key besides the changed paths, by part of the city.
+    pub part_forced: BTreeMap<CityPart, BTreeSet<NodeId>>,
     /// Districts the window commits.
     pub districts: BTreeSet<u32>,
+    /// Parts of the city the window re-keys, sub-cities first
+    /// (docs/specs-v0.5-draft.md section 3.2).
+    pub parts: BTreeSet<CityPart>,
 }
 
 impl WindowShape {
@@ -292,7 +301,7 @@ impl WindowShape {
                 .extend(list);
         }
         let mut district_forced: BTreeMap<u32, BTreeSet<NodeId>> = BTreeMap::new();
-        let mut city_forced = BTreeSet::new();
+        let mut part_forced: BTreeMap<CityPart, BTreeSet<NodeId>> = BTreeMap::new();
         let mut force = |node: NodeId| {
             if node.level <= shape.district_level() {
                 district_forced
@@ -300,7 +309,10 @@ impl WindowShape {
                     .or_default()
                     .insert(node);
             } else {
-                city_forced.insert(node);
+                part_forced
+                    .entry(shape.part_of(node))
+                    .or_default()
+                    .insert(node);
             }
         };
         for occupancy in &affected {
@@ -313,11 +325,23 @@ impl WindowShape {
                 force(node);
             }
         }
-        let districts = by_district
+        let districts: BTreeSet<u32> = by_district
             .keys()
             .chain(district_forced.keys())
             .copied()
             .collect();
+        let mut parts = BTreeSet::new();
+        if shape.has_city() {
+            parts.extend(
+                districts
+                    .iter()
+                    .map(|district| CityPart::SubCity(shape.subcity_of(*district))),
+            );
+            parts.extend(part_forced.keys().copied());
+            if shape.has_top() && !parts.is_empty() {
+                parts.insert(CityPart::Top);
+            }
+        }
         Ok(Self {
             epoch,
             shape,
@@ -325,8 +349,9 @@ impl WindowShape {
             affected,
             removed,
             district_forced,
-            city_forced,
+            part_forced,
             districts,
+            parts,
         })
     }
 
@@ -343,6 +368,12 @@ impl WindowShape {
             .get(&district)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// City nodes of part `part` to re-key besides the changed paths.
+    #[must_use]
+    pub fn part_forced(&self, part: CityPart) -> BTreeSet<NodeId> {
+        self.part_forced.get(&part).cloned().unwrap_or_default()
     }
 
     /// Every change of the window.
@@ -468,6 +499,13 @@ pub fn check_entry(
 pub fn prev_district_hash(state: &PublicState, shape: Shape, district: u32) -> CoreResult<Digest> {
     let empty = TreeDelta::default();
     Overlay::new(&state.tree, shape, &empty)?.district_hash(district)
+}
+
+/// Hash of the root of city part `part` before the window, in the window's
+/// shape (docs/specs-v0.5-draft.md section 3.2).
+pub fn prev_part_hash(state: &PublicState, shape: Shape, part: CityPart) -> CoreResult<Digest> {
+    let empty = TreeDelta::default();
+    Overlay::new(&state.tree, shape, &empty)?.node_hash(shape.part_root(part))
 }
 
 /// Parent nodes set by a re-key, with their taint.
@@ -760,10 +798,7 @@ pub fn joins_of(
 
 /// Roots of the districts of a window after their commits: whether each is
 /// live, and its new key.
-pub fn district_roots(
-    shape: Shape,
-    commits: &[DistrictCommit],
-) -> CoreResult<BTreeMap<u32, Option<Vec<u8>>>> {
+pub fn district_roots(shape: Shape, commits: &[DistrictCommit]) -> CoreResult<NewRoots> {
     let mut roots = BTreeMap::new();
     for commit in commits {
         let top = commit
@@ -776,6 +811,120 @@ pub fn district_roots(
         roots.insert(commit.district, top.public_key.clone());
     }
     Ok(roots)
+}
+
+/// Roots of the sub-cities after their city tasks: whether each is live,
+/// and its new key.
+pub fn subcity_roots(shape: Shape, tasks: &[CityTask]) -> CoreResult<NewRoots> {
+    let mut roots = BTreeMap::new();
+    for task in tasks {
+        let CityPart::SubCity(subcity) = task.part else {
+            continue;
+        };
+        let top = task
+            .updates
+            .last()
+            .ok_or(CoreError::Invalid("city task re-keys nothing"))?;
+        if top.node != shape.part_root(task.part) {
+            return Err(CoreError::Invalid("city task top"));
+        }
+        roots.insert(subcity, top.public_key.clone());
+    }
+    Ok(roots)
+}
+
+/// The new roots a part of the city starts from: those of the window's
+/// districts in a sub-city, or those of the window's sub-cities for the top.
+#[must_use]
+pub fn part_below(
+    shape: Shape,
+    part: CityPart,
+    district_roots: &NewRoots,
+    subcity_roots: &NewRoots,
+) -> NewRoots {
+    match part {
+        CityPart::SubCity(subcity) => district_roots
+            .iter()
+            .filter(|(district, _)| shape.subcity_of(**district) == subcity)
+            .map(|(district, key)| (*district, key.clone()))
+            .collect(),
+        CityPart::Top => subcity_roots.clone(),
+    }
+}
+
+/// Check a city task against the window (docs/specs-v0.5-draft.md section
+/// 3.2), given the new roots of the tier below, the window's delta before
+/// it (its district commits and, for the top, its sub-city tasks) and the
+/// performer's device key; returns the task's parents.
+pub fn check_city_task(
+    state: &PublicState,
+    window: &WindowShape,
+    task: &CityTask,
+    below: &NewRoots,
+    before: &TreeDelta,
+    performer_pk: &[u8],
+) -> CoreResult<BTreeMap<NodeId, Option<ParentNode>>> {
+    if task.gid != state.gid
+        || task.epoch != window.epoch
+        || task.height != window.shape.height
+        || !window.parts.contains(&task.part)
+    {
+        return Err(CoreError::Invalid("city task"));
+    }
+    if task.prev_part_hash != prev_part_hash(state, window.shape, task.part)? {
+        return Err(CoreError::Invalid("city task base"));
+    }
+    let live = below
+        .iter()
+        .map(|(index, key)| (*index, key.is_some()))
+        .collect();
+    let plan = plan_part(
+        &state.tree,
+        window.shape,
+        task.part,
+        &live,
+        &window.part_forced(task.part),
+    )?;
+    rekey::check(&plan, &task.updates, &task.wraps)?;
+    let parents = keyed_parents(&task.updates, task.performer);
+    let mut after = before.clone();
+    after.parents.extend(parents.clone());
+    let root = window.shape.part_root(task.part);
+    if Overlay::new(&state.tree, window.shape, &after)?.node_hash(root)? != task.part_hash {
+        return Err(CoreError::Invalid("city task hash"));
+    }
+    task.verify_signature(performer_pk)?;
+    Ok(parents)
+}
+
+/// Check the city tasks of a window: one per part of the window, in part
+/// order, each by an allowed performer and following its plan. `delta` is
+/// the delta of the window's district commits and `district_roots` their
+/// new roots; returns the parents of the city.
+pub fn check_city_tasks(
+    state: &PublicState,
+    window: &WindowShape,
+    tasks: &[CityTask],
+    district_roots: &NewRoots,
+    delta: &TreeDelta,
+    sealer: &SealerInfo,
+) -> CoreResult<BTreeMap<NodeId, Option<ParentNode>>> {
+    if tasks.windows(2).any(|pair| pair[0].part >= pair[1].part)
+        || window.parts != tasks.iter().map(|task| task.part).collect()
+    {
+        return Err(CoreError::Invalid("window city parts"));
+    }
+    let subcities = subcity_roots(window.shape, tasks)?;
+    let mut after = delta.clone();
+    let mut parents = BTreeMap::new();
+    for task in tasks {
+        let performer_pk = check_committer(state, window, task.performer, sealer)?;
+        let below = part_below(window.shape, task.part, district_roots, &subcities);
+        let keyed = check_city_task(state, window, task, &below, &after, &performer_pk)?;
+        after.parents.extend(keyed.clone());
+        parents.extend(keyed);
+    }
+    Ok(parents)
 }
 
 /// Check the district commits of a window: one per district of the window,
@@ -807,12 +956,13 @@ pub fn check_districts(
     Ok(delta)
 }
 
-/// Check a whole window (district commits and seal) against the state
-/// before it. With `entries`, also check every entry's signatures and
+/// Check a whole window (district commits, city tasks and seal) against the
+/// state before it. With `entries`, also check every entry's signatures and
 /// admission.
 pub fn check_window(
     state: &PublicState,
     commits: &[DistrictCommit],
+    city_tasks: &[CityTask],
     seal: &Seal,
     requests: &Requests,
     entries: bool,
@@ -822,6 +972,7 @@ pub fn check_window(
         || header.prev_interim != state.interim
         || header.district_bits != state.tree.district_bits()
         || header.island_bits != state.tree.island_bits()
+        || header.subcity_bits != state.tree.subcity_bits()
         || header.time_ms < state.time_ms
     {
         return Err(CoreError::Invalid("seal header"));
@@ -839,6 +990,13 @@ pub fn check_window(
         .collect();
     if listed != seal.body.districts {
         return Err(CoreError::Invalid("seal lists other district commits"));
+    }
+    let listed_city: Vec<(CityPart, Digest)> = city_tasks
+        .iter()
+        .map(|task| (task.part, task.hash()))
+        .collect();
+    if listed_city != seal.body.city {
+        return Err(CoreError::Invalid("seal lists other city tasks"));
     }
     let window = WindowShape::new(
         &state.tree,
@@ -858,12 +1016,8 @@ pub fn check_window(
     )?;
     let mut delta = check_districts(state, &window, commits, requests, &sealer, entries)?;
     let roots = district_roots(shape, commits)?;
-    let live = roots.iter().map(|(d, key)| (*d, key.is_some())).collect();
-    let city = plan_city(&state.tree, shape, &live, &window.city_forced)?;
-    rekey::check(&city, &seal.body.city_updates, &seal.body.city_wraps)?;
-    delta
-        .parents
-        .extend(keyed_parents(&seal.body.city_updates, sealer.occupancy));
+    let city = check_city_tasks(state, &window, city_tasks, &roots, &delta, &sealer)?;
+    delta.parents.extend(city);
     if Overlay::new(&state.tree, shape, &delta)?.tree_hash()? != header.tree_hash {
         return Err(CoreError::Invalid("tree hash"));
     }

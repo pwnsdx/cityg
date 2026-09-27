@@ -7,14 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Protocol: the v0.5 draft, stage 2 (city tasks)
+
+- Stage 2 of the draft is specified in detail (section 3 of
+  [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
+  E-17): sub-cities, city tasks, joiners as performers, entries by island,
+  repairs, and disputes, whose proof system stays open. Its city tasks are
+  implemented in `cityg-core`, with members as performers; joiner
+  performers, entries by island and repairs are not yet.
+- **Sub-cities and the top.** The shape gains `subcity_bits` (`S`, 8 by
+  default, fixed at genesis), bound after `island_bits` in the seal header,
+  the group context and checkpoints: sub-cities of `2^S` districts, and a
+  top above them when the tree is taller than `L + S`. `Divisions` holds
+  the three sizes (8, 8 and 8 by default); `Shape::new`, `PublicTree::new`,
+  `genesis_tree` and `Member::create` take it.
+- **City tasks.** The city that the sealer re-keyed alone is re-keyed by
+  one task per sub-city of the window and one for the top (`CityTask`,
+  signed by its performer under `city-g/city-task/v5`). Each is planned over
+  the new roots of the tier below, with a boundary above them, and bound to
+  the state it was built on by the hash of its part's root before and after
+  the window. The task that holds the root draws the root secret. A task's
+  nodes take its performer's taint: removing a performer re-keys the parts
+  it drew.
+- **A sealer that draws nothing.** It checks every district commit and city
+  task, follows them along its own path to the root secret, and signs. The
+  seal body lists the city tasks by part and hash instead of the city's
+  nodes and wraps: in the scale test, the seal weighs 5.4 KB instead of
+  51 KB, and the city's task 48.9 KB.
+- **Delivery service.** City tasks go to volunteers with no task, then to
+  volunteers in turn; an entrant performs every task. A sub-city task is
+  accepted once the commits of its districts are in, and the top's once
+  every sub-city task is; a second, different commit or task for the same
+  district or part is refused. `reassign_city` gives a part to another
+  performer; reassigning a district drops only the tasks of its sub-city
+  and of the top.
+- Breaking: the seal header, the group context and checkpoints gain
+  `subcity_bits`; `SealBody` lists the city tasks (`city`) instead of
+  `city_updates` and `city_wraps`; `plan_part` and `build_city_task`
+  replace `plan_city` and `build_city`; `KeySource` takes the new roots of
+  the tier below (`below`); `Member::commit_city` performs a task and
+  `Member::seal` takes a `WindowWork`, the commits, tasks and requests it
+  seals; `check_window` takes the city tasks.
+- Scenario tests in `crates/cityg-core/tests/tasks.rs`: sub-cities and the
+  top re-keyed by their own tasks while the sealer performs none, tasks that
+  wait for what they build on, a failed performer replaced, a district
+  reassigned, a removed performer whose parts are re-keyed, and an entrant
+  that performs every task. The scale test runs the city tasks and checks
+  the cost model with a boundary above the sub-cities
+  (`CITYG_SCALE_SUBCITY_BITS`, 8 by default): 33 tasks for 4,096 members
+  in sub-cities of eight districts.
+
 ### Protocol: the v0.5 draft, stage 1
 
 - A draft of the next profile, `city-g/v0.5-draft`, in
   [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md): a delta on v0.4
   in three stages, from the research synthesis beyond 0.4. Stage 1 is
-  specified and implemented in `cityg-core`; stages 2 (island tasks,
-  disputes, repairs) and 3 (parity with MLS) are outlined, with their
-  labels reserved. Design decisions E-15 and E-16.
+  specified and implemented in `cityg-core`; stage 2 (tasks, repairs,
+  disputes) is specified and partly implemented (above); stage 3 (parity
+  with MLS) is outlined, with its labels reserved. Design decisions E-15
+  and E-16.
 - **Islands read through relays.** The tree is read in islands of `2^c`
   leaves (`island_bits`, 8 by default, at most `L`, fixed at genesis and
   bound in the seal header, the group context and checkpoints). An island

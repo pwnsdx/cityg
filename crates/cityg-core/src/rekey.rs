@@ -1,9 +1,11 @@
-//! Multi-path re-key of a district or of the city (docs/specs.md section 7).
+//! Multi-path re-key of a district or of a part of the city (docs/specs.md
+//! section 7; docs/specs-v0.5-draft.md section 3.2).
 //!
 //! A window re-keys every ancestor of a changed base node, and every node
 //! tainted by a member the window removes or updates, with its ancestors.
-//! For a district the base nodes are the changed leaves; for the city, the
-//! roots of the districts that changed. Nodes are processed bottom-up:
+//! For a district the base nodes are the changed leaves; for a sub-city,
+//! the roots of its districts that changed; for the top, the roots of the
+//! sub-cities that changed. Nodes are processed bottom-up:
 //!
 //! * a node with no live child becomes blank;
 //! * otherwise, if some live child was re-keyed by the same commit and the
@@ -13,9 +15,10 @@
 //! * otherwise the node gets a fresh secret, wrapped to every live child.
 //!
 //! Boundaries are the levels where the committer knows no child's new
-//! secret: level 1 (the children are the members' leaves) and, in the city,
-//! level `L + 1` (the children are district roots re-keyed by district
-//! committers).
+//! secret: level 1 (the children are the members' leaves) and, in a part of
+//! the city, the level above its base (the children are the roots that the
+//! tier below re-keyed: districts for a sub-city, sub-cities for the top,
+//! docs/specs-v0.5-draft.md section 3.2).
 //!
 //! The *plan* of a re-key (which nodes, blank or not, the chain source and
 //! the wrap targets of each) depends only on public data, so the delivery
@@ -30,7 +33,7 @@ use crate::crypto::{
 };
 use crate::error::{CoreError, CoreResult};
 use crate::kem::{KEM_CIPHERTEXT_BYTES, KemSecret, validate_public_key};
-use crate::tree::{LeafNode, NodeId, ParentNode, PublicTree, Shape};
+use crate::tree::{CityPart, LeafNode, NodeId, ParentNode, PublicTree, Shape};
 
 /// New state of the leaves a window changes: `None` blanks a leaf.
 pub type LeafChanges = BTreeMap<u32, Option<LeafNode>>;
@@ -170,48 +173,50 @@ pub fn plan_district(
     ))
 }
 
-/// Plan the re-key of the city. `roots` gives, for every district of the
-/// window, whether its root is live after the window; `forced` the other
-/// city nodes to re-key. A tree no taller than a district has no city.
-pub fn plan_city(
+/// Plan the re-key of a part of the city (docs/specs-v0.5-draft.md section
+/// 3.2): a sub-city over the new roots of its districts of the window, or
+/// the top over the new roots of the window's sub-cities. `below` gives, for
+/// each such root (by index at the part's base level), whether it is live
+/// after the window; `forced` the other nodes of the part to re-key.
+pub fn plan_part(
     tree: &PublicTree,
     shape: Shape,
-    roots: &BTreeMap<u32, bool>,
+    part: CityPart,
+    below: &BTreeMap<u32, bool>,
     forced: &BTreeSet<NodeId>,
 ) -> CoreResult<Plan> {
-    let district_level = shape.district_bits;
-    if !shape.has_city() {
-        if forced.is_empty() {
-            return Ok(Plan::default());
-        }
-        return Err(CoreError::Invalid("city node in a one-district tree"));
+    if !shape.has_city() || (part == CityPart::Top && !shape.has_top()) {
+        return Err(CoreError::Invalid("city part of a tree without it"));
     }
-    let top = shape.height;
+    if let CityPart::SubCity(subcity) = part
+        && subcity >= shape.subcity_count()
+    {
+        return Err(CoreError::Invalid("sub-city index"));
+    }
+    let base = shape.part_base(part);
+    let root = shape.part_root(part);
     let mut set = BTreeSet::new();
-    for district in roots.keys() {
-        if *district >= shape.district_count() {
-            return Err(CoreError::Invalid("district index"));
+    for index in below.keys() {
+        let node = NodeId {
+            level: base,
+            index: *index,
+        };
+        if !shape.contains(node) || !root.is_above_or_at(node) {
+            return Err(CoreError::Invalid("city task root outside its part"));
         }
-        collect(
-            &mut set,
-            NodeId {
-                level: district_level + 1,
-                index: district >> 1,
-            },
-            top,
-        );
+        collect(&mut set, node.parent(), root.level);
     }
     for node in forced {
-        if node.level <= district_level || !shape.contains(*node) {
-            return Err(CoreError::Invalid("forced node outside the city"));
+        if node.level <= base || !shape.contains(*node) || !root.is_above_or_at(*node) {
+            return Err(CoreError::Invalid("forced node outside its part"));
         }
-        collect(&mut set, *node, top);
+        collect(&mut set, *node, root.level);
     }
     Ok(build(
         set,
         |child| {
-            if child.level == district_level {
-                roots
+            if child.level == base {
+                below
                     .get(&child.index)
                     .copied()
                     .unwrap_or_else(|| tree.parent(child).is_some())
@@ -219,7 +224,7 @@ pub fn plan_city(
                 tree.parent(child).is_some()
             }
         },
-        |level| level == district_level + 1,
+        |level| level == base + 1,
     ))
 }
 
@@ -233,13 +238,18 @@ pub fn growth_nodes(old_height: u8, shape: Shape) -> BTreeSet<NodeId> {
         .collect()
 }
 
+/// New roots of one tier of the tree after a window's tasks, by index at
+/// their level: the new public key, or `None` for a root that became blank.
+pub type NewRoots = BTreeMap<u32, Option<Vec<u8>>>;
+
 /// Where a committer finds the key of a wrap target: the changed leaves,
-/// the new district roots (for the city), then the tree before the window.
+/// the new roots of the tier below (for a part of the city: their level and
+/// keys), then the tree before the window.
 pub struct KeySource<'a> {
     pub tree: &'a PublicTree,
     pub shape: Shape,
     pub leaves: &'a LeafChanges,
-    pub roots: Option<&'a BTreeMap<u32, Option<Vec<u8>>>>,
+    pub below: Option<(u8, &'a NewRoots)>,
 }
 
 impl KeySource<'_> {
@@ -254,12 +264,13 @@ impl KeySource<'_> {
                     .map(|leaf| leaf.encryption_key.clone())
                     .ok_or(CoreError::Invalid("wrap to a blank leaf"));
             }
-        } else if node.level == self.shape.district_level()
-            && let Some(change) = self.roots.and_then(|roots| roots.get(&node.index))
+        } else if let Some((level, roots)) = self.below
+            && node.level == level
+            && let Some(change) = roots.get(&node.index)
         {
             return change
                 .clone()
-                .ok_or(CoreError::Invalid("wrap to a blank district"));
+                .ok_or(CoreError::Invalid("wrap to a blank root"));
         }
         self.tree
             .public_key(node)
@@ -724,7 +735,7 @@ impl MemberPath {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::tree::{Occupancy, ParentNode};
+    use crate::tree::{Divisions, Occupancy, ParentNode};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
@@ -748,7 +759,13 @@ mod tests {
     /// A full tree of `2^height` members in districts of `2^bits`, keyed by one
     /// committer, and every member's path.
     fn fixture(height: u8, bits: u8, rng: &mut ChaCha20Rng) -> Fixture {
-        let mut tree = PublicTree::new(height, bits, bits).unwrap();
+        fixture_with(height, Divisions::new(bits, bits, 8).unwrap(), rng)
+    }
+
+    /// The same with `divisions`: districts, then every part of the city,
+    /// sub-cities before the top.
+    fn fixture_with(height: u8, divisions: Divisions, rng: &mut ChaCha20Rng) -> Fixture {
+        let mut tree = PublicTree::new(height, divisions).unwrap();
         let mut paths = BTreeMap::new();
         let mut leaves = LeafChanges::new();
         for leaf in 0..(1u32 << height) {
@@ -771,7 +788,7 @@ mod tests {
                 tree: &tree,
                 shape: tree.shape(),
                 leaves: &mine,
-                roots: None,
+                below: None,
             };
             let rekeyed = generate(&plan, &keys, &GID, 0, &[0; 32], rng).unwrap();
             apply(&mut tree, &mine, &rekeyed.updates, committer);
@@ -787,17 +804,51 @@ mod tests {
                 tree.parent(root).map(|p| p.encryption_key.clone()),
             );
         }
-        let live: BTreeMap<u32, bool> = roots.iter().map(|(d, k)| (*d, k.is_some())).collect();
-        let plan = plan_city(&tree, tree.shape(), &live, &BTreeSet::new()).unwrap();
-        let keys = KeySource {
-            tree: &tree,
-            shape: tree.shape(),
-            leaves: &LeafChanges::new(),
-            roots: Some(&roots),
-        };
-        let rekeyed = generate(&plan, &keys, &GID, 0, &[0; 32], rng).unwrap();
-        apply(&mut tree, &LeafChanges::new(), &rekeyed.updates, committer);
-        advance_all(&mut paths, &tree, &rekeyed.updates, &rekeyed.wraps, None);
+        let shape = tree.shape();
+        let mut subcity_roots = BTreeMap::new();
+        for subcity in 0..shape.subcity_count() {
+            let part = CityPart::SubCity(subcity);
+            let mine: NewRoots = roots
+                .iter()
+                .filter(|(district, _)| shape.subcity_of(**district) == subcity)
+                .map(|(district, key)| (*district, key.clone()))
+                .collect();
+            let live = mine.iter().map(|(d, k)| (*d, k.is_some())).collect();
+            let plan = plan_part(&tree, shape, part, &live, &BTreeSet::new()).unwrap();
+            let keys = KeySource {
+                tree: &tree,
+                shape,
+                leaves: &LeafChanges::new(),
+                below: Some((shape.district_level(), &mine)),
+            };
+            let rekeyed = generate(&plan, &keys, &GID, 0, &[0; 32], rng).unwrap();
+            apply(&mut tree, &LeafChanges::new(), &rekeyed.updates, committer);
+            let root = shape.part_root(part);
+            advance_all(
+                &mut paths,
+                &tree,
+                &rekeyed.updates,
+                &rekeyed.wraps,
+                Some(root),
+            );
+            subcity_roots.insert(subcity, tree.parent(root).map(|p| p.encryption_key.clone()));
+        }
+        if shape.has_top() {
+            let live = subcity_roots
+                .iter()
+                .map(|(k, key)| (*k, key.is_some()))
+                .collect();
+            let plan = plan_part(&tree, shape, CityPart::Top, &live, &BTreeSet::new()).unwrap();
+            let keys = KeySource {
+                tree: &tree,
+                shape,
+                leaves: &LeafChanges::new(),
+                below: Some((shape.subcity_level(), &subcity_roots)),
+            };
+            let rekeyed = generate(&plan, &keys, &GID, 0, &[0; 32], rng).unwrap();
+            apply(&mut tree, &LeafChanges::new(), &rekeyed.updates, committer);
+            advance_all(&mut paths, &tree, &rekeyed.updates, &rekeyed.wraps, None);
+        }
         Fixture { tree, paths }
     }
 
@@ -869,6 +920,61 @@ mod tests {
     }
 
     #[test]
+    fn three_tiers_give_every_member_the_root() {
+        // Districts of two leaves, sub-cities of two districts (roots at
+        // level 2), and a top of levels 3 and 4.
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+        let fixture = fixture_with(4, Divisions::new(1, 1, 1).unwrap(), &mut rng);
+        assert!(fixture.tree.shape().has_top());
+        let root = fixture.tree.height();
+        let first = fixture.paths[&0].secret(root).unwrap().clone();
+        for path in fixture.paths.values() {
+            assert_eq!(**path.secret(root).unwrap(), *first);
+        }
+        // The top plans from the sub-city roots, with a boundary at level 3.
+        let tree = &fixture.tree;
+        let below = BTreeMap::from([(1u32, true)]);
+        let top = plan_part(tree, tree.shape(), CityPart::Top, &below, &BTreeSet::new()).unwrap();
+        assert_eq!(top.nodes[0].node, NodeId { level: 3, index: 0 });
+        assert_eq!(top.nodes[0].chain_from, None);
+        assert_eq!(top.nodes[0].wrap_to.len(), 2);
+        assert_eq!(top.nodes[1].chain_from, Some(NodeId { level: 3, index: 0 }));
+        // A sub-city plans only its own districts and nodes.
+        let foreign = BTreeMap::from([(2u32, true)]);
+        assert!(
+            plan_part(
+                tree,
+                tree.shape(),
+                CityPart::SubCity(0),
+                &foreign,
+                &BTreeSet::new()
+            )
+            .is_err()
+        );
+        let forced = BTreeSet::from([NodeId { level: 3, index: 0 }]);
+        assert!(
+            plan_part(
+                tree,
+                tree.shape(),
+                CityPart::SubCity(0),
+                &BTreeMap::new(),
+                &forced
+            )
+            .is_err()
+        );
+        assert!(
+            plan_part(
+                tree,
+                tree.shape(),
+                CityPart::SubCity(4),
+                &BTreeMap::new(),
+                &BTreeSet::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn plans_chain_where_possible_and_stop_at_boundaries() {
         let mut rng = ChaCha20Rng::seed_from_u64(10);
         let fixture = fixture(4, 2, &mut rng);
@@ -900,7 +1006,14 @@ mod tests {
         assert_eq!(plan.nodes[2].wrap_to, vec![NodeId { level: 1, index: 3 }]);
         // The city: level 3 is a boundary, level 4 chains.
         let roots = BTreeMap::from([(1u32, true)]);
-        let city = plan_city(tree, tree.shape(), &roots, &BTreeSet::new()).unwrap();
+        let city = plan_part(
+            tree,
+            tree.shape(),
+            CityPart::SubCity(0),
+            &roots,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         assert_eq!(city.nodes[0].node, NodeId { level: 3, index: 0 });
         assert_eq!(city.nodes[0].chain_from, None);
         assert_eq!(city.nodes[0].wrap_to.len(), 2);
@@ -932,7 +1045,7 @@ mod tests {
                 tree: &before,
                 shape: before.shape(),
                 leaves,
-                roots: None,
+                below: None,
             };
             let rekeyed = generate(&plan, &keys, &GID, 1, &[0; 32], &mut rng).unwrap();
             check(&plan, &rekeyed.updates, &rekeyed.wraps).unwrap();
@@ -944,13 +1057,20 @@ mod tests {
             all_wraps.extend(rekeyed.wraps);
         }
         let live = roots.iter().map(|(d, k)| (*d, k.is_some())).collect();
-        let city_plan = plan_city(&before, before.shape(), &live, &BTreeSet::new()).unwrap();
+        let city_plan = plan_part(
+            &before,
+            before.shape(),
+            CityPart::SubCity(0),
+            &live,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         let empty = LeafChanges::new();
         let keys = KeySource {
             tree: &before,
             shape: before.shape(),
             leaves: &empty,
-            roots: Some(&roots),
+            below: Some((before.shape().district_level(), &roots)),
         };
         let city = generate(&city_plan, &keys, &GID, 1, &[0; 32], &mut rng).unwrap();
         check(&city_plan, &city.updates, &city.wraps).unwrap();
@@ -1012,7 +1132,7 @@ mod tests {
             tree: &fixture.tree,
             shape: fixture.tree.shape(),
             leaves: &leaves,
-            roots: None,
+            below: None,
         };
         let rekeyed = generate(&plan, &keys, &GID, 1, &[0; 32], &mut rng).unwrap();
         check(&plan, &rekeyed.updates, &rekeyed.wraps).unwrap();

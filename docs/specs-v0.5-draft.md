@@ -3,10 +3,10 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes; stage 3 (section 4) is outlined, with its labels reserved. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and its city tasks are implemented with members as performers (sections 3.1, 3.2, 3.4 and 3.5); stage 3 (section 4) is outlined, with its labels reserved. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
-| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stage 1) |
-| Design | [design.md](design.md) (decisions E-15 and E-16) |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stage 1; the city tasks of stage 2) |
+| Design | [design.md](design.md) (decisions E-15 to E-17) |
 | Research | the three stages, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (section 3.6); îlots, relays and the maintained city, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (sections 2.4 to 2.8); urgent and ordinary removals and the parity profile, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md) (section 3); symbolic models of relays and îlots, [`research/formal-parity/`](research/formal-parity/README.md) (all research notes in French) |
 | Conformance | None yet: no test vectors (section 7) |
 
@@ -513,11 +513,19 @@ Replaces the member window of v0.4 §14.4.
   gives each district of the window to a joiner of the window that takes a
   leaf of the district, if there is one, else to a joiner with no task,
   else to a volunteer of the district, else to volunteers in turn.
-* **City tasks** go to joiners with no task, then to volunteers.
+* **City tasks** go to joiners with no task, then to volunteers with no
+  task, then to volunteers in turn.
 * **The sealer** is a volunteer: a member of epoch `n - 1` that the window
   does not affect. Welcomes are assigned as in v0.4 §11.
+* **Order.** The DS accepts a sub-city task once the district commits of
+  that sub-city are in, and the top's once every sub-city task is: the
+  sub-cities of a window proceed in parallel. It keeps the first commit or
+  task it accepts for a district or a part, and refuses a different one.
 * **Failover.** A task not submitted in time goes to another performer, as
-  a district in v0.4 §14.4; the replaced performer's task is refused.
+  a district in v0.4 §14.4; the replaced performer's task is refused. When
+  a district changes hands, the tasks built on its commit, those of its
+  sub-city and of the top, are performed again; the other sub-cities' are
+  kept.
 * **Entrant windows** do not change: the entrant performs every task and
   seals (v0.4 §12.7).
 
@@ -636,6 +644,21 @@ the branch's statement, over the member's key and the wrap in its context
 | --- | --- |
 | `L` (`district_bits`), `c` (`island_bits`) | 8 and 8 by default (v0.4: `L = 12`) |
 | `S` (`subcity_bits`) | 8 by default, fixed at genesis |
+
+**Measured.** The scale test (`crates/cityg-core/tests/scale.rs`, release
+build, one performer for every city task) runs windows of half removals and
+half joins paired with them, and checks the count of wraps and new keys
+against the cost model, with boundaries above the leaves, the districts and
+the sub-cities:
+
+| Window | City tasks | Seal |
+| --- | --- | --- |
+| N = 16,384, L = 10, S = 8, 2,000 changes | one sub-city, no top: 48.9 KB, 23 wraps | 5.4 KB |
+| N = 65,536, L = 12, S = 8, 4,000 changes | one sub-city, no top: 48.9 KB, 23 wraps | 5.4 KB |
+| N = 16,384, L = 10, S = 2, 2,000 changes | 4 sub-cities and the top: 65.0 KB, 25 wraps | 5.5 KB |
+| N = 4,096, L = 4, S = 3, 600 changes | 32 sub-cities and the top: 851 KB, 374 wraps | 12.6 KB |
+
+Before stage 2, the seal carried the city: 51 KB in the first two windows.
 
 **Modelled** (research note îlots, section 2.3; synthesis, section 5). A
 million members, 1.7 changes per second, 5-minute windows: a joiner that
@@ -761,6 +784,9 @@ Nothing of v0.4 decodes under this draft: every label changed.
   entries carry the island path (stage 2).
 * **Encodings** of island packets and top tasks, and test vectors, as for
   the objects v0.4 leaves open (v0.4 §19).
+* **The rest of stage 2** in `cityg-core`: joiner performers (section
+  3.3) and their assignment first (section 3.4), entries by island (section
+  3.6) and repairs (section 3.7).
 * **The proof system of disputes** (section 3.8): the statements are
   measured in the research notes, in Longfellow; the encoding of `proof`,
   its verifier in the DS, and the size limits remain to be fixed.

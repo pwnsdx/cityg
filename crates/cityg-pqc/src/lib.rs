@@ -40,6 +40,9 @@ pub struct SignatureContext(&'static [u8]);
 impl SignatureContext {
     /// District commit, signed by its committer.
     pub const DISTRICT_COMMIT: Self = Self(b"city-g/district-commit/v5");
+    /// City task: the re-key of a sub-city or of the top, signed by its
+    /// performer.
+    pub const CITY_TASK: Self = Self(b"city-g/city-task/v5");
     /// Seal of a window, signed by its sealer.
     pub const SEAL: Self = Self(b"city-g/seal/v5");
     /// Request of a device to join a group.
@@ -247,8 +250,9 @@ mod tests {
 
     use super::*;
 
-    const ALL_CONTEXTS: [SignatureContext; 11] = [
+    const ALL_CONTEXTS: [SignatureContext; 12] = [
         SignatureContext::DISTRICT_COMMIT,
+        SignatureContext::CITY_TASK,
         SignatureContext::SEAL,
         SignatureContext::JOIN_REQUEST,
         SignatureContext::ADMISSION,

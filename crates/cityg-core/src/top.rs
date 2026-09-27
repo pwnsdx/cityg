@@ -285,7 +285,7 @@ pub struct TopTask {
 mod tests {
     use super::*;
     use crate::crypto::fresh_secret;
-    use crate::tree::NodeId;
+    use crate::tree::{Divisions, NodeId};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn a_flat_element_opens_with_the_island_root_secret() {
         let mut rng = ChaCha20Rng::seed_from_u64(3);
-        let shape = Shape::new(5, 3, 2).unwrap();
+        let shape = Shape::new(5, Divisions::new(3, 2, 8).unwrap()).unwrap();
         let island_secret = fresh_secret(&[0; 32], &mut rng).unwrap();
         let island_pk = node_key(&island_secret).unwrap().public_key();
         let root = [8u8; 32];
@@ -379,7 +379,7 @@ mod tests {
         assert!(open_flat(&GID, 4, shape, 4, &flat, &island_secret).is_err());
         assert!(open_flat(&GID, 5, shape, 5, &flat, &island_secret).is_err());
         assert!(open_flat(&GID, 4, shape, 5, &flat, &[1u8; 32]).is_err());
-        let small = Shape::new(2, 3, 2).unwrap();
+        let small = Shape::new(2, Divisions::new(3, 2, 8).unwrap()).unwrap();
         assert!(flat_element(&GID, 4, small, 0, &island_pk, &root, &mut rng).is_err());
     }
 }

@@ -20,7 +20,9 @@ with X25519) and ML-DSA-65.
 > [`cityg-core`](crates/cityg-core) with an in-memory delivery service. The
 > core implements stage 1 of the [v0.5 draft](docs/specs-v0.5-draft.md), a
 > delta on v0.4: members may read the tree by island through relays, and
-> removals are urgent or ordinary. The message plane, the networked
+> removals are urgent or ordinary. It also implements the city tasks of
+> stage 2: members re-key the city by sub-city, and the sealer draws
+> nothing. The message plane, the networked
 > delivery service and the clients do not exist yet
 > ([specification, section 19](docs/specs.md#19-open-items)). There are no
 > test vectors and no independent human cryptographic review: **for
@@ -169,7 +171,8 @@ and half joins:
 | --- | --- | --- |
 | Wraps (against the bound `D·ln(N/D)`) | 5,333 (×1.27) | 12,475 (×1.12) |
 | District commits | 16, busiest 852 KB | 16, busiest 1.9 MB |
-| Seal | 51 KB | 51 KB |
+| Seal, which re-keys the city (v0.4) | 51 KB | 51 KB |
+| Seal and city task (v0.5 draft, stage 2) | 5.4 KB and 48.9 KB | 5.4 KB and 48.9 KB |
 | Packet per member | mean 7.7 KB | mean 8.3 KB |
 | Packet per member by island of 256 leaves, with a relay element (v0.5 draft) | mean 3.6 KB | mean 3.0 KB |
 | DS check of the whole window | 0.8 s | 1.6 s |
@@ -220,8 +223,8 @@ The architecture of 0.4 comes from a first research note,
 Fourteen more, in French, look at what comes next; the fifth gathers them
 into a candidate profile for the next version, in three stages, and the
 following ones work on its open problems. None of them is part of profile
-v0.4; the [v0.5 draft](docs/specs-v0.5-draft.md) specifies the first
-stage.
+v0.4; the [v0.5 draft](docs/specs-v0.5-draft.md) specifies the first two
+stages and outlines the third.
 
 | Note | Question | What it finds |
 | --- | --- | --- |
@@ -278,6 +281,10 @@ invites, anchored joins, and open groups. Those of
 `crates/cityg-core/tests/islands.rs` run island followers: relays, flat
 elements, a relay that lies, replays, a sealer that refreshes its path, a
 removed member facing its island's top, and urgent and ordinary removals.
+Those of `crates/cityg-core/tests/tasks.rs` run the city tasks: sub-cities
+and a top re-keyed by their own performers, tasks that wait for what they
+build on, failed performers replaced, a removed performer's parts re-keyed,
+and an entrant that performs every task.
 
 ## Contributing
 

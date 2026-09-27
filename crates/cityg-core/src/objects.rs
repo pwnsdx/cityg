@@ -23,7 +23,8 @@
 //!                    init_key]                                    ctx RE_ENTRY
 //! Checkpoint     := ["city-g/checkpoint/v5", gid, epoch, interim, tree_hash,
 //!                    registry_hash, height, district_bits, island_bits,
-//!                    external_pk_hash, time_ms, admin]            ctx CHECKPOINT
+//!                    subcity_bits, external_pk_hash, time_ms, admin]
+//!                                                                 ctx CHECKPOINT
 //! ```
 //!
 //! A group is *closed* unless the policy in force opens it. In a closed
@@ -980,6 +981,7 @@ pub struct CheckpointContent {
     pub height: u8,
     pub district_bits: u8,
     pub island_bits: u8,
+    pub subcity_bits: u8,
     pub external_pk_hash: Digest,
     pub time_ms: u64,
 }
@@ -1013,6 +1015,7 @@ impl Checkpoint {
                 uint(u64::from(content.height)),
                 uint(u64::from(content.district_bits)),
                 uint(u64::from(content.island_bits)),
+                uint(u64::from(content.subcity_bits)),
                 bytes(&content.external_pk_hash),
                 uint(content.time_ms),
                 admin.value(),
@@ -1029,7 +1032,7 @@ impl Checkpoint {
         let (mut fields, signed) = open_signed(
             encoded,
             CHECKPOINT_LABEL,
-            12,
+            13,
             MAX_REQUEST_BYTES,
             "checkpoint",
         )?;
@@ -1042,6 +1045,7 @@ impl Checkpoint {
             height: fields.u8()?,
             district_bits: fields.u8()?,
             island_bits: fields.u8()?,
+            subcity_bits: fields.u8()?,
             external_pk_hash: fields.digest()?,
             time_ms: fields.uint()?,
         };
@@ -1404,6 +1408,7 @@ mod tests {
             height: 5,
             district_bits: 2,
             island_bits: 1,
+            subcity_bits: 1,
             external_pk_hash: [4; 32],
             time_ms: 99,
         };
