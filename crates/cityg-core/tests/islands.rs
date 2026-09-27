@@ -12,7 +12,7 @@ use cityg_core::crypto::kem_pk_hash;
 use cityg_core::ds::TopChoice;
 use cityg_core::objects::Urgency;
 use cityg_core::rekey::WindowIndex;
-use cityg_core::top::{RelayElement, Top};
+use cityg_core::top::{RelayContext, RelayElement, Top};
 use cityg_core::tree::Occupancy;
 use common::Sim;
 
@@ -175,7 +175,14 @@ fn a_relay_that_sends_garbage_only_makes_its_island_fall_back() {
         .process(&packet)
         .unwrap();
     let gid = sim.ds.state().gid;
-    let garbage = RelayElement::seal(&gid, epoch, 2, island, &[9; 32], &[9; 32]).unwrap();
+    let context = RelayContext {
+        gid,
+        epoch,
+        island_bits: 2,
+        island,
+        seal_hash: [9; 32],
+    };
+    let garbage = RelayElement::seal(&context, &[9; 32], &[9; 32]).unwrap();
     sim.ds.submit_relay(hostile, garbage.clone()).unwrap();
     // No one but the island's relay may send its element.
     let victim = *sim

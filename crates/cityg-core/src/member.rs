@@ -42,7 +42,7 @@ use crate::roles::{
 use crate::schedule::{
     EpochSecrets, GroupContext, confirmed_transcript_hash, external_init, interim_transcript_hash,
 };
-use crate::top::{RelayElement, Top, flat_element, open_flat};
+use crate::top::{RelayContext, RelayElement, Top, flat_element, open_flat};
 use crate::tree::{LeafNode, Occupancy, Shape};
 use crate::welcome::Welcome;
 use crate::window::{
@@ -327,8 +327,8 @@ impl Member {
             path.set_leaf_key(pending.clone());
             leaf_changed = true;
         }
-        let (secrets, root) = self.follow_path(&path, shape, packet)?;
         let seal_hash = header.hash()?;
+        let (secrets, root) = self.follow_path(&path, shape, packet, &seal_hash)?;
         let confirmed = confirmed_transcript_hash(&self.header.interim, &seal_hash)?;
         let context = GroupContext {
             gid: self.header.gid,
@@ -376,13 +376,15 @@ impl Member {
         Ok(())
     }
 
-    /// The path the member will hold after the window of `packet`, and the
-    /// window's root secret. Nothing is checked against the tag here.
+    /// The path the member will hold after the window of `packet`, whose
+    /// seal header hashes to `seal_hash`, and the window's root secret.
+    /// Nothing is checked against the tag here.
     fn follow_path(
         &self,
         path: &MemberPath,
         shape: Shape,
         packet: &Packet,
+        seal_hash: &Digest,
     ) -> CoreResult<(PathSecrets, Secret)> {
         let gid = &self.header.gid;
         let epoch = packet.header.epoch;
@@ -414,7 +416,14 @@ impl Member {
         let index = shape.island_of(self.occupancy.leaf);
         match top {
             Top::Relay(relay) => {
-                let root = relay.open(gid, epoch, shape.island_bits, index, island_secret)?;
+                let context = RelayContext {
+                    gid: *gid,
+                    epoch,
+                    island_bits: shape.island_bits,
+                    island: index,
+                    seal_hash: *seal_hash,
+                };
+                let root = relay.open(&context, island_secret)?;
                 Ok((island, root))
             }
             Top::Flat(wrapped) => {
@@ -458,7 +467,8 @@ impl Member {
     }
 
     /// The relay element of the member's island for its epoch (E-15): the
-    /// root secret sealed under the secret of its island root.
+    /// root secret sealed under the secret of its island root, for the seal
+    /// the member followed.
     pub fn relay_element(&self) -> CoreResult<RelayElement> {
         let shape = self.header.shape;
         if !shape.has_islands() {
@@ -470,14 +480,14 @@ impl Member {
             .path
             .secret(shape.island_level())
             .ok_or(CoreError::Invalid("unknown island secret"))?;
-        RelayElement::seal(
-            &self.header.gid,
-            self.header.epoch,
-            shape.island_bits,
-            shape.island_of(self.occupancy.leaf),
-            island_secret,
-            &self.root,
-        )
+        let context = RelayContext {
+            gid: self.header.gid,
+            epoch: self.header.epoch,
+            island_bits: shape.island_bits,
+            island: shape.island_of(self.occupancy.leaf),
+            seal_hash: self.seal_hash,
+        };
+        RelayElement::seal(&context, island_secret, &self.root)
     }
 
     /// The flat elements of `islands` for the member's epoch (E-15): the

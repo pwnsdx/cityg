@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A relay element of the v0.5 draft binds the hash of its window's seal
+  in its context (`RelayContext`). The two branches of a fork share the
+  epoch and the islands that neither re-keys; without the seal, two honest
+  relays of such an island sealed the two branches' root secrets under the
+  same ChaCha20-Poly1305 key and nonce. Their XOR is the XOR of the roots,
+  so a member that one branch removes and the other keeps could read the
+  root of the branch that removes it, then its epoch with the init secret
+  it held. Found while writing the proof that each relay key seals one
+  plaintext. `RelayElement::seal` and `open` now take a `RelayContext`.
 - A catch-up's welcome is sealed to the member's leaf key as well as to the
   request's one-time init key (specification, section 11). A catch-up is
   signed with the device key alone and changes nothing in the tree:

@@ -27,7 +27,7 @@ use cityg_core::packet::{Packet, RegistryUpdate, SealLink, SealerEvidence};
 use cityg_core::registry::{Registry, RegistryDelta};
 use cityg_core::rekey::{KeySource, LeafChanges, WindowIndex, generate, plan_city, plan_district};
 use cityg_core::roles::{SealDraft, build_city, build_district, finish_seal, with_city};
-use cityg_core::top::{RelayElement, Top, flat_element};
+use cityg_core::top::{RelayContext, RelayElement, Top, flat_element};
 use cityg_core::tree::{LeafNode, Occupancy, ParentNode, PublicTree};
 use cityg_core::window::{
     PublicState, Requests, WindowShape, check_districts, check_sealer, check_window,
@@ -423,9 +423,14 @@ fn a_large_window_on_a_full_group_matches_the_model() {
     let removed_set: HashSet<u32> = removed.iter().copied().collect();
     let island_level = shape.island_level();
     let is_wrap = |step: &cityg_core::rekey::Step| matches!(step, cityg_core::rekey::Step::Wrap(_));
-    let relay = Top::Relay(
-        RelayElement::seal(&state.gid, epoch, island_bits, 0, &[1; 32], &[2; 32]).unwrap(),
-    );
+    let context = RelayContext {
+        gid: state.gid,
+        epoch,
+        island_bits,
+        island: 0,
+        seal_hash: [3; 32],
+    };
+    let relay = Top::Relay(RelayElement::seal(&context, &[1; 32], &[2; 32]).unwrap());
     let island_pk = &state
         .tree
         .parent(shape.island_root(0))

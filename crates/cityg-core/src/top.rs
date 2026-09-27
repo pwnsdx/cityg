@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! RelayElement := ["city-g/relay/v5", gid, epoch, island, sealed]
-//!   context := CBOR_det([gid, epoch, island_bits, island])
+//!   context := CBOR_det([gid, epoch, island_bits, island, seal_hash])
 //!   sealed  := ChaCha20-Poly1305(key   = ExpandLabel(s_j, "relay key", context, 32),
 //!                                nonce = ExpandLabel(s_j, "relay nonce", context, 12),
 //!                                aad = context, plaintext = r_n)            (48 bytes)
@@ -17,11 +17,16 @@
 //!                 each with the epoch of the window that made it
 //! ```
 //!
-//! `s_j` is the secret of the island root after the window. A relay element
-//! is made by a member of the island, which knows `s_j` and `r_n`; a flat
-//! element by any member that knows `r_n`, once it checked the island root's
-//! key against its header. Neither is signed: the member checks the
-//! confirmation tag, so a wrong element only makes it fall back to another.
+//! `s_j` is the secret of the island root after the window, and `seal_hash`
+//! the hash of the window's seal header. A relay element is made by a member
+//! of the island, which knows `s_j` and `r_n`; a flat element by any member
+//! that knows `r_n`, once it checked the island root's key against its
+//! header. Neither is signed: the member checks the confirmation tag, so a
+//! wrong element only makes it fall back to another.
+//!
+//! The seal hash keeps two branches of a fork apart: they can share the
+//! epoch and an island root the window left alone, and without it two honest
+//! relays would seal two root secrets under the same key and nonce.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +53,41 @@ pub const RELAY_LABEL: &str = "city-g/relay/v5";
 /// root secret.
 pub const RELAY_ELEMENT_BYTES: usize = SEALED_SECRET_BYTES + 4;
 
+/// What a relay element is bound to: its group, window, island, and the
+/// window's seal, which differs between the branches of a fork.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelayContext {
+    pub gid: Digest,
+    pub epoch: u64,
+    pub island_bits: u8,
+    pub island: u32,
+    /// `H(SealHeader)` of the window.
+    pub seal_hash: Digest,
+}
+
+impl RelayContext {
+    fn encode(&self) -> CoreResult<Vec<u8>> {
+        encode(&array(vec![
+            bytes(&self.gid),
+            uint(self.epoch),
+            uint(u64::from(self.island_bits)),
+            uint(u64::from(self.island)),
+            bytes(&self.seal_hash),
+        ]))
+    }
+
+    fn cipher(
+        &self,
+        island_secret: &[u8; 32],
+    ) -> CoreResult<(ChaCha20Poly1305, [u8; 12], Vec<u8>)> {
+        let context = self.encode()?;
+        let key = expand_label32(island_secret, "relay key", &context)?;
+        let mut nonce = [0u8; 12];
+        expand_label_into(island_secret, "relay nonce", &context, &mut nonce)?;
+        Ok((ChaCha20Poly1305::new(key.as_ref().into()), nonce, context))
+    }
+}
+
 /// The window's root secret, sealed under the secret of an island root by a
 /// member of the island.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,65 +99,37 @@ pub struct RelayElement {
     pub sealed: Vec<u8>,
 }
 
-fn relay_cipher(
-    gid: &Digest,
-    epoch: u64,
-    island_bits: u8,
-    island: u32,
-    island_secret: &[u8; 32],
-) -> CoreResult<(ChaCha20Poly1305, [u8; 12], Vec<u8>)> {
-    let context = encode(&array(vec![
-        bytes(gid),
-        uint(epoch),
-        uint(u64::from(island_bits)),
-        uint(u64::from(island)),
-    ]))?;
-    let key = expand_label32(island_secret, "relay key", &context)?;
-    let mut nonce = [0u8; 12];
-    expand_label_into(island_secret, "relay nonce", &context, &mut nonce)?;
-    Ok((ChaCha20Poly1305::new(key.as_ref().into()), nonce, context))
-}
-
 impl RelayElement {
-    /// Seal `root_secret` for island `island` under the secret of its root.
+    /// Seal `root_secret` for the island and window of `context` under the
+    /// secret of the island root.
     pub fn seal(
-        gid: &Digest,
-        epoch: u64,
-        island_bits: u8,
-        island: u32,
+        context: &RelayContext,
         island_secret: &[u8; 32],
         root_secret: &[u8; 32],
     ) -> CoreResult<Self> {
-        let (cipher, nonce, context) =
-            relay_cipher(gid, epoch, island_bits, island, island_secret)?;
+        let (cipher, nonce, aad) = context.cipher(island_secret)?;
         let sealed = cipher
             .encrypt(
                 (&nonce).into(),
                 Payload {
                     msg: root_secret,
-                    aad: &context,
+                    aad: &aad,
                 },
             )
             .map_err(|_| CoreError::Crypto("relay element"))?;
         Ok(Self {
-            gid: *gid,
-            epoch,
-            island,
+            gid: context.gid,
+            epoch: context.epoch,
+            island: context.island,
             sealed,
         })
     }
 
-    /// Open the element of window `epoch` for island `island` with the
-    /// secret of its root. The element's own fields must name them.
-    pub fn open(
-        &self,
-        gid: &Digest,
-        epoch: u64,
-        island_bits: u8,
-        island: u32,
-        island_secret: &[u8; 32],
-    ) -> CoreResult<Secret> {
-        if self.gid != *gid || self.epoch != epoch || self.island != island {
+    /// Open the element of the island and window of `context` with the
+    /// secret of the island root. The element's own fields must name them,
+    /// and an element sealed for another seal does not open.
+    pub fn open(&self, context: &RelayContext, island_secret: &[u8; 32]) -> CoreResult<Secret> {
+        if self.gid != context.gid || self.epoch != context.epoch || self.island != context.island {
             return Err(CoreError::Invalid(
                 "relay element of another window or island",
             ));
@@ -125,15 +137,14 @@ impl RelayElement {
         if self.sealed.len() != SEALED_SECRET_BYTES {
             return Err(CoreError::Malformed("relay element"));
         }
-        let (cipher, nonce, context) =
-            relay_cipher(gid, epoch, island_bits, island, island_secret)?;
+        let (cipher, nonce, aad) = context.cipher(island_secret)?;
         let opened = Zeroizing::new(
             cipher
                 .decrypt(
                     (&nonce).into(),
                     Payload {
                         msg: &self.sealed,
-                        aad: &context,
+                        aad: &aad,
                     },
                 )
                 .map_err(|_| CoreError::Decrypt("relay element"))?,
@@ -274,26 +285,73 @@ mod tests {
 
     const GID: Digest = [6u8; 32];
 
+    fn context(epoch: u64, island_bits: u8, island: u32, seal_hash: Digest) -> RelayContext {
+        RelayContext {
+            gid: GID,
+            epoch,
+            island_bits,
+            island,
+            seal_hash,
+        }
+    }
+
     #[test]
-    fn a_relay_element_opens_only_for_its_window_island_and_secret() {
+    fn a_relay_element_opens_only_for_its_window_island_seal_and_secret() {
         let island_secret = [4u8; 32];
         let root = [9u8; 32];
-        let relay = RelayElement::seal(&GID, 7, 2, 3, &island_secret, &root).unwrap();
+        let here = context(7, 2, 3, [1; 32]);
+        let relay = RelayElement::seal(&here, &island_secret, &root).unwrap();
         assert_eq!(relay.sealed.len(), SEALED_SECRET_BYTES);
-        assert_eq!(*relay.open(&GID, 7, 2, 3, &island_secret).unwrap(), root);
+        assert_eq!(*relay.open(&here, &island_secret).unwrap(), root);
         let decoded = RelayElement::decode(&relay.encode().unwrap()).unwrap();
         assert_eq!(decoded, relay);
-        // Another window, island, island size or secret: refused.
-        assert!(relay.open(&GID, 8, 2, 3, &island_secret).is_err());
-        assert!(relay.open(&GID, 7, 2, 4, &island_secret).is_err());
-        assert!(relay.open(&GID, 7, 3, 3, &island_secret).is_err());
-        assert!(relay.open(&GID, 7, 2, 3, &[5u8; 32]).is_err());
+        // Another window, island, island size, seal or secret: refused.
+        assert!(
+            relay
+                .open(&context(8, 2, 3, [1; 32]), &island_secret)
+                .is_err()
+        );
+        assert!(
+            relay
+                .open(&context(7, 2, 4, [1; 32]), &island_secret)
+                .is_err()
+        );
+        assert!(
+            relay
+                .open(&context(7, 3, 3, [1; 32]), &island_secret)
+                .is_err()
+        );
+        assert!(
+            relay
+                .open(&context(7, 2, 3, [2; 32]), &island_secret)
+                .is_err()
+        );
+        assert!(relay.open(&here, &[5u8; 32]).is_err());
         let mut moved = relay.clone();
         moved.epoch = 8;
-        assert!(moved.open(&GID, 8, 2, 3, &island_secret).is_err());
+        assert!(
+            moved
+                .open(&context(8, 2, 3, [1; 32]), &island_secret)
+                .is_err()
+        );
         let mut flipped = relay;
         flipped.sealed[0] ^= 1;
-        assert!(flipped.open(&GID, 7, 2, 3, &island_secret).is_err());
+        assert!(flipped.open(&here, &island_secret).is_err());
+    }
+
+    #[test]
+    fn two_branches_of_a_fork_seal_under_different_keys() {
+        // Two windows of the same epoch, as a fork shows them to two relays of
+        // an island that neither re-keyed: the same island secret, two roots.
+        let island_secret = [4u8; 32];
+        let (root_a, root_b) = ([9u8; 32], [7u8; 32]);
+        let a = RelayElement::seal(&context(7, 2, 3, [1; 32]), &island_secret, &root_a).unwrap();
+        let b = RelayElement::seal(&context(7, 2, 3, [2; 32]), &island_secret, &root_b).unwrap();
+        // Under one key and nonce, the ciphertexts would differ by the XOR of
+        // the roots, and a member of one branch would read the other's root.
+        let xor = |x: &[u8], y: &[u8]| x.iter().zip(y).map(|(p, q)| p ^ q).collect::<Vec<u8>>();
+        assert_ne!(xor(&a.sealed[..32], &b.sealed[..32]), xor(&root_a, &root_b));
+        assert!(a.open(&context(7, 2, 3, [2; 32]), &island_secret).is_err());
     }
 
     #[test]
