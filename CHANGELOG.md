@@ -170,6 +170,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads from the epoch it enters; the DS checks what it can see of a
   message; an insider's forgery is never delivered; skipped generations
   open later, within `MAX_SKIP`.
+- Symbolic model of stage 3 ([`docs/formal/`](docs/formal/README.md)): four
+  ProVerif scenarios, 37 in all. Two members that accept the same next
+  epoch read the same messages of the epoch, although an insider and the
+  delivery service show each its own, if each checks what it read against
+  the log the next seal header commits; without that check, they may not
+  (`sealed_log*.pv`). A joiner that enters with the authorizer's
+  checkpoint, which signs the confirmation tag and the external key with
+  the group context, gets the epoch's secret, which the service does not
+  know; a checkpoint that signs the group context alone lets the service
+  seal the joiner an epoch of its own (`authorizer_entry*.pv`).
 
 ### Protocol: the v0.5 draft, stage 2 (tasks)
 

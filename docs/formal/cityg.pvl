@@ -7,7 +7,9 @@
    welcomes and anchored joins.
    The scenarios named island_*, flat_* and refresh_* model stage 1 of
    profile city-g/v0.5-draft (docs/specs-v0.5-draft.md, section 2): islands
-   read through relay elements, flat elements and refreshes.
+   read through relay elements, flat elements and refreshes; sealed_log*
+   and authorizer_entry* model stage 3 (section 4): the logs a seal header
+   carries, and entries by the authorizer's checkpoint.
    Primitives are ideal: the X-Wing wrap of a secret is one ideal public-key
    encryption, ML-DSA-65 an unforgeable signature, BLAKE3 and its keyed modes
    one-way functions. Trees are written out in each scenario. *)

@@ -46,6 +46,10 @@ EXPECTED=(
   "welcome_joiner: true false"
   "welcome_unlisted: false false"
   "welcome_request_unbound: false false"
+  "sealed_log: true false"
+  "sealed_log_unchecked: false false"
+  "authorizer_entry: true false"
+  "authorizer_entry_unsigned_tag: false false"
 )
 
 for line in "${EXPECTED[@]}"; do

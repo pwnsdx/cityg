@@ -1359,12 +1359,13 @@ Nothing of v0.4 decodes under this draft: every label changed.
 * **Stage 3**, specified in section 4: cards in leaves and their summary
   hash, unique keys (part 3a), the message plane (part 3b), the
   authorized mode (part 3c) and the membership log (part 3d) are
-  implemented. FN-DSA-512 cards
-  wait for FIPS 206. The research models of the message plane and of
-  parity (`research/formal-messages/`, `research/formal-parity/`) cover
-  the sender hidden, burst chains, cards checked against the epoch's leaf,
-  batches and authorizer checkpoints; the profile's own model does not yet,
-  nor the sealed message log, the membership log or unique keys. The
+  implemented. FN-DSA-512 cards wait for FIPS 206. The research models of
+  the message plane and of parity (`research/formal-messages/`,
+  `research/formal-parity/`) cover the sender hidden, burst chains, cards
+  checked against the epoch's leaf, batches and authorizer checkpoints;
+  the profile's own model covers the logs in the seal header and entries
+  by the authorizer's checkpoint (`sealed_log*.pv`,
+  `authorizer_entry*.pv`), not yet the rest, nor unique keys. The
   authorizer's availability for members that require its checkpoints, and
   how a DS replicates the message log for caches, are open.
 * Everything v0.4 §19 lists, except the lighter structure for continuous

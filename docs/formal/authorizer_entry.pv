@@ -1,0 +1,39 @@
+(* Scenario AUTHORIZER_ENTRY: J enters epoch 2 with the authorizer's
+   checkpoint instead of a chain of seals (docs/specs-v0.5-draft.md section
+   4.9).
+
+   J trusts the key of the authorizer Z. S, a member, seals window 2 and
+   welcomes J: the joiner secret sealed to J's init key. Z checks the window
+   and signs its checkpoint: the hash of the group context, the confirmation
+   tag and the external key. The delivery service controls a device E and
+   hands J the entry of its choice: a context, a tag, a welcome, a
+   checkpoint, an external key. J accepts epoch 2 if Z signed them, and its
+   welcome's secret gives that tag and that external key. *)
+
+free MJ: bitstring [private].
+query attacker(MJ).
+
+event AcceptedJ(key).
+query es: key; event(AcceptedJ(es)).
+
+process
+  new skZ: skey; new skE: skey; new ikJ: key; new init1: key;
+  out(c, (spk(skZ), skE, kempk(ikJ)));
+  (
+    (* S seals window 2 and welcomes J; Z checkpoints the epoch. *)
+    new r2: key; new qw: key;
+    let gc2 = (N2, node_pk(r2)) in
+    let js2 = joiner_secret(init1, r2, gc2) in
+    let es2 = epoch_secret(js2) in
+    out(c, (gc2, tag(es2, gc2), wrap(kempk(ikJ), qw, js2),
+            sign(skZ, (N2, hash(gc2), tag(es2, gc2), external_pk(es2))),
+            external_pk(es2)))
+  ) | (
+    in(c, (gc: bitstring, tg: bitstring, wel: bitstring, cp: bitstring, xpk: kpk));
+    if checksign(spk(skZ), (N2, hash(gc), tg, xpk), cp) = true then
+    let es = epoch_secret(unwrap(ikJ, wel)) in
+    if tag(es, gc) = tg then
+    if external_pk(es) = xpk then
+    event AcceptedJ(es);
+    out(c, aenc(msg_key(es), MJ))
+  )

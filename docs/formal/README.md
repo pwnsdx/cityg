@@ -5,11 +5,12 @@ design choices of City-G, recorded in the [design note](../design.md) and
 studied in the research note
 [`grands-groupes-2026-09-25.md`](../research/grands-groupes-2026-09-25.md)
 (in French). It checks the choices the [specification](../specs.md) relies
-on, against the adversaries of its section 2.1, and stages 1 and 2 of the
-draft profile [`city-g/v0.5-draft`](../specs-v0.5-draft.md) (its sections 2
-and 3): islands read through relay elements, flat elements and refreshes;
-hedges and city tasks. It is not a model of the whole specification
-(section 19 of the specification).
+on, against the adversaries of its section 2.1, and the three stages of
+the draft profile [`city-g/v0.5-draft`](../specs-v0.5-draft.md) (its
+sections 2 to 4): islands read through relay elements, flat elements and
+refreshes; hedges and city tasks; the logs of the seal header and entries
+by the authorizer's checkpoint. It is not a model of the whole
+specification (section 19 of the specification).
 
 ## Running it
 
@@ -88,7 +89,18 @@ an encapsulation opens it, since the KEM is deterministic given them.
 | [`welcome_unlisted.pv`](welcome_unlisted.pv) | W does not check that the seal lists the commit. | Attack: the service makes a commit of its own that names a request of its own. |
 | [`welcome_request_unbound.pv`](welcome_request_unbound.pv) | W takes the init key from the request the service hands for the change, without checking its hash, as cityg-core did until requests were filed under their own reference. | Attack: the service hands a request of its own for K's. |
 
-The results bear on nine decisions of the design note:
+Four more model stage 3. A seal header carries the logs of the previous
+epoch's messages and of the window's changes, which the confirmation tag
+binds; an authorizer checkpoints each epoch it checked.
+
+| Scenario | What it checks | Expected result |
+| --- | --- | --- |
+| [`sealed_log.pv`](sealed_log.pv) | In epoch 1, A and B each read a message the delivery service shows them under the epoch's message key, which an insider holds too. S seals window 2 with the log the service gives it; A and B check the message they read against the log in the context the tag binds before they accept epoch 2. | Proved: two members that accept the same epoch read the same messages. Reachable (sanity): A accepts epoch 2. |
+| [`sealed_log_unchecked.pv`](sealed_log_unchecked.pv) | A and B accept epoch 2 without checking what they read against the log. | Attack: they accept the same epoch, having read different messages. |
+| [`authorizer_entry.pv`](authorizer_entry.pv) | J trusts the authorizer Z's key. S seals window 2 and welcomes J; Z signs the checkpoint of epoch 2: the hash of its group context, its tag and its external key. The service controls a device of its own and hands J the entry of its choice; J accepts epoch 2 if Z signed its context, tag and external key, and its welcome gives that tag. | Proved: the message J sends in epoch 2 stays secret. Reachable (sanity): J accepts epoch 2. |
+| [`authorizer_entry_unsigned_tag.pv`](authorizer_entry_unsigned_tag.pv) | Z's checkpoint signs the group context alone; J checks the tag the service hands it. | Attack: the service welcomes J into an epoch of its own. |
+
+The results bear on ten decisions of the design note:
 
 * **Taint rule (E-4).** Removing a member re-keys the nodes it tainted.
   Updating re-keys them too.
@@ -128,6 +140,15 @@ The results bear on nine decisions of the design note:
   the seal lists, and the init key must come from the request that hashes
   to the change's reference, which binds the welcome to the request the
   sealer and the joiner checked.
+* **Parity (E-18).** A log in the seal header, bound by the tag, makes two
+  members that accept the same epoch agree on what they read, provided each
+  checks what it read against it; the membership log is the same mechanism.
+  A joiner that trusts the authorizer enters by its checkpoint only if the
+  checkpoint signs the tag, as a seal's signature does in an anchored join.
+  Cards, burst chains, the sender hidden from the service, batches and
+  authorizer checkpoints for members that follow are modelled in the
+  research models of [`../research/formal-parity/`](../research/formal-parity/README.md)
+  and [`../research/formal-messages/`](../research/formal-messages/README.md).
 
 ## Abstractions and limits
 
