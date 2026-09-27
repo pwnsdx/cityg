@@ -60,6 +60,11 @@ names the check that backs it.
       sent.
 - [ ] Secret material is zeroized on drop and never logged; comparisons of
       MAC tags and secrets are constant time.
+- [ ] Every AEAD key and nonce derived from a secret and a context, not
+      from a fresh encapsulation, seals one plaintext, across the branches
+      of a fork too: the context binds the transcript, not only the epoch.
+      The relay elements of the v0.5 draft bind the interim transcript hash
+      (research note `extensions-gsd-2026-09-27.md`, section 5.5).
 - [ ] The delivery service accepts a welcome only from the welcomer the
       window assigned.
 

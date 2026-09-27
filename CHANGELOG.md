@@ -107,6 +107,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Research
 
+- The GSD extensions written in full, in
+  [`docs/research/extensions-gsd-2026-09-27.md`](docs/research/extensions-gsd-2026-09-27.md)
+  (in French): the extended game, in which every encapsulation is a vertex
+  and an envelope an encapsulation then a symmetric seal, its theorem
+  (`2N²(ε_KEM + ε_AE) + mN/2^(λ−1)`) and its proof in both cases of the
+  event `E`, with a random oracle observed and never programmed; the
+  invariant of coherence, operation by operation, over the real formats of
+  v0.4 and stage 1. Writing the condition that each symmetric key seals one
+  plaintext found the relay flaw fixed above. The loss, recounted with a
+  vertex per encapsulation, is `2^69` for a million members over ten years
+  (123 bits left to ML-KEM-768). The safety predicate gains a rule for a
+  reused nonce and three traces of forks (34 traces); the cost model of the
+  open problems gains report 6; the security review checklist asks that
+  every deterministic AEAD key seal one plaintext across the branches of a
+  fork.
 - The adaptive argument of the proof of the tree, in
   [`docs/research/argument-adaptatif-2026-09-27.md`](docs/research/argument-adaptatif-2026-09-27.md)
   (in French): the game reduced to the modified generalized selective

@@ -17,7 +17,10 @@ the closure.
   welcome(j, i, l)     the joiner secret j sealed to the init key i, and for
                        a catch-up to the leaf key l too: j needs them all
   relay_seal(s, k)     s sealed (AEAD) under a key derived from k, as a
-                       relay element seals the root under the island root
+                       relay element seals the root under the island root;
+                       a second plaintext under the same key and context
+                       reuses the nonce, and each plaintext gives the other
+                       (the stream cipher's XOR)
 
 Each trace mirrors a formal model, symbolic (ProVerif) or computational
 (CryptoVerif), or a scenario test, and the script checks that the predicate
@@ -34,8 +37,12 @@ here is one of its oracles, or of the two this note adds:
   SEnc.
 
 The script translates every trace into that hypergraph and checks what
-the GSD theorem requires of it: the graph is acyclic and the challenged
-secret is a sink. gsd-exp of the game is the closure computed here.
+the GSD theorem requires of it: each SEnc key seals one plaintext, the
+graph is acyclic and the challenged secret is a sink. gsd-exp of the game
+is the closure computed here. The note `extensions-gsd-2026-09-27.md`
+writes the extended theorem in full; two traces, relay elements of a
+fork bound as that note found them unsafe, fail the first check, as
+expected.
 
 Run: python3 docs/research/safety_predicate.py
 """
@@ -50,6 +57,7 @@ class Trace:
     def __init__(self):
         self.rules = []
         self.leaked = set()
+        self.sealed = {}
 
     def derive(self, out, source):
         self.rules.append((out, (source,), "Hash"))
@@ -65,8 +73,13 @@ class Trace:
         pair derived from key_source (an external init)."""
         self.rules.append((out, (key_source,), "Encap"))
 
-    def relay_seal(self, secret, key_source):
+    def relay_seal(self, secret, key_source, context=None):
         self.rules.append((secret, (key_source,), "SEnc"))
+        for other in self.sealed.setdefault((key_source, context), []):
+            if other != secret:
+                self.rules.append((secret, (other,), "XOR"))
+                self.rules.append((other, (secret,), "XOR"))
+        self.sealed[(key_source, context)].append(secret)
 
     def welcome(self, joiner, init_key, leaf_key=None):
         if leaf_key is None:
@@ -121,9 +134,14 @@ class Trace:
         return secret not in self.known()
 
     def gsd_shape(self, challenge):
-        """What the GSD theorem requires of the translated hypergraph: it is
-        acyclic, and the challenged secret is a sink. Returns the oracles
-        used, or raises."""
+        """What the GSD theorem requires of the translated hypergraph: one
+        plaintext per SEnc key, AND edges only for Join-Hash, no cycle, and
+        the challenged secret a sink. Returns the oracles used, or raises."""
+        for out, inputs, oracle in self.rules:
+            if oracle == "XOR":
+                raise ValueError(f"one SEnc key seals {out} and another plaintext")
+            if (len(inputs) == 2) != (oracle == "Join-Hash"):
+                raise ValueError(f"{out}: an AND edge that is not a Join-Hash")
         parents = {}
         for out, inputs, _ in self.rules:
             parents.setdefault(out, set()).update(inputs)
@@ -143,9 +161,6 @@ class Trace:
             visit(node)
         if any(challenge in inputs for _, inputs, _ in self.rules):
             raise ValueError(f"the challenge {challenge} is not a sink")
-        for out, inputs, oracle in self.rules:
-            if (len(inputs) == 2) != (oracle == "Join-Hash"):
-                raise ValueError(f"{out}: an AND edge that is not a Join-Hash")
         return {oracle for _, _, oracle in self.rules}
 
 
@@ -363,6 +378,29 @@ def island_tops(relay_source, flat_target):
     return t, "msg2"
 
 
+def fork_relay(binding):
+    """Stage 1 under a fork of window 2, whose branch A removes M. Branch B
+    is another window, sealed by an honest member, that keeps M; branch C
+    is the real seal of A with a tag of M's, which leads an honest relay
+    into a root M chose. No branch re-keys island i, whose relays seal each
+    branch's root under its secret, with a context that binds the epoch
+    alone, the seal, or the interim transcript hash (seal and tag). M knows
+    epoch 1 and the roots of B and C."""
+    t = Trace()
+    t.leak("epoch1", "rB", "rC")
+    t.epoch_secrets(1)
+    t.wrap("rA", "q")
+    contexts = {
+        "epoch": ("epoch 2", "epoch 2", "epoch 2"),
+        "seal": ("seal A", "seal B", "seal A"),
+        "interim": ("interim A", "interim B", "interim C"),
+    }[binding]
+    for root, context in zip(("rA", "rB", "rC"), contexts):
+        t.relay_seal(root, "s_i", context)
+    t.window(2, "init1", "rA")
+    return t, "msg2"
+
+
 def city(maintained, second_colludes):
     """The city above the îlots: node P above îlots k and j, node Q above
     îlot l. Window 2 removes M1 (îlot k), window 3 removes M2 (îlot l); the
@@ -402,6 +440,10 @@ def history_link_rejoin():
     t.leak("leaf_M_new")
     return t, "msg2"
 
+
+# Traces that are not GSD hypergraphs, as expected: the reduction does not
+# apply to them, and their epoch is exposed.
+NOT_GSD = {"fork, relay bound to the seal", "fork, relay bound to the epoch"}
 
 # (name, trace builder, the models it mirrors, True if they prove the secret)
 TRACES = [
@@ -449,6 +491,12 @@ TRACES = [
      "island_removal_stale_relay.pv", False),
     ("island tops, unchecked flat key", lambda: island_tops("t0n", "ds_key"),
      "flat_unchecked.pv", False),
+    ("fork, relay bound to the interim", lambda: fork_relay("interim"),
+     "islands.rs: a_relay_element_opens_only_under_the_transcript...", True),
+    ("fork, relay bound to the seal", lambda: fork_relay("seal"),
+     "the seal alone: an insider's tag under the real seal", False),
+    ("fork, relay bound to the epoch", lambda: fork_relay("epoch"),
+     "specs-v0.5-draft 2.3 as first written", False),
     ("city maintained", lambda: city(True, True),
      "ilot_city_maintained.pv, city_maintained.ocv", True),
     ("city stale", lambda: city(False, True), "ilot_city_stale.pv, city_stale.ocv", False),
@@ -467,13 +515,19 @@ def main():
         trace, secret = build()
         safe = trace.safe(secret)
         agree = safe == proved
+        try:
+            oracles |= trace.gsd_shape(secret)
+            agree = agree and name not in NOT_GSD
+        except ValueError as error:
+            if name not in NOT_GSD:
+                raise
+            models = f"{models} (not a GSD graph: {error})"
         disagree += not agree
-        oracles |= trace.gsd_shape(secret)
         print(f"  {name:<32} {secret:<7} {'safe' if safe else 'exposed':<9}"
               f" {'proved' if proved else 'attack':<9} {'yes' if agree else 'NO'}   {models}")
     print(f"  {len(TRACES)} traces, {len(TRACES) - disagree} agree with their models")
-    print(f"  as GSD hypergraphs: all acyclic, each challenge a sink; oracles used:"
-          f" {', '.join(sorted(oracles))}")
+    print(f"  as GSD hypergraphs: all but {len(NOT_GSD)} valid (one plaintext per SEnc key,"
+          f" acyclic, each challenge a sink); oracles used: {', '.join(sorted(oracles))}")
     return 1 if disagree else 0
 
 

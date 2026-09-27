@@ -7,6 +7,7 @@
 | Question | Comment passer des lemmes prouvés fenêtre par fenêtre à la sécurité de l'arbre entier, contre un adversaire qui corrompt au vu de tout ce qui précède, et que perd-on ? |
 | Compagnons | [`safety_predicate.py`](safety_predicate.py) : 28 traces, dont 3 nouvelles pour l'étape 1, traduites en hypergraphes GSD dont le script vérifie les conditions du théorème (`python3 docs/research/safety_predicate.py`). [`open_problems_sim.py`](open_problems_sim.py), rapport 5 : la perte comptée en secrets. |
 | Auteur | Claude Code (assistant IA d'Anthropic), à la demande du mainteneur. Une relecture cryptographique humaine reste nécessaire. |
+| Depuis | La note [les extensions du jeu GSD, en entier](extensions-gsd-2026-09-27.md) écrit le jeu étendu, son théorème et l'invariant. Chaque encapsulation y devient un sommet, et la perte passe à `2^69` pour un million de membres pendant dix ans. Elle montre que l'affirmation de la section 4, « chaque clé scelle un seul clair : le contexte lie l'époque et l'îlot pour un relais », était fausse sous une bifurcation. Les éléments de relais lient désormais le hachage de transcript intérimaire. |
 
 ## 0. Résumé
 

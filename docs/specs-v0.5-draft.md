@@ -531,8 +531,11 @@ Nothing of v0.4 decodes under this draft: every label changed.
   the relay and flat items, the tag check and the maintained city. Neither
   models the DS's choice of tops, relay rotation or the epochs of a
   refresh's steps.
-* **The proof of the tree**, and its adaptive argument (research note
-  [`research/preuve-arbre-2026-09-26.md`](research/preuve-arbre-2026-09-26.md)).
+* **The proof of the tree**, and its adaptive argument (research notes
+  [`research/preuve-arbre-2026-09-26.md`](research/preuve-arbre-2026-09-26.md),
+  [`research/argument-adaptatif-2026-09-27.md`](research/argument-adaptatif-2026-09-27.md)
+  and [`research/extensions-gsd-2026-09-27.md`](research/extensions-gsd-2026-09-27.md)):
+  written in full, not yet mechanized.
 * **Relay choice.** Rotating among online members spreads the work; a DS
   may prefer members with a good network, and the window's joiners, once
   entries carry the island path (stage 2).

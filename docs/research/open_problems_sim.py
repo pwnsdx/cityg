@@ -278,6 +278,41 @@ def report_secret_count():
     print()
 
 
+def encapsulations_per_window(height, district_bits, changed):
+    """Encapsulations a window adds, each a vertex of the extended GSD game
+    (extensions-gsd-2026-09-27.md): a wrap per re-keyed node to its child
+    not chained from, two below a fresh draw, and a welcome per join (half
+    of the changes). Relay elements add edges; flat elements, at most one
+    per island without a relay, are neglected."""
+    nodes = sum(distinct_ancestors(height, changed, level) for level in range(1, height + 1))
+    fresh = distinct_ancestors(height, changed, 1)
+    if height > district_bits:
+        fresh += distinct_ancestors(height, changed, district_bits + 1)
+    return nodes + fresh + 0.5 * changed
+
+
+def report_encapsulations():
+    print("6. The loss when every encapsulation is a vertex: Enc = Encap then SEnc (extended GSD game)")
+    print(f"   {'members':>9} {'window':>7} {'years':>5} {'secrets':>8} {'encaps.':>8} {'vertices N':>10}"
+          f" {'loss 2 N^2':>11} {'bits left, ML-KEM-768':>21}")
+    rate = 1.7
+    for log_n in (20, 24):
+        for window in (60, 300):
+            for years in (1, 10, 50):
+                changed = rate * (2 ** log_n / 2 ** 20) * window
+                windows = years * 365.25 * 86400 / window
+                secrets = windows * secrets_per_window(log_n, 12, changed)
+                encaps = windows * encapsulations_per_window(log_n, 12, changed)
+                vertices = secrets + encaps
+                bits = 1 + 2 * math.log2(vertices)
+                print(f"   {'2^%d' % log_n:>9} {'%d s' % window:>7} {years:>5}"
+                      f" {'2^%.1f' % math.log2(secrets):>8} {'2^%.1f' % math.log2(encaps):>8}"
+                      f" {'2^%.1f' % math.log2(vertices):>10} {'2^%.0f' % bits:>11} {192 - bits:>21.0f}")
+    print("   (the KEM key of a wrap or a welcome becomes a vertex, so that a member that opens an honest")
+    print("   encapsulation in another format stays inside the game; it costs about two bits)")
+    print()
+
+
 def main():
     print("Cost model of the open problems beyond v0.4.")
     print()
@@ -286,6 +321,7 @@ def main():
     report_cards()
     report_adaptive()
     report_secret_count()
+    report_encapsulations()
 
 
 if __name__ == "__main__":

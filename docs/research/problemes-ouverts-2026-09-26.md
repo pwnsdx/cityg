@@ -245,7 +245,7 @@ Le nouvel ordre :
 
 La note [preuves et mesures](preuves-et-mesures-2026-09-26.md) reprend cet ordre : elle mesure le litige, prouve l'authentification du relais et des témoins, écrit le plan de preuve de l'arbre et recommande HKDF pour `Extract`. Elle trouve aussi une faille du saut de la v0.4 sous clé d'appareil volée, et la corrige.
 
-Depuis : la preuve de l'arbre sous corruptions adaptatives est ramenée au jeu GSD modifié (note [l'argument adaptatif](argument-adaptatif-2026-09-27.md)), et l'étape 1 du profil candidat est spécifiée et implémentée ([brouillon v0.5](../specs-v0.5-draft.md)).
+Depuis : la preuve de l'arbre sous corruptions adaptatives est ramenée au jeu GSD modifié (note [l'argument adaptatif](argument-adaptatif-2026-09-27.md)), dont les extensions et l'invariant sont écrits en entier (note [les extensions du jeu GSD](extensions-gsd-2026-09-27.md)) ; l'étape 1 du profil candidat est spécifiée et implémentée ([brouillon v0.5](../specs-v0.5-draft.md)).
 
 ## 8. Modèles et reproductibilité
 
