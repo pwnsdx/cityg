@@ -3,10 +3,10 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is outlined, with its labels reserved. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and implemented, the proof system aside: the DS judges disputes with a verifier it is given (section 3.8); stage 3 (section 4) is specified, not yet implemented. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
 | Implementation | [`crates/cityg-core`](../crates/cityg-core) (stages 1 and 2; the proof system of disputes is plugged in, not included) |
-| Design | [design.md](design.md) (decisions E-15 to E-17) |
+| Design | [design.md](design.md) (decisions E-15 to E-18) |
 | Research | the three stages, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (section 3.6); îlots, relays and the maintained city, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (sections 2.4 to 2.8); urgent and ordinary removals and the parity profile, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md) (section 3); symbolic models of relays and îlots, [`research/formal-parity/`](research/formal-parity/README.md) (all research notes in French) |
 | Conformance | None yet: no test vectors (section 7) |
 
@@ -37,7 +37,7 @@ windows and roles, and changes how members read the tree:
 1. [Three stages](#1-stages)
 2. [Stage 1: islands, relays and cadence](#2-stage-1)
 3. [Stage 2: tasks](#3-stage-2)
-4. [Stage 3: parity (outline)](#4-stage-3)
+4. [Stage 3: parity](#4-stage-3)
 5. [Label registry](#5-labels)
 6. [Changes from v0.4](#6-changes)
 7. [Open items](#7-open-items)
@@ -53,7 +53,7 @@ earlier ones.
 | --- | --- | --- | --- |
 | 1. Relays and cadence | Members read the tree by island: the root secret comes from a relay of their island, a flat element or a refresh. Urgent and ordinary removals. Districts and the roles of v0.4 do not change. | At a million members, 1.7 changes per second and 5-minute windows, following the group costs about 94 KB per day, against 1.8 MB for whole paths with the same windows, and 44 MB for v0.4 with a window every 5 seconds per departure (research model, section 2.11). | Specified (section 2) and implemented |
 | 2. Tasks | Islands become the districts; the city is re-keyed by sub-city tasks and a top task; joiners perform tasks first; the sealer draws nothing; entries by island; repairs; disputes. | No committer role beyond small tasks; a task cuts off at most 256 members; the heaviest task of a burst takes 42 ms instead of 0.6 s; a joiner no longer reads the upper levels. | Specified (section 3); disputes lack their proof system |
-| 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, split leaves, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Outline (section 4) |
+| 3. Parity | Authorized mode and its checkpoints, a message plane in the manner of MLS, cards in leaves hashed by their summary, unique keys, a membership log, exporter and epoch authenticator. | The guarantees of MLS. | Specified (section 4), not implemented |
 
 <a id="2-stage-1"></a>
 ## 2. Stage 1: islands, relays and cadence
@@ -834,31 +834,351 @@ sub-city. The heaviest task of such a burst takes 42 ms, against 0.6 s for
 a v0.4 district of `2^12`.
 
 <a id="4-stage-3"></a>
-## 4. Stage 3: parity (outline)
+## 4. Stage 3: parity
 
-Not specified in detail and not implemented. From the parity note (section
-3) and the synthesis (section 3.5):
+Stage 3 gives the draft the guarantees of MLS (RFC 9420 §16, RFC 9750
+§8), mapped as G1 to G12 in the parity note (section 3) and the synthesis
+(sections 3.5 and 4), at the draft's scale. Stages 1 and 2 do not change.
+It has four parts, implemented in this order:
 
-* **Authorized mode.** A third admission mode in the group policy, with
-  the authorizer's key. The authorizer signs, per window, the Merkle root
-  of the join requests it authorizes (`AuthorizationBatch`), and a
-  checkpoint of each epoch it created (`AuthorizerCheckpoint`) over
-  `[gid, epoch, H(GroupContext), confirmation_tag, H(external_pk)]`. A
-  joiner anchors on it; a member MAY require it before it accepts a window.
-* **Message plane.** From `msg_secret_n`: `sender_data_secret`,
-  `encryption_secret` (the root of a secret tree over the leaves),
-  `exporter_secret` and `epoch_authenticator`. Encrypted sender data,
-  signed burst chains delivered to the application once their signature
-  checks, key commitments, and a sealed message log in the next seal.
-* **Leaves.** A card (a compact signature key) and `device_id` in the
-  leaf; the *split leaf*, whose hash takes `H_L("tree/leaf-key",
-  [encryption_key])` instead of the key, so that a reader checking a card
-  downloads 1,019 bytes of the leaf instead of 2,203.
-* **Unique keys**, through a sparse Merkle map of key hashes in the
-  registry; a **membership log** of each window's changes, committed by the
-  seal.
+| Part | Content | Sections |
+| --- | --- | --- |
+| 3a | Leaves with cards, their summary hash, unique keys | 4.1, 4.2 |
+| 3b | The message plane: key schedule, secret tree, messages, burst chains, key commitments, the sealed message log, exporter and epoch authenticator | 4.3 to 4.8 |
+| 3c | The authorized mode: authorization batches and authorizer checkpoints | 4.9 |
+| 3d | The membership log | 4.10 |
 
-Labels reserved for it: section 5.5.
+### 4.1 Leaves with cards
+
+```text
+LeafNode    := [device_pk, since, encryption_key, card, admission_hash, updated]
+Card        := [algorithm, public_key]
+  algorithm := 1  ML-DSA-65 (FIPS 204), public_key of 1952 bytes
+             | 2  FN-DSA-512, reserved until FIPS 206 is final
+LeafSummary := [device_id, since, H_L("tree/leaf-key", [encryption_key]), card,
+                admission_hash, updated]
+leaf_hash(i) := H_L("tree/leaf", [LeafSummary or null])
+```
+
+* **The card** is the key a member signs its messages with (section 4.5),
+  and nothing else. The device key, which may live in a hardware vault,
+  keeps signing requests, tasks and seals.
+* **A card changes with the leaf key**: join, update and re-entry requests
+  carry the new card beside the new leaf key (`card` follows
+  `encryption_key` in `JoinRequest`, `UpdateRequest` and
+  `ReEntryRequest`), and `updated` dates both. A stolen card stops
+  signing for the member at its next update: the healing of authentication
+  (G4). A device MUST draw a fresh card for each leaf key.
+* **The summary hash.** `leaf_hash` hashes the leaf's summary, which names
+  the device by `device_id` (v0.4 §4) and the leaf key by its hash. A
+  reader that checks a card downloads the summary, about 1.0 KB with an
+  FN-DSA-512 card and 2.1 KB with an ML-DSA-65 card, instead of the whole
+  leaf, 4.1 or 5.2 KB. Who needs the keys, the DS and the performers of
+  tasks, takes the whole leaf and hashes its summary; the leaf keeps the
+  device key, so that every rule of v0.4 that takes a device key from the
+  tree still does. The binding does not change, under the collision
+  resistance of `H_L`.
+* **Checking a card.** A reader checks a signature of epoch `n` against the
+  card in the sender's leaf in the tree of epoch `n`, or of a later epoch
+  `m` whose leaf shows `since <= n` and `updated <= n`: the same occupancy
+  then held the leaf from `since` to `m`, with the same card since
+  `updated`. A leaf proof of epoch `m` (v0.4 §5.3) and the summary show
+  it. A reader MUST NOT check a card against a cached leaf that no such
+  proof covers: a removed member that keeps its card would otherwise speak
+  through an insider (research models `card_revalidated.pv`,
+  `card_cached.pv`).
+
+### 4.2 Unique keys
+
+```text
+RegistryHeader := [admins, devices_root, admissions_root, keys_root,
+                   policy_hash or null, admission_mode, authorizer_pk_hash or null]
+registry_hash  := H_L("registry", [[[admin, admin_pk], ...], devices_root, admissions_root,
+                                   keys_root, policy_hash or null, admission_mode,
+                                   authorizer_pk_hash or null])
+keys: a sparse Merkle map (v0.4 §8) from key_hash to the occupancy that holds it
+key_hash := H_L("tree/leaf-key", [encryption_key]) | H_L("card", [card])
+```
+
+* Every leaf key and every card of the tree is in `keys`. A window changes
+  the map in the order of v0.4 §8: the two keys of a removed or evicted
+  member leave it; an update or a re-entry replaces the member's two keys;
+  a join adds the joiner's two.
+* A change MUST NOT set a key that is in the map after the removals, or
+  that another change of the window sets. The DS, the committers and the
+  auditors check it with the map (v0.4 §15); a member that copies another's
+  card would otherwise make its messages attributable to two leaves (G5).
+* `admission_mode` replaces `open`: 0 closed, 1 open, 2 authorized
+  (section 4.9); `authorizer_pk_hash := H_L("authorizer", [authorizer_pk])`
+  in an authorized group, else `null`.
+
+### 4.3 The key schedule of the message plane
+
+```text
+sender_data_secret_n, encryption_secret_n, exporter_secret_n, epoch_authenticator_n
+    := DeriveSecret(msg_secret_n, "sender data" | "encryption" | "exporter" | "authenticator")
+```
+
+A member erases `msg_secret_n` once it has derived the four, and
+`encryption_secret_n` as it derives the secret tree (section 4.4). It
+keeps the others while the epoch is active and until it has read the
+epoch's messages, whose log the next seal closes (section 4.8), then
+erases them.
+
+* **Exporter.** An application derives its own secrets of epoch `n`, as
+  with MLS's exporter:
+
+  ```text
+  Export_n(label, context, L) := ExpandLabel(DeriveSecret(exporter_secret_n, label),
+                                             "exported", H(context), L)
+  ```
+
+* **Epoch authenticator.** `epoch_authenticator_n` is the same for every
+  member of epoch `n`: two members that compare it out of band detect a
+  fork (RFC 9750 §5.2). Authorizer checkpoints (section 4.9) make the
+  comparison automatic.
+
+### 4.4 The secret tree
+
+Over the `2^height_n` leaves of the tree of epoch `n`:
+
+```text
+tree_secret(height_n, 0)   := encryption_secret_n
+tree_secret(k - 1, 2i)     := DeriveSecret(tree_secret(k, i), "tree left")
+tree_secret(k - 1, 2i + 1) := DeriveSecret(tree_secret(k, i), "tree right")
+ratchet_0(i)               := DeriveSecret(tree_secret(0, i), "application")
+key_g(i)                   := ExpandLabel(ratchet_g(i), "message key",    CBOR_det(g), 32)
+nonce_g(i)                 := ExpandLabel(ratchet_g(i), "message nonce",  CBOR_det(g), 12)
+ratchet_g+1(i)             := ExpandLabel(ratchet_g(i), "message secret", CBOR_det(g), 32)
+```
+
+* Each member sends from the chain of its leaf, `i`, generation `g` from
+  0; it MUST NOT use a generation twice.
+* **Deletion.** A member keeps a node's secret until it has derived both
+  children, then erases it; it keeps `ratchet_g(i)` until it has derived
+  `key_g`, `nonce_g` and `ratchet_g+1`, and a key and its nonce until the
+  message is decrypted, or the epoch ends. It keeps the keys of skipped
+  generations, at most `MAX_SKIP` ahead of the last it decrypted. A
+  message read stays secret against a compromise later in the epoch
+  (G4), which a chain derived directly from the epoch's secret would not
+  give.
+* Deriving one sender's chain takes `height_n` steps: 8.1 µs for `2^24`
+  positions (research note on the message plane, section 3.4).
+
+### 4.5 Messages
+
+```text
+Message    := ["city-g/message/v5", gid, epoch, encrypted_sender_data, ciphertext, commitment]
+SenderData := [leaf, generation, reuse_guard]                   reuse_guard: 4 random bytes
+Content    := [application_data, first_generation, signature or null, padding]
+```
+
+The sender at leaf `i`, at generation `g`:
+
+```text
+nonce                 := nonce_g(i), its first 4 bytes XORed with reuse_guard
+aad                   := CBOR_det(["city-g/message/v5", gid, epoch])
+ciphertext            := ChaCha20-Poly1305(key_g(i), nonce, CBOR_det(Content), aad)
+commitment            := H_L("msg-commit", [key_g(i), nonce, H(ciphertext)])
+sample                := ciphertext[0..32]
+sender_data_key       := ExpandLabel(sender_data_secret_n, "sender data key", sample, 32)
+sender_data_nonce     := ExpandLabel(sender_data_secret_n, "sender data nonce", sample, 12)
+encrypted_sender_data := ChaCha20-Poly1305(sender_data_key, sender_data_nonce,
+                                           CBOR_det(SenderData), aad)
+```
+
+* `padding` is a byte string of zeros, at the sender's choice; a
+  ciphertext has at least 32 bytes.
+* **The DS does not know who sends** (G2): the sender is under a key of
+  the epoch, with the signature. It authenticates connections and limits
+  their rates instead, as MLS provides (RFC 9420 §16.11) (research models
+  `sender_hidden.pv`, and `sender_visible.pv` with the sender in clear).
+* **A receiver** decrypts the sender data, checks that `leaf` is a member
+  of epoch `n`, derives the key and nonce of `generation`, checks the
+  commitment in constant time, then decrypts the content. It MUST refuse a
+  generation it has already decrypted.
+* **The reuse guard** keeps two devices that restored the same state from
+  reusing a nonce, as in MLS.
+
+### 4.6 Burst chains
+
+A sender signs at most once per burst; the signature covers every message
+of the epoch it sent so far:
+
+```text
+chain_-1  := ZERO32                                           for each sender, at each epoch
+chain_g   := H_L("msg-chain", [chain_g-1, H(CBOR_det([application_data_g, first_generation_g]))])
+signature := Card.Sign(CBOR_det([gid, epoch, leaf, first_generation, g, chain_g]))
+```
+
+under the context `city-g/message/v5`, carried by the content of message
+`g`. `first_generation` is the first generation after the sender's
+previous signature: every message of a burst carries it, and the signature
+at `g` covers the burst `first_generation..g`.
+
+* **Signing.** A sender whose last signature is older than `T_BURST` signs
+  at once: a message alone is signed. Otherwise it sends unsigned, and
+  signs at most `T_AUTH` after the first unsigned message of the burst,
+  with its next message or alone in a message whose `application_data` is
+  empty.
+* **Delivery.** A receiver delivers the messages of a burst to the
+  application only once it holds every message of the sender from
+  generation 0 to `g`, recomputes `chain_g`, and checks the signature
+  against the sender's card (section 4.1) (G3). It shows an unsigned
+  message as waiting, or holds it back, at most `T_AUTH` and a delivery
+  delay; without a signature by then, it drops the burst and reports it.
+* An insider can forge an unsigned message, but no signature will cover it
+  (research model `burst_chain.pv`); a chain authenticated by a key of the
+  epoch alone would let any member speak for the sender
+  (`burst_chain_mac_only.pv`).
+
+### 4.7 Key commitments and reports
+
+The commitment binds the message to its key: a receiver checks it, and a
+ciphertext opens to one content only (no "invisible salamanders"). To
+report message `g`, a member reveals `key` and `nonce` for the messages
+`g` to `g'`, the message whose signature covers `g`, and `chain_g-1`. A
+moderator (the DS or an admin) checks the commitments, decrypts, recomputes
+the chain from `chain_g-1`, checks the signature against the card of the
+sender's leaf of epoch `n`, and the messages' inclusion in the sealed log
+(section 4.8). Revealing these keys reveals no other message. Messages are
+signed: they are not deniable, as in MLS.
+
+### 4.8 The sealed message log
+
+```text
+SealBody gains: message_log := [count, root]               the log of epoch n - 1
+root := MTH("msg-log", [H(Message_1), ..., H(Message_count)])
+
+MTH(label, [])  := H_L(label, [])
+MTH(label, [d]) := H_L(label, [d])
+MTH(label, D)   := H_L(label, [MTH(label, D[0..k]), MTH(label, D[k..|D|])])
+                   k: the largest power of 2 below |D|
+```
+
+* **Order.** The DS numbers the messages of epoch `n - 1` in the order it
+  accepts them. It closes the log when it gives the sealer of the window
+  that creates epoch `n` its `message_log`, which the seal body carries;
+  it refuses messages of epoch `n - 1` from then on, and their senders
+  encrypt them again in epoch `n`.
+* **Transcript consistency** (G12). `message_log` enters `body_hash`, so
+  `seal_hash_n`, so every member's transcript: two members that accept
+  epoch `n` with the same interim transcript hash agree on the set and the
+  order of the messages of epoch `n - 1`. A sender cannot give two versions
+  of a generation to two receivers, and a DS that shows two members
+  different messages shows them two transcripts: a fork, which authorizer
+  checkpoints reveal.
+* **Verifiable delivery.** A sender checks that its messages are in the
+  log, with an inclusion proof (RFC 6962 §2.1.1): 448 bytes among 10,000
+  messages. A reader of a whole epoch recomputes the root.
+* **Serving.** The log of a closed epoch does not change and is
+  encrypted: caches can serve it without learning anything.
+* The sealer cannot check the log: it signs what the DS gives it. What
+  binds the DS is that every member accepts the same seal.
+
+### 4.9 The authorized mode
+
+```text
+GroupPolicy          := ["city-g/group-policy/v5", gid, admission_mode,
+                         max_idle_epochs or null, authorizer_pk or null, admin, signature]
+  admission_mode     := 0 closed | 1 open | 2 authorized, with authorizer_pk
+AuthorizationBatch   := ["city-g/authorization-batch/v5", gid, epoch, root, count, signature]
+  root               := MTH("authorized", [H(JoinRequest_1), ..., H(JoinRequest_count)])
+Authorization        := [batch, index, path]                    path: MTH inclusion proof
+AuthorizerCheckpoint := ["city-g/authorizer-checkpoint/v5", gid, epoch, H(GroupContext_n),
+                         confirmation_tag_n, kem_pk_hash(external_pk_n), signature]
+```
+
+Both authorizer objects are signed with `authorizer_pk` (an ML-DSA-65 key)
+under their labels.
+
+* **Joins.** In an authorized group a join carries no admission. The
+  authorizer signs, for the window that creates epoch `n`, the root of the
+  hashes of the join requests it authorizes; a join is valid with the
+  inclusion of its request's hash in such a batch, which the DS attaches
+  to it. Its token is `H(JoinRequest)`: it enters once. The DS, the
+  committers and the auditors check the batch's signature and the proof,
+  where v0.4 checks an admission (v0.4 §6, §10.3, §15). For 100,000 joins
+  there is one signature instead of 100,000, and 544 bytes of proof per
+  join instead of 3.3 KB (research model `batch_authorization.pv`; without
+  the signature of the root, the DS lets its own devices in:
+  `batch_authorization_unsigned.pv`).
+* **Checkpoints.** After each window, the authorizer checks it and signs
+  the checkpoint of the epoch it creates. It holds the group's public
+  state, checks the window as the DS does (v0.4 §14.5), compares its joins
+  with its batches, and recomputes the tree and registry hashes and the
+  group context; it signs the confirmation tag and the external key that
+  the seal carries, which it cannot compute. It needs no secret, and signs
+  at most one checkpoint per epoch.
+  * A joiner that trusts the authorizer's key checks this checkpoint and,
+    with its welcome, the tag, instead of a chain of seals (research model
+    `authorizer_anchor.pv`; unsigned, `authorizer_anchor_unsigned.pv`).
+    Without an answer from the authorizer, it falls back to the chain of
+    seals from the last checkpoint it trusts.
+  * A member that follows MAY require the checkpoint of epoch `n` before it
+    accepts the window that creates it. It has `H(GroupContext_n)` from
+    the header, and computes the tag and the external key: it downloads
+    the signature alone. No join its authorizer did not authorize passes,
+    even with the DS and a committer in collusion, and an insider allied to
+    the DS cannot lead it into an epoch the authorizer did not sign
+    (research models `authorizer_follow.pv`, and
+    `authorizer_follow_unchecked.pv` without the check). It pays in
+    liveness, since it waits for the checkpoint, and in bytes: a
+    checkpoint per window.
+* **Removals.** A `RemoveProposal` whose `proposer` is `null` is signed by
+  the authorizer; it is urgent (section 2.9).
+* **Trust.** The authorizer holds the place of MLS's authentication
+  service (G8): compromised, it lets in whom it wants, but every join
+  stays visible, committed by the seal and listed in the membership log.
+  It SHOULD be a service distinct from the DS, its key in a hardware
+  module; the same server as the DS can authorize its own devices, visibly.
+
+### 4.10 The membership log
+
+```text
+SealBody gains: membership_log := [count, root]              the window's changes
+root   := MTH("membership-log", [H(CBOR_det(record_1)), ..., H(CBOR_det(record_count))])
+record := [kind, leaf, device_id, card_prefix]               in change order (v0.4 §10.1)
+  card_prefix := the first 8 bytes of H_L("card", [card])
+```
+
+* A removal or an eviction names the device and card that leave the leaf;
+  a join, an update or a re-entry, those that the leaf holds after the
+  window.
+* A member downloads a window's records on demand and checks them against
+  the root, as MLS has every member check every change (G10): about 50
+  bytes per change, some 7 MB per day at 1.7 changes per second. A client shows the
+  changes, or keeps a log its user can examine when there are too many
+  (RFC 9750 §8.4.3.1). A proof that a device is a member costs 640 bytes.
+
+### 4.11 Security considerations
+
+* **What parity adds**, guarantee by guarantee: the sender hidden from the
+  DS (G2); senders authenticated by cards checked against the leaf of the
+  message's epoch, bursts delivered after their signature (G3); cards
+  that change with the leaf key (G4); unique keys (G5); the authorizer's
+  batches and checkpoints (G7 to G9); the membership log (G10); the
+  sealed message log against replays and deletions within an epoch (G12).
+* **What it does not change.** The DS can still fork the group, as with
+  MLS; a member that checks the checkpoints of an authorizer distinct from
+  the DS refuses the fork. Metadata: the DS sees the membership, since it
+  checks the requests, as an MLS DS that sees handshake messages in clear
+  (RFC 9750 §6.4). Fragmentation by an insider with a role stays bounded
+  by the tasks and named by disputes (section 3.8).
+* **The authorizer's availability** becomes the group's for members that
+  require its checkpoints.
+* **Readers outside the tree**, key bundles, public chains and custodians
+  (research note on the message plane, sections 3.1 and 3.8) are not part
+  of this profile: they do not have parity.
+
+### 4.12 Parameters
+
+| Name | Value |
+| --- | --- |
+| `T_BURST` | 2 s: a sender signs at once if its last signature is older |
+| `T_AUTH` | 5 s: the longest a burst waits for its signature |
+| `MAX_SKIP` | 1,024 generations kept ahead of the last decrypted |
+| `MAX_MESSAGE_BYTES` | 64 KiB per message, padding included |
 
 <a id="5-labels"></a>
 ## 5. Label registry
@@ -872,12 +1192,18 @@ Labels reserved for it: section 5.5.
 ### 5.2 Labelled hashes (`H_L`)
 
 Those of v0.4 §17.1, unchanged; they differ from v0.4's through the
-framing.
+framing. Stage 3 adds `tree/leaf-key`, `card` and `authorizer` (sections
+4.1, 4.2), `msg-chain`, `msg-commit` and `msg-log` (sections 4.6 to 4.8),
+`authorized` (section 4.9) and `membership-log` (section 4.10).
 
 ### 5.3 Derivation labels
 
-Those of v0.4 §17.2, `relay key` and `relay nonce` (section 2.3), and
-`task hedge` and `encaps coins` (section 3.3).
+Those of v0.4 §17.2, `relay key` and `relay nonce` (section 2.3),
+`task hedge` and `encaps coins` (section 3.3), and for stage 3 `sender
+data`, `encryption`, `exporter`, `authenticator` and `exported` (section
+4.3), `tree left`, `tree right`, `application`, `message key`, `message
+nonce` and `message secret` (section 4.4), `sender data key` and `sender
+data nonce` (section 4.5).
 
 ### 5.4 Encoded objects and signature contexts
 
@@ -890,18 +1216,13 @@ Every object label of v0.4 ends in `/v5` instead of `/v4`:
 unsigned `city-g/relay/v5`; for stage 2, `city-g/city-task/v5`,
 `city-g/repair-request/v5` and `city-g/dispute/v5` (signed),
 `city-g/repair/v5` (unsigned), and `city-g/dispute-statement/v5`, the
-encoding of a dispute's public inputs.
+encoding of a dispute's public inputs; for stage 3,
+`city-g/authorization-batch/v5` and `city-g/authorizer-checkpoint/v5`
+(signed by the authorizer), and `city-g/message/v5`, the message and the
+context of its card signatures.
 
 The FIPS 204 context of every signed object is its label, as in v0.4
 §17.3; the seal is signed under `city-g/seal/v5`.
-
-### 5.5 Reserved for stage 3
-
-| Kind | Labels |
-| --- | --- |
-| Encoded objects and signature contexts, stage 3 | `city-g/authorization-batch/v5`, `city-g/authorizer-checkpoint/v5` |
-| Labelled hashes, stage 3 | `tree/leaf-key`, `msg-chain`, `msg-commit`, `membership-log` |
-| Derivation labels, stage 3 | `sender data`, `encryption`, `exporter`, `authenticator` |
 
 <a id="6-changes"></a>
 ## 6. Changes from v0.4
@@ -928,6 +1249,12 @@ The FIPS 204 context of every signed object is its label, as in v0.4
 | §11 | Stage 2: a joiner does not welcome; members welcome the entries of a district that a joiner commits (section 3.4) |
 | §13.4 | Stage 2: entries by island (section 3.6) |
 | §14.4 | Stage 2: joiners perform tasks first (section 3.4); repair requests, repairs, exclusion without conviction and disputes (sections 3.7 and 3.8) |
+| §5.2, §5.3 | Stage 3: leaves carry a card; the leaf hash takes the leaf's summary (section 4.1) |
+| §6 | Stage 3: join, update and re-entry requests carry a card; the group policy gains the authorized mode and its key; the authorizer may propose removals (sections 4.1, 4.9) |
+| §8 | Stage 3: the registry gains the map of keys, `admission_mode` and the authorizer's key hash (section 4.2) |
+| §9, §19 | Stage 3: the message plane, from `msg_secret_n` (sections 4.3 to 4.8) |
+| §10.4 | Stage 3: the seal body gains the message log of the previous epoch and the membership log of the window (sections 4.8, 4.10) |
+| §12.9, §12.2 | Stage 3: joiners may anchor on an authorizer checkpoint, and members may require one (section 4.9) |
 
 Nothing of v0.4 decodes under this draft: every label changed.
 
@@ -970,5 +1297,13 @@ Nothing of v0.4 decodes under this draft: every label changed.
   not.
 * **Assignment under load**: how many tasks a joiner takes, and when a DS
   prefers a volunteer with a good network.
+* **Stage 3**, specified in section 4: not implemented. FN-DSA-512 cards
+  wait for FIPS 206. The research models of the message plane and of
+  parity (`research/formal-messages/`, `research/formal-parity/`) cover
+  the sender hidden, burst chains, cards checked against the epoch's leaf,
+  batches and authorizer checkpoints; the profile's own model does not yet,
+  nor the sealed message log, the membership log or unique keys. The
+  authorizer's availability for members that require its checkpoints, and
+  how a DS replicates the message log for caches, are open.
 * Everything v0.4 §19 lists, except the lighter structure for continuous
   churn, which this stage begins.

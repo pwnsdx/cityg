@@ -9,8 +9,8 @@
 
 The research note says why this design and what it costs. This note
 records its decisions (E-1 to E-14 for v0.4, E-15 and E-16 for stage 1 of
-the v0.5 draft, E-17 for its stage 2), what each one costs, and what was
-left out.
+the v0.5 draft, E-17 for its stage 2, E-18 for its stage 3), what each one
+costs, and what was left out.
 
 ## Starting point
 
@@ -464,6 +464,35 @@ Nor does a conviction re-key the performer's taints: it stays a member of
 the epoch, and its path gives it the root again. Its removal by an admin,
 on the evidence, re-keys them; a device whose key may have been stolen
 heals by its update.
+
+### E-18 — Parity: cards, a message plane, the authorized mode (v0.5 draft, stage 3)
+
+**Decision.** Leaves carry a card, the key that signs messages, drawn anew
+with each leaf key; the leaf hash takes the leaf's summary (`device_id`,
+the leaf key's hash, the card), so that a reader checks a card with about
+1 KB. The registry maps every leaf key and card: no key twice. The message
+plane derives from `msg_secret` the sender data, encryption, exporter and
+authenticator secrets; a secret tree over the leaves gives each sender a
+ratchet. Messages hide their sender from the DS, are signed once per burst
+by the sender's card and delivered after the signature, commit to their
+key, and are logged: the next seal commits the log of the epoch's
+messages. In an authorized group, an authorizer signs batches of joins and
+a checkpoint per epoch, on which joiners anchor and which members may
+require. Each seal commits the window's changes in a membership log.
+
+**Why.** The guarantees of MLS (research note on parity, sections 1 to 3):
+the sender hidden from the DS (G2), authenticated senders (G3) whose
+authentication heals (G4), unique keys (G5), an authentication service
+(G8), a known membership (G10), and, beyond MLS, the transcript's
+consistency within each epoch and the refusal of forks by members that
+check checkpoints (G7, G12).
+
+**Cost.** A member that reads 100 messages a day downloads about 213 KB
+(research synthesis, section 5). Required checkpoints cost a signature per
+window, and the membership log about 50 bytes per change, read on demand. The
+leaf keeps its device key, unlike the research note's leaf with
+`device_id`: no rule that takes a device key from the tree changes, and
+readers still download only the summary.
 
 ## Parameters
 

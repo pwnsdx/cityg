@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Protocol: the v0.5 draft, stage 3 (parity), specified
+
+- Stage 3 of the draft is specified in detail (section 4 of
+  [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
+  E-18), from the research notes on parity and on the message plane; it is
+  not implemented yet. Four parts, in the order of their implementation:
+  - **leaves with cards**: a card, the key that signs messages, beside the
+    leaf key, and changed with it; the leaf hash takes the leaf's summary
+    (`device_id`, the leaf key's hash, the card), so that a reader checks a
+    card with about 1 KB; the registry maps every leaf key and card, and
+    refuses one twice;
+  - **the message plane**: from `msg_secret`, the sender data, encryption,
+    exporter and authenticator secrets; a secret tree over the leaves with
+    a ratchet per sender; messages whose sender is encrypted, signed once
+    per burst by the sender's card and delivered after the signature, with
+    a key commitment for reports; the next seal commits the log of the
+    epoch's messages;
+  - **the authorized mode**: an authorizer's key in the group policy,
+    batches of authorized joins under one signature, and a checkpoint per
+    epoch, on which joiners anchor and which members may require before
+    they accept a window;
+  - **the membership log**: each seal commits the window's changes, about
+    50 bytes each, which members check on demand.
+- The leaf keeps its device key, unlike the research note's, so that no
+  rule that takes a device key from the tree changes: only its hash moves
+  to the summary.
+
 ### Protocol: the v0.5 draft, stage 2 (tasks)
 
 - Stage 2 of the draft is specified in detail (section 3 of
@@ -165,9 +192,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md): a delta on v0.4
   in three stages, from the research synthesis beyond 0.4. Stage 1 is
   specified and implemented in `cityg-core`; stage 2 (tasks, repairs,
-  disputes) is specified and partly implemented (above); stage 3 (parity
-  with MLS) is outlined, with its labels reserved. Design decisions E-15
-  and E-16.
+  disputes) is specified and implemented, the proof system of disputes
+  aside, and stage 3 (parity with MLS) is specified (above). Design
+  decisions E-15 and E-16.
 - **Islands read through relays.** The tree is read in islands of `2^c`
   leaves (`island_bits`, 8 by default, at most `L`, fixed at genesis and
   bound in the seal header, the group context and checkpoints). An island

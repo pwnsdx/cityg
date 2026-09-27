@@ -228,8 +228,8 @@ The architecture of 0.4 comes from a first research note,
 Fourteen more, in French, look at what comes next; the fifth gathers them
 into a candidate profile for the next version, in three stages, and the
 following ones work on its open problems. None of them is part of profile
-v0.4; the [v0.5 draft](docs/specs-v0.5-draft.md) specifies the first two
-stages and outlines the third.
+v0.4; the [v0.5 draft](docs/specs-v0.5-draft.md) specifies the three
+stages, and `cityg-core` implements the first two.
 
 | Note | Question | What it finds |
 | --- | --- | --- |
