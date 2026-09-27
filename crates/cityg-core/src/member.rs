@@ -15,7 +15,9 @@
 //! A [`Joiner`] enters from a checkpoint; a [`Returning`] member either
 //! jumps to the present with a welcome or re-enters its leaf. Both check
 //! the chain of seals from their anchor, and both can seal a window
-//! themselves when no member is online (E-7).
+//! themselves when no member is online (E-7). A joiner may also perform a
+//! task of the window it enters, on the state its chain of seals gives
+//! (E-17).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -27,13 +29,15 @@ use crate::commit::{
 };
 use crate::crypto::{
     Digest, Secret, Wrap, ZERO32, commit_secret, digest_eq, fresh_secret, kem_pk_hash, node_key,
+    task_hedge,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::identity::DeviceIdentity;
 use crate::kem::KemSecret;
 use crate::objects::{
-    Admission, CatchUpRequest, Checkpoint, CheckpointContent, GroupPolicy, Invite, JoinRequest,
-    ReEntryRequest, RemoveProposal, Request, UpdateRequest, Urgency, device_id, group_id,
+    Admission, CatchUpRequest, ChangeKind, Checkpoint, CheckpointContent, GroupPolicy, Invite,
+    JoinRequest, ReEntryRequest, RemoveProposal, Request, UpdateRequest, Urgency, device_id,
+    group_id,
 };
 use crate::packet::{Entry, EntrySteps, Packet, SealLink};
 use crate::rekey::{MemberPath, PathSecrets, WindowIndex};
@@ -48,8 +52,8 @@ use crate::top::{RelayContext, RelayElement, Top, flat_element, open_flat};
 use crate::tree::{CityPart, Divisions, LeafNode, Occupancy, Shape};
 use crate::welcome::Welcome;
 use crate::window::{
-    EpochHeader, PublicState, Requests, check_city_tasks, check_districts, check_sealer,
-    district_roots, genesis_tree, joins_of,
+    EpochHeader, PublicState, Requests, WindowShape, check_city_tasks, check_districts,
+    check_sealer, district_roots, genesis_tree, joins_of,
 };
 
 /// A removal the delivery service recorded and has not applied yet.
@@ -748,7 +752,15 @@ impl Member {
         )?;
         let delta = check_districts(state, &window, commits, requests, &sealer, false)?;
         let roots = district_roots(window.shape, commits)?;
-        check_city_tasks(state, &window, work.city_tasks, &roots, &delta, &sealer)?;
+        check_city_tasks(
+            state,
+            &window,
+            work.city_tasks,
+            &roots,
+            &delta,
+            &sealer,
+            requests,
+        )?;
         let root_secret = if commits.is_empty() && window.shape == self.header.shape {
             self.root.clone()
         } else {
@@ -844,8 +856,12 @@ impl Member {
                     )
                 }
                 WelcomeKind::Join | WelcomeKind::ReEntry => {
+                    // A change of a district commit the seal lists: the
+                    // member's own, or a joiner's, which cannot welcome
+                    // (docs/specs-v0.5-draft.md section 3.4).
                     let listed = commits.iter().any(|commit| {
-                        commit.committer == self.occupancy
+                        (commit.committer == self.occupancy
+                            || commit.committer.since == seal.header.epoch)
                             && commit.changes.iter().any(|c| c.request == welcome.request)
                             && seal
                                 .body
@@ -1035,6 +1051,104 @@ impl Joiner {
     pub fn follow(&mut self, links: &[SealLink]) -> CoreResult<()> {
         self.anchor = follow_all(&self.anchor, links)?;
         Ok(())
+    }
+
+    /// The occupancy the joiner takes in the window `task`, `[leaf, n]`:
+    /// that of its join among the window's changes.
+    pub fn occupancy_in(&self, task: &WindowTask) -> CoreResult<Occupancy> {
+        let reference = self.request.reference();
+        let change = task
+            .changes
+            .iter()
+            .find(|change| change.request == reference && change.kind == ChangeKind::Join)
+            .ok_or(CoreError::Invalid("join not in the window"))?;
+        Ok(Occupancy {
+            leaf: change.leaf,
+            since: task.epoch,
+        })
+    }
+
+    /// Commit district `district` of the window `task`, which the joiner
+    /// enters (docs/specs-v0.5-draft.md section 3.3). The joiner has followed
+    /// the chain of seals to the epoch before the window
+    /// ([`Joiner::follow`]); it checks the entries of the district, hedges
+    /// with its leaf seed, and erases what it drew once the commit is sent.
+    pub fn commit_district(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+        district: u32,
+        requests: &Requests,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<DistrictCommit> {
+        let (occupancy, window, hedge) = self.performer(state, task)?;
+        if task.committers.get(&district) != Some(&occupancy) {
+            return Err(CoreError::Unauthorized("not the district's committer"));
+        }
+        let (commit, drawn) = build_district(
+            state,
+            &window,
+            district,
+            requests,
+            occupancy,
+            &self.identity,
+            &hedge,
+            rng,
+        )?;
+        drop(drawn);
+        Ok(commit)
+    }
+
+    /// Perform the city task of `part` of the window `task`, which the
+    /// joiner enters (docs/specs-v0.5-draft.md sections 3.2 and 3.3), over
+    /// what `work` shows; as [`Joiner::commit_district`].
+    pub fn commit_city(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+        part: CityPart,
+        work: &WindowWork<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<CityTask> {
+        let (occupancy, window, hedge) = self.performer(state, task)?;
+        if task.city.get(&part) != Some(&occupancy) {
+            return Err(CoreError::Unauthorized("not the city task's performer"));
+        }
+        let (below, before) = work.base(state, &window, part)?;
+        let (city_task, drawn) = build_city_task(
+            &CityTaskInput {
+                state,
+                window: &window,
+                part,
+                below: &below,
+                before: &before,
+                performer: occupancy,
+            },
+            &self.identity,
+            &hedge,
+            rng,
+        )?;
+        drop(drawn);
+        Ok(city_task)
+    }
+
+    /// What a joiner checks before a task of the window `task`: the public
+    /// state against the last header of its chain of seals, a member window,
+    /// and its join among the window's changes. Returns its occupancy, the
+    /// window and the hedge of its secrets.
+    fn performer(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+    ) -> CoreResult<(Occupancy, WindowShape, Secret)> {
+        state.check_against(&self.anchor)?;
+        if task.entrant.is_some() {
+            return Err(CoreError::Unauthorized("a task of an entrant window"));
+        }
+        let occupancy = self.occupancy_in(task)?;
+        let window = task.window(state)?;
+        let hedge = task_hedge(self.leaf_key.seed(), &state.gid, task.epoch)?;
+        Ok((occupancy, window, hedge))
     }
 
     /// Enter the epoch a member sealed, with its welcome.

@@ -3,9 +3,9 @@
 | | |
 | --- | --- |
 | Profile | `city-g/v0.5-draft` |
-| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and its city tasks are implemented with members as performers (sections 3.1, 3.2, 3.4 and 3.5); stage 3 (section 4) is outlined, with its labels reserved. |
+| Status | Draft, written as a delta on v0.4. Stage 1 (section 2) is specified and implemented; stage 2 (section 3) is specified, except the proof system of disputes, and its tasks are implemented, joiners as performers included (sections 3.1 to 3.5); stage 3 (section 4) is outlined, with its labels reserved. |
 | Base | [specs.md](specs.md), profile `city-g/v0.4`: every rule this draft does not change holds, under the labels of section 5 |
-| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stage 1; the city tasks of stage 2) |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core) (stage 1; the tasks of stage 2) |
 | Design | [design.md](design.md) (decisions E-15 to E-17) |
 | Research | the three stages, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (section 3.6); îlots, relays and the maintained city, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (sections 2.4 to 2.8); urgent and ordinary removals and the parity profile, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md) (section 3); symbolic models of relays and îlots, [`research/formal-parity/`](research/formal-parity/README.md) (all research notes in French) |
 | Conformance | None yet: no test vectors (section 7) |
@@ -516,16 +516,28 @@ Replaces the member window of v0.4 §14.4.
 * **City tasks** go to joiners with no task, then to volunteers with no
   task, then to volunteers in turn.
 * **The sealer** is a volunteer: a member of epoch `n - 1` that the window
-  does not affect. Welcomes are assigned as in v0.4 §11.
+  does not affect.
+* **Welcomes.** A joiner cannot welcome: it learns `joiner_secret_n` from
+  its own welcome. The welcomes of a district that a member commits go to
+  that member (v0.4 §11); those of a district that a joiner commits go to
+  volunteers in turn. A welcomer welcomes a join or a re-entry only if it
+  is a change of a district commit that the seal lists, of its own or of a
+  joiner of the window, instead of its own alone (v0.4 §11). The entries
+  of a district that a joiner commits are checked by the joiner, like any
+  committer's, and sampled by auditors (v0.4 §15).
 * **Order.** The DS accepts a sub-city task once the district commits of
   that sub-city are in, and the top's once every sub-city task is: the
   sub-cities of a window proceed in parallel. It keeps the first commit or
   task it accepts for a district or a part, and refuses a different one.
-* **Failover.** A task not submitted in time goes to another performer, as
-  a district in v0.4 §14.4; the replaced performer's task is refused. When
-  a district changes hands, the tasks built on its commit, those of its
-  sub-city and of the top, are performed again; the other sub-cities' are
-  kept.
+* **Failover.** A task not submitted in time goes to another performer, a
+  member or a joiner of the window, as a district in v0.4 §14.4; the
+  replaced performer's task is refused. When a district changes hands, the
+  tasks built on its commit, those of its sub-city and of the top, are
+  performed again; the other sub-cities' are kept. A member that takes a
+  district takes its welcomes; when a joiner takes a member's district, the
+  member's welcomes go to the sealer.
+* **Members only.** A DS MAY give every task to members, as in v0.4:
+  performers and verifiers accept both.
 * **Entrant windows** do not change: the entrant performs every task and
   seals (v0.4 §12.7).
 
@@ -633,6 +645,11 @@ the branch's statement, over the member's key and the wrap in its context
   the taint rule re-keys what it drew.
 * **Taints** follow performers, joiners included: removing or updating a
   performer re-keys every node it drew (E-4).
+* **A joiner that commits a district** checks its entries as a member
+  committer does, and audits name it as they name a member (v0.4 §15). A
+  faulty joiner can place entries it should not, as a faulty member can in
+  v0.4, and is removed the same way. Members welcome such entries only from
+  a commit the seal lists.
 * **The sealer draws nothing** and learns nothing its own path does not
   give it.
 * **Forks.** Tasks bind the state they were built on; relay elements bind
@@ -757,6 +774,7 @@ The FIPS 204 context of every signed object is its label, as in v0.4
 | §7.3 | Stage 2: the city is re-keyed by city tasks, one per sub-city and one for the top (section 3.2) |
 | §10.3, §10.5 | Stage 2: a committer may be a joiner of the window, `[leaf, n]` (section 3.3) |
 | §10.4, §12.5 | Stage 2: the seal body lists city tasks instead of the city's nodes and wraps; the sealer draws nothing (section 3.5) |
+| §11 | Stage 2: a joiner does not welcome; members welcome the entries of a district that a joiner commits (section 3.4) |
 | §13.4 | Stage 2: entries by island (section 3.6) |
 | §14.4 | Stage 2: joiners perform tasks first (section 3.4); repairs and disputes (sections 3.7 and 3.8) |
 
@@ -784,9 +802,8 @@ Nothing of v0.4 decodes under this draft: every label changed.
   entries carry the island path (stage 2).
 * **Encodings** of island packets and top tasks, and test vectors, as for
   the objects v0.4 leaves open (v0.4 §19).
-* **The rest of stage 2** in `cityg-core`: joiner performers (section
-  3.3) and their assignment first (section 3.4), entries by island (section
-  3.6) and repairs (section 3.7).
+* **The rest of stage 2** in `cityg-core`: entries by island (section 3.6)
+  and repairs (section 3.7).
 * **The proof system of disputes** (section 3.8): the statements are
   measured in the research notes, in Longfellow; the encoding of `proof`,
   its verifier in the DS, and the size limits remain to be fixed.

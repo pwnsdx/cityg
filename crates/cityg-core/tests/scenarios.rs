@@ -928,6 +928,8 @@ fn a_failed_committer_is_replaced() {
     let mut sim = Sim::new(2, 14);
     sim.request_joins(7);
     sim.run_window();
+    // Members commit (the failover of a joiner: tests/tasks.rs).
+    sim.set_joiner_tasks(false);
     sim.request_joins(2);
     let task = sim.open_window();
     let (district, failed) = task
@@ -985,6 +987,8 @@ fn failed_committers_are_replaced_while_the_tree_grows() {
         .update_request(&mut sim.rng)
         .unwrap();
     sim.ds.submit_update(update, sim.now).unwrap();
+    // Members commit (the failover of a joiner: tests/tasks.rs).
+    sim.set_joiner_tasks(false);
     sim.request_joins(2);
     let task = sim.open_window();
     assert_eq!(task.height, 3);
@@ -1316,6 +1320,9 @@ fn joiners_check_the_chain_of_seals_from_their_checkpoint() {
         sim.request_joins(1);
         sim.run_window();
     }
+    // The late joiners stay outside the simulation, anchored on their
+    // checkpoint: members perform the window's tasks.
+    sim.set_joiner_tasks(false);
     let references: Vec<_> = late
         .iter()
         .map(|joiner| {

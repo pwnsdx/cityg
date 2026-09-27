@@ -14,7 +14,7 @@ use crate::crypto::{Digest, ZERO32, kem_pk_hash};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::check_device_key;
 use crate::kem::validate_public_key;
-use crate::objects::{ChangeKind, GroupPolicy, Request, device_id, group_id};
+use crate::objects::{ChangeKind, GroupPolicy, JoinRequest, Request, device_id, group_id};
 use crate::registry::{Registry, RegistryDelta, RegistryHeader};
 use crate::rekey::{
     self, LeafChanges, NewRoots, NodeUpdate, growth_nodes, plan_district, plan_part,
@@ -713,12 +713,39 @@ pub fn check_sealer(
     }
 }
 
-/// Check the committer of a district commit; returns its device key.
+/// The join request of `performer` if it is a joiner of the window: the
+/// occupancy `[leaf, n]` of a join among the window's changes
+/// (docs/specs-v0.5-draft.md section 3.3).
+#[must_use]
+pub fn joiner_request<'a>(
+    window: &WindowShape,
+    performer: Occupancy,
+    requests: &'a Requests,
+) -> Option<&'a JoinRequest> {
+    if performer.since != window.epoch || !window.shape.contains_leaf(performer.leaf) {
+        return None;
+    }
+    window
+        .district_changes(window.shape.district_of(performer.leaf))
+        .iter()
+        .filter(|change| change.leaf == performer.leaf && change.kind == ChangeKind::Join)
+        .find_map(|change| match requests.get(&change.request) {
+            Some(Request::Join(join)) => Some(join),
+            _ => None,
+        })
+}
+
+/// Check the committer of a district commit or the performer of a city
+/// task; returns its device key. It is a member of the previous epoch that
+/// the window leaves alone, or a joiner of the window, whose join is
+/// checked here (signature and admission, docs/specs-v0.5-draft.md section
+/// 3.3); in an entrant window, the entrant alone.
 pub fn check_committer(
     state: &PublicState,
     window: &WindowShape,
     committer: Occupancy,
     sealer: &SealerInfo,
+    requests: &Requests,
 ) -> CoreResult<Vec<u8>> {
     if sealer.entrant {
         if committer != sealer.occupancy {
@@ -727,6 +754,18 @@ pub fn check_committer(
             ));
         }
         return Ok(sealer.device_pk.clone());
+    }
+    if committer.since == window.epoch {
+        let join = joiner_request(window, committer, requests).ok_or(CoreError::Unauthorized(
+            "performer is not a joiner of the window",
+        ))?;
+        join.verify(
+            &state.gid,
+            window.epoch,
+            state.registry.admins(),
+            state.registry.is_open(),
+        )?;
+        return Ok(join.device_pk.clone());
     }
     let leaf = state
         .tree
@@ -908,6 +947,7 @@ pub fn check_city_tasks(
     district_roots: &NewRoots,
     delta: &TreeDelta,
     sealer: &SealerInfo,
+    requests: &Requests,
 ) -> CoreResult<BTreeMap<NodeId, Option<ParentNode>>> {
     if tasks.windows(2).any(|pair| pair[0].part >= pair[1].part)
         || window.parts != tasks.iter().map(|task| task.part).collect()
@@ -918,7 +958,7 @@ pub fn check_city_tasks(
     let mut after = delta.clone();
     let mut parents = BTreeMap::new();
     for task in tasks {
-        let performer_pk = check_committer(state, window, task.performer, sealer)?;
+        let performer_pk = check_committer(state, window, task.performer, sealer, requests)?;
         let below = part_below(window.shape, task.part, district_roots, &subcities);
         let keyed = check_city_task(state, window, task, &below, &after, &performer_pk)?;
         after.parents.extend(keyed.clone());
@@ -947,7 +987,7 @@ pub fn check_districts(
     }
     let mut delta = TreeDelta::default();
     for commit in commits {
-        let committer_pk = check_committer(state, window, commit.committer, sealer)?;
+        let committer_pk = check_committer(state, window, commit.committer, sealer, requests)?;
         let leaves = district_leaves(state, window, commit.district, requests, entries)?;
         let district = check_district_commit(state, window, commit, &leaves, &committer_pk)?;
         delta.leaves.extend(district.leaves);
@@ -1016,7 +1056,9 @@ pub fn check_window(
     )?;
     let mut delta = check_districts(state, &window, commits, requests, &sealer, entries)?;
     let roots = district_roots(shape, commits)?;
-    let city = check_city_tasks(state, &window, city_tasks, &roots, &delta, &sealer)?;
+    let city = check_city_tasks(
+        state, &window, city_tasks, &roots, &delta, &sealer, requests,
+    )?;
     delta.parents.extend(city);
     if Overlay::new(&state.tree, shape, &delta)?.tree_hash()? != header.tree_hash {
         return Err(CoreError::Invalid("tree hash"));

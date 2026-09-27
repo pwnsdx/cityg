@@ -16,6 +16,7 @@ use cityg_core::ds::{DeliveryService, DsConfig, TopChoice};
 use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::member::{Joiner, Member, Returning};
+use cityg_core::objects::ChangeKind;
 use cityg_core::packet::SealLink;
 use cityg_core::roles::{WindowTask, WindowWork};
 use cityg_core::tree::{Divisions, Occupancy};
@@ -91,6 +92,16 @@ impl Sim {
         };
         sim.set_all_online(true);
         sim
+    }
+
+    /// Whether the service gives tasks to the joiners of a window first
+    /// (docs/specs-v0.5-draft.md section 3.4), or to members only.
+    pub fn set_joiner_tasks(&mut self, on: bool) {
+        let config = DsConfig {
+            joiner_tasks: on,
+            ..*self.ds.config()
+        };
+        self.ds.set_config(config);
     }
 
     pub fn member(&self, occupancy: Occupancy) -> &Member {
@@ -210,9 +221,19 @@ impl Sim {
         let (_, requests, _) = self.ds.open_window_data().unwrap();
         let requests = requests.clone();
         for (district, committer) in &task.committers {
-            let commit = self.members[committer]
-                .commit_district(self.ds.state(), task, *district, &requests, &mut self.rng)
-                .unwrap();
+            let commit = if let Some(member) = self.members.get(committer) {
+                member.commit_district(self.ds.state(), task, *district, &requests, &mut self.rng)
+            } else {
+                let reference = self.ready_joiner(task, *committer);
+                self.joiners[&reference].commit_district(
+                    self.ds.state(),
+                    task,
+                    *district,
+                    &requests,
+                    &mut self.rng,
+                )
+            }
+            .unwrap();
             self.ds.submit_district_commit(commit).unwrap();
         }
         self.perform_city_tasks(task);
@@ -234,11 +255,40 @@ impl Sim {
                 city_tasks: &city_tasks,
                 requests: &requests,
             };
-            let city_task = self.members[performer]
-                .commit_city(self.ds.state(), task, *part, &work, &mut self.rng)
-                .unwrap();
+            let city_task = if let Some(member) = self.members.get(performer) {
+                member.commit_city(self.ds.state(), task, *part, &work, &mut self.rng)
+            } else {
+                let reference = self.ready_joiner(task, *performer);
+                self.joiners[&reference].commit_city(
+                    self.ds.state(),
+                    task,
+                    *part,
+                    &work,
+                    &mut self.rng,
+                )
+            }
+            .unwrap();
             self.ds.submit_city_task(city_task).unwrap();
         }
+    }
+
+    /// The joiner that takes `occupancy` in the open window `task`, once it
+    /// has followed the chain of seals to the current epoch
+    /// (docs/specs-v0.5-draft.md section 3.3). Returns its request.
+    pub fn ready_joiner(&mut self, task: &WindowTask, occupancy: Occupancy) -> [u8; 32] {
+        let reference = task
+            .changes
+            .iter()
+            .find(|change| change.leaf == occupancy.leaf && change.kind == ChangeKind::Join)
+            .map(|change| change.request)
+            .expect("a joiner of the window");
+        let links = self.links(self.joiners[&reference].anchor().epoch);
+        self.joiners
+            .get_mut(&reference)
+            .expect("the joiner")
+            .follow(&links)
+            .unwrap();
+        reference
     }
 
     /// The open window's sealer seals what the DS shows, following the

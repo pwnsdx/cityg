@@ -20,9 +20,9 @@ with X25519) and ML-DSA-65.
 > [`cityg-core`](crates/cityg-core) with an in-memory delivery service. The
 > core implements stage 1 of the [v0.5 draft](docs/specs-v0.5-draft.md), a
 > delta on v0.4: members may read the tree by island through relays, and
-> removals are urgent or ordinary. It also implements the city tasks of
-> stage 2: members re-key the city by sub-city, and the sealer draws
-> nothing. The message plane, the networked
+> removals are urgent or ordinary. It also implements the tasks of stage 2:
+> the city is re-keyed by sub-city, the window's joiners perform tasks
+> first, and the sealer draws nothing. The message plane, the networked
 > delivery service and the clients do not exist yet
 > ([specification, section 19](docs/specs.md#19-open-items)). There are no
 > test vectors and no independent human cryptographic review: **for
@@ -281,10 +281,11 @@ invites, anchored joins, and open groups. Those of
 `crates/cityg-core/tests/islands.rs` run island followers: relays, flat
 elements, a relay that lies, replays, a sealer that refreshes its path, a
 removed member facing its island's top, and urgent and ordinary removals.
-Those of `crates/cityg-core/tests/tasks.rs` run the city tasks: sub-cities
-and a top re-keyed by their own performers, tasks that wait for what they
+Those of `crates/cityg-core/tests/tasks.rs` run the tasks: sub-cities and
+a top re-keyed by their own performers, tasks that wait for what they
 build on, failed performers replaced, a removed performer's parts re-keyed,
-and an entrant that performs every task.
+an entrant that performs every task, and joiners that perform the tasks of
+the window they enter from the state their chain of seals gives.
 
 ## Contributing
 

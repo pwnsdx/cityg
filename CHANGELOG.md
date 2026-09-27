@@ -7,14 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Protocol: the v0.5 draft, stage 2 (city tasks)
+### Protocol: the v0.5 draft, stage 2 (tasks)
 
 - Stage 2 of the draft is specified in detail (section 3 of
   [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
   E-17): sub-cities, city tasks, joiners as performers, entries by island,
-  repairs, and disputes, whose proof system stays open. Its city tasks are
-  implemented in `cityg-core`, with members as performers; joiner
-  performers, entries by island and repairs are not yet.
+  repairs, and disputes, whose proof system stays open. Its tasks are
+  implemented in `cityg-core`, joiners as performers included; entries by
+  island and repairs are not yet.
 - **Sub-cities and the top.** The shape gains `subcity_bits` (`S`, 8 by
   default, fixed at genesis), bound after `island_bits` in the seal header,
   the group context and checkpoints: sub-cities of `2^S` districts, and a
@@ -34,13 +34,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seal body lists the city tasks by part and hash instead of the city's
   nodes and wraps: in the scale test, the seal weighs 5.4 KB instead of
   51 KB, and the city's task 48.9 KB.
-- **Delivery service.** City tasks go to volunteers with no task, then to
-  volunteers in turn; an entrant performs every task. A sub-city task is
+- **Joiners perform tasks.** A district commit or a city task may be
+  performed by a joiner of the window, as the occupancy `[leaf, n]` its
+  join takes (`Joiner::commit_district`, `Joiner::commit_city`). It follows
+  the chain of seals to the previous epoch first and checks the state it
+  is shown against it; it hedges its secrets with its leaf seed
+  (`task_hedge`), since it does not know the previous init secret. A
+  verifier takes its device key from its join, which it checks
+  (`check_committer` takes the window's requests); what it draws is tainted
+  by `[leaf, n]`. A joiner cannot welcome: the welcomes of its district go
+  to members in turn, and a member welcomes a join from its own commit or a
+  joiner's.
+- **Delivery service.** Tasks go to the window's joiners first: each
+  district to a joiner that takes one of its leaves, else to a joiner with
+  no task, else to a volunteer; city tasks to joiners with no task, then to
+  volunteers with no task, then to volunteers in turn
+  (`DsConfig::joiner_tasks`, on by default; `set_config`). An entrant
+  performs every task of its window. A sub-city task is
   accepted once the commits of its districts are in, and the top's once
   every sub-city task is; a second, different commit or task for the same
   district or part is refused. `reassign_city` gives a part to another
-  performer; reassigning a district drops only the tasks of its sub-city
-  and of the top.
+  performer, a member or a joiner; reassigning a district drops only the
+  tasks of its sub-city and of the top, and moves its welcomes.
 - Breaking: the seal header, the group context and checkpoints gain
   `subcity_bits`; `SealBody` lists the city tasks (`city`) instead of
   `city_updates` and `city_wraps`; `plan_part` and `build_city_task`
@@ -51,8 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scenario tests in `crates/cityg-core/tests/tasks.rs`: sub-cities and the
   top re-keyed by their own tasks while the sealer performs none, tasks that
   wait for what they build on, a failed performer replaced, a district
-  reassigned, a removed performer whose parts are re-keyed, and an entrant
-  that performs every task. The scale test runs the city tasks and checks
+  reassigned, a removed performer whose parts are re-keyed, an entrant that
+  performs every task, joiners that perform the tasks of the window they
+  enter and are welcomed by members, a joiner that performs only on the
+  state its chain of seals gives, a failed joiner replaced by a member, and
+  a member that welcomes a join only from its own commit or a joiner's.
+  Every other scenario test with joins now has joiners perform tasks; three
+  tests of member committers turn joiner tasks off. The scale test runs the city tasks and checks
   the cost model with a boundary above the sub-cities
   (`CITYG_SCALE_SUBCITY_BITS`, 8 by default): 33 tasks for 4,096 members
   in sub-cities of eight districts.

@@ -146,6 +146,15 @@ pub fn fresh_secret(hedge: &[u8; 32], rng: &mut impl CryptoRngCore) -> CoreResul
     derive_secret(&prk, "fresh node")
 }
 
+/// The hedge of a joiner's fresh secrets when it performs a task
+/// (docs/specs-v0.5-draft.md section 3.3): `ExpandLabel(leaf_seed, "task
+/// hedge", CBOR_det([gid, epoch]), 32)`, from the seed of the leaf key of
+/// its join request, since it does not know `init_n-1`.
+pub fn task_hedge(leaf_seed: &[u8; 32], gid: &Digest, epoch: u64) -> CoreResult<Secret> {
+    let context = encode(&array(vec![bytes(gid), uint(epoch)]))?;
+    expand_label32(leaf_seed, "task hedge", &context)
+}
+
 /// A node secret wrapped to one child of the node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wrap {
@@ -340,5 +349,15 @@ mod tests {
         let mut c = ChaCha20Rng::seed_from_u64(2);
         assert_ne!(*first, *fresh_secret(&[2u8; 32], &mut c).unwrap());
         assert_ne!(*first, *fresh_secret(&[1u8; 32], &mut a).unwrap());
+    }
+
+    #[test]
+    fn task_hedges_bind_the_seed_the_group_and_the_epoch() {
+        let hedge = task_hedge(&[1; 32], &[2; 32], 3).unwrap();
+        assert_eq!(*hedge, *task_hedge(&[1; 32], &[2; 32], 3).unwrap());
+        assert_ne!(*hedge, *task_hedge(&[9; 32], &[2; 32], 3).unwrap());
+        assert_ne!(*hedge, *task_hedge(&[1; 32], &[9; 32], 3).unwrap());
+        assert_ne!(*hedge, *task_hedge(&[1; 32], &[2; 32], 4).unwrap());
+        assert_ne!(*hedge, [1; 32]);
     }
 }

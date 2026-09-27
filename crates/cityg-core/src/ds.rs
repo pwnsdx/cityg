@@ -4,9 +4,9 @@
 //! It never draws a group secret and never signs a group object. It records
 //! requests after checking them, closes windows (E-1) at the cadence of
 //! their removals (E-16), places joins (E-11), assigns the roles of a
-//! window among online members or, with nobody online, to an entrant (E-3,
-//! E-7): its district commits, its city tasks (E-17) and its seal; checks
-//! what the roles send back, assigns the relays and flat
+//! window among its joiners and online members or, with nobody online, to
+//! an entrant (E-3, E-7, E-17): its district commits, its city tasks and
+//! its seal; checks what the roles send back, assigns the relays and flat
 //! elements of each window's islands (E-15), serves one packet per member,
 //! whole or by island (E-13, E-15), the chains of seals and the entries of
 //! joiners and returning members (E-8, E-10), keeps the latest wrap of
@@ -39,7 +39,8 @@ use crate::tree::{
 use crate::welcome::Welcome;
 use crate::window::{
     PublicState, Requests, SealerInfo, WindowShape, check_city_task, check_committer,
-    check_district_commit, check_entry, check_sealer, check_window, district_leaves, needed_height,
+    check_district_commit, check_entry, check_sealer, check_window, district_leaves,
+    joiner_request, needed_height,
 };
 
 /// Timing of windows (E-16).
@@ -50,6 +51,9 @@ pub struct DsConfig {
     pub window_ordinary_ms: u64,
     /// Window length when an urgent removal is pending (`WINDOW_URGENT`).
     pub window_urgent_ms: u64,
+    /// Give a window's tasks to its joiners first (docs/specs-v0.5-draft.md
+    /// section 3.4); otherwise to members only, as in v0.4.
+    pub joiner_tasks: bool,
 }
 
 impl Default for DsConfig {
@@ -57,6 +61,7 @@ impl Default for DsConfig {
         Self {
             window_ordinary_ms: 60_000,
             window_urgent_ms: 5_000,
+            joiner_tasks: true,
         }
     }
 }
@@ -322,6 +327,12 @@ impl DeliveryService {
     #[must_use]
     pub const fn config(&self) -> &DsConfig {
         &self.config
+    }
+
+    /// Change the timing and assignment rules; windows opened afterwards
+    /// follow them.
+    pub fn set_config(&mut self, config: DsConfig) {
+        self.config = config;
     }
 
     /// Mark a member online (a volunteer for roles) or offline.
@@ -792,6 +803,32 @@ impl DeliveryService {
             let city = window.parts.iter().map(|part| (*part, occupancy)).collect();
             (committers, city, occupancy, Some(entrant.request))
         } else {
+            // Joiners first (docs/specs-v0.5-draft.md section 3.4): the
+            // window's joins, as the occupancies they take. Each district
+            // goes to a joiner that takes a leaf of it, else to a joiner with
+            // no task, else to a volunteer of the district, else to
+            // volunteers in turn.
+            let joiners: Vec<Occupancy> = if self.config.joiner_tasks {
+                changes
+                    .iter()
+                    .filter(|change| change.kind == ChangeKind::Join)
+                    .map(|change| Occupancy {
+                        leaf: change.leaf,
+                        since: epoch,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut busy: BTreeSet<Occupancy> = BTreeSet::new();
+            let mut committers = BTreeMap::new();
+            for joiner in &joiners {
+                let district = shape.district_of(joiner.leaf);
+                if window.districts.contains(&district) && !committers.contains_key(&district) {
+                    committers.insert(district, *joiner);
+                    busy.insert(*joiner);
+                }
+            }
             let mut by_district: BTreeMap<u32, Occupancy> = BTreeMap::new();
             for volunteer in &volunteers {
                 by_district
@@ -799,30 +836,38 @@ impl DeliveryService {
                     .or_insert(*volunteer);
             }
             let mut next = 0usize;
-            let mut committers = BTreeMap::new();
             for district in &window.districts {
-                let committer = by_district.get(district).copied().unwrap_or_else(|| {
-                    let chosen = volunteers[next % volunteers.len()];
-                    next += 1;
-                    chosen
-                });
+                if committers.contains_key(district) {
+                    continue;
+                }
+                let committer = joiners
+                    .iter()
+                    .copied()
+                    .find(|joiner| !busy.contains(joiner))
+                    .or_else(|| by_district.get(district).copied())
+                    .unwrap_or_else(|| {
+                        let chosen = volunteers[next % volunteers.len()];
+                        next += 1;
+                        chosen
+                    });
+                busy.insert(committer);
                 committers.insert(*district, committer);
             }
-            let mut busy: BTreeSet<Occupancy> = committers.values().copied().collect();
             let sealer = volunteers
                 .iter()
                 .copied()
                 .find(|volunteer| !busy.contains(volunteer))
                 .unwrap_or(volunteers[0]);
-            // City tasks: volunteers with no task, then volunteers in turn
-            // (docs/specs-v0.5-draft.md section 3.4).
+            // City tasks: joiners with no task, then volunteers with no
+            // task, then volunteers in turn.
             busy.insert(sealer);
             let mut city = BTreeMap::new();
             for part in &window.parts {
-                let performer = volunteers
+                let performer = joiners
                     .iter()
+                    .chain(&volunteers)
                     .copied()
-                    .find(|volunteer| !busy.contains(volunteer))
+                    .find(|performer| !busy.contains(performer))
                     .unwrap_or_else(|| {
                         let chosen = volunteers[next % volunteers.len()];
                         next += 1;
@@ -832,6 +877,25 @@ impl DeliveryService {
                 city.insert(*part, performer);
             }
             (committers, city, sealer, None)
+        };
+        // Welcomers (v0.4 §11): the committer of the district when it is a
+        // member, members in turn when it is a joiner, which cannot welcome
+        // (docs/specs-v0.5-draft.md section 3.4), the sealer for a catch-up
+        // outside the window's districts, and the entrant in its window.
+        let mut turn = 0usize;
+        let mut welcomer_of = |leaf: u32| -> Occupancy {
+            if entrant.is_some() {
+                return sealer;
+            }
+            match committers.get(&shape.district_of(leaf)) {
+                Some(committer) if committer.since < epoch => *committer,
+                Some(_) => {
+                    let chosen = volunteers[turn % volunteers.len()];
+                    turn += 1;
+                    chosen
+                }
+                None => sealer,
+            }
         };
         let mut welcomes = Vec::new();
         for change in &changes {
@@ -843,10 +907,7 @@ impl DeliveryService {
             if Some(change.request) == entrant {
                 continue;
             }
-            let welcomer = committers
-                .get(&shape.district_of(change.leaf))
-                .copied()
-                .unwrap_or(sealer);
+            let welcomer = welcomer_of(change.leaf);
             welcomes.push(WelcomeTask {
                 kind,
                 request: change.request,
@@ -855,10 +916,7 @@ impl DeliveryService {
         }
         let mut catch_up_map = CatchUps::new();
         for request in catch_ups {
-            let welcomer = committers
-                .get(&shape.district_of(request.member.leaf))
-                .copied()
-                .unwrap_or(sealer);
+            let welcomer = welcomer_of(request.member.leaf);
             welcomes.push(WelcomeTask {
                 kind: WelcomeKind::CatchUp,
                 request: request.reference(),
@@ -933,22 +991,21 @@ impl DeliveryService {
     /// Give district `district` of the open window to another committer
     /// (a committer that failed); a commit already received is dropped.
     pub fn reassign(&mut self, district: u32, committer: Occupancy) -> CoreResult<WindowTask> {
+        if !self.may_perform(committer) {
+            return Err(CoreError::Invalid("committer"));
+        }
         let open = self
             .open
             .as_mut()
             .ok_or(CoreError::Invalid("no open window"))?;
-        if open.task.entrant.is_some()
-            || !self.state.tree.is_member(committer)
-            || open.window.affected.contains(&committer)
-        {
-            return Err(CoreError::Invalid("committer"));
-        }
         let old = open
             .task
             .committers
             .insert(district, committer)
             .ok_or(CoreError::Invalid("district not in the window"))?;
         let shape = open.window.shape;
+        let member = committer.since < open.task.epoch;
+        let sealer = open.task.sealer;
         for welcome in &mut open.task.welcomes {
             let leaf = match welcome.kind {
                 WelcomeKind::CatchUp => open
@@ -962,10 +1019,15 @@ impl DeliveryService {
                     .find(|change| change.request == welcome.request)
                     .map(|change| change.leaf),
             };
-            if welcome.welcomer == old
-                && leaf.is_some_and(|leaf| shape.district_of(leaf) == district)
-            {
+            if leaf.is_none_or(|leaf| shape.district_of(leaf) != district) {
+                continue;
+            }
+            // A member committer welcomes its district; a joiner cannot, so
+            // the old committer's welcomes go to the sealer.
+            if member {
                 welcome.welcomer = committer;
+            } else if welcome.welcomer == old {
+                welcome.welcomer = sealer;
             }
         }
         open.commits.remove(&district);
@@ -987,16 +1049,13 @@ impl DeliveryService {
         part: CityPart,
         performer: Occupancy,
     ) -> CoreResult<WindowTask> {
+        if !self.may_perform(performer) {
+            return Err(CoreError::Invalid("performer"));
+        }
         let open = self
             .open
             .as_mut()
             .ok_or(CoreError::Invalid("no open window"))?;
-        if open.task.entrant.is_some()
-            || !self.state.tree.is_member(performer)
-            || open.window.affected.contains(&performer)
-        {
-            return Err(CoreError::Invalid("performer"));
-        }
         let slot = open
             .task
             .city
@@ -1006,6 +1065,25 @@ impl DeliveryService {
         open.city_tasks.remove(&part);
         open.city_tasks.remove(&CityPart::Top);
         Ok(open.task.clone())
+    }
+
+    /// Whether `performer` may take over a task of the open window, a member
+    /// window: a member the service accepts from and the window leaves
+    /// alone, or a joiner of the window (docs/specs-v0.5-draft.md section
+    /// 3.3).
+    fn may_perform(&self, performer: Occupancy) -> bool {
+        self.open.as_ref().is_some_and(|open| {
+            open.task.entrant.is_none()
+                && !open.window.affected.contains(&performer)
+                && self.accepts_performer(open, performer)
+        })
+    }
+
+    /// Whether the service takes a task of the open window from
+    /// `performer`: a member it accepts from, or a joiner of the window.
+    fn accepts_performer(&self, open: &OpenWindow, performer: Occupancy) -> bool {
+        self.accepts_from(performer)
+            || joiner_request(&open.window, performer, &open.requests).is_some()
     }
 
     /// Drop the open window; its requests stay queued.
@@ -1031,11 +1109,16 @@ impl DeliveryService {
                 Err(CoreError::Invalid("district already committed"))
             };
         }
-        if !open.sealer.entrant && !self.accepts_from(commit.committer) {
+        if !open.sealer.entrant && !self.accepts_performer(open, commit.committer) {
             return Err(CoreError::Unauthorized("committer removed"));
         }
-        let committer_pk =
-            check_committer(&self.state, &open.window, commit.committer, &open.sealer)?;
+        let committer_pk = check_committer(
+            &self.state,
+            &open.window,
+            commit.committer,
+            &open.sealer,
+            &open.requests,
+        )?;
         let leaves = district_leaves(
             &self.state,
             &open.window,
@@ -1061,7 +1144,7 @@ impl DeliveryService {
         if open.task.city.get(&city_task.part) != Some(&city_task.performer) {
             return Err(CoreError::Unauthorized("not the city task's performer"));
         }
-        if !open.sealer.entrant && !self.accepts_from(city_task.performer) {
+        if !open.sealer.entrant && !self.accepts_performer(open, city_task.performer) {
             return Err(CoreError::Unauthorized("performer removed"));
         }
         if let Some(kept) = open.city_tasks.get(&city_task.part) {
@@ -1089,8 +1172,13 @@ impl DeliveryService {
         if !ready {
             return Err(CoreError::Invalid("city task before what it builds on"));
         }
-        let performer_pk =
-            check_committer(&self.state, &open.window, city_task.performer, &open.sealer)?;
+        let performer_pk = check_committer(
+            &self.state,
+            &open.window,
+            city_task.performer,
+            &open.sealer,
+            &open.requests,
+        )?;
         let commits: Vec<DistrictCommit> = open.commits.values().cloned().collect();
         let tasks: Vec<CityTask> = open.city_tasks.values().cloned().collect();
         let work = WindowWork {

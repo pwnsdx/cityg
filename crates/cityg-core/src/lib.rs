@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
-//! City-G protocol core, profile `city-g/v0.5-draft`, stage 1 and the city
-//! tasks of stage 2 (`docs/specs-v0.5-draft.md`, a delta on `city-g/v0.4`,
+//! City-G protocol core, profile `city-g/v0.5-draft`, stage 1 and the tasks
+//! of stage 2 (`docs/specs-v0.5-draft.md`, a delta on `city-g/v0.4`,
 //! `docs/specs.md`): end-to-end encrypted groups of up to millions of
 //! members, whose tree is split into districts under a city of sub-cities
-//! and a top, re-keyed once per window by district commits and city tasks,
-//! and read by island through relays.
+//! and a top, re-keyed once per window by district commits and city tasks
+//! that members and the window's joiners perform, and read by island
+//! through relays.
 //!
 //! The crate performs no I/O. Every input of randomness comes from a
 //! caller-provided [`rand_core::CryptoRngCore`], so that runs are
