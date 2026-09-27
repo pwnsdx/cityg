@@ -6,8 +6,10 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use cityg_core::audit::{self, Verdict};
-use cityg_core::authorizer::{Authorizer, SealedWindow, authorizer_pk_hash};
+use cityg_core::authorizer::{AuthorizationBatch, Authorizer, SealedWindow, authorizer_pk_hash};
 use cityg_core::card::{CardKey, LeafKeys};
 use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
@@ -84,12 +86,32 @@ fn an_authorized_group_admits_the_joins_its_authorizer_signs() {
     let (epoch, mut waiting) = sim.ds.awaiting_authorization();
     assert_eq!((epoch, waiting.len()), (sim.ds.epoch() + 1, 3));
     let later = waiting.pop().unwrap();
-    let authorized = authorizer.authorize(epoch, waiting, &mut sim.rng).unwrap();
+    // Each with a copy of the batch of its own, which the DS checks once and
+    // keeps once: the joins of the window share it.
+    let mut authorized = authorizer.authorize(epoch, waiting, &mut sim.rng).unwrap();
+    for join in &mut authorized {
+        let authorization = join.authorization.as_mut().unwrap();
+        authorization.batch =
+            Arc::new(AuthorizationBatch::decode(authorization.batch.encoded()).unwrap());
+    }
     assert_eq!(sim.ds.submit_authorizations(authorized).unwrap(), 2);
     let before = sim.members.len();
     sim.run_window();
     sim.assert_agreement();
     assert_eq!(sim.members.len(), before + 2);
+    let batches: Vec<&Arc<AuthorizationBatch>> = sim
+        .ds
+        .window(epoch)
+        .unwrap()
+        .requests
+        .values()
+        .filter_map(|request| match request {
+            Request::Join(join) => join.authorization.as_ref().map(|a| &a.batch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(batches.len(), 2);
+    assert!(Arc::ptr_eq(batches[0], batches[1]));
     // The third still waits; a batch for a past window does not pass.
     let (next, waiting) = sim.ds.awaiting_authorization();
     assert_eq!(waiting, vec![later]);

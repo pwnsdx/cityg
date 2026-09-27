@@ -15,6 +15,7 @@
 //! admin-signed policy, and keeps the records auditors sample (E-12).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::audit::{AuditRecord, records};
 use crate::authorizer::{AuthorizerCheckpoint, CheckpointedEpoch};
@@ -490,25 +491,29 @@ impl DeliveryService {
 
     /// Attach the authorizer's authorizations to queued joins, for the next
     /// window: each batch's signature is checked once against the
-    /// authorizer's key in force, and each join's proof in it. Returns how
-    /// many joins it authorized.
-    pub fn submit_authorizations(&mut self, joins: Vec<JoinRequest>) -> CoreResult<usize> {
+    /// authorizer's key in force, and each join's proof in it. The joins of
+    /// a batch share it, which later checks find checked. Returns how many
+    /// joins it authorized.
+    pub fn submit_authorizations(&mut self, mut joins: Vec<JoinRequest>) -> CoreResult<usize> {
         let epoch = self.next_epoch();
         let gid = self.state.gid;
         let admitters = self.state.admitters()?;
         let key = admitters
             .authorizer_pk
             .ok_or(CoreError::Invalid("the group is not authorized"))?;
-        let mut checked = HashSet::new();
-        for join in &joins {
+        let mut batches = HashMap::new();
+        for join in &mut joins {
+            let reference = join.reference();
             let authorization = join
                 .authorization
-                .as_ref()
+                .as_mut()
                 .ok_or(CoreError::Unauthorized("join without authorization"))?;
-            if checked.insert(crate::crypto::h(authorization.batch.encoded())) {
-                authorization.batch.verify(&gid, key)?;
-            }
-            authorization.check_proof(epoch, &join.reference())?;
+            authorization.batch = Arc::clone(
+                batches
+                    .entry(crate::crypto::h(authorization.batch.encoded()))
+                    .or_insert_with(|| Arc::clone(&authorization.batch)),
+            );
+            authorization.verify(&gid, epoch, &reference, key)?;
         }
         let mut authorized = 0;
         for join in joins {

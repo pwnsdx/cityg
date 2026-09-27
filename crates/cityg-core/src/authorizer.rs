@@ -15,7 +15,8 @@
 //! Both are signed with the authorizer's ML-DSA-65 key under their labels.
 //! A join in an authorized group carries no admission: the DS attaches its
 //! authorization, the batch of the window and the proof of the request's
-//! hash in it. One signature covers every join of a window.
+//! hash in it. One signature covers every join of a window, and the joins
+//! share their batch, whose signature a verifier checks once.
 //!
 //! The authorizer follows the group's public state, checks each window as
 //! the DS does and signs the checkpoint of the epoch it creates. A joiner
@@ -23,7 +24,7 @@
 //! ([`CheckpointedEpoch`]); a member may require it before it accepts a
 //! window.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use cityg_pqc::SignatureContext;
 use rand_core::CryptoRngCore;
@@ -69,7 +70,21 @@ pub struct AuthorizationBatch {
     pub root: Digest,
     pub count: u64,
     signed: Signed,
+    checked: CheckedKey,
 }
+
+/// The hash of the key a batch's signature was checked against, once it
+/// is: a cache, which equality ignores.
+#[derive(Clone, Debug, Default)]
+struct CheckedKey(OnceLock<Digest>);
+
+impl PartialEq for CheckedKey {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for CheckedKey {}
 
 impl AuthorizationBatch {
     fn sign(
@@ -110,6 +125,7 @@ impl AuthorizationBatch {
             root: fields.digest()?,
             count: fields.uint()?,
             signed,
+            checked: CheckedKey::default(),
         })
     }
 
@@ -119,16 +135,25 @@ impl AuthorizationBatch {
         &self.signed.encoded
     }
 
-    /// Check the authorizer's signature.
+    /// Check the authorizer's signature. The joins of a window share their
+    /// batch: the signature is checked the first time, and the checks that
+    /// follow against the same key compare its hash.
     pub fn verify(&self, gid: &Digest, authorizer_pk: &[u8]) -> CoreResult<()> {
         if self.gid != *gid {
             return Err(CoreError::Invalid("authorization batch for another group"));
+        }
+        let key = authorizer_pk_hash(authorizer_pk)?;
+        if self.checked.0.get() == Some(&key) {
+            return Ok(());
         }
         self.signed.verify(
             authorizer_pk,
             SignatureContext::AUTHORIZATION_BATCH,
             "authorization batch",
-        )
+        )?;
+        // A batch checked against a second key keeps the first.
+        let _ = self.checked.0.set(key);
+        Ok(())
     }
 }
 
@@ -152,16 +177,10 @@ impl Authorization {
         request: &Digest,
         authorizer_pk: &[u8],
     ) -> CoreResult<()> {
-        self.batch.verify(gid, authorizer_pk)?;
-        self.check_proof(epoch, request)
-    }
-
-    /// Check the window and the proof alone, for a batch whose signature
-    /// is already checked.
-    pub fn check_proof(&self, epoch: u64, request: &Digest) -> CoreResult<()> {
         if self.batch.epoch != epoch {
             return Err(CoreError::Invalid("authorization for another window"));
         }
+        self.batch.verify(gid, authorizer_pk)?;
         merkle::verify_inclusion(
             AUTHORIZED_LABEL,
             &self.batch.root,
@@ -538,13 +557,19 @@ mod tests {
             // For its window only.
             assert!(request.verify(&gid, 8, &admitters).is_err());
         }
-        // One signature for the batch; the proofs are short.
+        // One signature for the batch, which the joins share and a verifier
+        // checks once; the proofs are short.
         let batch = &authorized[0].authorization.as_ref().unwrap().batch;
         assert_eq!(batch.count, 5);
-        assert_eq!(
-            *batch,
-            AuthorizationBatch::decode(batch.encoded()).unwrap().into()
+        assert!(
+            authorized
+                .iter()
+                .all(|request| Arc::ptr_eq(&request.authorization.as_ref().unwrap().batch, batch))
         );
+        assert_eq!(batch.checked.0.get(), Some(&hash));
+        let fresh = AuthorizationBatch::decode(batch.encoded()).unwrap();
+        assert!(fresh.checked.0.get().is_none());
+        assert_eq!(**batch, fresh);
         assert!(authorized[0].authorization.as_ref().unwrap().encoded_len() <= 9 + 33 * 3);
         // Without its authorization, or with another's, a join is refused.
         assert_eq!(
@@ -554,10 +579,14 @@ mod tests {
         let mut swapped = joins[0].clone();
         swapped.authorization = authorized[1].authorization.clone();
         assert!(swapped.verify(&gid, 7, &admitters).is_err());
-        // Another authorizer's batch does not pass.
+        // Another authorizer's batch does not pass, nor a checked batch
+        // against another key or in another group.
         let other = Authorizer::new(gid, DeviceIdentity::from_seed(&[2; 32]));
         let forged = other.authorize(7, joins[..1].to_vec(), &mut rng).unwrap();
         assert!(forged[0].verify(&gid, 7, &admitters).is_err());
+        assert!(batch.verify(&gid, other.public_key()).is_err());
+        assert!(batch.verify(&[4; 32], &key).is_err());
+        assert_eq!(batch.checked.0.get(), Some(&hash));
         // Admitters need the key the registry names.
         assert!(
             Admitters::new(

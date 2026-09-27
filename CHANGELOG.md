@@ -142,6 +142,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   epoch's group context from its seal header.
 - Breaking: `Entry` gains `checkpoint`; a member that entered by a
   checkpoint holds no header of the epoch before.
+- **A batch's signature, checked once.** The joins of a window share their
+  batch, which keeps the hash of the key its signature was checked
+  against (`AuthorizationBatch::verify`): the DS, committers, the sealer,
+  the authorizer and auditors check it once, not once per join, and the
+  DS gives the joins of a batch one copy of it. Checking 200 joins of a
+  batch takes 201 µs a join instead of 370 µs (release build, one core);
+  what remains is each device's signature.
 - **The membership log, implemented** (part 3d, section 4.10,
   `cityg_core::membership`): each seal header carries the log of its
   window's changes, `[count, root]`, a Merkle tree over one record per
@@ -156,7 +163,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than the body, which members do not download.
 - Breaking: `SealHeader` gains `membership_log`.
 - Tests in `crates/cityg-core/tests/authorized.rs`: an authorized group
-  admits the joins its authorizer signs, window by window; nobody lets in
+  admits the joins its authorizer signs, window by window, and the joins
+  of a window share one copy of their batch; nobody lets in
   a join the authorizer did not sign (the DS, a committer, an auditor); the
   authorizer removes members urgently; an authorized joiner seals the
   window when nobody is online; the authorizer checkpoints the windows it

@@ -505,7 +505,10 @@ dropped messages. The membership log is in the seal header for the same
 reason as the message log. The authorizer checks each window from a public
 state it follows and signs only while the registry names it; a joiner that
 trusts it enters with its checkpoint, the seal header, the registry header
-and the external key, instead of a chain of seals.
+and the external key, instead of a chain of seals. The joins of a window
+share their batch, which keeps the hash of the key its signature was
+checked against: a verifier checks the signature once, not once per join,
+which halves the cost of checking a window's joins.
 
 ## Parameters
 

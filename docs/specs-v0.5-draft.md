@@ -1125,12 +1125,12 @@ under their labels.
   hashes of the join requests it authorizes; a join is valid with the
   inclusion of its request's hash in such a batch, which the DS attaches
   to it. Its token is `H(JoinRequest)`: it enters once. The DS, the
-  committers and the auditors check the batch's signature and the proof,
-  where v0.4 checks an admission (v0.4 §6, §10.3, §15). For 100,000 joins
-  there is one signature instead of 100,000, and 544 bytes of proof per
-  join instead of 3.3 KB (research model `batch_authorization.pv`; without
-  the signature of the root, the DS lets its own devices in:
-  `batch_authorization_unsigned.pv`).
+  committers and the auditors check the batch's signature, once for all
+  its joins, and each join's proof, where v0.4 checks an admission (v0.4
+  §6, §10.3, §15). For 100,000 joins there is one signature instead of
+  100,000, and 544 bytes of proof per join instead of 3.3 KB (research
+  model `batch_authorization.pv`; without the signature of the root, the
+  DS lets its own devices in: `batch_authorization_unsigned.pv`).
   * A join waits in the DS's queue until the authorizer authorizes it:
     before it opens a window, the DS gives the authorizer the joins that
     wait, and attaches to each the authorization of a batch for that
