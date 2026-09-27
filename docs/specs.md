@@ -4,11 +4,12 @@
 | --- | --- |
 | Profile | `city-g/v0.4` |
 | Status | Initial version. The key schedule, the tree, windows, welcomes, joins and the delivery-service rules are specified and implemented; the items of section 19 are not yet. |
-| Implementation | [`crates/cityg-core`](../crates/cityg-core): protocol core and an in-memory delivery service, no I/O |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core) 0.4.0: protocol core and an in-memory delivery service, no I/O. Since then, the crate implements stage 1 of the v0.5 draft (row "Next") |
 | Design | [design.md](design.md) (decisions E-1 to E-14) |
 | Formal model | [`formal/`](formal/README.md) (ProVerif) |
 | Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md), the guarantees of MLS at this scale, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md), who may re-key the tree, [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md), îlots under a flat top, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md), a synthesis beyond v0.4, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md), its open problems, [`research/problemes-ouverts-2026-09-26.md`](research/problemes-ouverts-2026-09-26.md), proofs and measurements, [`research/preuves-et-mesures-2026-09-26.md`](research/preuves-et-mesures-2026-09-26.md), the proof of the tree, [`research/preuve-arbre-2026-09-26.md`](research/preuve-arbre-2026-09-26.md), the X25519 half of a dispute, [`research/litige-x25519-2026-09-26.md`](research/litige-x25519-2026-09-26.md), a dispute without setup, [`research/litige-sans-mise-en-place-2026-09-26.md`](research/litige-sans-mise-en-place-2026-09-26.md), the whole dispute, [`research/litige-entier-2026-09-26.md`](research/litige-entier-2026-09-26.md), and both branches of a dispute, [`research/litige-deux-branches-2026-09-27.md`](research/litige-deux-branches-2026-09-27.md) (all in French); computational model [`research/formal-computational/`](research/formal-computational/README.md) |
 | Conformance | None yet: no test vectors (section 19) |
+| Next | [specs-v0.5-draft.md](specs-v0.5-draft.md), profile `city-g/v0.5-draft`: a delta on this profile, whose stage 1 (islands read through relays, urgent and ordinary removals) `cityg-core` implements |
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
 interpreted as in RFC 2119 and RFC 8174 when they appear in capitals.
@@ -1486,7 +1487,8 @@ This version does not yet specify or implement:
   members. The synthesis
   [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md)
   keeps this profile's tree, read through relays, and ranks what is still
-  open;
+  open; stage 1 of the [v0.5 draft](specs-v0.5-draft.md) specifies the
+  relays;
 * fraud proofs that also bind the district commit to the seal that listed
   it, so that a proof holds on its own across forks (section 15);
 * shrinking the tree; pruning the admission map;

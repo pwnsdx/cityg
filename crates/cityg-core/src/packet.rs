@@ -4,7 +4,9 @@
 //! * A [`Packet`] per member and window (E-13): the seal header, the
 //!   confirmation tag, the registry roots, and the steps of the member's
 //!   path. For a window sealed by an entrant it adds the seal signature and
-//!   the evidence that the entrant may seal (E-7).
+//!   the evidence that the entrant may seal (E-7). An island follower's
+//!   packet has the steps of its path up to its island root and the top of
+//!   its path: a relay element, a flat element or a refresh (E-15).
 //! * A [`SealLink`] per window for those who check the chain of seals from
 //!   a checkpoint or from their last epoch (E-10): the seal proof and the
 //!   evidence that its signer was a member of the previous epoch, or an
@@ -23,6 +25,7 @@ use crate::registry::RegistryHeader;
 use crate::rekey::Step;
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
 use crate::smm::SmmProof;
+use crate::top::Top;
 use crate::tree::{LeafProof, Occupancy, ParentNode, Shape};
 use crate::welcome::Welcome;
 use crate::window::EpochHeader;
@@ -251,6 +254,7 @@ fn check_successor(previous: &EpochHeader, header: &SealHeader) -> CoreResult<Sh
     if header.gid != previous.gid
         || header.prev_interim != previous.interim
         || header.district_bits != previous.shape.district_bits
+        || header.island_bits != previous.shape.island_bits
     {
         return Err(CoreError::Invalid("seal does not follow the epoch"));
     }
@@ -288,7 +292,7 @@ impl EpochHeader {
         Ok(Self {
             gid: *gid,
             epoch: content.epoch,
-            shape: Shape::new(content.height, content.district_bits)?,
+            shape: Shape::new(content.height, content.district_bits, content.island_bits)?,
             tree_hash: content.tree_hash,
             registry,
             interim: content.interim,
@@ -357,8 +361,11 @@ pub struct Packet {
     pub registry: RegistryUpdate,
     /// `H_L("kem-pk", [key])` of the member's leaf key after the window.
     pub leaf_key: Digest,
-    /// Steps of the member's path, by level: the nodes the window re-keyed.
+    /// Steps of the member's path, by level: the nodes the window re-keyed
+    /// (for an island follower, up to its island root).
     pub path: BTreeMap<u8, Step>,
+    /// For an island follower, how it gets the window's root secret.
+    pub top: Option<Top>,
 }
 
 impl Packet {
@@ -377,7 +384,8 @@ impl Packet {
                 Step::Wrap(_) => 3 + KEM_WRAP_BYTES,
             })
             .sum();
-        header + 34 + entrant + self.registry.encoded_len() + 34 + path
+        let top = self.top.as_ref().map_or(1, |top| 2 + top.encoded_len());
+        header + 34 + entrant + self.registry.encoded_len() + 34 + path + top
     }
 }
 

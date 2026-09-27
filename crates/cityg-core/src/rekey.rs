@@ -137,7 +137,7 @@ pub fn plan_district(
     leaves: &LeafChanges,
     forced: &BTreeSet<NodeId>,
 ) -> CoreResult<Plan> {
-    if district >= shape.district_count() || shape.district_bits != tree.district_bits() {
+    if district >= shape.district_count() || !shape.same_divisions(tree.shape()) {
         return Err(CoreError::Invalid("district index"));
     }
     let top = shape.district_level();
@@ -415,6 +415,18 @@ impl WindowIndex {
         self.keyed.get(&node).copied()
     }
 
+    /// Whether the window re-keyed any node.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keyed.is_empty()
+    }
+
+    /// The window's wrap of `node`'s new secret to `target`, if any.
+    #[must_use]
+    pub fn wrap(&self, node: NodeId, target: NodeId) -> Option<&Wrap> {
+        self.wraps.get(&(node, target))
+    }
+
     /// The window's steps along the path of `leaf` in a tree of `height`.
     pub fn steps(&self, leaf: u32, height: u8) -> CoreResult<BTreeMap<u8, Step>> {
         let mut steps = BTreeMap::new();
@@ -437,21 +449,75 @@ impl WindowIndex {
     }
 }
 
+/// Secrets of a member's path by level, each with the epoch of the window
+/// that set it: the node's latest re-key the member knows of.
+#[derive(Clone, Default)]
+pub struct PathSecrets {
+    pub secrets: BTreeMap<u8, Secret>,
+    pub epochs: BTreeMap<u8, u64>,
+}
+
+impl core::fmt::Debug for PathSecrets {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PathSecrets")
+            .field("epochs", &self.epochs)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PathSecrets {
+    /// Every secret of `secrets`, set by the window of `epoch`.
+    #[must_use]
+    pub fn at(secrets: BTreeMap<u8, Secret>, epoch: u64) -> Self {
+        let epochs = secrets.keys().map(|level| (*level, epoch)).collect();
+        Self { secrets, epochs }
+    }
+
+    /// Secret of the ancestor at `level`.
+    #[must_use]
+    pub fn secret(&self, level: u8) -> Option<&Secret> {
+        self.secrets.get(&level)
+    }
+
+    fn insert(&mut self, level: u8, secret: Secret, epoch: u64) {
+        self.secrets.insert(level, secret);
+        self.epochs.insert(level, epoch);
+    }
+
+    /// The levels up to `top` only.
+    #[must_use]
+    pub fn up_to(&self, top: u8) -> Self {
+        Self {
+            secrets: self
+                .secrets
+                .range(..=top)
+                .map(|(level, secret)| (*level, secret.clone()))
+                .collect(),
+            epochs: self
+                .epochs
+                .range(..=top)
+                .map(|(level, epoch)| (*level, *epoch))
+                .collect(),
+        }
+    }
+}
+
 /// A member's private path: its leaf key and the secrets of its ancestors,
-/// by level.
+/// by level. An island follower knows only the levels up to its island
+/// root (docs/specs-v0.5-draft.md section 2.2).
 #[derive(Clone)]
 pub struct MemberPath {
     leaf: u32,
     leaf_key: KemSecret,
     leaf_pk: Vec<u8>,
-    secrets: BTreeMap<u8, Secret>,
+    path: PathSecrets,
 }
 
 impl core::fmt::Debug for MemberPath {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MemberPath")
             .field("leaf", &self.leaf)
-            .field("levels", &self.secrets.len())
+            .field("levels", &self.path.secrets.len())
             .finish_non_exhaustive()
     }
 }
@@ -465,7 +531,7 @@ impl MemberPath {
             leaf,
             leaf_key,
             leaf_pk,
-            secrets: BTreeMap::new(),
+            path: PathSecrets::default(),
         }
     }
 
@@ -490,7 +556,19 @@ impl MemberPath {
     /// Secret of the ancestor at `level`.
     #[must_use]
     pub fn secret(&self, level: u8) -> Option<&Secret> {
-        self.secrets.get(&level)
+        self.path.secret(level)
+    }
+
+    /// The known secrets, with their epochs.
+    #[must_use]
+    pub const fn secrets(&self) -> &PathSecrets {
+        &self.path
+    }
+
+    /// Whether every level from 1 to `height` is known.
+    #[must_use]
+    pub fn knows(&self, height: u8) -> bool {
+        (1..=height).all(|level| self.path.secrets.contains_key(&level))
     }
 
     /// Replace the leaf key (after an update or a re-entry the member made).
@@ -500,31 +578,34 @@ impl MemberPath {
     }
 
     /// Replace the path secrets.
-    pub fn set_secrets(&mut self, secrets: BTreeMap<u8, Secret>) {
-        self.secrets = secrets;
+    pub fn set_path(&mut self, path: PathSecrets) {
+        self.path = path;
     }
 
+    /// Walk levels `from..=to` from `base`, which holds the levels below
+    /// `from` (and, with `keep_others`, the levels without a step).
     fn walk<'a>(
         &self,
-        height: u8,
+        base: &PathSecrets,
+        from: u8,
+        to: u8,
         step_at: impl Fn(u8) -> Option<(u64, &'a Step)>,
         keep_others: bool,
         gid: &Digest,
-    ) -> CoreResult<BTreeMap<u8, Secret>> {
-        let mut path: BTreeMap<u8, Secret> = BTreeMap::new();
-        let mut epochs: BTreeMap<u8, u64> = BTreeMap::new();
-        for level in 1..=height {
+    ) -> CoreResult<PathSecrets> {
+        let mut path = base.up_to(from.saturating_sub(1));
+        for level in from..=to {
             let node = NodeId::of_leaf(self.leaf, level);
             let child = NodeId::of_leaf(self.leaf, level - 1);
             let Some((epoch, step)) = step_at(level) else {
                 if !keep_others {
                     return Err(CoreError::Invalid("missing path step"));
                 }
-                let kept = self
-                    .secrets
-                    .get(&level)
-                    .ok_or(CoreError::Invalid("unknown path secret"))?;
-                path.insert(level, kept.clone());
+                let (Some(kept), Some(epoch)) = (base.secret(level), base.epochs.get(&level))
+                else {
+                    return Err(CoreError::Invalid("unknown path secret"));
+                };
+                path.insert(level, kept.clone(), *epoch);
                 continue;
             };
             let secret = match step {
@@ -536,7 +617,7 @@ impl MemberPath {
                         unwrap(gid, epoch, wrapped, &self.leaf_key, &self.leaf_pk)?
                     } else {
                         let below = path
-                            .get(&(level - 1))
+                            .secret(level - 1)
                             .ok_or(CoreError::Invalid("unknown path secret"))?;
                         let key = node_key(below)?;
                         let pk = key.public_key();
@@ -544,31 +625,34 @@ impl MemberPath {
                     }
                 }
                 Step::Chain => {
-                    if level == 1 || epochs.get(&(level - 1)) != Some(&epoch) {
+                    if level == 1 || path.epochs.get(&(level - 1)) != Some(&epoch) {
                         return Err(CoreError::Invalid("chain from a child not re-keyed"));
                     }
                     chain(
-                        path.get(&(level - 1))
+                        path.secret(level - 1)
                             .ok_or(CoreError::Invalid("unknown path secret"))?,
                     )?
                 }
             };
-            epochs.insert(level, epoch);
-            path.insert(level, secret);
+            path.insert(level, secret, epoch);
         }
         Ok(path)
     }
 
-    /// The path secrets after a window of epoch `epoch` whose steps along
-    /// this path are `steps` (by level); other levels keep their secret.
+    /// The path secrets up to `height` after a window of epoch `epoch`
+    /// whose steps along this path are `steps` (by level); other levels
+    /// keep their secret. With `height` the level of its island root, an
+    /// island follower advances its island path only.
     pub fn advance(
         &self,
         height: u8,
         steps: &BTreeMap<u8, Step>,
         gid: &Digest,
         epoch: u64,
-    ) -> CoreResult<BTreeMap<u8, Secret>> {
+    ) -> CoreResult<PathSecrets> {
         self.walk(
+            &self.path,
+            1,
             height,
             |level| steps.get(&level).map(|step| (epoch, step)),
             true,
@@ -583,8 +667,31 @@ impl MemberPath {
         height: u8,
         steps: &BTreeMap<u8, (u64, Step)>,
         gid: &Digest,
-    ) -> CoreResult<BTreeMap<u8, Secret>> {
+    ) -> CoreResult<PathSecrets> {
         self.walk(
+            &PathSecrets::default(),
+            1,
+            height,
+            |level| steps.get(&level).map(|(epoch, step)| (*epoch, step)),
+            false,
+            gid,
+        )
+    }
+
+    /// The levels above `below` up to `height`, from the last step of each
+    /// (a refresh, docs/specs-v0.5-draft.md section 2.5), on top of `base`,
+    /// which holds the levels up to `below`.
+    pub fn refresh(
+        &self,
+        base: &PathSecrets,
+        below: u8,
+        height: u8,
+        steps: &BTreeMap<u8, (u64, Step)>,
+        gid: &Digest,
+    ) -> CoreResult<PathSecrets> {
+        self.walk(
+            base,
+            below + 1,
             height,
             |level| steps.get(&level).map(|(epoch, step)| (*epoch, step)),
             false,
@@ -594,17 +701,14 @@ impl MemberPath {
 
     /// Check path secrets against the public keys of the path's parents (by
     /// level from 1).
-    pub fn check_keys(
-        secrets: &BTreeMap<u8, Secret>,
-        nodes: &[Option<ParentNode>],
-    ) -> CoreResult<()> {
+    pub fn check_keys(secrets: &PathSecrets, nodes: &[Option<ParentNode>]) -> CoreResult<()> {
         for (offset, node) in nodes.iter().enumerate() {
             let level = u8::try_from(offset + 1).map_err(|_| CoreError::Invalid("path"))?;
             let node = node
                 .as_ref()
                 .ok_or(CoreError::Invalid("blank ancestor of a member"))?;
             let secret = secrets
-                .get(&level)
+                .secret(level)
                 .ok_or(CoreError::Invalid("unknown path secret"))?;
             if node_key(secret)?.public_key() != node.encryption_key {
                 return Err(CoreError::Invalid(
@@ -644,7 +748,7 @@ mod tests {
     /// A full tree of `2^height` members in districts of `2^bits`, keyed by one
     /// committer, and every member's path.
     fn fixture(height: u8, bits: u8, rng: &mut ChaCha20Rng) -> Fixture {
-        let mut tree = PublicTree::new(height, bits).unwrap();
+        let mut tree = PublicTree::new(height, bits, bits).unwrap();
         let mut paths = BTreeMap::new();
         let mut leaves = LeafChanges::new();
         for leaf in 0..(1u32 << height) {
@@ -740,14 +844,16 @@ mod tests {
             let mut index = WindowIndex::default();
             index.add(updates, wraps);
             let steps = index.steps(*leaf, height).unwrap();
-            let secrets = path.advance(height, &steps, &GID, 0).unwrap();
-            let mut all = secrets;
+            let mut all = path.advance(height, &steps, &GID, 0).unwrap();
             for level in height + 1..=tree.height() {
-                if let Some(kept) = path.secret(level) {
-                    all.insert(level, kept.clone());
+                if let (Some(kept), Some(epoch)) =
+                    (path.secret(level), path.secrets().epochs.get(&level))
+                {
+                    all.secrets.insert(level, kept.clone());
+                    all.epochs.insert(level, *epoch);
                 }
             }
-            path.set_secrets(all);
+            path.set_path(all);
         }
     }
 
@@ -863,7 +969,7 @@ mod tests {
                 assert!(result.is_err(), "the removed member must not follow");
             } else {
                 let secrets = result.unwrap();
-                assert_eq!(*secrets[&4], *root_secret, "leaf {leaf}");
+                assert_eq!(**secrets.secret(4).unwrap(), *root_secret, "leaf {leaf}");
             }
         }
         // Ignoring the index, the removed member's old path opens no wrap.

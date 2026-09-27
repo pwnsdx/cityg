@@ -1,10 +1,11 @@
-//! Key schedule (docs/specs.md section 9): one epoch per window, keyed by
+//! Key schedule (docs/specs.md section 9, with the group context of
+//! docs/specs-v0.5-draft.md section 2.1): one epoch per window, keyed by
 //! the window's root secret and chained through the init secrets:
 //!
 //! ```text
-//! GroupContext_n := CBOR_det(["city-g/group-context/v4", gid, n, tree_hash_n,
-//!                             registry_hash_n, height_n, district_bits,
-//!                             "city-g/v0.4", confirmed_transcript_hash_n])
+//! GroupContext_n := CBOR_det(["city-g/group-context/v5", gid, n, tree_hash_n,
+//!                             registry_hash_n, height_n, district_bits, island_bits,
+//!                             "city-g/v0.5-draft", confirmed_transcript_hash_n])
 //! commit_secret_n := DeriveSecret(root_secret_n, "commit")
 //! joiner_secret_n := ExpandLabel(Extract(init_n-1, commit_secret_n),
 //!                                "joiner", H(GroupContext_n), 32)
@@ -42,6 +43,7 @@ pub struct GroupContext {
     pub registry_hash: Digest,
     pub height: u8,
     pub district_bits: u8,
+    pub island_bits: u8,
     pub confirmed_transcript_hash: Digest,
 }
 
@@ -49,13 +51,14 @@ impl GroupContext {
     /// `CBOR_det` encoding.
     pub fn encode(&self) -> CoreResult<Vec<u8>> {
         encode(&array(vec![
-            text("city-g/group-context/v4"),
+            text("city-g/group-context/v5"),
             bytes(&self.gid),
             uint(self.epoch),
             bytes(&self.tree_hash),
             bytes(&self.registry_hash),
             uint(u64::from(self.height)),
             uint(u64::from(self.district_bits)),
+            uint(u64::from(self.island_bits)),
             text(PROFILE),
             bytes(&self.confirmed_transcript_hash),
         ]))
@@ -207,6 +210,7 @@ mod tests {
             registry_hash: [3; 32],
             height: 4,
             district_bits: 2,
+            island_bits: 1,
             confirmed_transcript_hash: [5; 32],
         }
     }
@@ -238,6 +242,10 @@ mod tests {
             },
             GroupContext {
                 district_bits: 3,
+                ..base.clone()
+            },
+            GroupContext {
+                island_bits: 2,
                 ..base.clone()
             },
             GroupContext {

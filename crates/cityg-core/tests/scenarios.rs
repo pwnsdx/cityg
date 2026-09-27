@@ -5,6 +5,7 @@
 
 mod common;
 
+use cityg_core::objects::Urgency;
 use common::Sim;
 
 #[test]
@@ -64,7 +65,7 @@ fn a_removal_waits_for_the_first_participant_and_is_enforced_meanwhile() {
     sim.set_all_online(false);
     let target = *sim.members.keys().nth(2).unwrap();
     let proposal = sim.members[&common::CREATOR]
-        .remove_proposal(target, &mut sim.rng)
+        .remove_proposal(target, Urgency::Urgent, &mut sim.rng)
         .unwrap();
     sim.ds.submit_removal(proposal, sim.now).unwrap();
     let epoch = sim.ds.epoch();
@@ -77,10 +78,10 @@ fn a_removal_waits_for_the_first_participant_and_is_enforced_meanwhile() {
     assert!(sim.ds.packet(epoch, target).is_err());
     // A member coming online does not send while the removal waits.
     let pending = sim.ds.pending_removals();
-    let window_removal = sim.ds.config().window_removal_ms;
+    let window_urgent = sim.ds.config().window_urgent_ms;
     assert!(
         !sim.member(common::CREATOR)
-            .may_send(&pending, sim.now, window_removal)
+            .may_send(&pending, sim.now, window_urgent)
     );
     // It applies the removal first.
     sim.ds.set_online(common::CREATOR, true);
@@ -91,7 +92,7 @@ fn a_removal_waits_for_the_first_participant_and_is_enforced_meanwhile() {
     assert!(sim.member(common::CREATOR).may_send(
         &sim.ds.pending_removals(),
         sim.now,
-        window_removal
+        window_urgent
     ));
 }
 
@@ -103,7 +104,7 @@ fn a_joiner_applies_a_pending_removal_when_nobody_is_online() {
     sim.set_all_online(false);
     let target = *sim.members.keys().nth(3).unwrap();
     let proposal = sim.members[&common::CREATOR]
-        .remove_proposal(target, &mut sim.rng)
+        .remove_proposal(target, Urgency::Urgent, &mut sim.rng)
         .unwrap();
     sim.ds.submit_removal(proposal, sim.now).unwrap();
     sim.request_joins(1);
@@ -330,6 +331,7 @@ mod forged {
                 ),
                 leaf_key: kem_pk_hash(leaf_pk).unwrap(),
                 path: self.index.steps(leaf, self.seal.header.height).unwrap(),
+                top: None,
             }
         }
     }
@@ -641,7 +643,7 @@ fn removing_a_committer_rekeys_the_nodes_it_drew() {
     sim.ds.set_online(c, true);
     sim.ds.set_online(sealer, true);
     let proposal = sim.members[&leaving]
-        .remove_proposal(leaving, &mut sim.rng)
+        .remove_proposal(leaving, Urgency::Urgent, &mut sim.rng)
         .unwrap();
     sim.ds.submit_removal(proposal, sim.now).unwrap();
     // C keeps what it draws.
@@ -682,7 +684,7 @@ fn removing_a_committer_rekeys_the_nodes_it_drew() {
     );
     sim.set_all_online(true);
     let admin = sim.members[&common::CREATOR]
-        .remove_proposal(c, &mut sim.rng)
+        .remove_proposal(c, Urgency::Urgent, &mut sim.rng)
         .unwrap();
     sim.ds.submit_removal(admin, sim.now).unwrap();
     let task = sim.run_window();
@@ -783,7 +785,7 @@ fn a_join_takes_the_leaf_a_removal_empties() {
     sim.run_window();
     let leaving = *sim.members.keys().nth(5).unwrap();
     let proposal = sim.members[&common::CREATOR]
-        .remove_proposal(leaving, &mut sim.rng)
+        .remove_proposal(leaving, Urgency::Urgent, &mut sim.rng)
         .unwrap();
     sim.ds.submit_removal(proposal, sim.now).unwrap();
     sim.request_joins(1);
@@ -840,14 +842,51 @@ fn the_delivery_service_evicts_only_under_an_admin_policy() {
         .collect();
     assert_eq!(idle.len(), 3);
     assert_eq!(sim.ds.evict_idle(sim.now).unwrap(), 3);
-    let task = sim.run_window();
-    assert_eq!(
-        task.changes
+    // Evictions are ordinary: they do not stop members from sending. An
+    // admin's urgent removal of an evicted member does, counted from its
+    // own recording.
+    let config = *sim.ds.config();
+    let pending = sim.ds.pending_removals();
+    assert!(
+        pending
             .iter()
-            .filter(|c| c.kind == cityg_core::objects::ChangeKind::Eviction)
-            .count(),
-        3
+            .all(|removal| removal.urgency == Urgency::Ordinary)
     );
+    let later = sim.now + config.window_urgent_ms + 1;
+    assert!(
+        sim.member(common::CREATOR)
+            .may_send(&pending, later, config.window_urgent_ms)
+    );
+    let urgent_at = sim.now + 30_000;
+    let removal = sim.members[&common::CREATOR]
+        .remove_proposal(idle[0], Urgency::Urgent, &mut sim.rng)
+        .unwrap();
+    sim.ds.submit_removal(removal, urgent_at).unwrap();
+    let pending = sim.ds.pending_removals();
+    let raised = pending
+        .iter()
+        .find(|removal| removal.target == idle[0])
+        .unwrap();
+    assert_eq!(
+        (raised.recorded_ms, raised.urgency),
+        (urgent_at, Urgency::Urgent)
+    );
+    let creator = sim.member(common::CREATOR);
+    assert!(creator.may_send(
+        &pending,
+        urgent_at + config.window_urgent_ms,
+        config.window_urgent_ms
+    ));
+    assert!(!creator.may_send(
+        &pending,
+        urgent_at + config.window_urgent_ms + 1,
+        config.window_urgent_ms
+    ));
+    let task = sim.run_window();
+    // The urgent removal applies to its target instead of the eviction.
+    let count = |kind| task.changes.iter().filter(|c| c.kind == kind).count();
+    assert_eq!(count(cityg_core::objects::ChangeKind::Eviction), 2);
+    assert_eq!(count(cityg_core::objects::ChangeKind::Removal), 1);
     for member in idle {
         assert!(!sim.ds.state().tree.is_member(member));
         assert!(!sim.members.contains_key(&member));
@@ -991,7 +1030,7 @@ fn a_policy_whose_signer_left_is_dropped() {
     sim.request_joins(3);
     sim.run_window();
     let proposal = sim.members[&common::CREATOR]
-        .remove_proposal(common::CREATOR, &mut sim.rng)
+        .remove_proposal(common::CREATOR, Urgency::Ordinary, &mut sim.rng)
         .unwrap();
     sim.ds.submit_removal(proposal, sim.now).unwrap();
     let task = sim.open_window();

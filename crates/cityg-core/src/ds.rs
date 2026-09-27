@@ -1,11 +1,14 @@
-//! An in-memory delivery service (docs/specs.md section 14).
+//! An in-memory delivery service (docs/specs.md section 14, with section 2
+//! of docs/specs-v0.5-draft.md).
 //!
 //! It never draws a group secret and never signs a group object. It records
-//! requests after checking them, closes windows (E-1), places joins (E-11),
-//! assigns the roles of a window among online members or, with nobody
-//! online, to an entrant (E-3, E-7), checks what the roles send back,
-//! serves one packet per member (E-13), the chains of seals and the entries
-//! of joiners and returning members (E-8, E-10), keeps the latest wrap of
+//! requests after checking them, closes windows (E-1) at the cadence of
+//! their removals (E-16), places joins (E-11), assigns the roles of a
+//! window among online members or, with nobody online, to an entrant (E-3,
+//! E-7), checks what the roles send back, assigns the relays and flat
+//! elements of each window's islands (E-15), serves one packet per member,
+//! whole or by island (E-13, E-15), the chains of seals and the entries of
+//! joiners and returning members (E-8, E-10), keeps the latest wrap of
 //! every node, enforces recorded removals at delivery, evicts under an
 //! admin-signed policy, and keeps the records auditors sample (E-12).
 
@@ -18,7 +21,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::member::{CatchUps, PendingRemoval};
 use crate::objects::{
     Authorizer, CatchUpRequest, ChangeKind, Checkpoint, Eviction, GroupPolicy, JoinRequest,
-    ReEntryRequest, RemoveProposal, Request, UpdateRequest,
+    ReEntryRequest, RemoveProposal, Request, UpdateRequest, Urgency,
 };
 use crate::packet::{
     EntrantEvidence, EntrantProof, Entry, EntrySteps, Packet, RegistryUpdate, SealLink,
@@ -28,29 +31,44 @@ use crate::registry::RegistryHeader;
 use crate::rekey::{Step, WindowIndex};
 use crate::roles::{WelcomeKind, WelcomeTask, WindowTask};
 use crate::schedule::{confirmed_transcript_hash, interim_transcript_hash};
-use crate::tree::{LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode};
+use crate::top::{RelayElement, Top, TopTask};
+use crate::tree::{LeafNode, LeafProof, MAX_HEIGHT, NodeId, Occupancy, ParentNode, Shape};
 use crate::welcome::Welcome;
 use crate::window::{
     PublicState, Requests, SealerInfo, WindowShape, check_committer, check_district_commit,
     check_entry, check_sealer, check_window, district_leaves, needed_height,
 };
 
-/// Timing of windows.
+/// Timing of windows (E-16).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DsConfig {
-    /// Longest window (`WINDOW_MAX`).
-    pub window_max_ms: u64,
-    /// Window length when a removal is pending (`WINDOW_REMOVAL`).
-    pub window_removal_ms: u64,
+    /// Longest wait of a request (`WINDOW_ORDINARY`): joins, updates,
+    /// ordinary removals and evictions wait at most this long.
+    pub window_ordinary_ms: u64,
+    /// Window length when an urgent removal is pending (`WINDOW_URGENT`).
+    pub window_urgent_ms: u64,
 }
 
 impl Default for DsConfig {
     fn default() -> Self {
         Self {
-            window_max_ms: 60_000,
-            window_removal_ms: 5_000,
+            window_ordinary_ms: 60_000,
+            window_urgent_ms: 5_000,
         }
     }
+}
+
+/// Which top an island packet carries (E-15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopChoice {
+    /// The relay element of the member's island, else its flat element,
+    /// else a refresh.
+    Best,
+    /// The flat element, else a refresh: for a member whose relay element
+    /// did not open or led to a wrong tag.
+    AvoidRelay,
+    /// A refresh: for a relay, or a member that wants its whole path back.
+    Refresh,
 }
 
 #[derive(Clone, Debug)]
@@ -85,32 +103,50 @@ impl Queue {
         times.min()
     }
 
-    fn oldest_removal(&self) -> Option<u64> {
+    /// When the oldest urgent removal was recorded. Evictions are ordinary.
+    fn oldest_urgent(&self) -> Option<u64> {
         self.removals
             .iter()
+            .filter(|q| q.item.urgency == Urgency::Urgent)
             .map(|q| q.recorded_ms)
-            .chain(self.evictions.iter().map(|q| q.recorded_ms))
             .min()
     }
 
-    fn removal_targets(&self) -> BTreeMap<Occupancy, u64> {
-        let mut targets = BTreeMap::new();
-        for (target, at) in self
+    /// Every target of a recorded removal or eviction, with its urgency and
+    /// when it was recorded: for an urgent one, when its first urgent
+    /// removal was, which starts the urgent clock; otherwise, its first
+    /// record.
+    fn removal_targets(&self) -> BTreeMap<Occupancy, (u64, Urgency)> {
+        let mut first: BTreeMap<Occupancy, (u64, Option<u64>)> = BTreeMap::new();
+        for (target, at, urgency) in self
             .removals
             .iter()
-            .map(|q| (q.item.target, q.recorded_ms))
+            .map(|q| (q.item.target, q.recorded_ms, q.item.urgency))
             .chain(
                 self.evictions
                     .iter()
-                    .map(|q| (q.item.target, q.recorded_ms)),
+                    .map(|q| (q.item.target, q.recorded_ms, Urgency::Ordinary)),
             )
         {
-            targets
+            let urgent = (urgency == Urgency::Urgent).then_some(at);
+            first
                 .entry(target)
-                .and_modify(|first: &mut u64| *first = (*first).min(at))
-                .or_insert(at);
+                .and_modify(|(any, urgent_at)| {
+                    *any = (*any).min(at);
+                    *urgent_at = match (*urgent_at, urgent) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                })
+                .or_insert((at, urgent));
         }
-        targets
+        first
+            .into_iter()
+            .map(|(target, (any, urgent_at))| {
+                let entry = urgent_at.map_or((any, Urgency::Ordinary), |at| (at, Urgency::Urgent));
+                (target, entry)
+            })
+            .collect()
     }
 }
 
@@ -146,6 +182,10 @@ pub struct StoredWindow {
     welcomes: HashMap<Digest, Welcome>,
     audits: Vec<AuditRecord>,
     committer_leaves: HashMap<Occupancy, LeafProof>,
+    shape: Shape,
+    top: TopTask,
+    relays: BTreeMap<u32, RelayElement>,
+    flats: BTreeMap<u32, Wrap>,
 }
 
 impl StoredWindow {
@@ -174,6 +214,22 @@ impl StoredWindow {
     #[must_use]
     pub fn seal_bytes(&self) -> usize {
         self.seal.encode().map_or(0, |encoded| encoded.len())
+    }
+
+    /// Who gives the window's islands their top (E-15).
+    #[must_use]
+    pub const fn top_task(&self) -> &TopTask {
+        &self.top
+    }
+
+    /// Islands whose relay element or flat element was delivered.
+    #[must_use]
+    pub fn topped_islands(&self) -> BTreeSet<u32> {
+        self.relays
+            .keys()
+            .chain(self.flats.keys())
+            .copied()
+            .collect()
     }
 }
 
@@ -343,16 +399,28 @@ impl DeliveryService {
             &Request::Removal(proposal.clone()),
             true,
         )?;
-        if !self
+        // One per target; an urgent removal replaces an ordinary one, and
+        // its time starts the urgent clock.
+        match self
             .queue
             .removals
-            .iter()
-            .any(|q| q.item.target == proposal.target)
+            .iter_mut()
+            .find(|q| q.item.target == proposal.target)
         {
-            self.queue.removals.push(Queued {
+            None => self.queue.removals.push(Queued {
                 item: proposal,
                 recorded_ms: now_ms,
-            });
+            }),
+            Some(queued)
+                if queued.item.urgency == Urgency::Ordinary
+                    && proposal.urgency == Urgency::Urgent =>
+            {
+                *queued = Queued {
+                    item: proposal,
+                    recorded_ms: now_ms,
+                };
+            }
+            Some(_) => {}
         }
         Ok(())
     }
@@ -464,9 +532,10 @@ impl DeliveryService {
         self.queue
             .removal_targets()
             .into_iter()
-            .map(|(target, recorded_ms)| PendingRemoval {
+            .map(|(target, (recorded_ms, urgency))| PendingRemoval {
                 target,
                 recorded_ms,
+                urgency,
             })
             .collect()
     }
@@ -478,7 +547,9 @@ impl DeliveryService {
         self.state.tree.is_member(member) && !self.queue.removal_targets().contains_key(&member)
     }
 
-    /// Whether a window should be closed at `now_ms`.
+    /// Whether a window should be closed at `now_ms`: its oldest request
+    /// has waited `WINDOW_ORDINARY`, or its oldest urgent removal
+    /// `WINDOW_URGENT` (E-16).
     #[must_use]
     pub fn due(&self, now_ms: u64) -> bool {
         if self.open.is_some() {
@@ -487,12 +558,12 @@ impl DeliveryService {
         let by_age = self
             .queue
             .oldest()
-            .is_some_and(|oldest| now_ms.saturating_sub(oldest) >= self.config.window_max_ms);
-        let by_removal = self
+            .is_some_and(|oldest| now_ms.saturating_sub(oldest) >= self.config.window_ordinary_ms);
+        let by_urgency = self
             .queue
-            .oldest_removal()
-            .is_some_and(|oldest| now_ms.saturating_sub(oldest) >= self.config.window_removal_ms);
-        by_age || by_removal
+            .oldest_urgent()
+            .is_some_and(|oldest| now_ms.saturating_sub(oldest) >= self.config.window_urgent_ms);
+        by_age || by_urgency
     }
 
     /// Whether a queued entry is still valid for the window creating
@@ -951,6 +1022,7 @@ impl DeliveryService {
         self.state.apply(&outcome)?;
         let registry = self.state.registry.header()?;
         let epoch = outcome.epoch;
+        let shape = self.state.tree.shape();
         let mut index = WindowIndex::default();
         let mut all_updates = Vec::new();
         let mut all_wraps: Vec<&Wrap> = Vec::new();
@@ -1009,6 +1081,15 @@ impl DeliveryService {
             }
         }
         self.remove_applied(&open);
+        let top = if index.is_empty() {
+            // Nothing re-keyed: the root did not change.
+            TopTask {
+                epoch,
+                ..TopTask::default()
+            }
+        } else {
+            self.assign_top(epoch)
+        };
         for change in &open.task.changes {
             if let Some(Request::Join(join)) = open.requests.get(&change.request)
                 && let Some(Authorizer::Invite(invite)) = join
@@ -1035,8 +1116,217 @@ impl DeliveryService {
             welcomes: HashMap::new(),
             audits,
             committer_leaves,
+            shape,
+            top,
+            relays: BTreeMap::new(),
+            flats: BTreeMap::new(),
         });
         Ok(epoch)
+    }
+
+    /// The relays and flat elements of the window that created `epoch`,
+    /// from the state after it (E-15). Each island that holds members gets
+    /// a relay: an online member of the island that was a member of the
+    /// previous epoch and has no removal recorded, taken in turn from one
+    /// window to the next. The flat elements of the other islands are
+    /// spread over the relays; with no relay, members refresh.
+    fn assign_top(&self, epoch: u64) -> TopTask {
+        let shape = self.state.tree.shape();
+        let mut task = TopTask {
+            epoch,
+            ..TopTask::default()
+        };
+        if !shape.has_islands() {
+            return task;
+        }
+        let removing = self.queue.removal_targets();
+        let mut candidates: BTreeMap<u32, Vec<Occupancy>> = BTreeMap::new();
+        for (leaf, node) in self.state.tree.leaves() {
+            let member = node.occupancy(leaf);
+            let island = candidates.entry(shape.island_of(leaf)).or_default();
+            if member.since < epoch
+                && self.online.contains(&member)
+                && !removing.contains_key(&member)
+            {
+                island.push(member);
+            }
+        }
+        let mut bare = Vec::new();
+        for (island, members) in &candidates {
+            if members.is_empty() {
+                bare.push(*island);
+                continue;
+            }
+            let turn = usize::try_from(epoch).unwrap_or(0) % members.len();
+            task.relays.insert(*island, members[turn]);
+        }
+        let relays: Vec<Occupancy> = task.relays.values().copied().collect();
+        if !relays.is_empty() {
+            for (turn, island) in bare.into_iter().enumerate() {
+                task.flats
+                    .entry(relays[turn % relays.len()])
+                    .or_default()
+                    .push(island);
+            }
+        }
+        task
+    }
+
+    /// Keep the relay element of a sealed window from `relay`, the
+    /// authenticated sender, which the window must have made the relay of
+    /// its island. Relay elements are not signed and the service cannot
+    /// check them: a wrong one makes the island's members fall back to a
+    /// flat element or a refresh.
+    pub fn submit_relay(&mut self, relay: Occupancy, element: RelayElement) -> CoreResult<()> {
+        let gid = self.state.gid;
+        let stored = self.stored_mut(element.epoch)?;
+        if element.gid != gid || element.sealed.len() != crate::crypto::SEALED_SECRET_BYTES {
+            return Err(CoreError::Invalid("relay element"));
+        }
+        if stored.top.relays.get(&element.island) != Some(&relay) {
+            return Err(CoreError::Unauthorized("not the relay of this island"));
+        }
+        stored.relays.insert(element.island, element);
+        Ok(())
+    }
+
+    /// Keep the flat elements of a sealed window from `member`, the
+    /// authenticated sender, which the window must have asked for them. The
+    /// service checks their addresses and sizes, not their content.
+    pub fn submit_flats(
+        &mut self,
+        member: Occupancy,
+        epoch: u64,
+        flats: Vec<Wrap>,
+    ) -> CoreResult<()> {
+        let stored = self.stored_mut(epoch)?;
+        let shape = stored.shape;
+        let asked = stored.top.flats.get(&member).cloned().unwrap_or_default();
+        for flat in &flats {
+            let island = flat.target.index;
+            if !asked.contains(&island) {
+                return Err(CoreError::Unauthorized("flat element nobody asked for"));
+            }
+            if flat.node != shape.root()
+                || flat.target != shape.island_root(island)
+                || flat.kem_ciphertext.len() != crate::kem::KEM_CIPHERTEXT_BYTES
+                || flat.sealed.len() != crate::crypto::SEALED_SECRET_BYTES
+            {
+                return Err(CoreError::Invalid("flat element"));
+            }
+        }
+        for flat in flats {
+            stored.flats.insert(flat.target.index, flat);
+        }
+        Ok(())
+    }
+
+    fn stored_mut(&mut self, epoch: u64) -> CoreResult<&mut StoredWindow> {
+        let index = usize::try_from(epoch)
+            .ok()
+            .and_then(|epoch| epoch.checked_sub(1))
+            .ok_or(CoreError::Invalid("no window created epoch 0"))?;
+        self.windows
+            .get_mut(index)
+            .ok_or(CoreError::Invalid("unknown epoch"))
+    }
+
+    /// The last step of each level `from..=height` of the path of `leaf`,
+    /// as of `epoch`: from the latest re-key of every node for the current
+    /// epoch, else from the windows up to `epoch`.
+    fn steps_as_of(&self, epoch: u64, leaf: u32, from: u8, height: u8) -> CoreResult<EntrySteps> {
+        let mut steps = EntrySteps::new();
+        for level in from..=height {
+            let node = NodeId::of_leaf(leaf, level);
+            let child = node.child_toward(leaf);
+            let step = if epoch == self.state.epoch {
+                self.latest.get(&node).map(|latest| {
+                    let step = latest
+                        .wraps
+                        .get(&child)
+                        .map_or(Step::Chain, |wrapped| Step::Wrap(wrapped.clone()));
+                    (latest.epoch, step)
+                })
+            } else {
+                self.windows
+                    .iter()
+                    .take(usize::try_from(epoch).unwrap_or(0))
+                    .rev()
+                    .find_map(|stored| {
+                        stored.index.keyed(node).map(|live| {
+                            live.then(|| {
+                                let step = stored
+                                    .index
+                                    .wrap(node, child)
+                                    .map_or(Step::Chain, |wrapped| Step::Wrap(wrapped.clone()));
+                                (stored.seal.header.epoch, step)
+                            })
+                        })
+                    })
+                    .flatten()
+            };
+            steps.insert(
+                level,
+                step.ok_or(CoreError::Invalid("blank ancestor of a member"))?,
+            );
+        }
+        Ok(steps)
+    }
+
+    /// The packet of an island follower `member` for the window that
+    /// created `epoch` (E-15): the steps of its path up to its island root,
+    /// and a top as `choice` asks. A tree without islands, or a window that
+    /// re-keyed nothing, gives the packet of [`Self::packet`].
+    pub fn island_packet(
+        &self,
+        epoch: u64,
+        member: Occupancy,
+        choice: TopChoice,
+    ) -> CoreResult<Packet> {
+        let mut packet = self.packet(epoch, member)?;
+        let stored = self.window(epoch)?;
+        let shape = stored.shape;
+        if !shape.has_islands() || stored.index.is_empty() {
+            return Ok(packet);
+        }
+        let level = shape.island_level();
+        packet.path.retain(|stepped, _| *stepped <= level);
+        let island = shape.island_of(member.leaf);
+        let relay = stored
+            .relays
+            .get(&island)
+            .filter(|_| choice == TopChoice::Best);
+        let flat = stored
+            .flats
+            .get(&island)
+            .filter(|_| choice != TopChoice::Refresh);
+        packet.top = Some(match (relay, flat) {
+            (Some(relay), _) => Top::Relay(relay.clone()),
+            (None, Some(flat)) => Top::Flat(flat.clone()),
+            (None, None) => {
+                Top::Refresh(self.steps_as_of(epoch, member.leaf, level + 1, shape.height)?)
+            }
+        });
+        Ok(packet)
+    }
+
+    /// The last step of every level of `member`'s path above its island
+    /// root, as of the current epoch: what an island follower refreshes
+    /// its path from before sealing a window without a city (E-15).
+    pub fn refresh_steps(&self, member: Occupancy) -> CoreResult<EntrySteps> {
+        if !self.accepts_from(member) {
+            return Err(CoreError::Unauthorized("not a member, or removal recorded"));
+        }
+        let shape = self.state.tree.shape();
+        if !shape.has_islands() {
+            return Ok(EntrySteps::new());
+        }
+        self.steps_as_of(
+            self.state.epoch,
+            member.leaf,
+            shape.island_level() + 1,
+            shape.height,
+        )
     }
 
     fn entry_data(&self, leaf: u32) -> CoreResult<EntryData> {
@@ -1177,6 +1467,7 @@ impl DeliveryService {
             ),
             leaf_key: kem_pk_hash(&leaf.encryption_key)?,
             path: stored.index.steps(member.leaf, header.height)?,
+            top: None,
         })
     }
 
@@ -1252,6 +1543,7 @@ impl DeliveryService {
             || content.tree_hash != tree_hash
             || content.height != height
             || content.district_bits != self.state.tree.district_bits()
+            || content.island_bits != self.state.tree.island_bits()
             || content.registry_hash != registry.hash()?
             || content.external_pk_hash != kem_pk_hash(&external_pk)?
         {

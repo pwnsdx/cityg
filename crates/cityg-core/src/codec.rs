@@ -8,7 +8,7 @@
 //! ```
 //!
 //! `field_1` is the text label naming the object and its version (all
-//! `.../v4` in this profile), so the signed bytes of two object types never
+//! `.../v5` in this profile), so the signed bytes of two object types never
 //! coincide; the FIPS 204 context string separates them a second time.
 
 use ciborium::value::Value;

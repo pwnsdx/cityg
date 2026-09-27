@@ -228,6 +228,7 @@ pub fn finish_seal(
         sealer: draft.sealer.occupancy,
         height: shape.height,
         district_bits: shape.district_bits,
+        island_bits: shape.island_bits,
         tree_hash,
         registry_hash,
         body_hash: body.hash()?,
@@ -242,6 +243,7 @@ pub fn finish_seal(
         registry_hash,
         height: shape.height,
         district_bits: shape.district_bits,
+        island_bits: shape.island_bits,
         confirmed_transcript_hash: confirmed,
     };
     let commit = commit_secret(draft.root_secret)?;

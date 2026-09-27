@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
-//! City-G protocol core, profile `city-g/v0.4` (`docs/specs.md`): end-to-end
-//! encrypted groups of up to millions of members, whose tree is split into
-//! districts under a city and re-keyed once per window.
+//! City-G protocol core, profile `city-g/v0.5-draft`, stage 1
+//! (`docs/specs-v0.5-draft.md`, a delta on `city-g/v0.4`, `docs/specs.md`):
+//! end-to-end encrypted groups of up to millions of members, whose tree is
+//! split into districts under a city, re-keyed once per window, and read by
+//! island through relays.
 //!
 //! The crate performs no I/O. Every input of randomness comes from a
 //! caller-provided [`rand_core::CryptoRngCore`], so that runs are
@@ -22,7 +24,8 @@
 //!   welcomes ([`welcome`]);
 //! * the public state and the checked transition of a window ([`window`]);
 //! * what committers and sealers compute ([`roles`]);
-//! * packets, seal links and entries ([`packet`]);
+//! * packets, seal links and entries ([`packet`]), and the top of an island
+//!   follower's path: relay elements, flat elements and refreshes ([`top`]);
 //! * members, joiners and returning members, including windows an entrant
 //!   seals when no member is online ([`member`]);
 //! * an in-memory delivery service: queues, placement, roles, checks,
@@ -46,6 +49,7 @@ pub mod rekey;
 pub mod roles;
 pub mod schedule;
 pub mod smm;
+pub mod top;
 pub mod tree;
 pub mod welcome;
 pub mod window;

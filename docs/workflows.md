@@ -84,6 +84,32 @@ sequenceDiagram
 
 Sections 10, 12.2 to 12.6 and 14.
 
+## Following by island (v0.5 draft, stage 1)
+
+A member may read the tree by island: the root secret of a window comes
+from a member of its island, not from the upper levels of its path.
+
+```mermaid
+sequenceDiagram
+    participant DS
+    participant R as Relay (a member of island j)
+    participant F as Flat maker (another relay)
+    participant M as Member of island j
+    participant Q as Member of an island with nobody online
+    Note over DS: seal applied: one relay per island with a member online, flat elements for the others
+    R->>DS: island packet with a refresh (latest re-key of each node above the island)
+    R->>R: derive the path and the root, check the tag
+    R->>DS: relay element: the root sealed under island j's root secret (52 bytes)
+    F->>DS: flat elements: the root wrapped to the roots of the islands without relay
+    M->>DS: island packet: steps up to the island root, relay element
+    M->>M: advance the island path, open the element, check the tag
+    Q->>DS: island packet: steps up to the island root, flat element
+    Q->>Q: advance the island path, open the flat element, check the tag
+    Note over M: an element that fails: ask for the flat element or a refresh
+```
+
+Sections 2.2 to 2.8 of the [v0.5 draft](specs-v0.5-draft.md).
+
 ## Nobody online
 
 With no volunteer, the first joiner or re-entering member of the window

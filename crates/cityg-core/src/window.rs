@@ -127,6 +127,7 @@ impl PublicState {
         let (tree, registry) = genesis_tree(
             &header.gid,
             header.district_bits,
+            header.island_bits,
             &genesis.creator_pk,
             &genesis.encryption_key,
             &genesis.root_pk,
@@ -179,13 +180,14 @@ impl PublicState {
 pub fn genesis_tree(
     gid: &Digest,
     district_bits: u8,
+    island_bits: u8,
     creator_pk: &[u8],
     encryption_key: &[u8],
     root_pk: &[u8],
     policy: Option<&GroupPolicy>,
 ) -> CoreResult<(PublicTree, Registry)> {
     let creator = Occupancy { leaf: 0, since: 0 };
-    let mut tree = PublicTree::new(1, district_bits)?;
+    let mut tree = PublicTree::new(1, district_bits, island_bits)?;
     tree.set_leaf(
         0,
         Some(LeafNode {
@@ -257,7 +259,7 @@ impl WindowShape {
         for change in changes {
             by_leaf.entry(change.leaf).or_default().push(change);
         }
-        if shape.district_bits != tree.district_bits()
+        if !shape.same_divisions(tree.shape())
             || shape.height != needed_height(tree.height(), by_leaf.keys().next_back().copied())
         {
             return Err(CoreError::Invalid("window height"));
@@ -819,6 +821,7 @@ pub fn check_window(
     if header.gid != state.gid
         || header.prev_interim != state.interim
         || header.district_bits != state.tree.district_bits()
+        || header.island_bits != state.tree.island_bits()
         || header.time_ms < state.time_ms
     {
         return Err(CoreError::Invalid("seal header"));

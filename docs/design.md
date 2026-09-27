@@ -2,14 +2,14 @@
 
 | | |
 | --- | --- |
-| Profile | `city-g/v0.4`, specified in [specs.md](specs.md) |
+| Profile | `city-g/v0.4`, specified in [specs.md](specs.md); the draft `city-g/v0.5-draft`, a delta on it, in [specs-v0.5-draft.md](specs-v0.5-draft.md) |
 | Goal | Groups of millions of members, bursts of hundreds of thousands of joins and departures, and a group that keeps working when none of its members is online |
 | Implementation | [`crates/cityg-core`](../crates/cityg-core): protocol core and an in-memory delivery service, no I/O |
 | Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French): lower bounds, related work, cost model, measured costs; [`formal/`](formal/README.md): symbolic model of the security choices |
 
 The research note says why this design and what it costs. This note
-records its decisions (E-1 to E-14), what each one costs, and what was left
-out.
+records its decisions (E-1 to E-14 for v0.4, E-15 and E-16 for stage 1 of
+the v0.5 draft), what each one costs, and what was left out.
 
 ## Starting point
 
@@ -356,13 +356,69 @@ millions of members.
 * Names are not in the protocol. A client that shows names must bind each
   to a device key and warn when a name comes with another key.
 
+<a id="e-15"></a>
+### E-15 — Islands read through relays (v0.5 draft, stage 1)
+
+**Decision.** The tree is read in *islands* of `2^c` leaves (`c = 8` by
+default, `c <= L`, fixed at genesis and bound in every seal and group
+context). A member may follow as an *island follower*: it takes the steps
+of its path up to its island root, and the window's root secret from the
+top of its packet:
+* a *relay element*: the root secret sealed under a key derived from the
+  island root's secret, by a member of the island that the delivery
+  service names (52 bytes);
+* a *flat element*, for an island without a relay: the root secret wrapped
+  to the island root's key (one wrap);
+* a *refresh*: the latest re-key of each node of its path above its island,
+  from which it recovers the upper levels as a jump does.
+
+It checks the confirmation tag as before, and keeps the root secret. The
+windows, the roles and the re-key do not change: every window still
+re-keys every ancestor of what it changes.
+
+**Why.** Above about `2^14` leaves, the upper levels change in almost every
+window, and a member read a wrap per such level only to learn the root
+secret. A relay is a member of the island: it learns nothing, and the
+service can neither read nor forge its element. The tag makes a hostile
+relay a delay, not a fork (research model `ilot_relay.pv`; without the tag,
+`ilot_relay_unchecked.pv`), and a refresh needs no one online. Following a
+million-member group with 5-minute windows drops from 1.8 MB to about 94 KB
+per day (research note îlots, section 4).
+
+**Cost.** One relay per island and window, about 5.5 KB read by each; flat
+elements for islands with no member online; a member keeps the root secret
+and the epoch of each path secret. A sealer without a city must hold its
+whole path, so an island follower refreshes first (at most `height - c`
+wraps). The service learns which members are online in each island.
+
+<a id="e-16"></a>
+### E-16 — Urgent and ordinary removals (v0.5 draft, stage 1)
+
+**Decision.** A removal proposal carries a signed urgency. An *urgent*
+removal (by an admin, or a reported compromise) closes a window within
+`WINDOW_URGENT` (5 s), and members do not send while one waits longer. An
+*ordinary* removal (a departure, an eviction) waits for the window its age
+closes, at most `WINDOW_ORDINARY` (60 s by default, 5 minutes for a
+million members), and members keep sending. Both are enforced at delivery
+from their recording; an urgent proposal replaces an ordinary one for the
+same target.
+
+**Why.** With a million members leaving continuously, the 5-second rule of
+v0.4 makes a window every 5 seconds: 44 MB per member and day at 1.7
+changes per second (research note on parity, section 3.6). MLS bounds the
+delay of a removal by nothing but the next commit.
+
+**Cost.** A member that leaves may read what is sent for up to
+`WINDOW_ORDINARY` after its request.
+
 ## Parameters
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `L` (`district_bits`) | 12 | A district holds `2^L` leaves; fixed at genesis |
-| `WINDOW_MAX` | 60 s | Longest window |
-| `WINDOW_REMOVAL` | 5 s | Window length when a removal is pending |
+| `c` (`island_bits`) | 8 | An island holds `2^c` leaves, `c <= L`; fixed at genesis (v0.5 draft) |
+| `WINDOW_MAX` | 60 s | Longest window; `WINDOW_ORDINARY` in the v0.5 draft, 5 minutes for a million members |
+| `WINDOW_REMOVAL` | 5 s | Window length when a removal is pending; `WINDOW_URGENT` in the v0.5 draft, for urgent removals only |
 | `UPDATE_INTERVAL` | 7 days | A member updates its leaf key at least this often (post-compromise security; forward secrecy comes from the init chain) |
 | `CHECKPOINT_INTERVAL` | 1 hour | How often an admin should sign a checkpoint |
 | `AUDIT_K` | 20 | Mean number of audits per entry |

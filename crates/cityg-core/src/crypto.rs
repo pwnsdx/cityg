@@ -1,13 +1,13 @@
 //! Hashing, key derivation and wraps.
 //!
 //! * `H(x) := BLAKE3-256(x)`;
-//! * `H_L(label, args) := H(CBOR_det(["city-g/v0.4", label, args]))`, where
+//! * `H_L(label, args) := H(CBOR_det(["city-g/v0.5-draft", label, args]))`, where
 //!   `args` is a CBOR array: every labelled hash uses this one encoding;
 //! * `Extract(salt, ikm) := BLAKE3-keyed(key = salt, ikm)`;
 //! * `ExpandLabel(secret, label, context, L) := BLAKE3-keyed-XOF(key = secret,
-//!   CBOR_det(["city-g/v0.4 expand", label, context, L]))[0..L]`;
+//!   CBOR_det(["city-g/v0.5-draft expand", label, context, L]))[0..L]`;
 //! * `DeriveSecret(secret, label) := ExpandLabel(secret, label, h'', 32)`;
-//! * `MAC(key, data) := BLAKE3-keyed(key, CBOR_det(["city-g/v0.4 mac", data]))`.
+//! * `MAC(key, data) := BLAKE3-keyed(key, CBOR_det(["city-g/v0.5-draft mac", data]))`.
 //!
 //! BLAKE3 in keyed mode is a PRF and its XOF output is a PRF output of any
 //! length, so `Extract` and `ExpandLabel` follow the HKDF structure with
@@ -31,10 +31,10 @@ use crate::kem::{KEM_CIPHERTEXT_BYTES, KemSecret, encapsulate};
 use crate::tree::NodeId;
 
 /// Profile identifier bound into every group context.
-pub const PROFILE: &str = "city-g/v0.4";
-const HASH_TAG: &str = "city-g/v0.4";
-const EXPAND_TAG: &str = "city-g/v0.4 expand";
-const MAC_TAG: &str = "city-g/v0.4 mac";
+pub const PROFILE: &str = "city-g/v0.5-draft";
+const HASH_TAG: &str = "city-g/v0.5-draft";
+const EXPAND_TAG: &str = "city-g/v0.5-draft expand";
+const MAC_TAG: &str = "city-g/v0.5-draft mac";
 
 /// Size of a sealed 32-byte secret (ChaCha20-Poly1305 adds a 16-byte tag).
 pub const SEALED_SECRET_BYTES: usize = 48;

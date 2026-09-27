@@ -1,18 +1,19 @@
-//! District commits and seals (docs/specs.md section 10).
+//! District commits and seals (docs/specs.md section 10, with the seal
+//! header of docs/specs-v0.5-draft.md section 2.1).
 //!
 //! ```text
-//! DistrictCommit := ["city-g/district-commit/v4", gid, epoch, district, height,
+//! DistrictCommit := ["city-g/district-commit/v5", gid, epoch, district, height,
 //!                    prev_district_hash, committer, changes, nodes, wraps,
 //!                    district_hash, signature]      ctx DISTRICT_COMMIT, by the committer
 //!   change := [kind, leaf, request_ref]             sorted by (leaf, kind)
 //!   node   := [level, index, public_key or null]    in plan order
 //!   wrap   := [level, index, target_level, target_index, kem_ciphertext, sealed]
 //!
-//! SealHeader := ["city-g/seal/v4", gid, epoch, prev_interim, kind, sealer, height,
-//!                district_bits, tree_hash, registry_hash, body_hash, time_ms,
-//!                [kem_output, request_ref] or null]
+//! SealHeader := ["city-g/seal/v5", gid, epoch, prev_interim, kind, sealer, height,
+//!                district_bits, island_bits, tree_hash, registry_hash, body_hash,
+//!                time_ms, [kem_output, request_ref] or null]
 //!   kind 0 genesis, 1 member, 2 entrant (the last field is set for kind 2)
-//! SealBody   := ["city-g/seal-body/v4", [[district, H(district commit)], ...],
+//! SealBody   := ["city-g/seal-body/v5", [[district, H(district commit)], ...],
 //!                city_nodes, city_wraps, eviction_policy or null,
 //!                [nonce, creator_pk, encryption_key, root_pk] or null]
 //! Seal       := [SealHeader, SealBody, tag, external_pk, signature]
@@ -37,9 +38,9 @@ use crate::objects::ChangeKind;
 use crate::rekey::NodeUpdate;
 use crate::tree::{NodeId, Occupancy};
 
-pub const DISTRICT_COMMIT_LABEL: &str = "city-g/district-commit/v4";
-pub const SEAL_LABEL: &str = "city-g/seal/v4";
-pub const SEAL_BODY_LABEL: &str = "city-g/seal-body/v4";
+pub const DISTRICT_COMMIT_LABEL: &str = "city-g/district-commit/v5";
+pub const SEAL_LABEL: &str = "city-g/seal/v5";
+pub const SEAL_BODY_LABEL: &str = "city-g/seal-body/v5";
 /// Upper bound on an encoded district commit.
 pub const MAX_DISTRICT_COMMIT_BYTES: usize = 64 * 1024 * 1024;
 /// Upper bound on an encoded seal.
@@ -292,6 +293,7 @@ pub struct SealHeader {
     pub sealer: Occupancy,
     pub height: u8,
     pub district_bits: u8,
+    pub island_bits: u8,
     pub tree_hash: Digest,
     pub registry_hash: Digest,
     pub body_hash: Digest,
@@ -310,6 +312,7 @@ impl SealHeader {
             self.sealer.value(),
             uint(u64::from(self.height)),
             uint(u64::from(self.district_bits)),
+            uint(u64::from(self.island_bits)),
             bytes(&self.tree_hash),
             bytes(&self.registry_hash),
             bytes(&self.body_hash),
@@ -322,7 +325,7 @@ impl SealHeader {
 
     fn from_value(value: Value) -> CoreResult<Self> {
         const WHAT: &str = "seal header";
-        let items = expect_array(value, 13, WHAT)?;
+        let items = expect_array(value, 14, WHAT)?;
         expect_label(&items[0], SEAL_LABEL, WHAT)?;
         let mut fields = Fields::new(items, WHAT);
         fields.next()?;
@@ -338,6 +341,7 @@ impl SealHeader {
         let sealer = fields.occupancy()?;
         let height = fields.u8()?;
         let district_bits = fields.u8()?;
+        let island_bits = fields.u8()?;
         let tree_hash = fields.digest()?;
         let registry_hash = fields.digest()?;
         let body_hash = fields.digest()?;
@@ -363,6 +367,7 @@ impl SealHeader {
             sealer,
             height,
             district_bits,
+            island_bits,
             tree_hash,
             registry_hash,
             body_hash,
@@ -651,6 +656,7 @@ mod tests {
             sealer: Occupancy { leaf: 7, since: 4 },
             height: 5,
             district_bits: 2,
+            island_bits: 1,
             tree_hash: [3; 32],
             registry_hash: [4; 32],
             body_hash: body.hash().unwrap(),

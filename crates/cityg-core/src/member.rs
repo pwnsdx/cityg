@@ -1,12 +1,15 @@
 //! Members, joiners and returning members (docs/specs.md section 12).
 //!
-//! A [`Member`] keeps its leaf key, the secrets of its path, the secrets of
-//! its epoch and the epoch's header: O(log N) state, whatever the size of
-//! the group. It follows the group window by window from [`Packet`]s,
-//! checking the confirmation tag (and, for windows an entrant sealed, the
-//! entrant's signature and admission). Any member may commit a district or
-//! seal a window from the public state the delivery service shows it, once
-//! it has checked that state against its header.
+//! A [`Member`] keeps its leaf key, the secrets of its path, the root
+//! secret, the secrets of its epoch and the epoch's header: O(log N) state,
+//! whatever the size of the group. It follows the group window by window
+//! from [`Packet`]s, checking the confirmation tag (and, for windows an
+//! entrant sealed, the entrant's signature and admission). A member may
+//! follow its whole path, or only its island path and the top of its path
+//! (a relay element, a flat element or a refresh: E-15); it then makes the
+//! relay and flat elements the delivery service asks of it. Any member may
+//! commit a district or seal a window from the public state the delivery
+//! service shows it, once it has checked that state against its header.
 //!
 //! A [`Joiner`] enters from a checkpoint; a [`Returning`] member either
 //! jumps to the present with a welcome or re-enters its leaf. Both check
@@ -21,22 +24,25 @@ use zeroize::Zeroizing;
 use crate::commit::{
     DistrictCommit, EntrantInit, Genesis, Seal, SealBody, SealHeader, SealKind, SealProof,
 };
-use crate::crypto::{Digest, Secret, ZERO32, commit_secret, fresh_secret, kem_pk_hash, node_key};
+use crate::crypto::{
+    Digest, Secret, Wrap, ZERO32, commit_secret, digest_eq, fresh_secret, kem_pk_hash, node_key,
+};
 use crate::error::{CoreError, CoreResult};
 use crate::identity::DeviceIdentity;
 use crate::kem::KemSecret;
 use crate::objects::{
     Admission, CatchUpRequest, Checkpoint, CheckpointContent, GroupPolicy, Invite, JoinRequest,
-    ReEntryRequest, RemoveProposal, Request, UpdateRequest, device_id, group_id,
+    ReEntryRequest, RemoveProposal, Request, UpdateRequest, Urgency, device_id, group_id,
 };
-use crate::packet::{Entry, Packet, SealLink};
-use crate::rekey::{MemberPath, WindowIndex};
+use crate::packet::{Entry, EntrySteps, Packet, SealLink};
+use crate::rekey::{MemberPath, PathSecrets, WindowIndex};
 use crate::roles::{
     SealDraft, WelcomeKind, WindowTask, build_city, build_district, finish_seal, with_city,
 };
 use crate::schedule::{
     EpochSecrets, GroupContext, confirmed_transcript_hash, external_init, interim_transcript_hash,
 };
+use crate::top::{RelayElement, Top, flat_element, open_flat};
 use crate::tree::{LeafNode, Occupancy, Shape};
 use crate::welcome::Welcome;
 use crate::window::{
@@ -49,6 +55,7 @@ use crate::window::{
 pub struct PendingRemoval {
     pub target: Occupancy,
     pub recorded_ms: u64,
+    pub urgency: Urgency,
 }
 
 /// Catch-up requests of a window, by reference.
@@ -66,6 +73,9 @@ pub struct Member {
     identity: DeviceIdentity,
     occupancy: Occupancy,
     path: MemberPath,
+    /// The root secret of the current epoch, which an island follower does
+    /// not hold in its path.
+    root: Secret,
     header: EpochHeader,
     previous: Option<EpochHeader>,
     seal_hash: Digest,
@@ -84,18 +94,21 @@ impl core::fmt::Debug for Member {
 
 impl Member {
     /// Create a group: the creator at leaf 0, admin, in a tree of two leaves
-    /// with districts of `2^district_bits` leaves. An `open` group admits any
-    /// device without admission (its creator signs that policy at genesis);
-    /// otherwise every join needs an admission. Returns the creator and the
-    /// genesis seal.
+    /// with districts of `2^district_bits` leaves and islands of
+    /// `2^island_bits` (`island_bits <= district_bits`). An `open` group
+    /// admits any device without admission (its creator signs that policy at
+    /// genesis); otherwise every join needs an admission. Returns the creator
+    /// and the genesis seal.
     pub fn create(
         identity: DeviceIdentity,
         nonce: [u8; 32],
         district_bits: u8,
+        island_bits: u8,
         open: bool,
         time_ms: u64,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<(Self, Seal)> {
+        let shape = Shape::new(1, district_bits, island_bits)?;
         let gid = group_id(identity.public_key(), &nonce)?;
         let creator = Occupancy { leaf: 0, since: 0 };
         let policy = if open {
@@ -111,6 +124,7 @@ impl Member {
         let (tree, registry) = genesis_tree(
             &gid,
             district_bits,
+            island_bits,
             identity.public_key(),
             &leaf_key.public_key(),
             &root_pk,
@@ -136,6 +150,7 @@ impl Member {
             sealer: creator,
             height: 1,
             district_bits,
+            island_bits,
             tree_hash,
             registry_hash: registry_header.hash()?,
             body_hash: body.hash()?,
@@ -151,6 +166,7 @@ impl Member {
             registry_hash: header.registry_hash,
             height: 1,
             district_bits,
+            island_bits,
             confirmed_transcript_hash: confirmed,
         };
         let commit = commit_secret(&root_secret)?;
@@ -159,15 +175,19 @@ impl Member {
         let external_pk = secrets.external_key()?.public_key();
         let seal = Seal::sign(header, body, tag, external_pk.clone(), &identity, rng)?;
         let mut path = MemberPath::new(0, leaf_key);
-        path.set_secrets(BTreeMap::from([(1, root_secret)]));
+        path.set_path(PathSecrets::at(
+            BTreeMap::from([(1, root_secret.clone())]),
+            0,
+        ));
         let member = Self {
             identity,
             occupancy: creator,
             path,
+            root: root_secret,
             header: EpochHeader {
                 gid,
                 epoch: 0,
-                shape: Shape::new(1, district_bits)?,
+                shape,
                 tree_hash,
                 registry: registry_header,
                 interim: interim_transcript_hash(&confirmed, &tag)?,
@@ -251,13 +271,29 @@ impl Member {
         joins_of(seal, commits, requests)
     }
 
+    /// Whether the member holds its whole path, as a member that follows
+    /// every step of it does. An island follower holds its island path only,
+    /// until it refreshes (E-15).
+    #[must_use]
+    pub fn knows_path(&self) -> bool {
+        self.path.knows(self.header.shape.height)
+    }
+
     /// Follow one window. [`LEAF_TAKEN`] means that someone else changed the
     /// member's leaf with its device key.
+    ///
+    /// A packet without top gives every step of the member's path; the
+    /// member must hold its whole path, unless the window re-keyed nothing.
+    /// A packet with a top gives the steps up to the member's island root:
+    /// the member takes the root secret from the relay element or the flat
+    /// element of its island, and then holds only its island path, or from a
+    /// refresh, and then holds its whole path again.
     pub fn process(&mut self, packet: &Packet) -> CoreResult<()> {
         let header = &packet.header;
         if header.gid != self.header.gid
             || header.prev_interim != self.header.interim
             || header.district_bits != self.header.shape.district_bits
+            || header.island_bits != self.header.shape.island_bits
         {
             return Err(CoreError::Invalid("packet for another epoch"));
         }
@@ -291,10 +327,7 @@ impl Member {
             path.set_leaf_key(pending.clone());
             leaf_changed = true;
         }
-        let secrets = path.advance(shape.height, &packet.path, &self.header.gid, header.epoch)?;
-        let root = secrets
-            .get(&shape.height)
-            .ok_or(CoreError::Invalid("unknown root secret"))?;
+        let (secrets, root) = self.follow_path(&path, shape, packet)?;
         let seal_hash = header.hash()?;
         let confirmed = confirmed_transcript_hash(&self.header.interim, &seal_hash)?;
         let context = GroupContext {
@@ -304,9 +337,10 @@ impl Member {
             registry_hash: header.registry_hash,
             height: shape.height,
             district_bits: shape.district_bits,
+            island_bits: shape.island_bits,
             confirmed_transcript_hash: confirmed,
         };
-        let commit = commit_secret(root)?;
+        let commit = commit_secret(&root)?;
         let epoch_secrets = EpochSecrets::derive(&init_prev, &commit, &context)?;
         epoch_secrets.check_confirmation_tag(&confirmed, &packet.tag)?;
         let external_pk = epoch_secrets.external_key()?.public_key();
@@ -321,7 +355,7 @@ impl Member {
             };
             entrant.evidence.verify(&self.header, &proof)?;
         }
-        path.set_secrets(secrets);
+        path.set_path(secrets);
         if leaf_changed {
             self.pending_leaf = None;
         }
@@ -336,9 +370,146 @@ impl Member {
         };
         self.previous = Some(core::mem::replace(&mut self.header, next));
         self.path = path;
+        self.root = root;
         self.secrets = epoch_secrets;
         self.seal_hash = seal_hash;
         Ok(())
+    }
+
+    /// The path the member will hold after the window of `packet`, and the
+    /// window's root secret. Nothing is checked against the tag here.
+    fn follow_path(
+        &self,
+        path: &MemberPath,
+        shape: Shape,
+        packet: &Packet,
+    ) -> CoreResult<(PathSecrets, Secret)> {
+        let gid = &self.header.gid;
+        let epoch = packet.header.epoch;
+        let Some(top) = &packet.top else {
+            if packet.path.is_empty() && shape == self.header.shape {
+                // The window re-keyed nothing: the root did not change.
+                return Ok((path.secrets().clone(), self.root.clone()));
+            }
+            let secrets = path.advance(shape.height, &packet.path, gid, epoch)?;
+            let root = secrets
+                .secret(shape.height)
+                .ok_or(CoreError::Invalid("unknown root secret"))?
+                .clone();
+            return Ok((secrets, root));
+        };
+        if !shape.has_islands() {
+            return Err(CoreError::Invalid("top of a tree without islands"));
+        }
+        let level = shape.island_level();
+        if packet.path.keys().any(|stepped| *stepped > level) {
+            return Err(CoreError::Invalid(
+                "island packet with steps above the island",
+            ));
+        }
+        let island = path.advance(level, &packet.path, gid, epoch)?;
+        let island_secret = island
+            .secret(level)
+            .ok_or(CoreError::Invalid("unknown island secret"))?;
+        let index = shape.island_of(self.occupancy.leaf);
+        match top {
+            Top::Relay(relay) => {
+                let root = relay.open(gid, epoch, shape.island_bits, index, island_secret)?;
+                Ok((island, root))
+            }
+            Top::Flat(wrapped) => {
+                let root = open_flat(gid, epoch, shape, index, wrapped, island_secret)?;
+                Ok((island, root))
+            }
+            Top::Refresh(steps) => {
+                let whole = path.refresh(&island, level, shape.height, steps, gid)?;
+                let root = whole
+                    .secret(shape.height)
+                    .ok_or(CoreError::Invalid("unknown root secret"))?
+                    .clone();
+                Ok((whole, root))
+            }
+        }
+    }
+
+    /// Recover the levels of its path above its island root from the last
+    /// step of each (E-15), for the epoch the member is in: what an island
+    /// follower does before a role that needs its whole path (sealing a
+    /// window without a city). The recovered path must lead to the root
+    /// secret the member holds.
+    pub fn refresh(&mut self, steps: &EntrySteps) -> CoreResult<()> {
+        let shape = self.header.shape;
+        if self.knows_path() {
+            return Ok(());
+        }
+        let level = shape.island_level();
+        let island = self.path.secrets().up_to(level);
+        let whole = self
+            .path
+            .refresh(&island, level, shape.height, steps, &self.header.gid)?;
+        let root = whole
+            .secret(shape.height)
+            .ok_or(CoreError::Invalid("unknown root secret"))?;
+        if !digest_eq(root, &self.root) {
+            return Err(CoreError::Invalid("the refresh leads to another root"));
+        }
+        self.path.set_path(whole);
+        Ok(())
+    }
+
+    /// The relay element of the member's island for its epoch (E-15): the
+    /// root secret sealed under the secret of its island root.
+    pub fn relay_element(&self) -> CoreResult<RelayElement> {
+        let shape = self.header.shape;
+        if !shape.has_islands() {
+            return Err(CoreError::Invalid(
+                "relay element in a tree without islands",
+            ));
+        }
+        let island_secret = self
+            .path
+            .secret(shape.island_level())
+            .ok_or(CoreError::Invalid("unknown island secret"))?;
+        RelayElement::seal(
+            &self.header.gid,
+            self.header.epoch,
+            shape.island_bits,
+            shape.island_of(self.occupancy.leaf),
+            island_secret,
+            &self.root,
+        )
+    }
+
+    /// The flat elements of `islands` for the member's epoch (E-15): the
+    /// root secret wrapped to each island root. The keys come from `state`,
+    /// which is first checked against the member's header, so that no
+    /// secret goes to a key the delivery service chose.
+    pub fn flat_elements(
+        &self,
+        state: &PublicState,
+        islands: &[u32],
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Vec<Wrap>> {
+        state.check_against(&self.header)?;
+        let shape = self.header.shape;
+        islands
+            .iter()
+            .map(|island| {
+                let key = state
+                    .tree
+                    .parent(shape.island_root(*island))
+                    .ok_or(CoreError::Invalid("flat element for a blank island"))?;
+                flat_element(
+                    &self.header.gid,
+                    self.header.epoch,
+                    shape,
+                    *island,
+                    &key.encryption_key,
+                    &self.root,
+                    rng,
+                )
+            })
+            .collect()
     }
 
     /// Request a new leaf key (post-compromise security): the next window
@@ -357,16 +528,19 @@ impl Member {
         Ok(request)
     }
 
-    /// Propose the removal of `target` (as an admin, or of oneself).
+    /// Propose the removal of `target` (as an admin, or of oneself), urgent
+    /// or ordinary (E-16).
     pub fn remove_proposal(
         &self,
         target: Occupancy,
+        urgency: Urgency,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<RemoveProposal> {
         RemoveProposal::sign(
             &self.header.gid,
             target,
             self.occupancy,
+            urgency,
             &self.identity,
             rng,
         )
@@ -451,6 +625,7 @@ impl Member {
                 registry_hash: header.registry_hash()?,
                 height: header.shape.height,
                 district_bits: header.shape.district_bits,
+                island_bits: header.shape.island_bits,
                 external_pk_hash: kem_pk_hash(&header.external_pk)?,
                 time_ms,
             },
@@ -523,6 +698,12 @@ impl Member {
         let root_secret = if let Some(secret) = city.secret(root) {
             secret.clone()
         } else if let ([commit], false) = (commits, window.shape.has_city()) {
+            // Without a city, the root is the district's: the sealer follows
+            // the district commit along its own path, which it must hold
+            // whole (an island follower refreshes first).
+            if !self.knows_path() {
+                return Err(CoreError::Invalid("the sealer must refresh its path"));
+            }
             let mut index = WindowIndex::default();
             index.add(&commit.updates, &commit.wraps);
             let steps = index.steps(self.occupancy.leaf, window.shape.height)?;
@@ -530,14 +711,11 @@ impl Member {
                 self.path
                     .advance(window.shape.height, &steps, &state.gid, window.epoch)?;
             secrets
-                .get(&window.shape.height)
-                .ok_or(CoreError::Invalid("unknown root secret"))?
-                .clone()
-        } else if commits.is_empty() && window.shape == self.header.shape {
-            self.path
                 .secret(window.shape.height)
                 .ok_or(CoreError::Invalid("unknown root secret"))?
                 .clone()
+        } else if commits.is_empty() && window.shape == self.header.shape {
+            self.root.clone()
         } else {
             return Err(CoreError::Invalid("window without a new root"));
         };
@@ -647,18 +825,15 @@ impl Member {
         Ok(welcomes)
     }
 
-    /// Whether the member may send in its epoch: not while a removal older
-    /// than `window_removal_ms` waits (E-7).
+    /// Whether the member may send in its epoch: not while an urgent
+    /// removal older than `window_urgent_ms` waits (E-7, E-16). Ordinary
+    /// removals wait for the next scheduled window without stopping anyone.
     #[must_use]
-    pub fn may_send(
-        &self,
-        pending: &[PendingRemoval],
-        now_ms: u64,
-        window_removal_ms: u64,
-    ) -> bool {
-        !pending
-            .iter()
-            .any(|removal| now_ms.saturating_sub(removal.recorded_ms) > window_removal_ms)
+    pub fn may_send(&self, pending: &[PendingRemoval], now_ms: u64, window_urgent_ms: u64) -> bool {
+        !pending.iter().any(|removal| {
+            removal.urgency == Urgency::Urgent
+                && now_ms.saturating_sub(removal.recorded_ms) > window_urgent_ms
+        })
     }
 
     /// Ask to jump to the present (E-8): a welcome into the window that
@@ -1030,6 +1205,10 @@ fn enter_with(
     let mut path = MemberPath::new(input.occupancy.leaf, input.leaf_key);
     let secrets = path.recover(header.shape.height, &entry.steps, &header.gid)?;
     MemberPath::check_keys(&secrets, &entry.nodes)?;
+    let root = secrets
+        .secret(header.shape.height)
+        .ok_or(CoreError::Invalid("unknown root secret"))?
+        .clone();
     let welcome = &entry.welcome;
     if welcome.gid != header.gid
         || welcome.epoch != header.epoch
@@ -1047,11 +1226,12 @@ fn enter_with(
     if secrets_of_epoch.external_key()?.public_key() != last.proof.external_pk {
         return Err(CoreError::Invalid("welcome does not match the seal"));
     }
-    path.set_secrets(secrets);
+    path.set_path(secrets);
     Ok(Member {
         identity: input.identity,
         occupancy: input.occupancy,
         path,
+        root,
         header,
         previous: Some(previous),
         seal_hash,
@@ -1196,13 +1376,15 @@ fn seal_as_entrant(
             rng,
         )?);
     }
+    // The entrant's leaf changed, so the window re-keyed its whole path.
     let mut member_path = MemberPath::new(input.occupancy.leaf, input.leaf_key);
-    member_path.set_secrets(path);
+    member_path.set_path(PathSecrets::at(path, window.epoch));
     let seal_hash = sealed.seal.header.hash()?;
     let member = Member {
         identity: input.identity,
         occupancy: input.occupancy,
         path: member_path,
+        root: root_secret,
         header: sealed.header,
         previous: Some(input.anchor.clone()),
         seal_hash,

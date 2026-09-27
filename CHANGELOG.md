@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Protocol: the v0.5 draft, stage 1
+
+- A draft of the next profile, `city-g/v0.5-draft`, in
+  [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md): a delta on v0.4
+  in three stages, from the research synthesis beyond 0.4. Stage 1 is
+  specified and implemented in `cityg-core`; stages 2 (island tasks,
+  disputes, repairs) and 3 (parity with MLS) are outlined, with their
+  labels reserved. Design decisions E-15 and E-16.
+- **Islands read through relays.** The tree is read in islands of `2^c`
+  leaves (`island_bits`, 8 by default, at most `L`, fixed at genesis and
+  bound in the seal header, the group context and checkpoints). An island
+  follower takes the steps of its path up to its island root, and the
+  window's root secret from a relay element that a member of its island
+  seals under the island root's secret (52 bytes), a flat element that
+  wraps it to the island root for an island without a relay, or a refresh
+  from the latest re-key of each node above its island. It checks the tag
+  as before; a relay can only delay it. The delivery service names a relay
+  per island among its online members, spreads the flat elements over the
+  relays, and serves whole or island packets. A sealer without a city
+  refreshes its path first. In the scale test, an island packet with a
+  relay element weighs 3.6 KB against 7.7 KB for the whole path (16,384
+  members, 2,000 changes), and 3.0 KB against 8.3 KB (65,536 members,
+  4,000 changes).
+- **Urgent and ordinary removals.** A removal proposal carries a signed
+  urgency. Urgent removals (an admin's, or a reported compromise) keep the
+  windows within `WINDOW_URGENT` (5 s) and the rule that members do not
+  send while one waits; ordinary ones (departures, evictions) wait for the
+  window their age closes, at most `WINDOW_ORDINARY`. `DsConfig` fields are
+  renamed `window_ordinary_ms` and `window_urgent_ms`.
+- Breaking: every label ends in `/v5` and the framing tags are
+  `city-g/v0.5-draft`, so nothing of v0.4 decodes. `Member::create` takes
+  `island_bits`; `Member::remove_proposal` and `RemoveProposal::sign` take
+  an `Urgency`; `Packet` gains `top`; `MemberPath` returns `PathSecrets`,
+  with the epoch of each secret. The ML-DSA known-answer test keeps its
+  original context string.
+- Scenario tests in `crates/cityg-core/tests/islands.rs`: relays, a flat
+  element for an island with nobody online, a relay that sends garbage,
+  replays through relays, flat elements and refreshes, a sealer that
+  refreshes its path, urgent and ordinary removals, a removed member facing
+  its island's top, an entrant window followed by refresh, and a window
+  that re-keys nothing.
+
 ### Documentation
 
 - The README presents City-G 0.4: why it exists, its key ideas, a

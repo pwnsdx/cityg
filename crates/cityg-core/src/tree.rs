@@ -6,7 +6,9 @@
 //! The tree has `2^height` leaves. With `L = district_bits`, a *district*
 //! is the subtree of `2^L` leaves under node `(L, d)` when `height > L`; a
 //! group whose tree is not taller than a district has one district, whose
-//! root is the tree's root.
+//! root is the tree's root. Likewise, with `c = island_bits <= L`, an
+//! *island* is the subtree of `2^c` leaves under node `(c, j)`, the unit an
+//! island follower reads the tree by (docs/specs-v0.5-draft.md section 2).
 //!
 //! Only occupied leaves and non-blank parent nodes are stored. A parent node
 //! is blank exactly when its subtree holds no member; every stored parent
@@ -163,32 +165,46 @@ impl Occupancy {
     }
 }
 
-/// Dimensions of a tree: `2^height` leaves in districts of `2^district_bits`.
+/// Dimensions of a tree: `2^height` leaves in districts of `2^district_bits`
+/// leaves, read in islands of `2^island_bits` leaves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
     pub height: u8,
     pub district_bits: u8,
+    pub island_bits: u8,
 }
 
 impl Shape {
-    /// Check the dimensions.
-    pub fn new(height: u8, district_bits: u8) -> CoreResult<Self> {
-        if !(1..=MAX_HEIGHT).contains(&height) || !(1..=MAX_HEIGHT).contains(&district_bits) {
+    /// Check the dimensions: `1 <= island_bits <= district_bits`, so that
+    /// every island lies in one district.
+    pub fn new(height: u8, district_bits: u8, island_bits: u8) -> CoreResult<Self> {
+        if !(1..=MAX_HEIGHT).contains(&height)
+            || !(1..=MAX_HEIGHT).contains(&district_bits)
+            || !(1..=district_bits).contains(&island_bits)
+        {
             return Err(CoreError::Invalid("tree dimensions"));
         }
         Ok(Self {
             height,
             district_bits,
+            island_bits,
         })
     }
 
-    /// The same districts in a tree of `2^height` leaves (`height` not
-    /// smaller than the current one).
+    /// The same districts and islands in a tree of `2^height` leaves
+    /// (`height` not smaller than the current one).
     pub fn grown(self, height: u8) -> CoreResult<Self> {
         if height < self.height {
             return Err(CoreError::Invalid("tree growth"));
         }
-        Self::new(height, self.district_bits)
+        Self::new(height, self.district_bits, self.island_bits)
+    }
+
+    /// Whether `other` has the same districts and islands (both are fixed
+    /// at genesis).
+    #[must_use]
+    pub const fn same_divisions(self, other: Self) -> bool {
+        self.district_bits == other.district_bits && self.island_bits == other.island_bits
     }
 
     /// Number of leaves, `2^height`.
@@ -250,6 +266,48 @@ impl Shape {
         NodeId {
             level: self.height,
             index: 0,
+        }
+    }
+
+    /// Whether the tree has levels above the island roots: members may then
+    /// follow as island followers (docs/specs-v0.5-draft.md section 2).
+    #[must_use]
+    pub const fn has_islands(self) -> bool {
+        self.height > self.island_bits
+    }
+
+    /// Level of the island roots: `min(c, height)`.
+    #[must_use]
+    pub fn island_level(self) -> u8 {
+        self.island_bits.min(self.height)
+    }
+
+    /// Number of islands.
+    #[must_use]
+    pub const fn island_count(self) -> u32 {
+        if self.has_islands() {
+            1 << (self.height - self.island_bits)
+        } else {
+            1
+        }
+    }
+
+    /// Island of a leaf.
+    #[must_use]
+    pub const fn island_of(self, leaf: u32) -> u32 {
+        if self.has_islands() {
+            leaf >> self.island_bits
+        } else {
+            0
+        }
+    }
+
+    /// Root node of island `island`.
+    #[must_use]
+    pub fn island_root(self, island: u32) -> NodeId {
+        NodeId {
+            level: self.island_level(),
+            index: island,
         }
     }
 
@@ -388,10 +446,11 @@ pub struct PublicTree {
 }
 
 impl PublicTree {
-    /// An empty tree of `2^height` leaves in districts of `2^district_bits`.
-    pub fn new(height: u8, district_bits: u8) -> CoreResult<Self> {
+    /// An empty tree of `2^height` leaves in districts of `2^district_bits`
+    /// and islands of `2^island_bits`.
+    pub fn new(height: u8, district_bits: u8, island_bits: u8) -> CoreResult<Self> {
         Ok(Self {
-            shape: Shape::new(height, district_bits)?,
+            shape: Shape::new(height, district_bits, island_bits)?,
             leaves: BTreeMap::new(),
             parents: HashMap::new(),
             taints: HashMap::new(),
@@ -416,6 +475,12 @@ impl PublicTree {
     #[must_use]
     pub const fn district_bits(&self) -> u8 {
         self.shape.district_bits
+    }
+
+    /// `c`: islands hold `2^c` leaves.
+    #[must_use]
+    pub const fn island_bits(&self) -> u8 {
+        self.shape.island_bits
     }
 
     /// Hash of an empty subtree whose root is at `level`.
@@ -553,8 +618,8 @@ impl PublicTree {
 
     /// Grow to `shape` and apply `delta`.
     pub fn apply(&mut self, shape: Shape, delta: &TreeDelta) -> CoreResult<()> {
-        if shape.district_bits != self.shape.district_bits {
-            return Err(CoreError::Invalid("district size"));
+        if !shape.same_divisions(self.shape) {
+            return Err(CoreError::Invalid("district or island size"));
         }
         if shape.height != self.shape.height {
             self.grow_to(shape.height)?;
@@ -656,7 +721,7 @@ pub struct Overlay<'a> {
 impl<'a> Overlay<'a> {
     /// `base` grown to `shape` with `delta` applied.
     pub fn new(base: &'a PublicTree, shape: Shape, delta: &'a TreeDelta) -> CoreResult<Self> {
-        if shape.district_bits != base.shape.district_bits || shape.height < base.shape.height {
+        if !shape.same_divisions(base.shape) || shape.height < base.shape.height {
             return Err(CoreError::Invalid("overlay shape"));
         }
         let mut dirty = HashSet::new();
@@ -845,11 +910,11 @@ mod tests {
 
     #[test]
     fn addressing_and_districts() {
-        let shape = Shape::new(5, 2).unwrap();
+        let shape = Shape::new(5, 2, 1).unwrap();
         assert_eq!(shape.district_count(), 8);
         assert_eq!(shape.district_of(13), 3);
         assert_eq!(shape.district_root(3), NodeId { level: 2, index: 3 });
-        let small = Shape::new(2, 4).unwrap();
+        let small = Shape::new(2, 4, 3).unwrap();
         assert_eq!(small.district_count(), 1);
         assert_eq!(small.district_root(0), small.root());
         let node = NodeId::of_leaf(13, 2);
@@ -859,12 +924,22 @@ mod tests {
         assert_eq!(node.children()[1].parent(), node);
         assert_eq!(node.child_toward(13), NodeId { level: 1, index: 6 });
         assert_eq!(node.leaves(), 12..16);
-        assert!(Shape::new(0, 2).is_err() && Shape::new(25, 2).is_err());
+        assert!(Shape::new(0, 2, 1).is_err() && Shape::new(25, 2, 1).is_err());
+        assert!(Shape::new(5, 2, 3).is_err() && Shape::new(5, 2, 0).is_err());
+        // Islands of two leaves: sixteen of them, the roots at level 1.
+        assert!(shape.has_islands() && shape.island_count() == 16);
+        assert_eq!(shape.island_of(13), 6);
+        assert_eq!(shape.island_root(6), NodeId { level: 1, index: 6 });
+        // A tree no taller than an island is one island, whose root is the
+        // tree's root.
+        assert!(!small.has_islands() && small.island_count() == 1);
+        assert_eq!(small.island_root(0), small.root());
+        assert!(!shape.same_divisions(Shape::new(5, 2, 2).unwrap()));
     }
 
     #[test]
     fn hashes_follow_the_content_and_the_cache_is_invalidated() {
-        let mut tree = PublicTree::new(3, 2).unwrap();
+        let mut tree = PublicTree::new(3, 2, 1).unwrap();
         let empty = tree.tree_hash().unwrap();
         tree.set_leaf(5, Some(leaf(1, 1))).unwrap();
         let one = tree.tree_hash().unwrap();
@@ -878,7 +953,7 @@ mod tests {
         assert_ne!(keyed, one);
         assert_eq!(tree.tainted_by(owner).len(), 3);
         // Recomputing from scratch gives the cached value.
-        let mut fresh = PublicTree::new(3, 2).unwrap();
+        let mut fresh = PublicTree::new(3, 2, 1).unwrap();
         fresh.set_leaf(5, Some(leaf(1, 1))).unwrap();
         for level in 1..=3 {
             fresh
@@ -893,7 +968,7 @@ mod tests {
 
     #[test]
     fn leaf_proofs_verify_and_detect_changes() {
-        let mut tree = PublicTree::new(4, 2).unwrap();
+        let mut tree = PublicTree::new(4, 2, 1).unwrap();
         let owner = Occupancy { leaf: 0, since: 0 };
         for index in [0u32, 3, 9, 14] {
             tree.set_leaf(index, Some(leaf(u8::try_from(index).unwrap(), 2)))
@@ -927,7 +1002,7 @@ mod tests {
 
     #[test]
     fn growth_keeps_addresses() {
-        let mut tree = PublicTree::new(2, 3).unwrap();
+        let mut tree = PublicTree::new(2, 3, 2).unwrap();
         tree.set_leaf(1, Some(leaf(1, 0))).unwrap();
         tree.grow_to(4).unwrap();
         assert_eq!(tree.shape().district_count(), 2);
@@ -939,7 +1014,7 @@ mod tests {
     #[test]
     fn an_overlay_hashes_like_the_applied_tree() {
         let owner = Occupancy { leaf: 1, since: 0 };
-        let mut base = PublicTree::new(2, 2).unwrap();
+        let mut base = PublicTree::new(2, 2, 1).unwrap();
         base.set_leaf(1, Some(leaf(1, 0))).unwrap();
         base.set_leaf(2, Some(leaf(2, 0))).unwrap();
         for node in [
@@ -986,7 +1061,7 @@ mod tests {
     #[test]
     fn an_overlay_of_pure_growth_matches_growth() {
         let owner = Occupancy { leaf: 0, since: 0 };
-        let mut base = PublicTree::new(1, 3).unwrap();
+        let mut base = PublicTree::new(1, 3, 2).unwrap();
         base.set_leaf(0, Some(leaf(1, 0))).unwrap();
         base.set_parent(NodeId { level: 1, index: 0 }, Some(parent(1, owner)))
             .unwrap();

@@ -1,6 +1,7 @@
 # Glossary
 
-Section numbers refer to the [specification](specs.md).
+Section numbers refer to the [specification](specs.md); "v0.5 §x" refers to
+the [v0.5 draft](specs-v0.5-draft.md), a delta on it.
 
 **Admin.** A member whose occupancy and device key are in the registry's
 admin list. Admins sign admissions, invites, checkpoints and group
@@ -72,6 +73,9 @@ transcript and its secrets (section 9).
 **Eviction.** A removal the DS writes, under an admin-signed policy, for a
 member whose leaf key has not changed for too long (sections 6 and 14.7).
 
+**Flat element.** The root secret of a window wrapped to the root of an
+island that has no relay, by a member the DS asks (v0.5 §2.4).
+
 **External init.** The init secret an entrant encapsulates to the external
 key of the previous epoch, in place of that epoch's init secret, which it
 does not know (section 9).
@@ -88,6 +92,14 @@ placed that entry (section 15).
 **Group policy.** An admin-signed object stating whether the group is open
 and after how many epochs an idle member may be evicted (section 6).
 
+**Island.** The subtree of `2^c` leaves under node `(c, j)`, `c <= L`: the
+unit an island follower reads the tree by (v0.5 §2.1).
+
+**Island follower.** A member that takes the steps of its path up to its
+island root, and the root secret from the top of its packet: a relay
+element, a flat element or a refresh. It holds its island path and the root
+secret (v0.5 §2.2).
+
 **Init key.** A one-time X-Wing key of a join, re-entry or catch-up
 request, to which a welcome is sealed (section 11).
 
@@ -101,7 +113,9 @@ entered it. It is never reused (section 1).
 signed request and no admission; every join stays visible (section 6.1).
 
 **Packet.** What a member downloads for one window: the seal header, the
-tag, the registry update and the steps of its path (section 13.1).
+tag, the registry update and the steps of its path (section 13.1). An
+island packet has the steps up to the member's island root and a top
+(v0.5 §2.8).
 
 **Path.** A member's leaf and its ancestors up to the root; a member holds
 the secret of each (section 7.4).
@@ -109,6 +123,14 @@ the secret of each (section 7.4).
 **Plan.** The public structure of a re-key: which nodes, which become blank,
 where each secret is chained from and which children it is wrapped to. Any
 verifier recomputes it (section 7.3).
+
+**Refresh.** The latest re-key of each node of a member's path above its
+island, from which it recovers those levels as a jump does; checked by the
+window's tag, or against the root secret the member holds (v0.5 §2.5).
+
+**Relay.** The member of an island the DS names to seal the window's root
+secret under the island root's secret, for the island's members: a *relay
+element* of 52 bytes (v0.5 §2.3).
 
 **Re-entry.** A returning member's signed request to re-enter its own leaf
 with a new leaf key (section 12.10).
@@ -119,6 +141,11 @@ policy's hash and mode; members keep its header (section 8).
 **Removal, recorded and applied.** A removal is recorded when the DS accepts
 its proposal, and applied by the next window, which re-keys everything the
 member knew (sections 14.2 and 14.6).
+
+**Removal, urgent or ordinary.** An urgent removal (by an admin, or a
+reported compromise) closes a window within `WINDOW_URGENT`, and members do
+not send while it waits longer; an ordinary one (a departure, an eviction)
+waits for the window its age closes, at most `WINDOW_ORDINARY` (v0.5 §2.9).
 
 **Seal.** The object that creates an epoch: the header (hashes, sealer,
 external init of an entrant), the body (district commit hashes, the city's
@@ -144,6 +171,9 @@ child's new secret) (section 7.4).
 public and hashed with the tree. Removing or updating a member re-keys every
 node it taints (sections 5.2 and 10.2).
 
+**Top.** How an island follower gets the root secret of a window: a relay
+element, a flat element or a refresh (v0.5 §2.2).
+
 **Token.** What the admission map records for a join so that it enters
 once: the admission's hash, or the request's hash without admission (section
 6).
@@ -155,7 +185,9 @@ may give a role (section 14.4).
 a joiner, a re-entering member or a member that asked to jump (section 11).
 
 **Window.** The requests the DS collects before one epoch; it closes after
-`WINDOW_MAX`, or `WINDOW_REMOVAL` when a removal waits (section 14.2).
+`WINDOW_MAX`, or `WINDOW_REMOVAL` when a removal waits (section 14.2). In
+the v0.5 draft, after `WINDOW_ORDINARY`, or `WINDOW_URGENT` when an urgent
+removal waits (v0.5 §2.9).
 
 **Wrap.** A node's new secret for the holder of a child's key: an X-Wing
 encapsulation and the secret under ChaCha20-Poly1305 (section 7.2).

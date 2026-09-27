@@ -122,6 +122,8 @@ La ville entretenue fait du profil candidat une évolution de la v0.4, pas une r
 | 2. Tâches d'îlot | Les quartiers deviennent des îlots ; les committers et le scelleur deviennent des tâches ; les entrants re-keyent leur propre chemin et se partagent la ville ; litiges prouvés et réparation. | Plus de rôle de committer visible ; une tâche coupe au plus 256 membres ; la tâche la plus lourde d'une vague prend 42 ms au lieu de 0,6 s. |
 | 3. Parité | Mode autorisé, points de contrôle, plan de messages, feuille scindée, unicité des clés, journal des membres, exporteur. | Les garanties de MLS (section 4). |
 
+Depuis ([brouillon de spécification v0.5](../specs-v0.5-draft.md)) : l'étape 1 est spécifiée et implémentée dans `cityg-core`, profil `city-g/v0.5-draft`. Un membre sans relais ni élément plat reconstruit le haut de son chemin à partir du dernier re-key de chaque nœud, sans que personne soit en ligne. Les entrées ne changent pas à cette étape : un entrant lit encore son chemin entier, et c'est l'étape 2 qui l'en dispense. Les étapes 2 et 3 y sont esquissées, leurs labels réservés.
+
 ## 4. Garanties face à MLS, et leurs preuves
 
 Les scénarios sont dans [`docs/formal/`](../formal/README.md) (F), [`formal-messages/`](formal-messages/README.md) (M) et [`formal-parity/`](formal-parity/README.md) (P). Les attaques montrent que le mécanisme correspondant est nécessaire.

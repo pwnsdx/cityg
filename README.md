@@ -18,9 +18,12 @@ with X25519) and ML-DSA-65.
 > [specification](docs/specs.md), the [design note](docs/design.md), a
 > [symbolic model](docs/formal/) and the protocol core
 > [`cityg-core`](crates/cityg-core) with an in-memory delivery service. The
-> message plane, the networked delivery service and the clients do not exist
-> yet ([specification, section 19](docs/specs.md#19-open-items)). There are
-> no test vectors and no independent human cryptographic review: **for
+> core implements stage 1 of the [v0.5 draft](docs/specs-v0.5-draft.md), a
+> delta on v0.4: members may read the tree by island through relays, and
+> removals are urgent or ordinary. The message plane, the networked
+> delivery service and the clients do not exist yet
+> ([specification, section 19](docs/specs.md#19-open-items)). There are no
+> test vectors and no independent human cryptographic review: **for
 > production, use MLS.**
 
 ---
@@ -60,6 +63,7 @@ At a million members, four of its choices get in the way:
 | **Light members** | A member keeps its path and the secrets of its epoch, O(log N), and downloads one packet per window with the steps of its own path. |
 | **Checks by sampling** | The DS checks every request, committers the entries of their district, the sealer the structure of every commit, and members audit random entries. |
 | **Open groups** | An admin-signed policy can open a group to any device; every join stays visible. |
+| **Relays** (v0.5 draft) | A member may read the tree by island of 256 leaves: a member of its island seals each window's root secret for it in 52 bytes, checked by the tag. Urgent removals keep their 5-second windows; departures wait for the next scheduled window. |
 
 ## City‑G 0.4 and MLS
 
@@ -166,6 +170,7 @@ and half joins:
 | District commits | 16, busiest 852 KB | 16, busiest 1.9 MB |
 | Seal | 51 KB | 51 KB |
 | Packet per member | mean 7.7 KB | mean 8.3 KB |
+| Packet per member by island of 256 leaves, with a relay element (v0.5 draft) | mean 3.6 KB | mean 3.0 KB |
 | DS check of the whole window | 0.8 s | 1.6 s |
 
 **Modelled**, for a group of `2^20` members
@@ -180,7 +185,10 @@ and half joins:
 * **The weak point.** At a million members, departures come every second or
   so, and under the rule that a removal closes its window within 5 s,
   windows last 5 s: following the group then costs about 44 MB a day at
-  1.7 changes per second. The research notes bring this down (below).
+  1.7 changes per second. The research notes bring this down (below), and
+  stage 1 of the [v0.5 draft](docs/specs-v0.5-draft.md) implements the
+  first step: with ordinary removals, 5-minute windows and relays, about
+  94 KB a day ([`ilots_sim.py`](docs/research/ilots_sim.py)).
 
 ## Limits
 
@@ -208,9 +216,11 @@ and half joins:
 
 The architecture of 0.4 comes from a first research note,
 [Groupes de millions de membres](docs/research/grands-groupes-2026-09-25.md).
-Eight more, in French, look at what comes next; the fifth gathers them
-into a candidate profile for the next version, and the last three work on
-its open problems. None of them is part of the profile.
+Twelve more, in French, look at what comes next; the fifth gathers them
+into a candidate profile for the next version, in three stages, and the
+following ones work on its open problems. None of them is part of profile
+v0.4; the [v0.5 draft](docs/specs-v0.5-draft.md) specifies the first
+stage.
 
 | Note | Question | What it finds |
 | --- | --- | --- |
@@ -231,7 +241,7 @@ its open problems. None of them is part of the profile.
 
 | Path | Content |
 | --- | --- |
-| [`crates/cityg-core`](crates/cityg-core) | Protocol core without I/O: deterministic CBOR, X-Wing, device identities, hashing and wraps, the tree, re-key plans, the registry, the key schedule, signed requests, district commits and seals, welcomes, members, joiners and returning members, an in-memory delivery service, audits and fraud proofs. |
+| [`crates/cityg-core`](crates/cityg-core) | Protocol core without I/O: deterministic CBOR, X-Wing, device identities, hashing and wraps, the tree, re-key plans, the registry, the key schedule, signed requests, district commits and seals, welcomes, members, joiners and returning members, relay and flat elements for island followers, an in-memory delivery service, audits and fraud proofs. |
 | [`crates/cityg-pqc`](crates/cityg-pqc) | FIPS 204 ML-DSA-65 with per-usage contexts. |
 | [`docs/`](docs/README.md) | Specification, design note, glossary, workflows, symbolic model, research. |
 | [`scripts/`](scripts/) | Local CI, security review, delivery-service guardrail. |
@@ -261,7 +271,10 @@ groups on the in-memory delivery service: growth over several districts,
 windows sealed by an entrant with nobody online, recorded removals, removal
 of a committer that kept its secrets, forged epochs, jumps and re-entries,
 a stolen device key, failed committers, eviction, audits and fraud proofs,
-invites, anchored joins, and open groups.
+invites, anchored joins, and open groups. Those of
+`crates/cityg-core/tests/islands.rs` run island followers: relays, flat
+elements, a relay that lies, replays, a sealer that refreshes its path, a
+removed member facing its island's top, and urgent and ordinary removals.
 
 ## Contributing
 

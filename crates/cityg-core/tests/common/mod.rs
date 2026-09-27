@@ -1,5 +1,6 @@
 //! A small simulation of a group: a delivery service, members that
-//! follow every window, and joiners.
+//! follow every window (their whole path, or as island followers), and
+//! joiners.
 
 #![allow(
     dead_code,
@@ -10,7 +11,8 @@
 
 use std::collections::BTreeMap;
 
-use cityg_core::ds::{DeliveryService, DsConfig};
+use cityg_core::ds::{DeliveryService, DsConfig, TopChoice};
+use cityg_core::error::CoreError;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::member::{Joiner, Member, Returning};
 use cityg_core::packet::SealLink;
@@ -34,6 +36,9 @@ pub struct Sim {
     /// Members that do not follow windows for now.
     pub absent: std::collections::BTreeSet<Occupancy>,
     pub now: u64,
+    /// Members follow as island followers, and relays and flat elements
+    /// are made after every seal (E-15).
+    pub islands: bool,
 }
 
 impl Sim {
@@ -45,10 +50,20 @@ impl Sim {
 
     /// A group created by one member, open or closed.
     pub fn with_policy(bits: u8, seed: u64, open: bool) -> Self {
+        Self::build(bits, bits, seed, open, false)
+    }
+
+    /// A closed group with districts of `2^bits` leaves and islands of
+    /// `2^island_bits`, whose members follow as island followers.
+    pub fn with_islands(bits: u8, island_bits: u8, seed: u64) -> Self {
+        Self::build(bits, island_bits, seed, false, true)
+    }
+
+    fn build(bits: u8, island_bits: u8, seed: u64, open: bool, islands: bool) -> Self {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let identity = DeviceIdentity::generate(&mut rng);
         let (creator, genesis) =
-            Member::create(identity, [7; 32], bits, open, 1_000, &mut rng).unwrap();
+            Member::create(identity, [7; 32], bits, island_bits, open, 1_000, &mut rng).unwrap();
         let ds = DeliveryService::new(genesis, DsConfig::default()).unwrap();
         let mut members = BTreeMap::new();
         members.insert(creator.occupancy(), creator);
@@ -60,6 +75,7 @@ impl Sim {
             returning: BTreeMap::new(),
             absent: std::collections::BTreeSet::new(),
             now: 1_000,
+            islands,
         };
         sim.set_all_online(true);
         sim
@@ -171,6 +187,14 @@ impl Sim {
     /// The committers of the open window `task` commit, its sealer seals,
     /// and every member follows it. Returns the new epoch.
     pub fn complete_window(&mut self, task: &WindowTask) -> u64 {
+        let epoch = self.seal_window(task);
+        self.follow(epoch);
+        epoch
+    }
+
+    /// The committers of the open window `task` commit and its sealer
+    /// seals; nobody follows yet. Returns the new epoch.
+    pub fn seal_window(&mut self, task: &WindowTask) -> u64 {
         let (_, requests, _) = self.ds.open_window_data().unwrap();
         let requests = requests.clone();
         for (district, committer) in &task.committers {
@@ -180,34 +204,113 @@ impl Sim {
             self.ds.submit_district_commit(commit).unwrap();
         }
         let commits = self.ds.open_commits();
+        // Without a city, the sealer follows the district commit along its
+        // own path: an island follower refreshes its path first.
+        let city = self
+            .ds
+            .state()
+            .tree
+            .shape()
+            .grown(task.height)
+            .unwrap()
+            .has_city();
+        if !city && !self.members[&task.sealer].knows_path() {
+            let steps = self.ds.refresh_steps(task.sealer).unwrap();
+            self.members
+                .get_mut(&task.sealer)
+                .unwrap()
+                .refresh(&steps)
+                .unwrap();
+        }
         let seal = self.members[&task.sealer]
             .seal(self.ds.state(), task, &commits, &requests, &mut self.rng)
             .unwrap();
-        let epoch = self.ds.submit_seal(seal).unwrap();
-        self.follow(epoch);
-        epoch
+        self.ds.submit_seal(seal).unwrap()
     }
 
     /// Every member follows the window of `epoch`; members it removed leave.
+    /// With islands, the window's relays and flat elements come first.
     pub fn follow(&mut self, epoch: u64) {
+        if self.islands {
+            self.make_tops(epoch);
+        }
         let occupancies: Vec<Occupancy> = self.members.keys().copied().collect();
         for occupancy in occupancies {
             if self.members[&occupancy].epoch() + 1 != epoch || self.absent.contains(&occupancy) {
                 continue;
             }
-            match self.ds.packet(epoch, occupancy) {
-                Ok(packet) => {
+            let followed = if self.islands {
+                self.follow_island(occupancy, epoch)
+            } else {
+                self.ds.packet(epoch, occupancy).map(|packet| {
                     self.members
                         .get_mut(&occupancy)
                         .unwrap()
                         .process(&packet)
                         .unwrap();
-                }
-                Err(_) => {
-                    self.members.remove(&occupancy);
-                }
+                })
+            };
+            if followed.is_err() {
+                self.members.remove(&occupancy);
             }
         }
+    }
+
+    /// The relays of window `epoch` follow it by refresh and send their
+    /// relay elements; then the members asked for flat elements send them.
+    pub fn make_tops(&mut self, epoch: u64) {
+        let task = self.ds.window(epoch).unwrap().top_task().clone();
+        for relay in task.relays.values() {
+            let ready = self
+                .members
+                .get(relay)
+                .is_some_and(|member| member.epoch() + 1 == epoch);
+            if !ready || self.absent.contains(relay) {
+                continue;
+            }
+            let packet = self
+                .ds
+                .island_packet(epoch, *relay, TopChoice::Refresh)
+                .unwrap();
+            let member = self.members.get_mut(relay).unwrap();
+            member.process(&packet).unwrap();
+            let element = member.relay_element().unwrap();
+            self.ds.submit_relay(*relay, element).unwrap();
+        }
+        for (maker, islands) in &task.flats {
+            let Some(member) = self.members.get(maker) else {
+                continue;
+            };
+            if member.epoch() != epoch {
+                continue;
+            }
+            let flats = member
+                .flat_elements(self.ds.state(), islands, &mut self.rng)
+                .unwrap();
+            self.ds.submit_flats(*maker, epoch, flats).unwrap();
+        }
+    }
+
+    /// An island follower follows window `epoch`: from its relay element,
+    /// else its flat element, else a refresh. A packet the service refuses
+    /// (the member was removed) is the error.
+    pub fn follow_island(&mut self, occupancy: Occupancy, epoch: u64) -> Result<(), CoreError> {
+        for choice in [TopChoice::Best, TopChoice::AvoidRelay] {
+            let packet = self.ds.island_packet(epoch, occupancy, choice)?;
+            let member = self.members.get_mut(&occupancy).unwrap();
+            if member.process(&packet).is_ok() {
+                return Ok(());
+            }
+        }
+        let packet = self
+            .ds
+            .island_packet(epoch, occupancy, TopChoice::Refresh)?;
+        self.members
+            .get_mut(&occupancy)
+            .unwrap()
+            .process(&packet)
+            .expect("a refresh leads to the epoch");
+        Ok(())
     }
 
     /// Welcomers seal their welcomes; joiners of the window enter.
@@ -303,6 +406,10 @@ impl Sim {
         self.absent.remove(&occupancy);
         while self.members[&occupancy].epoch() < self.ds.epoch() {
             let epoch = self.members[&occupancy].epoch() + 1;
+            if self.islands {
+                self.follow_island(occupancy, epoch).unwrap();
+                continue;
+            }
             let packet = self.ds.packet(epoch, occupancy).unwrap();
             self.members
                 .get_mut(&occupancy)

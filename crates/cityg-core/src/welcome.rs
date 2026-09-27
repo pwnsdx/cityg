@@ -1,7 +1,7 @@
 //! Welcomes (docs/specs.md section 11).
 //!
 //! ```text
-//! Welcome := ["city-g/welcome/v4", gid, epoch, request_ref, kem_ciphertext,
+//! Welcome := ["city-g/welcome/v5", gid, epoch, request_ref, kem_ciphertext,
 //!             leaf_ciphertext or null, sealed]
 //! context := CBOR_det([gid, epoch, request_ref, H_L("kem-pk", [init_key]),
 //!                      H_L("kem-pk", [leaf_key]) or null])
@@ -34,7 +34,7 @@ use crate::crypto::{
 use crate::error::{CoreError, CoreResult};
 use crate::kem::{KEM_CIPHERTEXT_BYTES, KemSecret, encapsulate};
 
-pub const WELCOME_LABEL: &str = "city-g/welcome/v4";
+pub const WELCOME_LABEL: &str = "city-g/welcome/v5";
 const MAX_WELCOME_BYTES: usize = 4096;
 
 /// A welcome into epoch `epoch` for the request `request`.

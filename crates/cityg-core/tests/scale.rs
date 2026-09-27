@@ -9,7 +9,8 @@
 //! The group is built directly (every leaf occupied, keyed by one
 //! committer); the window goes through the protocol's functions: entries
 //! checked by the committers, district commits, the city re-key and the
-//! seal, the delivery service's full check, and one packet per member.
+//! seal, the delivery service's full check, and one packet per member,
+//! whole or by island (`CITYG_SCALE_ISLAND_BITS`, 8 by default).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
@@ -20,12 +21,13 @@ use cityg_core::commit::Change;
 use cityg_core::identity::DeviceIdentity;
 use cityg_core::kem::KemSecret;
 use cityg_core::objects::{
-    Admission, ChangeKind, JoinRequest, RemoveProposal, Request, device_id, group_id,
+    Admission, ChangeKind, JoinRequest, RemoveProposal, Request, Urgency, device_id, group_id,
 };
 use cityg_core::packet::{Packet, RegistryUpdate, SealLink, SealerEvidence};
 use cityg_core::registry::{Registry, RegistryDelta};
 use cityg_core::rekey::{KeySource, LeafChanges, WindowIndex, generate, plan_city, plan_district};
 use cityg_core::roles::{SealDraft, build_city, build_district, finish_seal, with_city};
+use cityg_core::top::{RelayElement, Top, flat_element};
 use cityg_core::tree::{LeafNode, Occupancy, ParentNode, PublicTree};
 use cityg_core::window::{
     PublicState, Requests, WindowShape, check_districts, check_sealer, check_window,
@@ -47,12 +49,12 @@ struct Group {
     committers: BTreeMap<u32, (Occupancy, DeviceIdentity)>,
 }
 
-/// A group of `2^height` members in districts of `2^bits`, keyed by one
-/// committer (the admin at leaf 0).
-fn full_group(height: u8, bits: u8, rng: &mut ChaCha20Rng) -> Group {
+/// A group of `2^height` members in districts of `2^bits` and islands of
+/// `2^island_bits`, keyed by one committer (the admin at leaf 0).
+fn full_group(height: u8, bits: u8, island_bits: u8, rng: &mut ChaCha20Rng) -> Group {
     let admin = DeviceIdentity::generate(rng);
     let gid = group_id(admin.public_key(), &[1; 32]).unwrap();
-    let mut tree = PublicTree::new(height, bits).unwrap();
+    let mut tree = PublicTree::new(height, bits, island_bits).unwrap();
     let shape = tree.shape();
     let admin_occupancy = Occupancy { leaf: 0, since: 0 };
     let mut committers = BTreeMap::new();
@@ -218,9 +220,12 @@ fn a_large_window_on_a_full_group_matches_the_model() {
     let height = u8::try_from(env("CITYG_SCALE_HEIGHT", 14)).unwrap();
     let bits = u8::try_from(env("CITYG_SCALE_BITS", 10)).unwrap();
     let changes = usize::try_from(env("CITYG_SCALE_CHANGES", 2000)).unwrap();
+    let island_bits = u8::try_from(env("CITYG_SCALE_ISLAND_BITS", 8))
+        .unwrap()
+        .min(bits);
     let mut rng = ChaCha20Rng::seed_from_u64(7);
     let start = Instant::now();
-    let group = full_group(height, bits, &mut rng);
+    let group = full_group(height, bits, island_bits, &mut rng);
     let state = &group.state;
     let n = 1usize << height;
     println!(
@@ -256,9 +261,15 @@ fn a_large_window_on_a_full_group_matches_the_model() {
             leaf: *leaf,
             since: 0,
         };
-        let proposal =
-            RemoveProposal::sign(&state.gid, target, admin_occupancy, &group.admin, &mut rng)
-                .unwrap();
+        let proposal = RemoveProposal::sign(
+            &state.gid,
+            target,
+            admin_occupancy,
+            Urgency::Urgent,
+            &group.admin,
+            &mut rng,
+        )
+        .unwrap();
         let request = Request::Removal(proposal);
         list.push(Change {
             leaf: *leaf,
@@ -410,16 +421,33 @@ fn a_large_window_on_a_full_group_matches_the_model() {
         None,
     );
     let removed_set: HashSet<u32> = removed.iter().copied().collect();
+    let island_level = shape.island_level();
+    let is_wrap = |step: &cityg_core::rekey::Step| matches!(step, cityg_core::rekey::Step::Wrap(_));
+    let relay = Top::Relay(
+        RelayElement::seal(&state.gid, epoch, island_bits, 0, &[1; 32], &[2; 32]).unwrap(),
+    );
+    let island_pk = &state
+        .tree
+        .parent(shape.island_root(0))
+        .unwrap()
+        .encryption_key;
+    let flat = Top::Flat(
+        flat_element(&state.gid, epoch, shape, 0, island_pk, &[2; 32], &mut rng).unwrap(),
+    );
     let mut sizes = Vec::new();
     let mut wrap_counts = Vec::new();
+    let mut relay_sizes = Vec::new();
+    let mut flat_sizes = Vec::new();
+    let mut upper_wraps = Vec::new();
     for leaf in (0..n as u32).step_by((n / 4096).max(1)) {
         if removed_set.contains(&leaf) {
             continue;
         }
         let path = index.steps(leaf, shape.height).unwrap();
-        wrap_counts.push(
-            path.values()
-                .filter(|s| matches!(s, cityg_core::rekey::Step::Wrap(_)))
+        wrap_counts.push(path.values().filter(|step| is_wrap(step)).count());
+        upper_wraps.push(
+            path.range(island_level + 1..)
+                .filter(|(_, step)| is_wrap(step))
                 .count(),
         );
         let packet = Packet {
@@ -429,8 +457,15 @@ fn a_large_window_on_a_full_group_matches_the_model() {
             registry: registry.clone(),
             leaf_key: [0; 32],
             path,
+            top: None,
         };
         sizes.push(packet.encoded_len());
+        let mut island = packet;
+        island.path.retain(|level, _| *level <= island_level);
+        island.top = Some(relay.clone());
+        relay_sizes.push(island.encoded_len());
+        island.top = Some(flat.clone());
+        flat_sizes.push(island.encoded_len());
     }
     let mean = sizes.iter().sum::<usize>() as f64 / sizes.len() as f64;
     let mean_wraps = wrap_counts.iter().sum::<usize>() as f64 / wrap_counts.len() as f64;
@@ -442,6 +477,15 @@ fn a_large_window_on_a_full_group_matches_the_model() {
         human(*sizes.iter().max().unwrap() as f64)
     );
     assert!(mean < model_member * 1.2 + 512.0);
+    let average = |values: &[usize]| values.iter().sum::<usize>() as f64 / values.len() as f64;
+    println!(
+        "island packets (islands of 2^{island_bits}): with a relay element mean {} (max {}), with a flat element mean {}; a relay reads {:.1} wraps above its island",
+        human(average(&relay_sizes)),
+        human(*relay_sizes.iter().max().unwrap() as f64),
+        human(average(&flat_sizes)),
+        average(&upper_wraps),
+    );
+    assert!(average(&relay_sizes) < mean);
 
     // What a joiner downloads per window of the chain from its checkpoint.
     let link = SealLink {

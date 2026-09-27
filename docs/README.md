@@ -2,14 +2,18 @@
 
 City-G's protocol is profile **`city-g/v0.4`**, its initial version. The
 reference is the [specification](specs.md); everything else here explains
-or checks it.
+or checks it. The [v0.5 draft](specs-v0.5-draft.md), profile
+`city-g/v0.5-draft`, is a delta on it: its first stage (islands read
+through relays, urgent and ordinary removals) is what `cityg-core`
+implements.
 
 ## Protocol
 
 | Document | Content |
 | --- | --- |
 | [specs.md](specs.md) | Specification: threat model and security properties, cryptographic suite and encodings, tree, signed requests, re-key, registry, key schedule, district commits and seals, welcomes, members, packets, delivery service, audits, parameters, label registry, security considerations, open items, relation to MLS. |
-| [design.md](design.md) | Why the protocol is built as it is (decisions E-1 to E-14), what each decision costs, and what was left out. |
+| [specs-v0.5-draft.md](specs-v0.5-draft.md) | Draft of the next profile, `city-g/v0.5-draft`, as a delta on v0.4, in three stages. Stage 1, specified and implemented: islands of `2^c` leaves, island followers that take the root secret from a relay element of their island (52 bytes), a flat element or a refresh from the latest re-keys; urgent and ordinary removals. Stages 2 (island tasks, disputes, repairs) and 3 (parity with MLS) outlined, with their labels reserved. |
+| [design.md](design.md) | Why the protocol is built as it is (decisions E-1 to E-14, and E-15 and E-16 for the v0.5 draft), what each decision costs, and what was left out. |
 | [workflows.md](workflows.md) | Sequence diagrams: creating a group, joining, a window of changes, nobody online, coming back, seeing who joined an open group. |
 | [GLOSSARY.md](GLOSSARY.md) | Terms of the specification. |
 | [formal/](formal/README.md) | ProVerif model of the security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins, windows sealed by an entrant, open groups, catch-ups welcomed to the leaf key. |

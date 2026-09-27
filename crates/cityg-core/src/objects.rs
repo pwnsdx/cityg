@@ -1,26 +1,29 @@
-//! Signed requests (docs/specs.md section 6).
+//! Signed requests (docs/specs.md section 6, with the removal and the
+//! checkpoint of docs/specs-v0.5-draft.md section 2).
 //!
 //! ```text
-//! Invite         := ["city-g/invite/v4", gid, invite_pk, expires_at_ms, max_uses,
+//! Invite         := ["city-g/invite/v5", gid, invite_pk, expires_at_ms, max_uses,
 //!                    inviter, inviter_pk]                         ctx INVITE, by the inviter
-//! Admission      := ["city-g/admission/v4", gid, device_id, not_after_epoch, kind,
+//! Admission      := ["city-g/admission/v5", gid, device_id, not_after_epoch, kind,
 //!                    admin or null, authorizer_pk, invite or null] ctx ADMISSION
 //!   kind 0: signed by admin `admin`, whose key is authorizer_pk
 //!   kind 1: signed by the invite key authorizer_pk of the enclosed invite
-//! JoinRequest    := ["city-g/join-request/v4", gid, device_pk, encryption_key,
+//! JoinRequest    := ["city-g/join-request/v5", gid, device_pk, encryption_key,
 //!                    init_key, not_after_epoch, admission or null] ctx JOIN_REQUEST, by the device
-//! RemoveProposal := ["city-g/remove/v4", gid, target, proposer]   ctx REMOVE_PROPOSAL
-//! Eviction       := ["city-g/eviction/v4", gid, target, policy_hash]   (unsigned)
-//! GroupPolicy    := ["city-g/group-policy/v4", gid, admission, max_idle_epochs or null,
+//! RemoveProposal := ["city-g/remove/v5", gid, target, proposer, urgency]  ctx REMOVE_PROPOSAL
+//!   urgency 0: ordinary (the next scheduled window), 1: urgent (a window within
+//!   WINDOW_URGENT, and members do not send while it waits)
+//! Eviction       := ["city-g/eviction/v5", gid, target, policy_hash]   (unsigned)
+//! GroupPolicy    := ["city-g/group-policy/v5", gid, admission, max_idle_epochs or null,
 //!                    admin]                                       ctx GROUP_POLICY
 //!   admission 0: closed (a join needs an admission), 1: open (any device)
-//! UpdateRequest  := ["city-g/update/v4", gid, member, replaces, encryption_key]  ctx UPDATE_REQUEST
-//! CatchUpRequest := ["city-g/catch-up/v4", gid, member, prev_interim, init_key]  ctx CATCH_UP
-//! ReEntryRequest := ["city-g/re-entry/v4", gid, member, replaces, encryption_key,
+//! UpdateRequest  := ["city-g/update/v5", gid, member, replaces, encryption_key]  ctx UPDATE_REQUEST
+//! CatchUpRequest := ["city-g/catch-up/v5", gid, member, prev_interim, init_key]  ctx CATCH_UP
+//! ReEntryRequest := ["city-g/re-entry/v5", gid, member, replaces, encryption_key,
 //!                    init_key]                                    ctx RE_ENTRY
-//! Checkpoint     := ["city-g/checkpoint/v4", gid, epoch, interim, tree_hash,
-//!                    registry_hash, height, district_bits, external_pk_hash,
-//!                    time_ms, admin]                              ctx CHECKPOINT
+//! Checkpoint     := ["city-g/checkpoint/v5", gid, epoch, interim, tree_hash,
+//!                    registry_hash, height, district_bits, island_bits,
+//!                    external_pk_hash, time_ms, admin]            ctx CHECKPOINT
 //! ```
 //!
 //! A group is *closed* unless the policy in force opens it. In a closed
@@ -60,16 +63,16 @@ pub const MAX_ADMISSION_BYTES: usize = 24 * 1024;
 /// Upper bound on any other encoded request.
 pub const MAX_REQUEST_BYTES: usize = 48 * 1024;
 
-pub const INVITE_LABEL: &str = "city-g/invite/v4";
-pub const ADMISSION_LABEL: &str = "city-g/admission/v4";
-pub const JOIN_REQUEST_LABEL: &str = "city-g/join-request/v4";
-pub const REMOVE_LABEL: &str = "city-g/remove/v4";
-pub const EVICTION_LABEL: &str = "city-g/eviction/v4";
-pub const POLICY_LABEL: &str = "city-g/group-policy/v4";
-pub const UPDATE_LABEL: &str = "city-g/update/v4";
-pub const CATCH_UP_LABEL: &str = "city-g/catch-up/v4";
-pub const RE_ENTRY_LABEL: &str = "city-g/re-entry/v4";
-pub const CHECKPOINT_LABEL: &str = "city-g/checkpoint/v4";
+pub const INVITE_LABEL: &str = "city-g/invite/v5";
+pub const ADMISSION_LABEL: &str = "city-g/admission/v5";
+pub const JOIN_REQUEST_LABEL: &str = "city-g/join-request/v5";
+pub const REMOVE_LABEL: &str = "city-g/remove/v5";
+pub const EVICTION_LABEL: &str = "city-g/eviction/v5";
+pub const POLICY_LABEL: &str = "city-g/group-policy/v5";
+pub const UPDATE_LABEL: &str = "city-g/update/v5";
+pub const CATCH_UP_LABEL: &str = "city-g/catch-up/v5";
+pub const RE_ENTRY_LABEL: &str = "city-g/re-entry/v5";
+pub const CHECKPOINT_LABEL: &str = "city-g/checkpoint/v5";
 
 /// `gid := H_L("group-id", [creator_device_pk, nonce])`.
 pub fn group_id(creator_pk: &[u8], nonce: &[u8; 32]) -> CoreResult<Digest> {
@@ -487,12 +490,25 @@ impl JoinRequest {
     }
 }
 
+/// How soon a removal must be applied (docs/specs-v0.5-draft.md section
+/// 2.9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Urgency {
+    /// A departure or a housekeeping removal: the next scheduled window, and
+    /// members keep sending meanwhile.
+    Ordinary = 0,
+    /// A removal by an admin, or a reported compromise: a window within
+    /// `WINDOW_URGENT`, and members do not send while it waits longer.
+    Urgent = 1,
+}
+
 /// A proposal to remove a member, by an admin or by the member itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoveProposal {
     pub gid: Digest,
     pub target: Occupancy,
     pub proposer: Occupancy,
+    pub urgency: Urgency,
     signed: Signed,
 }
 
@@ -502,6 +518,7 @@ impl RemoveProposal {
         gid: &Digest,
         target: Occupancy,
         proposer: Occupancy,
+        urgency: Urgency,
         identity: &DeviceIdentity,
         rng: &mut impl CryptoRngCore,
     ) -> CoreResult<Self> {
@@ -511,6 +528,7 @@ impl RemoveProposal {
                 bytes(gid),
                 target.value(),
                 proposer.value(),
+                uint(urgency as u64),
             ],
             identity,
             SignatureContext::REMOVE_PROPOSAL,
@@ -521,17 +539,21 @@ impl RemoveProposal {
 
     /// Parse a removal proposal.
     pub fn decode(encoded: &[u8]) -> CoreResult<Self> {
-        let (mut fields, signed) = open_signed(
-            encoded,
-            REMOVE_LABEL,
-            4,
-            MAX_REQUEST_BYTES,
-            "remove proposal",
-        )?;
+        const WHAT: &str = "remove proposal";
+        let (mut fields, signed) = open_signed(encoded, REMOVE_LABEL, 5, MAX_REQUEST_BYTES, WHAT)?;
+        let gid = fields.digest()?;
+        let target = fields.occupancy()?;
+        let proposer = fields.occupancy()?;
+        let urgency = match fields.uint()? {
+            0 => Urgency::Ordinary,
+            1 => Urgency::Urgent,
+            _ => return Err(CoreError::Malformed(WHAT)),
+        };
         Ok(Self {
-            gid: fields.digest()?,
-            target: fields.occupancy()?,
-            proposer: fields.occupancy()?,
+            gid,
+            target,
+            proposer,
+            urgency,
             signed,
         })
     }
@@ -957,6 +979,7 @@ pub struct CheckpointContent {
     pub registry_hash: Digest,
     pub height: u8,
     pub district_bits: u8,
+    pub island_bits: u8,
     pub external_pk_hash: Digest,
     pub time_ms: u64,
 }
@@ -989,6 +1012,7 @@ impl Checkpoint {
                 bytes(&content.registry_hash),
                 uint(u64::from(content.height)),
                 uint(u64::from(content.district_bits)),
+                uint(u64::from(content.island_bits)),
                 bytes(&content.external_pk_hash),
                 uint(content.time_ms),
                 admin.value(),
@@ -1005,7 +1029,7 @@ impl Checkpoint {
         let (mut fields, signed) = open_signed(
             encoded,
             CHECKPOINT_LABEL,
-            11,
+            12,
             MAX_REQUEST_BYTES,
             "checkpoint",
         )?;
@@ -1017,6 +1041,7 @@ impl Checkpoint {
             registry_hash: fields.digest()?,
             height: fields.u8()?,
             district_bits: fields.u8()?,
+            island_bits: fields.u8()?,
             external_pk_hash: fields.digest()?,
             time_ms: fields.uint()?,
         };
@@ -1270,19 +1295,52 @@ mod tests {
         let new = KemSecret::generate(&mut rng).public_key();
         let init = KemSecret::generate(&mut rng).public_key();
 
-        let by_admin =
-            RemoveProposal::sign(&s.gid, member, s.admin, &s.admin_id, &mut rng).unwrap();
+        let by_admin = RemoveProposal::sign(
+            &s.gid,
+            member,
+            s.admin,
+            Urgency::Urgent,
+            &s.admin_id,
+            &mut rng,
+        )
+        .unwrap();
         by_admin
             .verify(&s.gid, &s.admins, member_id.public_key())
             .unwrap();
-        let by_self = RemoveProposal::sign(&s.gid, member, member, &member_id, &mut rng).unwrap();
+        assert_eq!(by_admin.urgency, Urgency::Urgent);
+        let by_self = RemoveProposal::sign(
+            &s.gid,
+            member,
+            member,
+            Urgency::Ordinary,
+            &member_id,
+            &mut rng,
+        )
+        .unwrap();
         by_self
             .verify(&s.gid, &s.admins, member_id.public_key())
             .unwrap();
+        // The urgency is signed: it cannot be changed without the proposer.
+        let decoded = RemoveProposal::decode(by_self.encoded()).unwrap();
+        assert_eq!(decoded.urgency, Urgency::Ordinary);
+        let mut raised = by_self.encoded().to_vec();
+        // The urgency, then the signature's head (a byte string of 3309
+        // bytes: 0x59 0x0c 0xed) and the signature.
+        let position = raised.len() - cityg_pqc::SIGNATURE_BYTES - 4;
+        assert_eq!(raised[position..position + 2], [0x00, 0x59]);
+        raised[position] = 0x01;
+        let forged = RemoveProposal::decode(&raised).unwrap();
+        assert_eq!(forged.urgency, Urgency::Urgent);
+        assert!(
+            forged
+                .verify(&s.gid, &s.admins, member_id.public_key())
+                .is_err()
+        );
         let by_other = RemoveProposal::sign(
             &s.gid,
             member,
             Occupancy { leaf: 2, since: 1 },
+            Urgency::Urgent,
             &member_id,
             &mut rng,
         )
@@ -1345,6 +1403,7 @@ mod tests {
             registry_hash: [3; 32],
             height: 5,
             district_bits: 2,
+            island_bits: 1,
             external_pk_hash: [4; 32],
             time_ms: 99,
         };

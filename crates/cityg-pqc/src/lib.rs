@@ -39,28 +39,28 @@ pub struct SignatureContext(&'static [u8]);
 
 impl SignatureContext {
     /// District commit, signed by its committer.
-    pub const DISTRICT_COMMIT: Self = Self(b"city-g/district-commit/v4");
+    pub const DISTRICT_COMMIT: Self = Self(b"city-g/district-commit/v5");
     /// Seal of a window, signed by its sealer.
-    pub const SEAL: Self = Self(b"city-g/seal/v4");
+    pub const SEAL: Self = Self(b"city-g/seal/v5");
     /// Request of a device to join a group.
-    pub const JOIN_REQUEST: Self = Self(b"city-g/join-request/v4");
+    pub const JOIN_REQUEST: Self = Self(b"city-g/join-request/v5");
     /// Admission of a joining device, by an admin or an invite key.
-    pub const ADMISSION: Self = Self(b"city-g/admission/v4");
+    pub const ADMISSION: Self = Self(b"city-g/admission/v5");
     /// Invite delegating admissions to an invite key.
-    pub const INVITE: Self = Self(b"city-g/invite/v4");
+    pub const INVITE: Self = Self(b"city-g/invite/v5");
     /// Removal proposal (voluntary leave or removal by an admin).
-    pub const REMOVE_PROPOSAL: Self = Self(b"city-g/remove/v4");
+    pub const REMOVE_PROPOSAL: Self = Self(b"city-g/remove/v5");
     /// Request of a member to replace its leaf key.
-    pub const UPDATE_REQUEST: Self = Self(b"city-g/update/v4");
+    pub const UPDATE_REQUEST: Self = Self(b"city-g/update/v5");
     /// Request of a member to jump to the present.
-    pub const CATCH_UP: Self = Self(b"city-g/catch-up/v4");
+    pub const CATCH_UP: Self = Self(b"city-g/catch-up/v5");
     /// Request of a member to re-enter its own leaf.
-    pub const RE_ENTRY: Self = Self(b"city-g/re-entry/v4");
+    pub const RE_ENTRY: Self = Self(b"city-g/re-entry/v5");
     /// Checkpoint of an epoch, signed by an admin.
-    pub const CHECKPOINT: Self = Self(b"city-g/checkpoint/v4");
+    pub const CHECKPOINT: Self = Self(b"city-g/checkpoint/v5");
     /// Policy of a group (open or closed admission, eviction of idle
     /// members), signed by an admin.
-    pub const GROUP_POLICY: Self = Self(b"city-g/group-policy/v4");
+    pub const GROUP_POLICY: Self = Self(b"city-g/group-policy/v5");
 
     /// Context bytes passed to FIPS 204 as `ctx`.
     #[must_use]
@@ -390,23 +390,15 @@ mod tests {
     /// caught. Both values were cross-checked with an independent
     /// implementation (dilithium-py 1.4.0, `ML_DSA_65.key_derive` and
     /// `_sign_internal` with `rnd = 0^32` over `0 || len(ctx) || ctx || m`).
+    /// The context is pinned too, to the bytes of the check: it does not
+    /// follow the profile's labels.
     #[test]
     fn deterministic_known_answer_is_stable() {
+        const KAT_CONTEXT: SignatureContext = SignatureContext(b"city-g/district-commit/v4");
         let (public_key, secret_key) = keypair_from_seed(&[0x42u8; 32]);
-        let signature = sign_with_randomness(
-            &secret_key,
-            SignatureContext::DISTRICT_COMMIT,
-            b"city-g kat",
-            &[0u8; 32],
-        )
-        .expect("sign");
-        verify(
-            &public_key,
-            SignatureContext::DISTRICT_COMMIT,
-            b"city-g kat",
-            &signature,
-        )
-        .expect("verify");
+        let signature = sign_with_randomness(&secret_key, KAT_CONTEXT, b"city-g kat", &[0u8; 32])
+            .expect("sign");
+        verify(&public_key, KAT_CONTEXT, b"city-g kat", &signature).expect("verify");
         assert_eq!(
             hex_digest(blake3::hash(&public_key).as_bytes()),
             "3a46d0b0835485ef0558d7ef2a3be17f2fceb9ae3d80fe45265084d17f5a5ad3"
