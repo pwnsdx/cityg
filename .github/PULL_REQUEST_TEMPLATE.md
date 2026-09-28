@@ -58,6 +58,7 @@ Describe how you tested your changes:
 - [ ] Specification updated first (`docs/specs.md`); new labels and contexts registered (section 17)
 - [ ] Design decision recorded in `docs/design.md` if the change affects one
 - [ ] Formal model updated if the key schedule, taints, removals, joins or entrants changed (`docs/formal/`)
+- [ ] Test vectors regenerated if an encoding or a derivation changed (`docs/vectors/`)
 - [ ] New profile version (any change to an encoding, label, context, algorithm or parameter)
 
 ## Performance Impact

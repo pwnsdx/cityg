@@ -21,3 +21,4 @@ zeroize = { version = "1", features = ["derive"] }
 [dev-dependencies]
 hex = "0.4"
 rand_chacha = "0.3"
+serde_json = "1"

@@ -8,7 +8,7 @@
 | Implementation | [`crates/cityg-core`](../crates/cityg-core) (the three stages; the proof system of disputes is plugged in, not included) |
 | Design | [design.md](design.md) (decisions E-15 to E-18) |
 | Research | the three stages, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md) (section 3.6); îlots, relays and the maintained city, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) (sections 2.4 to 2.8); urgent and ordinary removals and the parity profile, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md) (section 3); symbolic models of relays and îlots, [`research/formal-parity/`](research/formal-parity/README.md) (all research notes in French) |
-| Conformance | None yet: no test vectors (section 7) |
+| Conformance | Test vectors of the derivations and the encoded objects, generated and checked by the implementation ([`vectors/`](vectors/README.md)); no second implementation has checked them (section 7) |
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
 interpreted as in RFC 2119 and RFC 8174 when they appear in capitals.
@@ -1337,8 +1337,12 @@ Nothing of v0.4 decodes under this draft: every label changed.
 * **Relay choice.** Rotating among online members spreads the work; a DS
   may prefer members with a good network, and the window's joiners, once
   entries carry the island path (stage 2).
-* **Encodings** of island packets and top tasks, and test vectors, as for
-  the objects v0.4 leaves open (v0.4 §19).
+* **Encodings** of island packets and top tasks, as for the objects v0.4
+  leaves open (v0.4 §19). The test vectors of [`vectors/`](vectors/README.md)
+  cover the derivations and the encoded objects, one of each, and two
+  genesis seals, not a window that applies, entries, packets, audit
+  records or the authorizer's checkpoints; they come from the
+  implementation, and no second implementation has checked them.
 * **Excluding on repairs.** The threshold, whether counts should decay or
   weigh the requester's own history (a member that asks in many windows),
   and when a DS should ask an excluded performer for an update.

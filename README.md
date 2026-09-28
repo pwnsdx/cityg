@@ -33,9 +33,10 @@ with X25519) and ML-DSA-65.
 > batch and checkpoints each epoch, and the membership log of each window.
 > The networked
 > delivery service and the clients do not exist yet
-> ([specification, section 19](docs/specs.md#19-open-items)). There are no
-> test vectors and no independent human cryptographic review: **for
-> production, use MLS.**
+> ([specification, section 19](docs/specs.md#19-open-items)). The test
+> vectors ([`docs/vectors/`](docs/vectors/README.md)) come from this
+> implementation and no second one has checked them, and there is no
+> independent human cryptographic review: **for production, use MLS.**
 
 ---
 

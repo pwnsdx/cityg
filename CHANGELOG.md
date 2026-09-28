@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Conformance: test vectors of the v0.5 draft
+
+- Test vectors in [`docs/vectors/`](docs/vectors/README.md), eight JSON
+  files that list every input, secrets and the randomness each operation
+  draws included, and every output: the hash and derivation functions and
+  the identifiers, ML-DSA-65 signatures with a given `rnd`, X-Wing
+  encapsulations with given coins, hedged coins and a wrap
+  (`crypto-basics.json`); the key schedule over three epochs, the last
+  sealed by an entrant, with the group context, the transcript hashes, the
+  external key and the secrets of the message plane (`key-schedule.json`);
+  the secret tree and its chains (`secret-tree.json`); three messages of a
+  sender, signed, unsigned and signing the burst, with every intermediate
+  value and the log (`message-protection.json`); `MTH` roots and proofs
+  under the three labels and the membership log (`merkle.json`); the leaf
+  and parent nodes, node hashes and leaf proofs of a small tree
+  (`tree.json`); sparse Merkle maps and registry headers
+  (`registry.json`); one of each encoded object, signed from a recorded
+  seed and `rnd`, and two genesis seals with the secrets of epoch 0
+  (`objects.json`).
+- `crates/cityg-core/tests/vectors/` generates them: each module computes
+  the outputs by the implementation and by the definitions of the
+  specification written out again, and a check reads each file as a
+  verifier would. `cargo test -p cityg-core --test vectors` regenerates
+  the files in memory, compares them with the committed ones, naming the
+  first field that differs, and checks them; the ignored test
+  `write_vectors` rewrites them after an intended change. `serde_json` is
+  a dev-dependency.
+- They come from this implementation and no second one has checked them;
+  they cover derivations and encodings, not a window that applies. The
+  specifications, the README and the docs index say so where they said
+  there were none.
+
 ### Protocol: the v0.5 draft, stage 3 (parity), specified and implemented
 
 - Stage 3 of the draft is specified in detail (section 4 of

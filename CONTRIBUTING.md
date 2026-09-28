@@ -33,8 +33,8 @@ docs/formal/run.sh /path/to/proverif       # symbolic model
 | Path | Content |
 | --- | --- |
 | `docs/specs.md` | Specification of `city-g/v0.4`. |
-| `docs/specs-v0.5-draft.md` | Draft of `city-g/v0.5-draft`, a delta on v0.4 in three stages; stages 1 and 2 are implemented, but for the proof system of disputes. |
-| `docs/design.md` | Design decisions E-1 to E-17. |
+| `docs/specs-v0.5-draft.md` | Draft of `city-g/v0.5-draft`, a delta on v0.4 in three stages, all implemented but for the proof system of disputes. |
+| `docs/design.md` | Design decisions E-1 to E-18. |
 | `crates/cityg-pqc` | ML-DSA-65 (FIPS 204) with per-usage contexts. |
 | `crates/cityg-core` | Protocol core without I/O and an in-memory delivery service. Its module documentation lists the layers, from deterministic CBOR up to members and the delivery service. |
 | `crates/cityg-core/tests/scenarios.rs` | Whole groups on the in-memory delivery service. |
@@ -44,6 +44,8 @@ docs/formal/run.sh /path/to/proverif       # symbolic model
 | `crates/cityg-core/tests/messages.rs` | Stage 3 of the v0.5 draft, the message plane: messages through the DS, burst chains checked against the cards of the message's epoch, the sealed message log. |
 | `crates/cityg-core/tests/tasks.rs` | Stage 2 of the v0.5 draft: sub-cities and the top re-keyed by their performers, joiners performing the tasks of the window they enter, order, failover, taints and welcomes, a sealer that draws nothing, entries by island, repair requests and repairs, the exclusion of a performer that members blame, and disputes that convict the performer of a faulty wrap. |
 | `crates/cityg-core/tests/scale.rs` | A large window on a full group, against the cost model (release, `--ignored`). |
+| `crates/cityg-core/tests/vectors/` | The test vectors of the v0.5 draft: regenerates `docs/vectors/` in memory, compares it with the files and checks them as a verifier would; `write_vectors` (`--ignored`) rewrites them. |
+| `docs/vectors/` | Test vectors of the v0.5 draft's derivations and encoded objects, with every input. |
 | `docs/formal/` | Symbolic model of the security choices. |
 | `docs/research/` | Research notes (in French), cost models, benchmarks, a zero-knowledge prover, and symbolic and computational models of the proposals. |
 
@@ -84,6 +86,10 @@ The specification comes first; the code implements it.
 - Record a design decision in `docs/design.md` when the change makes one.
 - Update the symbolic model in `docs/formal/` if the change touches the key
   schedule, taints, removals, joins and welcomes, entrants or open groups.
+- Regenerate the test vectors if the change touches an encoding or a
+  derivation (`cargo test -p cityg-core --test vectors write_vectors --
+  --ignored`), and say so in the pull request: a vector that changes is a
+  new profile version.
 - Run the scale test if the change touches the tree, the re-key or the
   delivery service.
 

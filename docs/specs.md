@@ -1477,7 +1477,9 @@ This version does not yet specify or implement:
   data, unique keys, a mode where the service authorizes joins, a
   membership log, urgent and ordinary removals); none of it is part of
   this profile.
-* test vectors, an independent verifier and a conformance manifest;
+* test vectors of this profile (the v0.5 draft has them, under its own
+  labels: [`vectors/`](vectors/README.md)), an independent verifier and a
+  conformance manifest;
 * the encodings of packets, seal links, entries, audit records and fraud
   proofs, and district views with proofs for committers (section 12.3);
 * the delivery service's API, persistence, and the clients;
