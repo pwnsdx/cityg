@@ -1,159 +1,56 @@
-# City-G Documentation
+# City-G documentation
 
-Welcome to the City-G documentation! This index helps you find the right documentation for your needs.
+City-G's protocol is profile **`city-g/v0.4`**, its initial version. The
+reference is the [specification](specs.md); everything else here explains
+or checks it. The [v0.5 draft](specs-v0.5-draft.md), profile
+`city-g/v0.5-draft`, is a delta on it: its first stage (islands read
+through relays, urgent and ordinary removals), its second (the city
+re-keyed by sub-city, joiners that perform tasks, a sealer that draws
+nothing, entries by island, repairs, and disputes judged with a proof
+system the delivery service is given) and its third (cards, unique keys,
+the message plane, the authorized mode, the membership log) are what
+`cityg-core` implements.
 
-> [!IMPORTANT]
-> For `tswe/msphf-we/fs-hybrid + prs-barrier`, the authoritative normative spec is [`./specs.md`](./specs.md).
-> The `docs/protocol/*` chapters are non-normative companion material. Some chapters are explanatory and some are historical; if there is any conflict, follow the unified spec and implementation behavior/tests.
-> The current shipping wire/profile baseline in this repo is `v0.1.4`.
+## Protocol
 
-## 📚 Documentation by Audience
+| Document | Content |
+| --- | --- |
+| [specs.md](specs.md) | Specification: threat model and security properties, cryptographic suite and encodings, tree, signed requests, re-key, registry, key schedule, district commits and seals, welcomes, members, packets, delivery service, audits, parameters, label registry, security considerations, open items, relation to MLS. |
+| [specs-v0.5-draft.md](specs-v0.5-draft.md) | Draft of the next profile, `city-g/v0.5-draft`, as a delta on v0.4, in three stages. Stage 1, specified and implemented: islands of `2^c` leaves, island followers that take the root secret from a relay element of their island (52 bytes), a flat element or a refresh from the latest re-keys; urgent and ordinary removals. Stage 2, specified and implemented: sub-cities and city tasks, joiners as performers, entries by island, repair requests and repairs, the exclusion without conviction of the performers that members blame, and disputes, their public inputs and the interface of the proof system that judges them; the proof system itself is open. Stage 3 (parity with MLS), specified and implemented: cards in leaves hashed by their summary and unique keys (part 3a), a message plane in the manner of MLS (part 3b: secret tree, sender hidden from the DS, burst chains signed by cards, key commitments, a sealed message log, exporter and epoch authenticator), the authorized mode (part 3c: an authorizer's batches of joins, its removals and its checkpoints, on which joiners anchor and which members may require), and a membership log in each seal header (part 3d). |
+| [design.md](design.md) | Why the protocol is built as it is (decisions E-1 to E-14, and E-15 to E-18 for the v0.5 draft), what each decision costs, and what was left out. |
+| [workflows.md](workflows.md) | Sequence diagrams: creating a group, joining, a window of changes, nobody online, coming back, seeing who joined an open group. |
+| [GLOSSARY.md](GLOSSARY.md) | Terms of the specification. |
+| [formal/](formal/README.md) | ProVerif model of the security choices: taint rule, init chain, signed confirmation tag, district welcomes, anchored joins, windows sealed by an entrant, open groups, catch-ups welcomed to the leaf key; and of the v0.5 draft: in stage 1, the tops of the window that removes a member, the keys of flat elements, refreshes checked against the root; in stage 2, hedges that cover the coins of every encapsulation, city tasks bound to the roots they wrap to, repairs wrapped to a checked leaf key, and welcomes of joiners' districts bound to the seal and to the request's reference; in stage 3, the logs a seal header commits, which members check against what they read, and entries by an authorizer's checkpoint that signs the confirmation tag. |
+| [vectors/](vectors/README.md) | Test vectors of the v0.5 draft: the hash and derivation functions, the key schedule over three epochs, the secret tree, the messages of a sender, the Merkle logs, the hashes of a tree, sparse Merkle maps and registry headers, and one instance of each encoded object, with the seeds and the randomness that made them, so that another implementation reproduces them byte for byte; generated and checked by `crates/cityg-core/tests/vectors/`. |
+| [security-review-checklist.md](security-review-checklist.md) | Security review of a change or a release. |
 
-### For New Users
-Start here if you're new to City-G:
+## Research
 
-- **[GUI User Guide](./gui-user-guide.md)** - Complete guide to using the desktop application
-- **[Workflows](./workflows.md)** - Visual sequence diagrams for common operations
-- **[Troubleshooting](./TROUBLESHOOTING.md)** - Solutions to common problems
-
-### For Developers & Integrators
-Building applications with City-G:
-
-- **[Repository Cleanup Plan](./repo-cleanup-plan-2026-03-29.md)** - Structured cleanup roadmap for code, spec, docs, CI, and repository weight
-- **[Legacy Surface Inventory](./legacy-surface-inventory-2026-03-30.md)** - Classified list of obsolete, historical, test-only, and adaptation surfaces to purge or relabel
-- **[GUI Material System Roadmap](./gui-material-system-roadmap.md)** - Accepted UI architecture direction for GPUI materials and cross-platform shell design
-- **[API Reference](./api-reference.md)** - REST API and WebSocket documentation
-- **[Room-Scoped Administration Redesign](./room-admin-governance-redesign.md)** - Current room governance and admin model
-- **[Configuration Guide](./configuration.md)** - Configuration options and environment variables
-- **[Observability Guide](./OBSERVABILITY.md)** - Logging, metrics, and monitoring
-
-### For Protocol Implementers
-Implementing the City-G protocol:
-
-- **[Unified Specification](./specs.md)** - Authoritative normative source
-- **[Protocol Companion Index](./protocol/00-README.md)** - Chapterized companion material mapped back to the spec
-- **[Implementation Guide](./protocol/11-implementation-guide.md)** - Current code walkthrough and module map
-- **[Testing Guide](./protocol/13-testing-guide.md)** - Tests, manifests, CI expectations, and local validation flows
-- **[Protocol Checklist](./protocol/20-protocol-checklist.md)** - Guarantee-to-flow coverage matrix for the current profile
-
-### For Operators
-Deploying and managing City-G in production:
-
-- **[Configuration Guide](./configuration.md)** - Server and client configuration
-- **[Observability Guide](./OBSERVABILITY.md)** - Monitoring and troubleshooting
-- **[Deployment Guide](./protocol/14-deployment-guide.md)** - Deployment considerations
-- **[Release QA Checklist](./release-qa-checklist.md)** - End-to-end release gate checks
-- **[Security Review Checklist](./security-review-checklist.md)** - Security verification workflow
-- **[Timing Verification](./timing-verification.md)** - Side-channel analysis and verification
-
-### For Security Auditors
-Reviewing the current protocol/profile claims and their proof anchors:
-
-- **[Final Verification Report](./audits/final-verification-report-2026-03-26.md)** - Canonical audit verdict index for the current repo state
-- **[Protocol Checklist](./protocol/20-protocol-checklist.md)** - Guarantee-to-flow runtime coverage matrix
-- **[Preproduction Validation](./preproduction-validation.md)** - Operational validation gates and longer campaign runners
-- **[Evidence Index](./evidence/README.md)** - Benchmarks, Dudect, proof metrics, and runtime evidence
-
-## 📖 Canonical Reading Paths
-
-### Product and Runtime
-- [GUI User Guide](./gui-user-guide.md)
-- [Workflows](./workflows.md)
-- [Troubleshooting](./TROUBLESHOOTING.md)
-
-### Protocol and Implementation
-- [Unified Specification](./specs.md)
-- [Protocol Companion Index](./protocol/00-README.md)
-- [Implementation Guide](./protocol/11-implementation-guide.md)
-- [Protocol Checklist](./protocol/20-protocol-checklist.md)
-
-### Operations and Release
-- [Configuration Guide](./configuration.md)
-- [Observability](./OBSERVABILITY.md)
-- [Preproduction Validation](./preproduction-validation.md)
-- [Release QA Checklist](./release-qa-checklist.md)
-- [Security Review Checklist](./security-review-checklist.md)
-
-## 🔍 Quick Links
-
-### Common Tasks
-- **Join a room**: [GUI Guide - Join Flow](./gui-user-guide.md#join-flow)
-- **Send encrypted messages**: [GUI Guide - Messaging](./gui-user-guide.md#messaging)
-- **Configure the server**: [Configuration Guide](./configuration.md)
-- **Deploy to production**: [Deployment Guide](./protocol/14-deployment-guide.md)
-- **Troubleshoot issues**: [Troubleshooting Guide](./TROUBLESHOOTING.md)
-
-### API Documentation
-- **REST endpoints**: [API Reference - Endpoints](./api-reference.md#api-endpoints)
-- **WebSocket API**: [API Reference - WebSocket](./api-reference.md#websocket-api)
-- **Error handling**: [API Reference - Error Handling](./api-reference.md#error-handling)
-
-### Protocol Understanding
-- **Normative behavior**: [Unified Specification](./specs.md)
-- **How server-blindness works**: [Protocol Overview](./protocol/01-overview.md#31-smooth-projective-hash-functions-sphf) (companion chapter)
-- **Join flow details**: [Client Operations](./protocol/08-client-operations.md) (companion chapter)
-- **Proof verification**: [Server Acceptance](./protocol/07-server-acceptance.md) (companion chapter)
-- **Compare to MLS**: [MLS Comparison](./protocol/16-comparison-mls.md)
-
-## 📦 Component Documentation
-
-Crate-specific documentation:
-
-- **[msphf-lb-vrf](../crates/msphf-lb-vrf/README.md)** - Lattice-based VRF implementation
-- **[capss](../crates/capss/README.md)** - CAPSS Smallwood proof system
-- **[cityg-config](../crates/cityg-config/README.md)** - Configuration management
-- **[pqcrypto-kyber](../crates/pqcrypto-kyber/README.md)** - Local ML-KEM-768 bridge preserving the `pqcrypto_kyber::kyber768` API shape
-
-## 🔬 Research & Evidence
-
-Verification artifacts and benchmarks:
-
-- **[Evidence](./evidence/README.md)** - Benchmarks, timing analysis, and proof metrics
-  - [Benchmarks](./evidence/benchmarks/README.md) - Performance measurements
-  - [Dudect](./evidence/dudect/README.md) - Constant-time verification
-  - [Cachegrind](./evidence/cachegrind/README.md) - Cache analysis
-  - [Proof Metrics](./evidence/proof_metrics/README.md) - Proof size analysis
-
-## 📋 Additional Resources
-
-- **[Main README](../README.md)** - Project overview and quick start
-- **[Security Policy](../SECURITY.md)** - Vulnerability reporting
-- **[Specification](./specs.md)** - Formal protocol specification
-
-## 🛠️ For Contributors
-
-- See the main [README](../README.md#contributing) for contribution guidelines
-- [Unified Specification](./specs.md) - Normative rules to implement/test against
-- [Testing Guide](./protocol/13-testing-guide.md) - How to run and write tests (companion chapter)
-- [Implementation Guide](./protocol/11-implementation-guide.md) - Code walkthrough (companion chapter)
-
-## 🚀 Current Cutover Order
-
-Direct cutover policy for the current base profile (`v0.1.4`):
-
-1. Update server and clients from the same release set.
-2. Confirm conformance gates on the release candidate:
-   - `cargo test --workspace`
-   - `cargo llvm-cov --workspace --summary-only` (>=95% line coverage)
-3. Roll out server binary and restart all API instances.
-4. Roll out clients (GUI/CLI/integrations) built against the same spec/profile.
-5. Verify runtime health:
-   - API `/health` and telemetry endpoints
-   - barrier endpoints (`resolve_revoked_leaves`, `resolve_joins_since`, `fetch_public_tree`)
-   - acceptance logs for barrier/FS freeze codes
-6. Freeze deployment if acceptance errors regress beyond baseline.
-
-### Rollback Criteria
-
-Rollback to the previous known-good release if any of the following occur:
-
-- sustained acceptance failures tied to migration invariants (`9472`, `96010`, `96011`, `96012`, `96013`);
-- barrier snapshot authentication failures (`960.9`) above baseline;
-- client/server version skew detected in production traffic;
-- message-path regression that prevents normal send/fetch operations after rollout.
-
-Rollback action: revert server + client binaries together as one unit and replay standard validation gates before re-attempting rollout.
-
----
-
-**Need help?** Start with the [FAQ](./protocol/17-faq.md), [Glossary](./GLOSSARY.md), or [GUI User Guide](./gui-user-guide.md).
+| Document | Content |
+| --- | --- |
+| [research/grands-groupes-2026-09-25.md](research/grands-groupes-2026-09-25.md) | Groups of millions of members (in French): the limits of a classic TreeKEM group, lower bounds and related work, the architecture of City-G (districts re-keyed in parallel by committers that hold no state of their own, per-district queues, taints, district welcomes, anchored joins, sampling audits), its costs, guarantees, risks and roadmap. |
+| [research/rekey_sim.py](research/rekey_sim.py) | Cost model behind the note's figures: windows, placement of joins, district size, CPU, steady-state traffic, audits. |
+| [research/plan-de-messages-2026-09-26.md](research/plan-de-messages-2026-09-26.md) | A message plane for very large groups (in French), not part of the profile: keepers and readers (readers leave the tree and get the reader secrets of the epochs they missed in key bundles checked against chained tags, so removing a reader needs no re-key), sender cards with compact signatures (FN-DSA, round-3 candidates), burst chains, committing messages and reports, a sealed message log for transcript consistency, checkpoints against forks, and, for public groups with hostile or offline members, a public chain of reader secrets broken at bans, bundles served and windows sealed by any member, keepers admitted by an admin; costs, guarantees, risks and roadmap. |
+| [research/msg_sim.py](research/msg_sim.py) | Cost model of the message-plane note: bytes per message by signature scheme, sender keys, following versus key bundles or the public chain, a reader's day, bursts with keepers only, the load of the members that serve bundles, history. |
+| [research/formal-messages/](research/formal-messages/README.md) | ProVerif model of the mechanisms of the message-plane note: key bundles, removal of a reader without re-key, forks, the public chain and its breaks, windows sealed by a reader, burst chains, sender cards. |
+| [research/parite-mls-2026-09-26.md](research/parite-mls-2026-09-26.md) | The guarantees of MLS for a million members (in French): City-G compared with RFC 9420 and RFC 9750 guarantee by guarantee; why members outside the tree cannot have them; the proposed profile: every member in the tree, a mode where the service authorizes joins (batched authorizations, a checkpoint per window that joiners anchor on and members may check), an MLS-style message plane with encrypted sender data, unique keys, a membership log, urgent and ordinary removals; history links studied and rejected; costs, guarantees and roadmap. |
+| [research/parity_sim.py](research/parity_sim.py) | Cost model of the parity note: following by churn and window cadence, a member's day, a burst of 100,000 joins and departures with batched authorizations and anchored joiners, coming back after an absence, the membership log; and, for the note on server-managed re-keys, what members download and servers compute when one or k servers re-key the tree, and the size of the members' tasks. |
+| [research/formal-parity/](research/formal-parity/README.md) | ProVerif model of the parity note: batched authorizations, joiners anchored on the authorizer's checkpoint, members that check every checkpoint, history links and the attack that rules them out, the sender hidden from the delivery service; and of the note on server-managed re-keys: a server that draws the tree's secrets, alone or with a member it removed, two servers that each draw a share, disputes of wraps and the replay that rules out a cheaper one; and of the îlots note: a removal in an îlot, relays checked against the tag, stable îlot keys and forward secrecy, the welcome shortcut it rejects, and a joiner that enters alone with or without a removal waiting; and of the city maintained above the îlots: a city that a window does not re-key, which two removed members exploit and one alone cannot; and a catch-up signed with a stolen device key under the former rule of v0.4, with the fix, now in the profile, that binds its welcome to the member's leaf key. |
+| [research/ilots-2026-09-26.md](research/ilots-2026-09-26.md) | Îlots under a flat top (in French): above about 2^14 leaves every subtree changes in almost every window, so the binary city costs each member a wrap per level; the proposal cuts the tree into îlots of 2^8 leaves with no tree above them, sends each window's secret to every îlot root, lets a member relay it inside its îlot in 52 bytes, has joiners re-key their own paths and share the top, and repairs a cut îlot through its members' leaves. Following a group of a million members costs about 94 KB a day instead of 1.8 MB, whatever the group's size; guarantees, rejected shortcuts and roadmap. A revision keeps a binary city above the îlots, re-keyed by every window along the paths it changes and read by the relays, which makes the flat top a fallback: a window that changes one îlot costs 30 KB instead of 4.8 MB, and a joiner alone that applies a removal 95 KB. |
+| [research/ilots_sim.py](research/ilots_sim.py) | Cost model of the îlots note: how often subtrees change, following by îlot size, churn and window, the top, îlot tasks and welcomes, a burst of 100,000 joins and departures, repairs, entry, groups up to 2^24, a joiner that enters alone when nobody is online, a city maintained above the îlots, and a member's day at the candidate profile of the note beyond v0.4, with a split leaf hash and checkpoints checked by their signature alone. |
+| [research/rekey-serveur-2026-09-26.md](research/rekey-serveur-2026-09-26.md) | Could the server re-key the tree instead of members, possibly with zero-knowledge proofs? (In French.) Why a server cannot draw the tree's secrets without knowing them, whatever it proves; what a server that draws them loses (with one member it removed, it reads every later epoch); the options (one server, k servers each drawing a share, an enclave, members drawing while the server manages the rest) with their guarantees and costs; the recommendation: members' work as background tasks, with disputes proved in zero knowledge and repairs. |
+| [research/au-dela-0.4-2026-09-26.md](research/au-dela-0.4-2026-09-26.md) | Beyond v0.4 (in French): the research notes gathered into a candidate profile for the next version, the v0.4 tree read through relays at îlots of 2^8 and re-keyed by small tasks given first to joiners, with the authorized mode and the MLS-style message plane; how to get there from v0.4 in three steps; what each note kept and rejected; the guarantees of MLS with the scenarios behind each; costs; a leaf hash that keeps the leaf key apart for sender cards, and checkpoints checked by their signature alone; the open problems ranked, and a research plan. |
+| [research/problemes-ouverts-2026-09-26.md](research/problemes-ouverts-2026-09-26.md) | The open problems of the note beyond v0.4, taken in order (in French): the first computational proofs, the dual-PRF assumption that the key schedule needs of `Extract`, the size of the zero-knowledge proof of a wrap dispute (about 1.1 million AND gates; about 0.4 MB with the server as designated verifier), witnesses in a quorum against forks, sender cards kept in a cache, and what tasks reveal to the server; the state of each problem. |
+| [research/open_problems_sim.py](research/open_problems_sim.py) | Cost model of that note: the statement of a wrap dispute counted in gates and field operations, checkpoints countersigned by k of n witnesses, sender cards in a cache; and what adaptive proofs of the tree lose, as `(Qn)²` and, for the note on the adaptive argument, counted in the secrets City-G draws. |
+| [research/formal-computational/](research/formal-computational/README.md) | CryptoVerif model of the key schedule and the îlots: forward secrecy with stable tree keys, a removed member that stays out once it missed a window, windows sealed by an entrant, relays and flat items, the maintained city, fresh secrets hedged against a weak generator; a lying relay caught by the tag, witnesses in a quorum against forks, a catch-up bound to the leaf key, the taint rule and the healing of a leaked member by its update; with controls that remove each mechanism or assumption. |
+| [research/preuves-et-mesures-2026-09-26.md](research/preuves-et-mesures-2026-09-26.md) | Proofs and measurements (in French): the zero-knowledge proof of a wrap dispute measured (under a second and 2 MB without its X25519 half, which needs a proof over its own field), authentication in the computational model, a weakness of v0.4 (a stolen device key read every window through catch-ups, unseen) and its fix, now in the profile, the plan of a proof of the whole tree under adaptive corruptions, with random oracles, and the choice between BLAKE3 and HKDF for `Extract`. |
+| [research/preuve-arbre-2026-09-26.md](research/preuve-arbre-2026-09-26.md) | The proof of the whole tree (in French): the security game of City-G under adaptive corruptions (a CGKA by windows), its safety predicate over the graph of secrets, the target theorem with random oracles and the loss of Tainted TreeKEM, a sketch of the proof whose every step has a mechanized lemma, and what is still missing. |
+| [research/extensions-gsd-2026-09-27.md](research/extensions-gsd-2026-09-27.md) | The GSD extensions in full (in French): the extended game with every encapsulation a vertex (an envelope is an encapsulation then a symmetric seal), its theorem and proof in both cases of the event `E`, with a random oracle observed and never programmed; the invariant of coherence written operation by operation over the real formats of v0.4 and stage 1; the flaw it found (relays of two branches of a fork sealing two roots under one key and nonce) and its fix; the loss recounted, `2^69` for a million members over ten years. |
+| [research/safety_predicate.py](research/safety_predicate.py) | That note's safety predicate, executable: what the adversary deduces from leaks through derivations, `Extract`, wraps, welcomes, external inits and relay elements, checked against the verdicts of the formal models, a table or a scenario test (34 traces, 29 of them mirroring 43 ProVerif and CryptoVerif scenarios; three forks of stage 1, two of which are not GSD graphs, as expected); each trace translated into a hypergraph of the modified GSD game, checked acyclic with its challenge a sink. |
+| [research/argument-adaptatif-2026-09-27.md](research/argument-adaptatif-2026-09-27.md) | The adaptive argument (in French): the tree of City-G reduced to the modified generalized selective decryption game of Alwen, Jost and Mularczyk, as CoCoA and ETK did for variants of MLS; two more oracles (an encapsulation, a symmetric seal) for external inits, jumps and relays; a simulation lemma and a combinatorial lemma resting on an invariant of coherence, covering windows with several committers, entrants, jumps, relays, flat elements and refreshes; the loss counted in secrets drawn, `2N²` with `N ≈ 2^33` for a million members over ten years (125 bits left to ML-KEM-768); what remains to write and mechanize. |
+| [research/litige-x25519-2026-09-26.md](research/litige-x25519-2026-09-26.md) | The X25519 half of a wrap dispute (in French): proved in the field of X25519 with Diet Mac'n'Cheese (5,048 multiplications, 1,024 bit conversions), 18.5 MB and 4.6 MB in under 3 s, of which 20.6 MB of setup; the dispute over emulated mobile links (1.8 s without the X25519 half, 21.6 s for it, on a 4G-like link); why revealing `ss_X` stays rejected, and a public check of `ct_X` that convicts a committer without proof; a proof without setup over two fields as the next step. |
+| [research/litige-sans-mise-en-place-2026-09-26.md](research/litige-sans-mise-en-place-2026-09-26.md) | A wrap dispute without setup (in French): the X25519 half proved with Longfellow in its field (158 KB, 65 ms, verified in 48 ms) and the hashing in GF(2^128) (552 KB, 0.69 s), in one message anyone can verify; the machine calibrated against Longfellow's Pixel 9 measurements; the lattice part priced by an anchor, an ML-DSA-65 verification (3.2 s, 790 KB); the two ways compared. |
+| [research/litige-entier-2026-09-26.md](research/litige-entier-2026-09-26.md) | The whole wrap dispute without setup (in French): ML-KEM-768's lattice part as polynomial identities checked at a point drawn after the commitment (109,000 to 184,000 terms); a revised statement, without the member's seed and, in the usual case, without the re-encryption check, with a second statement that convicts a ciphertext whose re-encryption fails without revealing where; the whole first branch in the field of X25519, `ExpandLabel` and ChaCha20 included, in 573 KB, 1.49 s to prove and 0.97 s to verify; what remains. |
+| [research/litige-deux-branches-2026-09-27.md](research/litige-deux-branches-2026-09-27.md) | Both branches of a wrap dispute (in French): the second branch, a wrap that opens to a secret whose node key is not the published one, proved in the field of X25519 (787 KB, 3.72 s to prove, 2.26 s to verify), without checking the tag and without revealing where the keys differ, with a short statement for the common case (635 KB, about half the time); the exact decryption failure rate under the norm bounds, which corrects the earlier estimate and moves to a bound on each half of the key (`2^-121.2` for the worst admitted key); the verifier's public checks of `ct_X` and `pk_v`, coded; the memory with the circuit serialized (104 and 251 MB for the prover); what remains. |
+| [research/dispute-zk/](research/dispute-zk/README.md) | The provers of the dispute notes: in C++ with emp-zk, the hashing and ML-KEM arithmetic of a wrap dispute, a multiplication modulo 2^255 − 19 and the arithmetic backend; the X25519 half in its own field with Diet Mac'n'Cheese, from a relation generator, with patches for swanky; a relay that counts bytes and flights and emulates a mobile link; the rejected shortcut, priced; and, without setup, the X25519 half and the hashing as Longfellow circuits, then the whole dispute in one field, with a reference of ML-KEM-768 and X-Wing. |
+| [research/bench/](research/bench/src/main.rs) | Micro-benchmarks of the primitives (X-Wing, ML-DSA-65, FN-DSA, BLAKE3, ChaCha20-Poly1305) through `cityg-core`, the source of the CPU figures of both notes; and [`wrap_vector`](research/bench/src/bin/wrap_vector.rs), a wrap with its key schedule, the test vector of the dispute's circuits. |

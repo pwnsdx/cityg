@@ -1,0 +1,26 @@
+(* Scenario ILOT_RELAY_UNCHECKED: the same relay, but B does not check the
+   sealer's tag.
+
+   Expected: attack. The relay seals a secret of its own under the îlot's
+   relay key, and B enters an epoch nobody sealed: a relay helps members
+   fetch less, it never tells them which epoch is real. *)
+
+free skS: skey [private].
+
+event RealEpoch(key).
+event BAccepts(key).
+query es: key; event(BAccepts(es)) ==> event(RealEpoch(es)).
+
+process
+  new es1: key; new sj: key; new r2: key; new q: key;
+  let init1 = init_secret(es1) in
+  let gc2 = (N2, node_pk(sj)) in
+  let es2 = epoch_secret(joiner_secret(init1, commit_secret(r2), gc2)) in
+  event RealEpoch(es2);
+  out(c, (es1, sj, r2, spk(skS)));
+  out(c, seal(node_pk(sj), q, N2, r2));
+  out(c, (gc2, tag(es2, gc2), sign(skS, (L_seal, gc2, tag(es2, gc2)))));
+  in(c, (blob: bitstring, g: bitstring));
+  let r = sdec(relay_key(sj), N2, blob) in
+  let es = epoch_secret(joiner_secret(init1, commit_secret(r), g)) in
+  event BAccepts(es)

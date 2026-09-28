@@ -1,0 +1,46 @@
+(* Scenario CATCH-UP WELCOMED TO THE INIT KEY ALONE (sanity check): the
+   rule before the welcome of a catch-up was bound to the leaf key. The
+   attacker holds M's device key, not M's state. A and M are members of
+   epoch 1. In window 2, A welcomes any catch-up of M that M's device key
+   signed for epoch 1, sealing the joiner secret of epoch 2 to the
+   request's one-time init key only; the attacker records a catch-up with
+   an init key of its own. A catch-up changes nothing in the tree, so
+   nobody sees it. A then sends a message in epoch 2. M records a catch-up
+   of its own.
+   Queries: the message stays secret (expected: attack, in every window
+   the attacker asks for); M's own jump completes (sanity check: the event
+   is reachable). *)
+
+const L_catch_up: bitstring.
+free Msg2: bitstring [private].
+event Jumped.
+query attacker(Msg2).
+query event(Jumped).
+
+process
+  new skM: skey; new lsM: key; new init0: key; new r1: key; new r2: key;
+  out(c, (spk(skM), leaf_pk(lsM), skM));
+  let gc1 = (N1, node_pk(r1)) in
+  let es1 = epoch_secret(joiner_secret(init0, r1, gc1)) in
+  let gc2 = (N2, node_pk(r2)) in
+  let js2 = joiner_secret(init_secret(es1), r2, gc2) in
+  let es2 = epoch_secret(js2) in
+  out(c, (gc2, tag(es2, gc2)));
+  (
+    (* A, the welcomer: checks the member's signature and the epoch, and
+       takes the init key from the request. *)
+    !in(c, (ik: kpk, sg: bitstring));
+    if checksign(spk(skM), (L_catch_up, N1, ik), sg) = true then
+    new q: key;
+    out(c, (kem_ct(ik, q), senc(kdf(kem_ss(ik, q), L_welcome), js2)))
+  ) | (
+    out(c, aenc(msg_key(es2), Msg2))
+  ) | (
+    (* M comes back with a jump. *)
+    new ikM: key;
+    out(c, (kempk(ikM), sign(skM, (L_catch_up, N1, kempk(ikM)))));
+    in(c, (ct: bitstring, w: bitstring));
+    let js = sdec(kdf(decaps(ikM, ct), L_welcome), w) in
+    if tag(epoch_secret(js), gc2) = tag(es2, gc2) then
+    event Jumped
+  )

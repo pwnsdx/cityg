@@ -1,0 +1,45 @@
+(* Scenario JOIN: J enters in window 2 with a district welcome, then its
+   whole state leaks.
+
+   Epoch 1: A and B in district 1 (node d1, secret sd1). Window 2: J enters
+   the first leaf of district 2 = parent(J, blank). B, committer of district
+   2 and of the city, draws d2's secret t2 (wrapped to J's leaf) and the
+   root r2 (wrapped to d1 and d2), then seals the joiner secret to J's
+   one-time init key: this is the welcome, produced once the root is known.
+   J checks B's signature and the tag, sends a message, then its device
+   leaks (the init key was used once and erased). *)
+
+free Mprev: bitstring [private].   (* sent in epoch 1 *)
+free Mjoin: bitstring [private].   (* sent by J in epoch 2 *)
+query attacker(Mprev).
+query attacker(Mjoin).
+
+process
+  new lsA: key; new lsB: key; new sd1: key; new r1: key; new init0: key;
+  new lsJ: key; new ikJ: key; new skB: skey;
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), node_pk(sd1), leaf_pk(lsJ), kempk(ikJ), spk(skB)));
+  let gc1 = (N1, node_pk(sd1), node_pk(r1)) in
+  let es1 = epoch_secret(joiner_secret(init0, r1, gc1)) in
+  out(c, aenc(msg_key(es1), Mprev));
+  (
+    new t2: key; new qj: key; new r2: key; new q1: key; new q2: key; new qw: key;
+    let gc2 = (N2, node_pk(sd1), node_pk(t2), node_pk(r2)) in
+    let js2 = joiner_secret(init_secret(es1), r2, gc2) in
+    let es2 = epoch_secret(js2) in
+    out(c, (wrap(leaf_pk(lsJ), qj, t2), wrap(node_pk(sd1), q1, r2), wrap(node_pk(t2), q2, r2),
+            gc2, tag(es2, gc2), sign(skB, (N2, gc2, tag(es2, gc2))), wrap(kempk(ikJ), qw, js2)))
+  ) | (
+    in(c, (wj: bitstring, wr: bitstring, gc2: bitstring, tg: bitstring, sg: bitstring, wel: bitstring));
+    if checksign(spk(skB), (N2, gc2, tg), sg) = true then
+    let (=N2, pk1: kpk, pk2: kpk, pkr: kpk) = gc2 in
+    let t2 = unwrap(leaf_sk(lsJ), wj) in
+    if node_pk(t2) = pk2 then
+    let r2 = unwrap(node_sk(t2), wr) in
+    if node_pk(r2) = pkr then
+    let js2 = unwrap(ikJ, wel) in
+    let es2 = epoch_secret(js2) in
+    if tag(es2, gc2) = tg then
+    out(c, aenc(msg_key(es2), Mjoin));
+    phase 1;
+    out(c, (lsJ, t2, r2, js2, es2, init_secret(es2)))
+  )

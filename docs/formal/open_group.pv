@@ -1,0 +1,51 @@
+(* Scenario OPEN: an open group, where a join needs no admission.
+
+   A and B share epoch 1. The group is open: A accepts a window sealed by an
+   entrant whose device key is not a member's, provided that key signed the
+   seal and is bound into the new epoch, where every member sees it. The
+   delivery service can therefore join a device of its own and seal the
+   window itself, as any stranger could.
+
+   Two properties:
+   * the service reads what A sends in the epoch it entered (expected: an
+     open group gives no confidentiality against whoever joins it);
+   * it cannot make A accept a message as B's: A checks B's device key,
+     which the service does not have. *)
+
+free skA, skB: skey [private].
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event SentB(bitstring).
+event ReceivedFromB(bitstring).
+query m: bitstring; event(ReceivedFromB(m)) ==> event(SentB(m)).
+
+process
+  new lsA: key; new lsB: key; new es1: key;
+  out(c, (spk(skA), spk(skB), leaf_pk(lsA), leaf_pk(lsB), external_pk(es1)));
+  (
+    (* A: a window sealed by a new device, then a message in that epoch. *)
+    in(c, (pkE: spkey, w: bitstring, gc2: bitstring, tg: bitstring, sg: bitstring));
+    if pkE <> spk(skA) && pkE <> spk(skB) then
+    if checksign(pkE, (N2, gc2, tg), sg) = true then
+    let (=N2, pkr: kpk, ct: bitstring, =pkE) = gc2 in
+    let r2 = unwrap(leaf_sk(lsA), w) in
+    if node_pk(r2) = pkr then
+    let init_ext = unwrap(external_sk(es1), ct) in
+    let es2 = epoch_secret(joiner_secret(init_ext, r2, gc2)) in
+    if tag(es2, gc2) = tg then
+    out(c, aenc(msg_key(es2), MA))
+  ) | (
+    (* B sends messages signed with its device key. *)
+    !
+    new mB: bitstring;
+    event SentB(mB);
+    out(c, (mB, sign(skB, (L_msg, mB))))
+  ) | (
+    (* A accepts a message as B's only under B's device key. *)
+    !
+    in(c, (m: bitstring, s: bitstring));
+    if checksign(spk(skB), (L_msg, m), s) = true then
+    event ReceivedFromB(m)
+  )

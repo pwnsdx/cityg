@@ -1,0 +1,25 @@
+(* Scenario HISTORY_LINK_REJOIN (why history links are rejected): the
+   history link of history_link.pv, and M, removed by window 2, joins again
+   in window 3.
+
+   As a joiner of epoch 3, M derives the root of epoch 3; it still holds the
+   init secret of epoch 1. The link gives it the commit secret of epoch 2,
+   and so epoch 2, where it was not a member. Links cannot tell a member
+   back from an absence from a joiner that holds an old init secret. *)
+
+free M2: bitstring [private].
+query attacker(M2).
+
+process
+  new es1: key; new lsR: key; new r2: key; new r3: key; new q2: key; new q3: key;
+  let init1 = init_secret(es1) in
+  out(c, (init1, leaf_pk(lsR)));
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, commit_secret(r2), gc2)) in
+  let gc3 = (N3, node_pk(r3)) in
+  out(c, (gc2, tag(es2, gc2), seal(leaf_pk(lsR), q2, N2, r2)));
+  out(c, (gc3, seal(leaf_pk(lsR), q3, N3, r3),
+          history_link(commit_secret(r3), gc3, commit_secret(r2))));
+  out(c, aenc(msg_key(es2), M2));
+  (* M joins again in window 3: it learns the root of epoch 3. *)
+  out(c, r3)

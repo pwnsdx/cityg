@@ -1,0 +1,32 @@
+(* Scenario BURST_CHAIN_MAC_ONLY (sanity check): the chain of a burst is
+   authenticated with a MAC under a key derived from the epoch's message
+   key instead of the sender's card signature. Every member holds that key:
+   the attacker, a member, speaks as S. *)
+
+free skS: skey [private].
+free gk: key.
+
+event Sent(bitstring).
+event AcceptedFromS(bitstring).
+query m: bitstring; event(AcceptedFromS(m)) ==> event(Sent(m)).
+
+process
+  out(c, spk(skS));
+  (
+    !
+    new m1: bitstring; new m2: bitstring;
+    event Sent(m1);
+    let e1 = aenc(gk, m1) in
+    out(c, e1);
+    event Sent(m2);
+    let e2 = aenc(gk, m2) in
+    let c2 = chain(chain(ZERO, e1), e2) in
+    out(c, (e2, mac(kdf(gk, L_chain_mac), (L_card, N1, c2))))
+  ) | (
+    !
+    in(c, x1: bitstring);
+    in(c, (x2: bitstring, t: bitstring));
+    if t = mac(kdf(gk, L_chain_mac), (L_card, N1, chain(chain(ZERO, x1), x2))) then
+    event AcceptedFromS(adec(gk, x1));
+    event AcceptedFromS(adec(gk, x2))
+  )

@@ -1,0 +1,68 @@
+(* Scenario TAINT: removal of a malicious committer, with the taint rule.
+
+   Four leaves in two districts of two leaves:
+     d1 = parent(A, B), d2 = parent(C, M), root = parent(d1, d2).
+   In window 1, M (a member of district 2, malicious) was the committer of
+   district 1: it drew the secret s1 of d1, which A and B hold, and kept it.
+   The attacker holds M's leaf key and everything M learned in epoch 1: s1,
+   the secret s2 of d2 (on M's path), the root and the init secret.
+
+   Window 2 removes M. C commits district 2 (M's leaf blank), B re-keys
+   district 1 because its node is tainted by M (the taint rule), and C
+   commits the city. The city committer and A accept a district commit only
+   from the committer the window assigned (B for district 1, C for
+   district 2). *)
+
+free skA, skB, skC: skey [private].
+
+(* A message A sends in epoch 2. *)
+free M2: bitstring [private].
+query attacker(M2).
+
+(* Reachability: A accepts epoch 2. *)
+event AcceptedA(key).
+query es: key; event(AcceptedA(es)).
+
+process
+  new lsA: key; new lsB: key; new lsC: key; new lsM: key;
+  new s1: key; new s2: key; new r1: key; new init1: key;
+  out(c, (lsM, s1, s2, r1, init1));
+  out(c, (spk(skA), spk(skB), spk(skC)));
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), leaf_pk(lsC), leaf_pk(lsM)));
+  (
+    (* District 2, committer C: a fresh secret for d2, wrapped to C only. *)
+    new t2: key; new rc: key;
+    out(c, (wrap(leaf_pk(lsC), rc, t2), node_pk(t2), sign(skC, (N2, D2, node_pk(t2)))))
+  ) | (
+    (* District 1, committer B: d1 is tainted by M, so it gets a fresh
+       secret, wrapped to A and B. *)
+    new t1: key; new ra: key; new rb: key;
+    out(c, (wrap(leaf_pk(lsA), ra, t1), wrap(leaf_pk(lsB), rb, t1), node_pk(t1),
+            sign(skB, (N2, D1, node_pk(t1)))))
+  ) | (
+    (* City committer C: a fresh root, wrapped to the two district roots. *)
+    in(c, (pk1: kpk, sig1: bitstring));
+    if checksign(spk(skB), (N2, D1, pk1), sig1) = true then
+    in(c, (pk2: kpk, sig2: bitstring));
+    if checksign(spk(skC), (N2, D2, pk2), sig2) = true then
+    new r2: key; new q1: key; new q2: key;
+    let gc2 = (N2, pk1, pk2, node_pk(r2)) in
+    let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+    out(c, (wrap(pk1, q1, r2), wrap(pk2, q2, r2), gc2, tag(es2, gc2),
+            sign(skC, (N2, CITY, gc2, tag(es2, gc2)))))
+  ) | (
+    (* A: its district commit, then the city commit. *)
+    in(c, (w1: bitstring, pk1: kpk, sig1: bitstring));
+    if checksign(spk(skB), (N2, D1, pk1), sig1) = true then
+    let t1 = unwrap(leaf_sk(lsA), w1) in
+    if node_pk(t1) = pk1 then
+    in(c, (wr: bitstring, gc2: bitstring, tg: bitstring, sigc: bitstring));
+    if checksign(spk(skC), (N2, CITY, gc2, tg), sigc) = true then
+    let (=N2, =pk1, pk2: kpk, pkr: kpk) = gc2 in
+    let r2 = unwrap(node_sk(t1), wr) in
+    if node_pk(r2) = pkr then
+    let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+    if tag(es2, gc2) = tg then
+    event AcceptedA(es2);
+    out(c, aenc(msg_key(es2), M2))
+  )

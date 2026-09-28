@@ -1,0 +1,41 @@
+(* Scenario ILOT_RELAY: a member takes the epoch secret from a relay of its
+   îlot, and checks it against the sealed tag.
+
+   B and relay C are members of îlot j in epochs 1 and 2. C is hostile and
+   works with the server, which is the network here: the attacker knows the
+   secrets of epoch 1, the root of îlot j and the real epoch secret of
+   window 2. The top seals the epoch secret to the root of j, and the
+   sealer signs the tag of epoch 2 in its seal. B takes a blob from the
+   network, sealed under the îlot's relay key, derives the epoch and
+   accepts it only if the sealer's tag checks.
+
+   Expected: proved. B accepts only the real epoch: the relay can give it
+   nothing else, since it cannot forge the sealer's signature and the tag
+   binds the epoch secret. The signature stands for the sealer's seal or
+   the authorizer's checkpoint: a member that checks an unsigned tag can be
+   led into another epoch by any member of epoch 1 with the server, relay
+   or not (authorizer_follow_unchecked.pv). *)
+
+free skS: skey [private].
+
+event RealEpoch(key).
+event BAccepts(key).
+query es: key; event(BAccepts(es)) ==> event(RealEpoch(es)).
+
+process
+  new es1: key; new sj: key; new r2: key; new q: key;
+  let init1 = init_secret(es1) in
+  let gc2 = (N2, node_pk(sj)) in
+  let es2 = epoch_secret(joiner_secret(init1, commit_secret(r2), gc2)) in
+  event RealEpoch(es2);
+  (* What C knows; the top; the sealer's signed tag. *)
+  out(c, (es1, sj, r2, spk(skS)));
+  out(c, seal(node_pk(sj), q, N2, r2));
+  out(c, (gc2, tag(es2, gc2), sign(skS, (L_seal, gc2, tag(es2, gc2)))));
+  (* Member B. *)
+  in(c, (blob: bitstring, g: bitstring, tg: bitstring, sg: bitstring));
+  if checksign(spk(skS), (L_seal, g, tg), sg) = true then
+  let r = sdec(relay_key(sj), N2, blob) in
+  let es = epoch_secret(joiner_secret(init1, commit_secret(r), g)) in
+  if tag(es, g) = tg then
+  event BAccepts(es)

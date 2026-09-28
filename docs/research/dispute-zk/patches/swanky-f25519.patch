@@ -1,0 +1,163 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 045948a..a54c361 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -275,3 +275,7 @@ overflow-checks = true
+ [profile.dev.package]
+ # See #147
+ jemalloc-sys.opt-level = 3
++
++[patch."https://github.com/GaloisInc/ff"]
++ff = { path = "../ff" }
++ff_codegen = { path = "../ff/ff_codegen" }
+diff --git a/edge/diet-mac-and-cheese/src/backend_multifield.rs b/edge/diet-mac-and-cheese/src/backend_multifield.rs
+index 03ebc10..6ac6134 100644
+--- a/edge/diet-mac-and-cheese/src/backend_multifield.rs
++++ b/edge/diet-mac-and-cheese/src/backend_multifield.rs
+@@ -43,7 +43,7 @@ use swanky_error::{ErrorKind, OptionExt, Result, WrapErr, bail, ensure};
+ use swanky_field::{FiniteField, FiniteRing, PrimeFiniteField, StatisticallySecureField};
+ use swanky_field_binary::{F2, F40b};
+ use swanky_field_f61p::F61p;
+-use swanky_field_ff_primes::{F127p, F128p, F384p, F384q, Secp256k1, Secp256k1order};
++use swanky_field_ff_primes::{F25519, F127p, F128p, F384p, F384q, Secp256k1, Secp256k1order};
+ use swanky_party::{
+     private::{PartyPrivate, PartyPrivateCopy},
+     ty_eq::{EqualityProposition, Witness},
+@@ -1872,6 +1872,11 @@ impl<
+             let (lpn_setup, lpn_extend) = mapping_lpn_size(lpn_size);
+             self.load_backend_fe::<F128p>(channel, rng, idx, lpn_setup, lpn_extend)?;
+             Ok(())
++        } else if field == std::any::TypeId::of::<F25519>() {
++            info!("loading field F25519");
++            let (lpn_setup, lpn_extend) = mapping_lpn_size_large_field(lpn_size);
++            self.load_backend_fe::<F25519>(channel, rng, idx, lpn_setup, lpn_extend)?;
++            Ok(())
+         } else if field == std::any::TypeId::of::<Secp256k1>() {
+             info!("loading field Secp256k1");
+             let (lpn_setup, lpn_extend) = mapping_lpn_size_large_field(lpn_size);
+@@ -1973,6 +1978,10 @@ impl<
+             info!("loading field F128p");
+             self.load_backend_fe_plaintext::<F128p>(idx)?;
+             Ok(())
++        } else if field == std::any::TypeId::of::<F25519>() {
++            info!("loading field F25519");
++            self.load_backend_fe_plaintext::<F25519>(idx)?;
++            Ok(())
+         } else if field == std::any::TypeId::of::<Secp256k1>() {
+             info!("loading field Secp256k1");
+             self.load_backend_fe_plaintext::<Secp256k1>(idx)?;
+@@ -2127,6 +2136,18 @@ impl<
+                 lpn_setup,
+                 lpn_extend,
+             )
++        } else if field == std::any::TypeId::of::<F25519>() {
++            info!("loading field F25519");
++            let (lpn_setup, lpn_extend) = mapping_lpn_size_large_field(lpn_size);
++            self.load_backend_multithreaded_fe::<F25519, C2, I>(
++                channel,
++                channels_vole,
++                threads_per_field,
++                rng,
++                idx,
++                lpn_setup,
++                lpn_extend,
++            )
+         } else if field == std::any::TypeId::of::<Secp256k1>() {
+             info!("loading field Secp256k1");
+             let (lpn_setup, lpn_extend) = mapping_lpn_size_large_field(lpn_size);
+diff --git a/edge/diet-mac-and-cheese/src/fields.rs b/edge/diet-mac-and-cheese/src/fields.rs
+index 9e7dd57..1686d32 100644
+--- a/edge/diet-mac-and-cheese/src/fields.rs
++++ b/edge/diet-mac-and-cheese/src/fields.rs
+@@ -9,7 +9,7 @@ use swanky_error::{ErrorKind, Result, WrapErr, bail, ensure};
+ use swanky_field::PrimeFiniteField;
+ use swanky_field_binary::{F2, F40b, F63b};
+ use swanky_field_f61p::F61p;
+-use swanky_field_ff_primes::{F127p, F128p, F384p, F384q, Secp256k1, Secp256k1order};
++use swanky_field_ff_primes::{F25519, F127p, F128p, F384p, F384q, Secp256k1, Secp256k1order};
+ use swanky_serialization::CanonicalSerialize;
+ use swanky_sieve_ir_parser::Number;
+ 
+@@ -33,6 +33,10 @@ pub const F128P_MODULUS: Number = Number::from_be_hex(
+ pub const SECP256K1_MODULUS: Number = Number::from_be_hex(
+     "00000000000000000000000000000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+ );
++/// The modulus for [`F25519`], as a [`Number`].
++pub const F25519_MODULUS: Number = Number::from_be_hex(
++    "000000000000000000000000000000007fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed",
++);
+ /// The modulus for [`Secp256k1order`], as a [`Number`].
+ pub const SECP256K1ORDER_MODULUS: Number = Number::from_be_hex(
+     "00000000000000000000000000000000fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+@@ -71,6 +75,11 @@ fn secp256k1_modulus_is_correct() {
+     assert_eq!(SECP256K1_MODULUS, Secp256k1::modulus_int());
+ }
+ 
++#[test]
++fn f25519_modulus_is_correct() {
++    assert_eq!(F25519_MODULUS, F25519::modulus_int());
++}
++
+ #[test]
+ fn secp256k1order_modulus_is_correct() {
+     assert_eq!(SECP256K1ORDER_MODULUS, Secp256k1order::modulus_int());
+@@ -98,6 +107,8 @@ pub fn modulus_to_type_id(modulus: Number) -> Result<TypeId> {
+         Ok(TypeId::of::<F128p>())
+     } else if modulus == SECP256K1_MODULUS {
+         Ok(TypeId::of::<Secp256k1>())
++    } else if modulus == F25519_MODULUS {
++        Ok(TypeId::of::<F25519>())
+     } else if modulus == SECP256K1ORDER_MODULUS {
+         Ok(TypeId::of::<Secp256k1order>())
+     } else if modulus == F384P_MODULUS {
+@@ -199,5 +210,5 @@ macro_rules! impl_sieve_ir_deserialize_binary_ext_field {
+     }
+ }
+ 
+-impl_sieve_ir_deserialize_prime_field! { F2, F61p, F127p, F128p, Secp256k1, Secp256k1order, F384p, F384q }
++impl_sieve_ir_deserialize_prime_field! { F2, F61p, F127p, F128p, F25519, Secp256k1, Secp256k1order, F384p, F384q }
+ impl_sieve_ir_deserialize_binary_ext_field! { F40b, F63b }
+diff --git a/edge/field-ff-primes/build.rs b/edge/field-ff-primes/build.rs
+index 92b7178..e8781b3 100644
+--- a/edge/field-ff-primes/build.rs
++++ b/edge/field-ff-primes/build.rs
+@@ -51,6 +51,13 @@ fn main() {
+             generator: "3",
+             endianness: Little,
+         },
++        PrimeFieldCodegen {
++            ident: "F25519",
++            is_pub: true,
++            modulus: "57896044618658097711785492504343953926634992332820282019728792003956564819949",
++            generator: "2",
++            endianness: Little,
++        },
+         PrimeFieldCodegen {
+             ident: "Secp256k1order",
+             is_pub: true,
+diff --git a/edge/field-ff-primes/src/prime_field_using_ff.rs b/edge/field-ff-primes/src/prime_field_using_ff.rs
+index 0c2ab3e..f3d4815 100644
+--- a/edge/field-ff-primes/src/prime_field_using_ff.rs
++++ b/edge/field-ff-primes/src/prime_field_using_ff.rs
+@@ -421,6 +421,21 @@ prime_field_using_ff!(
+     num_bits = generic_array::typenum::U256,
+ );
+ 
++prime_field_using_ff!(
++    /// The finite field over the prime
++    /// $`P = 2^{255} - 19
++    ///     = 57896044618658097711785492504343953926634992332820282019728792003956564819949`$,
++    /// the field of Curve25519.
++    F25519,
++    f25519,
++    modulus = "57896044618658097711785492504343953926634992332820282019728792003956564819949",
++    generator = "2",
++    limbs = 4,
++    actual_limbs = 4,
++    num_bytes = generic_array::typenum::U32,
++    num_bits = generic_array::typenum::U255,
++);
++
+ prime_field_using_ff!(
+     /// The finite field over the prime
+     /// $`P = 2^{256} - 2^{32} - 2^9 - 2^8 - 2^7 - 2^6 - 2^4 - 1

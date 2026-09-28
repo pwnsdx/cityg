@@ -1,0 +1,33 @@
+(* Scenario TASK_HEDGE_COINS (profile v0.5-draft, stage 2): the same
+   performer, whose encapsulations take their coins from the generator, as
+   in v0.4 (section 7.2 of the specification): only its fresh secrets are
+   hedged.
+
+   Expected: attack: M opens the wrap with the coins it read, then reads
+   epoch 2. Reachable (sanity): A accepts epoch 2. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event AAccepts(key).
+query es: key; event(AAccepts(es)).
+
+process
+  new lsA: key; new lsP: key; new es1: key;
+  let init1 = init_secret(es1) in
+  out(c, (es1, leaf_pk(lsA), leaf_pk(lsP)));
+  new g1: key; new g2: key;
+  out(c, (g1, g2));
+  let h = task_hedge(lsP, N2) in
+  let r2 = fresh(h, g1) in
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+  out(c, (wrap(leaf_pk(lsA), g2, r2), gc2, tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), MA));
+  (
+    in(c, (wa: bitstring, g: bitstring, tg: bitstring));
+    let r = unwrap(leaf_sk(lsA), wa) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    event AAccepts(es)
+  )

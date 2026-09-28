@@ -1,0 +1,61 @@
+(* Scenario PCS: a committer whose device leaked heals by updating.
+
+   As taint.pv, but M is an honest member whose device leaked while it was
+   the committer of district 1 in window 1: the attacker holds M's old leaf
+   key and what M knew in epoch 1, s1 (d1, tainted by M) included. In
+   window 2, M updates: it sends a fresh leaf key the attacker does not
+   get. C re-keys district 2 to C and M's new leaf, B re-keys district 1
+   because its node is tainted by M, and C commits the city. M reads
+   epoch 2; the attacker must not. *)
+
+free skA, skB, skC: skey [private].
+
+free M2: bitstring [private].
+query attacker(M2).
+
+event AcceptedM(key).
+query es: key; event(AcceptedM(es)).
+
+process
+  new lsA: key; new lsB: key; new lsC: key; new lsM: key; new lsM2: key;
+  new s1: key; new s2: key; new r1: key; new init1: key;
+  out(c, (lsM, s1, s2, r1, init1));
+  out(c, (spk(skA), spk(skB), spk(skC)));
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), leaf_pk(lsC), leaf_pk(lsM), leaf_pk(lsM2)));
+  (
+    (* District 2, committer C: a fresh secret for d2, wrapped to C and to M's new leaf. *)
+    new t2: key; new rc: key; new rm: key;
+    out(c, (wrap(leaf_pk(lsC), rc, t2), wrap(leaf_pk(lsM2), rm, t2), node_pk(t2),
+            sign(skC, (N2, D2, node_pk(t2)))))
+  ) | (
+    (* District 1, committer B: d1 is tainted by M. *)
+    new t1: key; new ra: key; new rb: key;
+    out(c, (wrap(leaf_pk(lsA), ra, t1), wrap(leaf_pk(lsB), rb, t1), node_pk(t1),
+            sign(skB, (N2, D1, node_pk(t1)))))
+  ) | (
+    (* City committer C. *)
+    in(c, (pk1: kpk, sig1: bitstring));
+    if checksign(spk(skB), (N2, D1, pk1), sig1) = true then
+    in(c, (pk2: kpk, sig2: bitstring));
+    if checksign(spk(skC), (N2, D2, pk2), sig2) = true then
+    new r2: key; new q1: key; new q2: key;
+    let gc2 = (N2, pk1, pk2, node_pk(r2)) in
+    let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+    out(c, (wrap(pk1, q1, r2), wrap(pk2, q2, r2), gc2, tag(es2, gc2),
+            sign(skC, (N2, CITY, gc2, tag(es2, gc2)))))
+  ) | (
+    (* M, with its new leaf: district 2, then the city. *)
+    in(c, (w2: bitstring, pk2: kpk, sig2: bitstring));
+    if checksign(spk(skC), (N2, D2, pk2), sig2) = true then
+    let t2 = unwrap(leaf_sk(lsM2), w2) in
+    if node_pk(t2) = pk2 then
+    in(c, (wr: bitstring, gc2: bitstring, tg: bitstring, sigc: bitstring));
+    if checksign(spk(skC), (N2, CITY, gc2, tg), sigc) = true then
+    let (=N2, pk1: kpk, =pk2, pkr: kpk) = gc2 in
+    let r2 = unwrap(node_sk(t2), wr) in
+    if node_pk(r2) = pkr then
+    let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+    if tag(es2, gc2) = tg then
+    event AcceptedM(es2);
+    out(c, aenc(msg_key(es2), M2))
+  )

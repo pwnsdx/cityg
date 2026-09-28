@@ -1,0 +1,20 @@
+(* Scenario READER_REMOVED_WITH_ROOT (sanity check): the removal of
+   reader_removed.pv in a design where readers hold the root secret of the
+   keepers' tree and the epoch secret, and derive each epoch themselves
+   instead of asking for bundles.
+
+   Window 2 removes R and re-keys nothing, since readers are not in the
+   tree. *)
+
+free MK: bitstring [private].
+query attacker(MK).
+
+process
+  new es1: key; new r: key;
+  (* What the removed reader R held in epoch 1. *)
+  out(c, (r, es1));
+  let gc2 = (N2, node_pk(r)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r, gc2)) in
+  let rs2 = reader_secret(es2) in
+  out(c, gc2);
+  out(c, aenc(msg_key(rs2), MK))

@@ -1,0 +1,58 @@
+(* Scenario CITY_TASK_BOUND (profile v0.5-draft, stage 2): a city task
+   bound to the district commits it builds on.
+
+   A sub-city of two districts, whose root is the tree root: district 1
+   holds A and M, district 2 holds S, the sealer. In epoch 1, M holds the
+   init secret and every secret it knew; the attacker has them. Window 2
+   removes M. C1, a member, commits district 1: a fresh secret d1 for its
+   root, wrapped to A's leaf, and signs the new root key. P performs the
+   city task on the district roots the delivery service shows it: a fresh
+   root secret s wrapped to both, signed with the hash of the keys it
+   wrapped to (part_hash, docs/specs-v0.5-draft.md section 3.2). The
+   service may show P a key of its own for district 1.
+   S checks both signatures and that the task's hash covers the root keys
+   of the commits it checked, follows the task along its path (the root of
+   district 2, unchanged, whose secret it holds) to s, seals window 2 and
+   sends a message in it.
+
+   Expected: proved: M does not read the epoch S seals.
+   Reachable (sanity): S seals. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event SSeals(key).
+query es: key; event(SSeals(es)).
+
+process
+  new lsA: key; new t2: key; new es1: key;
+  new skC: skey; new skP: skey;
+  let init1 = init_secret(es1) in
+  (* M's state of epoch 1, and the public keys. *)
+  out(c, (es1, leaf_pk(lsA), node_pk(t2), spk(skC), spk(skP)));
+  (* C1 commits district 1. *)
+  new d1: key; new wd: key;
+  out(c, (wrap(leaf_pk(lsA), wd, d1), node_pk(d1), sign(skC, (N2, D1, node_pk(d1)))));
+  (
+    (* P performs the city task on the roots it is shown. Its names come
+       after its input: the same process, which ProVerif proves more
+       precisely (CITY_TASK_UNBOUND draws them first, which lets it
+       rebuild the attack). *)
+    in(c, (k1: kpk, k2: kpk));
+    new s: key; new w1: key; new w2: key;
+    let ks = node_pk(s) in
+    let body = (N2, CITY_TASK, ks, wrap(k1, w1, s), wrap(k2, w2, s), hash((k1, k2, ks))) in
+    out(c, (body, sign(skP, body)))
+  ) | (
+    (* S checks the commit and the task, follows the task and seals. *)
+    in(c, (kd1: kpk, sc: bitstring, body: bitstring, sp: bitstring));
+    if checksign(spk(skC), (N2, D1, kd1), sc) = true then
+    if checksign(spk(skP), body, sp) = true then
+    let (=N2, =CITY_TASK, ks: kpk, x1: bitstring, x2: bitstring, ph: bitstring) = body in
+    if ph = hash((kd1, node_pk(t2), ks)) then
+    let r = unwrap(node_sk(t2), x2) in
+    let gc2 = (N2, kd1, ks) in
+    let es2 = epoch_secret(joiner_secret(init1, r, gc2)) in
+    event SSeals(es2);
+    out(c, aenc(msg_key(es2), MA))
+  )

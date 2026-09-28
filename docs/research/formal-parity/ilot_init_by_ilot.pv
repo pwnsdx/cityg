@@ -1,0 +1,33 @@
+(* Scenario ILOT_INIT_BY_ILOT: a cheaper welcome, rejected. Instead of a
+   welcome per joiner, sealed to its one-time init key, the init secret of
+   epoch 1 is sealed to the root of the îlot that receives a joiner, which
+   every joiner of the îlot opens.
+
+   Îlot j keeps its root through windows 2 and 3. Window 2 has a joiner in
+   îlot j, so the init secret of epoch 1 is sealed to the root of j, like
+   the epoch secret of window 2. A member sends M2 in epoch 2. In epoch 3,
+   member A of îlot j is compromised: the attacker learns the root of j and
+   the secrets of epoch 3; A had erased those of epochs 1 and 2.
+
+   Expected: attack. The root of j opens both the epoch secret of window 2
+   and the init secret of epoch 1: the compromise opens epoch 2, which
+   ilot_forward_secrecy.pv keeps secret. Welcomes stay sealed to one-time
+   init keys. *)
+
+free M2: bitstring [private].
+query attacker(M2).
+
+process
+  new es1: key; new sj: key; new lsA: key;
+  new r2: key; new r3: key; new q1: key; new q2: key; new q3: key;
+  let init1 = init_secret(es1) in
+  let g2 = (N2, node_pk(sj)) in
+  let g3 = (N3, node_pk(sj)) in
+  let es2 = epoch_secret(joiner_secret(init1, commit_secret(r2), g2)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), commit_secret(r3), g3)) in
+  (* The top of windows 2 and 3, and the init secret for the joiner. *)
+  out(c, (seal(node_pk(sj), q2, N2, r2), seal(node_pk(sj), q3, N3, r3), seal(node_pk(sj), q1, N1, init1)));
+  out(c, (g2, g3));
+  out(c, aenc(msg_key(es2), M2));
+  (* The compromise of A in epoch 3. *)
+  out(c, (sj, lsA, es3))

@@ -1,488 +1,193 @@
-# City-G Glossary
+# Glossary
 
-A comprehensive reference for City-G terminology, organized alphabetically for quick lookup.
+Section numbers refer to the [specification](specs.md); "v0.5 §x" refers to
+the [v0.5 draft](specs-v0.5-draft.md), a delta on it.
 
-> [!IMPORTANT]
-> This glossary tracks the current repo state, but some entries still mention
-> earlier profile revision numbers where the term first became salient. For
-> current normative behavior, follow [`./specs.md`](./specs.md).
+**Admin.** A member whose occupancy and device key are in the registry's
+admin list. Admins sign admissions, invites, checkpoints and group
+policies, and may remove any member. If a window leaves no admin, its
+sealer becomes one (the promotion rule, section 8).
 
----
+**Admission.** A signed permission for one device to join once, by an admin
+(kind 0) or by the holder of an invite key (kind 1). It names the device
+(`device_id`) and its last epoch. Its hash is recorded in the admission map
+when it is used (sections 6 and 8).
 
-## A
+**Anchor.** The epoch a joiner or a returning member checks the chain of
+seals from: an admin checkpoint, or the last epoch a member followed
+(section 12.9).
 
-### Acceptance
-The process by which the server validates an anchor (or epoch bundle) cryptographically without learning secrets. See [Server Acceptance](./protocol/07-server-acceptance.md).
+**Audit record.** One entry of a window with the proofs an auditor needs to
+check it against the previous epoch's header (section 15).
 
-### AcceptanceOptions
-Configuration parameters that control coarse-grained policy for anchor validation (allowed SRX modes, suite IDs, bootstrap rules). Configured once per deployment.
+**Blank.** A leaf without a member, or a parent node without a key. A parent
+node is blank exactly when its subtree holds no member (section 5.2).
 
-### Anchor
-A signed, server-blind update representing a state transition (e.g., member join, merge, or revocation). The server can validate it cryptographically but cannot decrypt the protected header containing epoch keys. Devices derive and use those keys privately.
+**Catch-up (jump).** A returning member's signed request for a welcome into
+the next window; it recovers its path from the last step of each of its
+nodes and skips the epochs in between (section 12.10).
 
-**Anchor types** (current base profile, spec S4.1):
-- **JOIN**: introduces a new device leaf; carries `barrier_leaf_pk` (key 177).
-- **MERGE**: carries merge/checkpoint state; may carry `barrier_update` (key 175).
-- **REGULAR**: any anchor that is neither JOIN nor MERGE.
+**Change.** `[kind, leaf, request_ref]`: a removal, eviction, join, update
+or re-entry that a district commit applies to one leaf (section 10.1).
 
-**Also known as**: Epoch bundle, ClientEpochBundle
+**Checkpoint.** An admin's signed statement of an epoch: interim transcript
+hash, tree hash, registry hash, shape and external key hash. Joiners anchor
+on it (sections 6 and 12.9).
 
-**See also**: [Protocol Overview](./protocol/01-overview.md)
+**City.** The levels of the tree above the districts, re-keyed by the
+sealer (section 5.1).
 
-### AEAD
-Authenticated Encryption with Associated Data. Used in City-G for encrypting the KBROAD envelope (ChaCha20-Poly1305).
+**Closed group.** A group whose joins need an admission; every group
+without a policy that opens it (section 6.1).
 
-**See also**: KBROAD
+**Committer.** The member (or entrant) that re-keys one district of a window
+and signs its district commit. It need not belong to the district
+(sections 10.3 and 12.4).
 
----
+**Confirmation tag.** `MAC(confirm_key_n, confirmed_transcript_hash_n)`:
+proves that whoever computed it derived the same epoch secrets, which bind
+the tree, the registry and the transcript (section 9).
 
-## B
+**Delivery service (DS).** The server: it records and checks requests,
+closes windows, assigns roles, checks commits and seals, and serves packets,
+seal links and entries. It never draws a group secret and never signs a
+group object (section 14).
 
-### Barrier (PRS Barrier)
-The post-revocation secrecy subsystem of the current base profile (spec S11).
-Uses a KEM-tree cover to rotate `K_barrier` after revocations, ensuring that
-revoked members cannot decrypt future messages.
+**Device key.** The ML-DSA-65 key a device signs with in one group; its
+hash with the group identifier is the `device_id` (section 4).
 
-**Components**: `K_barrier`, `barrier_version`, `BarrierUpdate`, `KemTreeCoverPayload`
+**District.** A subtree of `2^L` leaves, re-keyed by its own committer in
+parallel with the others (section 5.1).
 
-**See also**: K_barrier, BarrierUpdate
+**Entrant.** With no member online, the joiner or returning member that
+takes every role of a window: it commits every district, seals with an
+external init and welcomes the others (section 12.7).
 
-### BarrierUpdate
-A CBOR structure (spec S11.5) carried in anchor header key 175 on MERGE anchors. Contains the KEM-tree cover payload that lets non-revoked members derive the new `K_barrier`.
+**Entry.** What a joiner or a returning member downloads to enter an epoch:
+the chain of seals, its welcome, the steps of its path, its leaf proof and
+its path's parent nodes (section 13.4).
 
-**Wire tag**: `"barrier-v1"`
+**Epoch.** The state a window creates. Epoch `n` has a tree, a registry, a
+transcript and its secrets (section 9).
 
-### barrier_version
-A monotonically increasing integer tracking the current barrier epoch. Bound into the payload key schedule (S8.3) and device-chain commit (S7.4).
+**Eviction.** A removal the DS writes, under an admin-signed policy, for a
+member whose leaf key has not changed for too long (sections 6 and 14.7).
 
----
+**Flat element.** The root secret of a window wrapped to the root of an
+island that has no relay, by a member the DS asks (v0.5 §2.4).
 
-## C
+**External init.** The init secret an entrant encapsulates to the external
+key of the previous epoch, in place of that epoch's init secret, which it
+does not know (section 9).
 
-### CAPSS Smallwood
-A hash-based polynomial commitment scheme providing zero-knowledge proofs. In City-G, it proves that `hp` (hash projection key) was derived deterministically from a seed and binds forward-secrecy metadata without revealing secrets.
+**Forced node.** A node a window must re-key besides the paths of its
+changed leaves: the taints of the members it removes, evicts, updates or
+re-enters, and the nodes above the old root when the tree grows (section
+10.2).
 
-**Proof Size**: ~12KB typical, ≤16KB maximum
-**Field**: `146: fs_capss` in anchor headers
+**Fraud proof.** A signed district commit, an audit record of an invalid
+entry and the committer's leaf proof: anyone can check that the committer
+placed that entry (section 15).
 
-**See also**: [CAPSS README](../crates/capss/README.md), [Proof Systems](./protocol/06-proof-systems.md)
+**Group policy.** An admin-signed object stating whether the group is open
+and after how many epochs an idle member may be evicted (section 6).
 
-### Checkpoint
-A compact summary that replaces many anchors, allowing newcomers to sync quickly without gaining extra decryption ability for past content. Also called a **rollup**.
+**Island.** The subtree of `2^c` leaves under node `(c, j)`, `c <= L`: the
+unit an island follower reads the tree by (v0.5 §2.1).
 
-**See also**: Rollup, Epoch
+**Island follower.** A member that takes the steps of its path up to its
+island root, and the root secret from the top of its packet: a relay
+element, a flat element or a refresh. It holds its island path and the root
+secret (v0.5 §2.2).
 
-### Ciphertext
-The encrypted message content stored on the server. Only group members with valid epoch keys can decrypt it.
+**Init key.** A one-time X-Wing key of a join, re-entry or catch-up
+request, to which a welcome is sealed (section 11).
 
-**See also**: E_k, Epoch
+**Leaf proof.** A leaf and, for each level, the content of its ancestor and
+the hash of the sibling subtree: it recomputes the tree hash (section 5.3).
 
-### ClientEpochBundle
-The CBOR-encoded data structure containing all cryptographic material for an anchor: proofs, witnesses, epoch metadata, and encrypted secrets.
+**Occupancy.** `[leaf, since]`: a member, named by its leaf and the epoch it
+entered it. It is never reused (section 1).
 
-**See also**: Anchor, [Data Structures](./protocol/03-data-structures.md)
+**Open group.** A group whose policy lets any device join with its own
+signed request and no admission; every join stays visible (section 6.1).
 
----
+**Packet.** What a member downloads for one window: the seal header, the
+tag, the registry update and the steps of its path (section 13.1). An
+island packet has the steps up to the member's island root and a top
+(v0.5 §2.8).
 
-## D
+**Path.** A member's leaf and its ancestors up to the root; a member holds
+the secret of each (section 7.4).
 
-### DECS
-Distributed Encrypted Commitment Scheme. Part of CAPSS Smallwood using Merkle trees and polynomial masking.
+**Plan.** The public structure of a re-key: which nodes, which become blank,
+where each secret is chained from and which children it is wrapped to. Any
+verifier recomputes it (section 7.3).
 
-### Device
-A physical endpoint (phone, laptop, server) with its own cryptographic identity (ML-DSA signing key, VRF keypair).
+**Refresh.** The latest re-key of each node of a member's path above its
+island, from which it recovers those levels as a jump does; checked by the
+window's tag, or against the root secret the member holds (v0.5 §2.5).
 
----
+**Relay.** The member of an island the DS names to seal the window's root
+secret under the island root's secret, for the island's members: a *relay
+element* of 52 bytes (v0.5 §2.3).
 
-## E
+**Re-entry.** A returning member's signed request to re-enter its own leaf
+with a new leaf key (section 12.10).
 
-### E_k (Epoch Key)
-The symmetric encryption key used to encrypt/decrypt messages within a
-specific epoch. In the current base profile, the payload key schedule binds to
-`K_barrier` and `barrier_version` (spec S8.3): `K_msg_epoch` is derived via
-HKDF-BLAKE3 from `E_k` with `K_barrier` in the salt, ensuring revoked members
-cannot decrypt.
+**Registry.** The admins, the device map, the admission map and the group
+policy's hash and mode; members keep its header (section 8).
 
-**Security**: Server never learns E_k (cryptographically enforced).
+**Removal, recorded and applied.** A removal is recorded when the DS accepts
+its proposal, and applied by the next window, which re-keys everything the
+member knew (sections 14.2 and 14.6).
 
-### Epoch
-A cryptographic snapshot of the group state at a specific point in time, including:
-- Merkle tree root of all members
-- Witness extraction key material
-- VRF proofs
-- Forward secrecy metadata
+**Removal, urgent or ordinary.** An urgent removal (by an admin, or a
+reported compromise) closes a window within `WINDOW_URGENT`, and members do
+not send while it waits longer; an ordinary one (a departure, an eviction)
+waits for the window its age closes, at most `WINDOW_ORDINARY` (v0.5 §2.9).
 
-**Also known as**: Anchor, WE-epoch (Witness Extraction epoch)
+**Seal.** The object that creates an epoch: the header (hashes, sealer,
+external init of an entrant), the body (district commit hashes, the city's
+re-key, a group policy) and one signature over the header, the tag and the
+next external key (section 10.4).
 
-**See also**: Anchor, E_k, Y*
+**Seal link.** One step of a chain of seals: the seal proof, the evidence
+that its signer was a member or an admitted entrant, and the registry header
+(section 13.3).
 
-### Epoch ID (eid)
-A 32-byte identifier uniquely identifying an epoch, derived as `H("msphf/eid", xk_hash, Y*)`.
+**Sealer.** The member (or entrant) that checks the district commits of a
+window, re-keys the city and signs the seal (section 12.5).
 
-**See also**: [Client Operations](./protocol/08-client-operations.md)
+**Sparse Merkle map.** A map from 32-byte keys to occupancies whose root
+depends only on its entries, with proofs of values and of absences (section
+8).
 
----
+**Step.** How a member gets the new secret of a re-keyed ancestor: `Wrap`
+(opened with the key of the child toward it) or `Chain` (derived from the
+child's new secret) (section 7.4).
 
-## F
+**Taint.** The occupancy of the committer that drew a node's current secret,
+public and hashed with the tree. Removing or updating a member re-keys every
+node it taints (sections 5.2 and 10.2).
 
-### Forward Secrecy (FS)
-Cryptographic property ensuring that compromise of current keys does not reveal past communications. City-G provides **minutes-grade forward secrecy** through automatic epoch rotation.
+**Top.** How an island follower gets the root secret of a window: a relay
+element, a flat element or a refresh (v0.5 §2.2).
 
-**Granularity**: Configurable (default: 5 minutes via `H` parameter)
-**Enforcement**: Time-blind (client-enforced, not server-controlled)
+**Token.** What the admission map records for a join so that it enters
+once: the admission's hash, or the request's hash without admission (section
+6).
 
-**See also**: [Protocol Overview](./protocol/01-overview.md#key-innovations)
+**Volunteer.** An online member the window does not affect, to which the DS
+may give a role (section 14.4).
 
-### Freeze Code
-A numeric error code returned when the server rejects an anchor during validation. Each code indicates a specific validation failure (witness error, parent not found, window full, etc.).
+**Welcome.** The joiner secret of a window sealed to a one-time init key, for
+a joiner, a re-entering member or a member that asked to jump (section 11).
 
-**See also**: [Error Reference](./protocol/12-error-reference.md)
+**Window.** The requests the DS collects before one epoch; it closes after
+`WINDOW_MAX`, or `WINDOW_REMOVAL` when a removal waits (section 14.2). In
+the v0.5 draft, after `WINDOW_ORDINARY`, or `WINDOW_URGENT` when an urgent
+removal waits (v0.5 §2.9).
 
-### Frontier
-The set of Merkle tree hashes needed to compute the root and generate witnesses. For N members, frontier size is O(log₂ N):
-- 1,000 members → ~10 hashes (320 bytes)
-- 1,000,000 members → ~20 hashes (640 bytes)
-
-**See also**: Merkle Root, Witness
-
----
-
-## G
-
-### Group ID (gid)
-A string identifier for a City-G room (e.g., `"demo-room"`, `"team-alpha"`).
-
----
-
-## H
-
-### H_L (Domain-Separated Hash)
-Domain-separated hash function producing 32 bytes, used throughout City-G for label-separated derivations (spec S2.2):
-`H_L(label, args[]) := BLAKE3_derive_key(context="city-g|h_l|v1", message="city-g|" || ASCII(label) || 0x00 || CBOR_det(args[]))`
-
-### Hash Projection Key (hp)
-A Ring-LWE parameter set used to compute Y* via smooth projective hash functions. The server never learns hp (encrypted in KBROAD envelope).
-
-**Generation**: RLWE-HPS (Hash-based Public-Key Encryption)
-**Security**: ML-KEM-768 IND-CCA2 protects hp
-
-### Head
-A parallel branch in the Multi-Head Window representing concurrent state evolution. City-G supports up to `h_max` heads (default: 16).
-
-**See also**: MHW
-
-
-### HKDF-BLAKE3
-Key derivation function used throughout City-G (spec S2.3). `HKDF-BLAKE3(ikm, salt32, info_bytes, L=32)` performs Extract then Expand using BLAKE3 keyed hashing. L is always 32 bytes in this profile.
-
----
-
-## J
-
-### Join Flow
-The process where a new member joins a group:
-1. Fetch group state (roots, frontier, KBROAD public key)
-2. Create anchor locally with proofs
-3. Submit to server for validation
-4. Begin sending/receiving messages
-
-**Time**: <100ms for validation
-**Offline**: No online handshake required
-
-**See also**: [Workflows](./workflows.md#join-flow)
-
----
-
-## K
-
-### K_barrier
-The group-wide barrier secret (32 bytes) used to bind the payload key schedule (spec S8.3, S11). Rotated via `BarrierUpdate` after revocations (post-revocation secrecy) or proactive PCS refresh. Provisioned to joiners during the join flow (spec S12.2).
-
-**See also**: Barrier, BarrierUpdate
-
-### Barrier-Sealed HP Envelope
-Barrier-scoped envelope that transports `hp` as an opaque client-to-client blob. Structure:
-```
-["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
-```
-
-**Server Role**: Validates structure only, never decrypts
-**Field**: `97: msphf_hp` in anchor headers
-
-**See also**: [Protocol Overview](./protocol/01-overview.md#33-barrier-sealed-hp-envelope)
-
----
-
-## L
-
-### LB-VRF
-Lattice-Based Verifiable Random Function. Provides deterministic, verifiable randomness used in City-G's ME-OR construction for Y* derivation.
-
-**Security**: Post-quantum secure (Module-LWE hardness)
-**Proof Size**: ≤8KB
-
-**See also**: [LB-VRF README](../crates/msphf-lb-vrf/README.md)
-
-### Leaf ID
-A 32-byte hash identifying a device: `H(device_public_key)`. Each member has a unique leaf ID in the Merkle tree.
-
-**Format**: Hex-encoded (64 characters)
-**Privacy**: Server sees leaf IDs, not raw public keys
-
-**See also**: Device, Merkle Root
-
-### LVCS
-Linear Verifiable Commitment Scheme. Part of CAPSS with layout management and opening proofs.
-
----
-
-## M
-
-### ME-OR (Masked-Equality OR)
-A cryptographic construction allowing members in either the join or revoke set to derive the same epoch digest Y* using SPHF with carefully computed masks.
-
-**Innovation**: Enables offline admission and parallel operations
-**Result**: All valid members compute identical Y* without interaction
-
-**See also**: [SPHF & ME-OR](./protocol/05-sphf-meor.md)
-
-### Merkle Root
-A 32-byte hash representing the complete state of the member tree. Roots change as members join/leave, providing tamper-evident membership tracking.
-
-**Types**:
-- `parent_root`: Previous state
-- `join_delta_root`: Current state after adds
-- `revoked_root`: Accumulated revocations
-
-### MHW (Multi-Head Window)
-Concurrency control mechanism allowing up to `h_max` parallel anchors within a time window. Prevents race conditions and enables high-throughput joins.
-
-**Parameters**:
-- `h_max`: 16 concurrent heads (default)
-- `TTL`: 120 seconds (default; raise only if clients routinely exceed 2 minutes of jitter)
-- `WID`: Window identifier (public, deterministic)
-
-**See also**: [Multi-Head Window](./protocol/09-multi-head-window.md)
-
-### ML-DSA
-Module Lattice Digital Signature Algorithm (NIST FIPS 204, formerly Dilithium). Used for Proof-of-Possession (PoP) signatures in City-G.
-
-**Variant**: ML-DSA-65
-**Security**: Post-quantum secure (~128-bit classical, ~96-bit quantum)
-
-### ML-KEM
-Module Lattice Key Encapsulation Mechanism (NIST FIPS 203, formerly Kyber). Used for KBROAD envelope encryption.
-
-**Variant**: ML-KEM-768
-**Security**: Post-quantum secure, IND-CCA2
-
----
-
-## P
-
-### PACS
-Polynomial Algebraic Constraint System. Defines constraint relations for witness data in CAPSS proofs.
-
-### Parent Root
-The Merkle root representing the group state before a new anchor is applied. Each anchor must reference a valid parent root known to the server.
-
-### Pivot
-Forward secrecy component that rotates periodically (every `H` seconds) to provide time-based key evolution.
-
-**See also**: Forward Secrecy
-
-### PoP (Proof-of-Possession)
-An ML-DSA-65 signature proving device key ownership. Every anchor includes a PoP signature from the publisher.
-
-**See also**: ML-DSA, Publisher
-
-### Publisher
-The device that creates and signs an anchor. Can be:
-- The joining member (self-join in open groups)
-- An admin (controlled groups)
-- An existing member (merge operations)
-
-**Blindness**: Server validates publisher's proofs without learning epoch secrets
-
----
-
-## R
-
-### RLWE-HPS
-Ring Learning With Errors - Hash Proof System. The instantiation of SPHF used in City-G for computing hp values.
-
-**Parameters**:
-- Ring degree: 256
-- Modulus: q = 3329
-- Distribution: Centered binomial
-
-**Security**: Module-LWE hardness (~96-bit quantum security)
-
-### Rollup
-See **Checkpoint**
-
----
-
-## S
-
-### Server-Blindness
-Cryptographic property ensuring the server cannot decrypt messages or derive epoch keys, even if the server is compromised. Enforced through:
-1. ML-KEM-768 IND-CCA2 (KBROAD encryption)
-2. ZK-VRF output-hiding
-3. Code separation (no decryption functions in server path)
-4. Automated verification (`verify_no_secrets.sh`)
-
-**Important**: Server-blindness refers to **encryption key confidentiality** (server cannot learn hp, Y*, E_k, or eid). This does NOT mean sender anonymity — the server **CAN identify devices** via public keys (ML-DSA-65, ~2KB) transmitted in field #108 (HDR_POP_PK) during join/merge operations.
-
-**See also**: [Security Model](./protocol/10-security-model.md)
-
-### SPHF (Smooth Projective Hash Function)
-Hash functions where evaluation depends on language membership. Members of the group can compute the same Y* deterministically; non-members get computationally indistinguishable randomness.
-
-**Application**: All valid devices compute identical Y* from their hp values without interaction
-
-**See also**: [SPHF & ME-OR](./protocol/05-sphf-meor.md)
-
-### SRX (Structured Relational Witness)
-The witness validation system providing Merkle proofs of membership/non-membership with canonical encoding.
-
-**Modes**: `srx/v1-complete` (full witnesses)
-**Size**: O(log N) for N members
-
-**See also**: [Witness Validation](./protocol/04-witness-validation.md)
-
----
-
-## T
-
-### TOFU (Trust-On-First-Use)
-Security model where the first encountered public key for an identity is trusted, with warnings on subsequent key changes.
-
-**City-G Usage**: Optional identity binding with ML-DSA-65 PoP; alias→key mappings stored locally
-
-### tswe/msphf-we/fs-hybrid + prs-barrier
-The City-G protocol profile family name used by the current base profile:
-- **tswe**: Time-Stamped Witness Extraction
-- **msphf-we**: Masked SPHF with Witness Extraction
-- **fs-hybrid**: Forward Secrecy with hybrid pivot rotation
-- **prs-barrier**: Post-Revocation Secrecy via KEM-tree barrier
-
----
-
-## W
-
-### WE-epoch
-Witness Extraction epoch. See **Epoch**.
-
-### WID (Window Identifier)
-A deterministic identifier for a Multi-Head Window, computed as:
-```
-WID = H_L("mhw/window", [gid, parent_root, seed_ctx_hash])
-```
-
-**Properties**: Public (not derived from secrets), unique per window state
-
-### Witness
-Cryptographic proof that a leaf ID is (or is not) a member of the Merkle tree at a specific root. Witnesses are canonical and grow O(log N).
-
-**See also**: [Witness Validation](./protocol/04-witness-validation.md)
-
----
-
-## X
-
-### xk_hash
-A 32-byte commitment to the anchor context (group ID, roots, public parameters). Used for challenge binding in proofs.
-
-**Computation**: `H("msphf/xk", [gid, parent_root, join_delta_root, ...])`
-
----
-
-## Y
-
-### Y* (VRF Output)
-The unique epoch digest computed via ME-OR from SPHF evaluation. Used to derive the epoch key E_k.
-
-**Properties**:
-- Deterministic for valid group members
-- Output-hiding (server never learns Y*)
-- Unique per epoch
-- 32 bytes
-
-**Derivation**: In the current base profile, message keys are bound to
-`K_barrier` via HKDF-BLAKE3 (spec S8.3).
-
-**See also**: [SPHF & ME-OR](./protocol/05-sphf-meor.md)
-
----
-
-## Z
-
-### ZK-VRF (Zero-Knowledge Verifiable Random Function)
-A proof system demonstrating that Y* was computed correctly without revealing it. Based on LB-VRF with output-hiding property.
-
-**Proof Size**: ≤8KB
-**Field**: `95: zk_vrf_proof` in anchor headers
-
-**See also**: [Proof Systems](./protocol/06-proof-systems.md)
-
----
-
-## Numeric & Symbols
-
-### 16 KB
-Maximum size for CAPSS Smallwood proofs (`fs_capss_max_bytes`)
-
-### 8 KB
-Maximum size for ZK-VRF proofs (`max_vrf_proof_bytes`)
-
-### 32 bytes
-Standard size for:
-- Hash outputs (BLAKE3)
-- Epoch IDs
-- Leaf IDs
-- Merkle roots
-- Y* outputs
-
----
-
-## Common Abbreviations
-
-| Abbreviation | Full Term |
-|--------------|-----------|
-| AEAD | Authenticated Encryption with Associated Data |
-| CAPSS | A Framework for SNARK-Friendly Post-Quantum Signatures |
-| CBOR | Concise Binary Object Representation |
-| DECS | Distributed Encrypted Commitment Scheme |
-| FS | Forward Secrecy |
-| HP | Hash Projection |
-| HPS | Hash Proof System |
-| KEK | Key Encryption Key |
-| LB-VRF | Lattice-Based Verifiable Random Function |
-| LVCS | Linear Verifiable Commitment Scheme |
-| ME-OR | Masked-Equality OR |
-| MHW | Multi-Head Window |
-| ML-DSA | Module Lattice Digital Signature Algorithm |
-| ML-KEM | Module Lattice Key Encapsulation Mechanism |
-| PACS | Polynomial Algebraic Constraint System |
-| PoP | Proof-of-Possession |
-| RLWE | Ring Learning With Errors |
-| ROM | Random Oracle Model |
-| SPHF | Smooth Projective Hash Function |
-| SRX | Structured Relational Witness |
-| TOFU | Trust-On-First-Use |
-| VRF | Verifiable Random Function |
-| WE | Witness Extraction |
-| ZK | Zero-Knowledge |
-
----
-
-## See Also
-
-- **[Protocol Overview](./protocol/01-overview.md)** - High-level protocol architecture
-- **[FAQ](./protocol/17-faq.md)** - Frequently asked questions
-- **[Label Registry](./protocol/15-label-registry.md)** - Domain separation labels
-- **[Data Structures](./protocol/03-data-structures.md)** - CBOR encodings
-
----
-**Note**: This glossary consolidates terminology from across City-G documentation. For formal definitions, see the [specification](./specs.md).
+**Wrap.** A node's new secret for the holder of a child's key: an X-Wing
+encapsulation and the secret under ChaCha20-Poly1305 (section 7.2).

@@ -1,0 +1,32 @@
+(* Scenario ILOT_FORWARD_SECRECY: the root of an îlot stays the same over
+   many windows; a member compromised later does not open the past.
+
+   Îlot j does not change during windows 1, 2 and 3: the top seals the
+   epoch secret of each window to the same root of j. Member A sends M2 in
+   epoch 2. In epoch 3, A is compromised: the attacker learns the root of
+   îlot j, A's leaf key and the secrets of epoch 3. A erased those of
+   epochs 1 and 2, as the key schedule requires; the init secret before
+   epoch 1 is secret.
+
+   Expected: proved. With the root of j, the attacker opens the epoch
+   secrets of windows 1, 2 and 3, but the init chain keeps epoch 2 from it:
+   stable îlot keys do not cost forward secrecy. *)
+
+free M2: bitstring [private].
+query attacker(M2).
+
+process
+  new init0: key; new sj: key; new lsA: key;
+  new r1: key; new r2: key; new r3: key; new q1: key; new q2: key; new q3: key;
+  let g1 = (N1, node_pk(sj)) in
+  let g2 = (N2, node_pk(sj)) in
+  let g3 = (N3, node_pk(sj)) in
+  let es1 = epoch_secret(joiner_secret(init0, commit_secret(r1), g1)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), commit_secret(r2), g2)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), commit_secret(r3), g3)) in
+  (* The top of each window, to the same root. *)
+  out(c, (seal(node_pk(sj), q1, N1, r1), seal(node_pk(sj), q2, N2, r2), seal(node_pk(sj), q3, N3, r3)));
+  out(c, (g1, g2, g3));
+  out(c, aenc(msg_key(es2), M2));
+  (* The compromise of A in epoch 3. *)
+  out(c, (sj, lsA, es3))

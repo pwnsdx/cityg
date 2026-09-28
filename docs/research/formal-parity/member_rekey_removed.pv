@@ -1,0 +1,38 @@
+(* Scenario MEMBER_REKEY_REMOVED: the same removal when members re-key the
+   tree, as in profile city-g/v0.4.
+
+   M was a member of epoch 1 and window 2 removes it; it gives the epoch
+   secret of epoch 1 to the server, which is the network here. Window 2 has
+   entrant J, whose external init is sealed to the external key of epoch 1;
+   window 3 has no join and chains the init secret. The roots of both
+   windows are drawn by members, the committers, and wrapped to the leaves
+   of the members of the new epoch, not to M's. A member of each epoch
+   sends M2 in epoch 2 and M3 in epoch 3.
+
+   Expected: proved. M opens J's external init, but neither M nor the
+   server learns the roots. The model follows history_link.pv: the property
+   is about the real epochs, those the committers create; a member that
+   checks only the tag can still be led into another epoch by M and the
+   server (docs/specs.md, section 2.3; authorizer_follow.pv). *)
+
+free M2, M3: bitstring [private].
+query attacker(M2).
+query attacker(M3).
+
+process
+  new es1: key; new lsA: key; new skJ: skey; new x: key; new q: key;
+  new r2: key; new r3: key; new q2: key; new q3: key;
+  (* What M gives the server; A's leaf key and J's key are public. *)
+  out(c, (es1, leaf_pk(lsA), spk(skJ)));
+  let xi = seal(external_pk(es1), q, N2, x) in
+  out(c, (xi, sign(skJ, (L_ext, xi))));
+  (* Window 2: the committers' root, wrapped to A's leaf. *)
+  let gc2 = (N2, node_pk(r2), xi) in
+  let es2 = epoch_secret(joiner_secret(x, commit_secret(r2), gc2)) in
+  out(c, (gc2, seal(leaf_pk(lsA), q2, N2, r2), tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), M2));
+  (* Window 3. *)
+  let gc3 = (N3, node_pk(r3)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), commit_secret(r3), gc3)) in
+  out(c, (gc3, seal(leaf_pk(lsA), q3, N3, r3), tag(es3, gc3)));
+  out(c, aenc(msg_key(es3), M3))

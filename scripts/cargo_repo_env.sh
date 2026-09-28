@@ -35,9 +35,8 @@ fi
 export CARGO_HOME="$CITYG_REPO_CARGO_HOME"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CITYG_REPO_TARGET_ROOT/$CITYG_CARGO_TARGET_SLOT}"
 
-# Native GUI/test flows exercise deep barrier recovery + protobuf/crypto stacks
-# and exceed the default per-thread stack on some hosts. Keep a repo-local floor
-# unless the caller explicitly overrides it.
+# ML-KEM/ML-DSA operations keep large values on the stack; keep a repo-local
+# floor for test threads unless the caller explicitly overrides it.
 export RUST_MIN_STACK="${RUST_MIN_STACK:-67108864}"
 
 unset _cityg_cargo_env_source

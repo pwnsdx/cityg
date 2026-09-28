@@ -26,7 +26,7 @@ What actually happened.
 
 ## Environment
 
-- **City-G Version:** [e.g., v0.1.0]
+- **City-G Version:** [e.g., 0.4.0]
 - **Rust Version:** [output of `rustc --version`]
 - **OS:** [e.g., Ubuntu 22.04, macOS 14.0, Windows 11]
 - **Architecture:** [e.g., x86_64, aarch64]

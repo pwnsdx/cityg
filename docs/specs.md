@@ -1,1998 +1,1532 @@
-CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER)
-
-Version: v0.1.4
-Date: 2026-03-23
-Status: Active wire/API profile revision
-Profile ID: tswe/msphf-we/fs-hybrid + prs-barrier (native async-first barrier transport)
-
-PROFILE STATUS
-* The wire/API `profile_version` exposed by the current implementation is `v0.1.4`.
-* `v0.1.4` is a wire-profile revision from `v0.1.3`, because it removes the legacy HP envelope transport and makes `barrier-sealed-v1` the sole in-profile transport for header[97].
-* For commit-level traceability of this profile revision, see `docs/spec-conformance-changelog-v0.1.4.md`.
-
-IMPORTANT (label supersession / no mixing)
-* All H_L label strings and HKDF info strings in THIS document are NORMATIVE for this profile version.
-* Implementations MUST adopt the full label set in this document as a unit and MUST NOT mix label sets across versions.
-
-SCOPE
-This profile specifies:
-* time-blind FS-hybrid epoch evolution and tau_e derivation,
-* device-chain binding patched to bind barrier state,
-* acceptance rules relevant to FS (time-blind) and SRX carve-out,
-* payload envelope + key schedule patched to include PRS barrier state,
-* PRS barrier (K_barrier) with cold-path KEM-Tree Cover for post-revocation secrecy,
-* join provisioning requirements required by PRS barrier and FS-hybrid acceptance.
-
-CONTROL-PLANE GOVERNANCE (normative subset for `v0.1.4`)
-This unified spec is the normative source for the cryptographic/profile
-behavior above. The room-scoped governance subset actually consumed by the
-current wire/API profile is fixed here and matched by the current API/server
-implementation; [`api-reference.md`](./api-reference.md) and
-[`room-admin-governance-redesign.md`](./room-admin-governance-redesign.md) are
-explanatory companions, not separate sources of truth for the subset below.
-
-Room-scoped governance rules for the current profile:
-* room bootstrap/governance uses room-scoped signed admin proofs tied to a
-  persistent room identity (`RoomAdminProof`), not aliases,
-* the creator becomes the initial room admin on the first successful room
-  claim/bootstrap,
-* room-admin lifecycle operations are `grant_admin`, `revoke_admin`, and
-  `list_admins`, and room-admin member expulsion is exposed as a
-  room-admin-authorized MERGE/revocation transition,
-* there is no legacy `x-cityg-admin-token` fallback for room-scoped endpoints,
-* KBROAD maintenance is automatic/server-managed in normal join/merge ticket
-  flows rather than a manual client precondition.
-
-Room admin proof registry for `v0.1.4`:
-* `RoomAdminProof := { pop_public_key:bstr, signature:bstr }`.
-* The only in-profile signature suite for `RoomAdminProof` is ML-DSA-87 /
-  Dilithium5.
-* The signed message MUST be `CBOR_det((operation:tstr, room_id:tstr, payload:bstr))`.
-* `operation` is a closed-world registry in this profile:
-  * `bootstrap_room_v1`
-  * `rotate_room_kbroad_v1`
-  * `grant_room_admin_v1`
-  * `revoke_room_admin_v1`
-  * `list_room_admins_v1`
-  * `expel_room_member_v1`
-* `payload` semantics are fixed as follows:
-  * for `bootstrap_room_v1` and `rotate_room_kbroad_v1`: `payload == kbroad_public`
-  * for `grant_room_admin_v1` and `revoke_room_admin_v1`: `payload == target_pop_public_key`
-  * for `list_room_admins_v1`: `payload == EMPTY`
-  * for `expel_room_member_v1`: `payload == CBOR_det((author_leaf_id:bstr32, target_leaf_id:bstr32))`
-* The replay key for one proof is `H_L("room-admin/replay-key", [pop_public_key, signature])`.
-* The server MUST reject replay of one previously accepted room-admin proof for
-  the same room.
-* Authorization principal for room-scoped governance is exactly
-  `pop_public_key`; alias text is never an authorization principal.
-* The server MUST reject a room-admin proof whose signing identity is not
-  currently authorized for the requested room-scoped operation.
-
-External proof / suite registry fixed by this profile:
-* membership representation and verification (including current `slot_index`
-  mapping) remain external, but their consumed outputs are fixed by the fields
-  named in this document,
-* the in-profile generated ticket / provisioning suite identifiers are fixed to:
-  * `proof_mode == "lin+zkvrf"`
-  * `vrf_id == "lb-vrf/v1"`
-  * `msphf_crs_id == "rlwe-merkle/v1"`
-  * `msphf_params_id == "rlwe-params/mock"`
-* the in-profile room-admin and history-authority signature suite is
-  ML-DSA-87 / Dilithium5,
-* any join/merge/provisioning artifact or ticket carrying different values for
-  those closed-world suite identifiers is out of profile for `v0.1.4` and MUST
-  be rejected by base-profile clients.
-
-S0. NORMATIVE LANGUAGE
-The key words "MUST", "MUST NOT", "REQUIRED", "SHOULD", "SHOULD NOT", "MAY" are to be interpreted as described in RFC 2119 and RFC 8174 when, and only when, they appear in all capitals.
-
-S1. TYPES, ENCODING, AND NOTATION
-
-S1.1 Byte strings
-* bstrN: exactly N bytes
-* bstr: variable length bytes
-
-S1.2 Integers
-* uint: non-negative integer representable in deterministic CBOR.
-* uint64: uint in the inclusive range [0 .. 18446744073709551615]. If a field is typed uint64, any value outside this range MUST be rejected as out of profile.
-
-S1.3 Deterministic CBOR (CBOR_det) (normative)
-All CBOR encodings used in this profile for:
-* anchor headers (canonical map form),
-* any AAD arrays,
-* PayloadEnvelope,
-* BarrierUpdate and KemTreeCoverPayload,
-* bind tuples (VRF bind, proof commits),
-MUST use deterministic CBOR per RFC 8949 S4.2:
-* shortest integer encodings
-* shortest definite-length encodings
-* map keys ordered by encoded byte sequence
-* no indefinite-length items
-* no floats (reject if encountered)
-* no duplicate map keys
-
-Deterministic-encoding verification rule (normative, MUST):
-For any object that MUST be encoded as CBOR_det, verifiers MUST check that the received bytes are deterministic.
-The reference conforming verification method is:
-1. Parse the received CBOR bytes using a parser that:
-   * rejects floats,
-   * rejects indefinite-length items,
-   * rejects duplicate map keys,
-   * rejects malformed CBOR.
-2. Re-encode the parsed data model using CBOR_det rules.
-3. Require the re-encoded bytes to be byte-for-byte identical to the original received bytes.
-Implementations MAY use any equivalent verification method (including parser-level or single-pass canonicality validation) provided it rejects exactly the same non-deterministic inputs as the reference method above.
-
-If the check fails:
-* for anchor headers or other profile-global CBOR_det items: reject with 907.1
-* for BarrierUpdate and/or KemTreeCoverPayload: reject with 960.7
-* for PayloadEnvelope: receivers MUST discard the message as malformed (transport/application error handling; out of scope for anchor acceptance codes)
-
-S1.4 Hash constants
-* ZERO32: 32-byte all-zero string
-* ZERO16: 16-byte all-zero string
-
-S1.5 Pseudocode notation aliases (normative)
-To avoid ambiguity across implementations, the following aliases are normative throughout this document:
-* BOTTOM means the blank marker (empty bstr), i.e., set/logic symbol `⊥`.
-* EMPTYSET means the empty set, i.e., symbol `∅`.
-* IN means set membership, i.e., symbol `∈`.
-* NOT IN means non-membership, i.e., symbol `∉`.
-* INTERSECT means set intersection, i.e., symbol `∩`.
-
-S2. CRYPTOGRAPHIC PRIMITIVES (NORMATIVE)
-
-S2.1 BLAKE3
-* BLAKE3(message) -> 32 bytes by default output length
-* BLAKE3_keyed(key32, message) -> 32 bytes
-
-S2.2 H_L: domain-separated hash -> bstr32 (normative)
-H_L(label, args[]) := BLAKE3_derive_key(
-  context = "city-g|h_l|v1",
-  message = "city-g|" || ASCII(label) || 0x00 || CBOR_det(args[])
-)
-* ASCII(label) MUST be bytes in 0x20..0x7E, MUST NOT include 0x00.
-* output is exactly 32 bytes.
-
-S2.3 HKDF-BLAKE3 (normative, L=32 only)
-HKDF-BLAKE3.Extract(salt32, ikm) -> prk32:
-  prk32 := BLAKE3_keyed(key=salt32, message=ikm)
-HKDF-BLAKE3.Expand(prk32, info_bytes, L=32) -> okm32:
-  okm32 := BLAKE3_keyed(key=prk32, message=(info_bytes || 0x01))[0..32]  /* first 32 bytes */
-HKDF-BLAKE3(ikm, salt32, info_bytes, L=32) -> okm32:
-  prk32 := Extract(salt32, ikm)
-  okm32 := Expand(prk32, info_bytes, 32)
-Any invocation with L != 32 MUST be rejected as out of profile.
-
-S2.4 AEAD: ChaCha20-Poly1305 (normative)
-* key: 32 bytes
-* nonce: 12 bytes
-* tag: 16 bytes
-AEAD_Seal(key32, nonce12, aad_bytes, pt_bytes) -> ct_bytes
-AEAD_Open(key32, nonce12, aad_bytes, ct_bytes) -> pt_bytes | FAIL
-
-S2.5 KEM: ML-KEM-768 (normative)
-KeyGen()                  -> (ek, dk)
-KeyGen_internal(d32, z32) -> (ek, dk)
-Encaps(ek)                -> (ct, ss32)
-Decaps(dk, ct)            -> ss32
-Sizes:
-* ek: 1184 bytes
-* dk: 2400 bytes
-* ct: 1088 bytes
-* ss: 32 bytes
-Naming rule:
-* Use ek (public/encapsulation) and dk (private/decapsulation).
-* ML-KEM secrets MUST be named dk_* (never sk_*).
-* When this spec uses pk_* in barrier context (pk_entries, pk_target), those byte strings are ML-KEM ek values.
-
-S3. IDENTIFIERS, MEMBERSHIP/BARRIER INTERFACES, AND CONTEXT VALUES
-
-S3.1 Core identifiers (inputs)
-* gid : bstr    group identifier (stable for group lifetime)
-* weid : bstr32 "window id" (FS context id)
-* xk_hash : bstr32 transcript hash / handshake binding. For `v0.1.4`, this is not an opaque deployment-local convention: `xk_hash := H_L("msphf/xk", [CBOR_det(X_k)])`, where `X_k` commits at minimum `(gid, cat, we_epoch_id, anchor_hdr_ctx, tswe_salt_hash, parent_root, join_delta_root, revoked_since_prev_root, revoked_root, pox_r_commit when present)`.
-* E_k : bstr    ME-OR derived value / binding (opaque here)
-* history_view_id : bstr32 exact committed membership/checkpoint/barrier history view identifier
-* HistoryAuthorityScope : one deployment-defined authenticated history authority domain for `(gid, deployment)` that issues the A)/B)/C)/D) responses consumed together by one client decision. In this base profile, the scope is the authenticated deployment/server context that vends those responses unless an extension defines a stronger explicit scope identifier.
-* HistoryCommitment := [history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint]
-  * `history_commitment_id` names one server-local append-only commitment step for the authenticated history view.
-  * `prev_history_commitment_id` is all-zero only for the first locally committed history step for that `(gid, deployment)`.
-  * `history_seq` is a server-local monotonically increasing append-only sequence number for that `(gid, deployment)`.
-  * `history_commitment_id` MUST be computed as `H_L("barrier/history-commitment", [gid, history_view_id, prev_history_commitment_id, history_seq])`.
-  * This object strengthens local append-only correlation for A)/B)/C)/D); it is NOT, by itself, a federated/global consensus object.
-* Authenticated acceptance/finality in this document is always scoped to one `HistoryAuthorityScope` unless a later extension explicitly states stronger cross-scope consensus semantics.
-
-S3.2 Membership/SRX anchor roots (inputs)
-* header[110], header[111], header[112], header[113] : bstr32 roots (membership and revocation)
-* membership mapping: `current_slot_lease(device_pk) -> { slot_index:uint, slot_generation:uint64 }`, committed by membership state
-* membership state also defines the current per-group membership leaf identifier `leaf_id(device_pk) -> bstr32` for each active device. This 32-byte `leaf_id` is distinct from the current slot lease and is the canonical `sender_leaf_id` used in S8.
-* For this base profile, `leaf_id(device_pk)` MUST be a deterministic per-group function of `(gid, device_pk, device_pk_alg)` under the selected leaf-id mode. Re-deriving `leaf_id` for the same `(gid, device_pk, device_pk_alg)` tuple MUST yield the same 32-byte value.
-
-S3.3 Interfaces REQUIRED by this profile (implementability requirement)
-The membership/SRX/barrier subsystems MUST provide to any authenticated group member:
-
-Shared authenticated-view rule (normative):
-* Every successful response from A), B), C), and D) MUST be bound to a `history_view_id` naming the exact committed history/checkpoint view under which the response was computed.
-* Every successful response from A), B), C), and D) MUST also carry a `HistoryCommitment` for that same view.
-* The proof/object format is deployment-defined, but it MUST cryptographically bind `(gid, history_view_id, request selector(s), response payload)` to committed history/checkpoint state.
-* The deployment MUST define one `HistoryAuthorityScope` for these authenticated responses. All A)/B)/C)/D) responses composed for one validation, activation, provisioning, or recovery decision MUST come from that same scope. Mixing authenticated responses from different scopes for one decision is out of profile and MUST fail closed.
-* The returned `HistoryCommitment.history_view_id` MUST equal the top-level `history_view_id`.
-* For responses computed against current state rather than a historical snapshot, the server MUST first advance/persist the current `HistoryCommitment` if the current committed state differs from the last emitted `HistoryCommitment`.
-* `history_seq` MUST strictly increase whenever the server locally appends a new committed history/checkpoint/barrier state for that `gid`; `history_commitment_id` MUST be unique for each such step.
-* A client that has already persisted an authenticated current state for one `HistoryAuthorityScope` MUST fail closed if a later join/merge/provisioning/helper current-state artifact for that same scope claims:
-  * a lower `barrier_version`,
-  * a lower `history_seq`,
-  * or the same `history_seq` with a different `history_commitment_id`.
-* If the same `HistoryCommitment` is presented again, `barrier_version` and `kem_tree_hash_after` MUST remain consistent with that previously authenticated local current state.
-* Later sections may write `Resolve...(...)` / `Lookup...(...)` as shorthand for the payload component only; callers MUST also validate the accompanying `history_view_id`, `HistoryCommitment`, and authenticated proof/object per this section.
-* Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `HistoryCommitment`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
-* Historical snapshot fetches served from retained history MUST return the exact `HistoryCommitment` recorded when that snapshot became committed/fetchable, not a freshly recomputed current commitment.
-* If the deployment cannot provide authenticated completeness/finality for one requested result inside its `HistoryAuthorityScope`, it MUST return an authenticated "insufficient history / not available / pending" style outcome rather than silently omitting records and claiming success.
-* The base profile REQUIRES `global-history-authority-v1` on join/merge/provisioning/helper/lookup surfaces that carry authenticated current-state or helper objects.
-* Therefore A), B), and C) MUST carry non-empty `helper_completeness_attestation` values verified under one negotiated `HistoryAuthorityDescriptor`.
-* `local-history-authority-v1` remains defined only as a non-base legacy/test-only extension for explicitly scope-local deployments, fixtures, and compatibility tests; clients enforcing the base profile MUST reject it on base-profile API/wire paths.
-* API/wire surfaces that carry `HistoryAuthorityDescriptor`, `global_history_attestation`, `current_global_history_attestation`, or `helper_completeness_attestation` MUST also carry an explicit extension identifier string `history_authority_extension`.
-* In the base profile, `history_authority_extension` MUST equal exactly `"global-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
-* When `local-history-authority-v1` is explicitly negotiated outside the base profile, `history_authority_extension` MUST equal exactly `"local-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
-* Clients MUST fail closed if extension-defined objects are present while `history_authority_extension` is absent/empty, if `history_authority_extension` names an unsupported extension, if a base-profile path carries `"local-history-authority-v1"`, or if pages of one logical A)/B)/C) result drift across different `history_authority_extension` values.
-* `MAX_BARRIER_N_MAX := 65_536`.
-* `MAX_BARRIER_HELPER_PAGE_ENTRIES := 512`.
-* A), B), and C) are paged interfaces in the base profile. Each request MUST accept an explicit `page_offset`/`entry_offset` and `max_entries`; `max_entries == 0` means "use the profile default page size", namely `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
-* A), B), and C) MUST reject requests whose effective page size exceeds `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
-* Every successful page of one logical A), B), or C) result MUST carry the same `history_view_id` and the same `HistoryCommitment` as every other page of that same logical result.
-* Page ordering MUST be deterministic and gap-free. The response MUST identify the returned page's starting offset, the logical total number of entries, and whether another page exists. Clients composing multiple pages MUST fail closed on offset gaps, overlaps, `total_entries` drift, or authenticated-view mismatch.
-
-A) ResolveRevokedOccupancies(revocation_roots_hash, page_offset?, max_entries?) -> list of RevokedOccupancyRecord page
-RevokedOccupancyRecord = [slot_index:uint, slot_generation:uint64]
-Returns revoked slot occupancies corresponding to revocation_roots_hash.
-This enumeration MUST be integrity-protected by membership/SRX state referenced by header[112]/[113].
-The authenticated response MUST carry `history_view_id`.
-The authenticated response MUST carry the corresponding `HistoryCommitment`.
-If the deployment defines a helper-completeness extension, that extension MUST bind any `helper_completeness_attestation` to `(gid, history_view_id, revocation_roots_hash, page_offset, total_entries, payload page)` and to one exact authenticated history object for that result.
-Returned records MUST be strictly sorted by increasing `(slot_index, slot_generation)`, MUST carry `slot_index < N_max`, and the selected committed view MUST contain at most one active occupancy per `(slot_index, slot_generation)`.
-
-B) ResolveJoinOccupanciesSince(prev_barrier_version, page_offset?, max_entries?) -> list of JoinOccupancyRecord page
-JoinOccupancyRecord = [device_pk:bstr, slot_index:uint, ek_leaf:bstr, slot_generation:uint64]
-Returns exactly the join leaf allocations and leaf public keys that:
-* were committed after prev_barrier_version,
-* remain active at the selected `history_view_id`,
-* and therefore MUST be applied by S11.6 before revocation blanking for that same `history_view_id`.
-Activations that were never committed, were superseded before commitment, or are no longer active at the selected `history_view_id` MUST NOT be returned.
-This enumeration MUST be integrity-protected by checkpoint history / membership state.
-The authenticated response MUST carry `history_view_id`.
-The authenticated response MUST carry the corresponding `HistoryCommitment`.
-If the deployment defines a helper-completeness extension, that extension MUST bind any `helper_completeness_attestation` to `(gid, history_view_id, prev_barrier_version, page_offset, total_entries, payload page)` and to one exact authenticated history object for that result.
-When later sections refer to `JoinSet` or `unresolved JoinSet`, they mean exactly this authenticated payload for the selected `history_view_id`.
-Output constraints (normative):
-* entries MUST be strictly sorted by increasing `(slot_index, slot_generation)`,
-* there MUST be at most one returned active occupancy per `slot_index`,
-* `slot_index` MUST be `< N_max`,
-* `slot_generation` MUST be a uint64 and MUST increase strictly on every reuse of the same `slot_index`,
-* `ek_leaf` MUST be exactly 1184 bytes,
-* the number of returned records MUST be `<= N_max`,
-* the server MUST prune or compact resolved, revoked, and superseded join activations so that `ResolveJoinOccupanciesSince(...)` remains bounded by the currently active join activations needed for the selected `history_view_id`,
-* if membership history is inconsistent (duplicate active allocation, out-of-range index, conflicting `ek_leaf` for the same activation), the implementation MUST fail closed and MUST NOT construct or accept a dependent `barrier_update`.
-
-C) FetchBarrierPublicTree(kem_tree_hash_after, entry_offset?, max_entries?) -> pk_entries page
-pk_entries is an array of length (2*N_max-1) of bstr, where each entry is either empty bstr (BOTTOM) or ML-KEM ek (1184 bytes).
-The returned pk_entries MUST hash (per S11.4) to the requested kem_tree_hash_after.
-The authenticated response MUST carry `history_view_id`.
-The authenticated response MUST carry the corresponding `HistoryCommitment`.
-Historical retention contract (normative):
-* FetchBarrierPublicTree(kem_tree_hash_after) MUST work for any committed historical barrier public tree snapshot addressed by kem_tree_hash_after, not only the current one.
-* `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS := 256` committed snapshots per `gid`, inclusive of the current committed snapshot.
-* `MAX_RETAINED_LOCAL_PUBLIC_TREE_SNAPSHOTS := 8` locally retained authenticated public-tree snapshots per client/session; clients that implement a retained-snapshot fast path MUST evict older retained snapshots before exceeding this bound.
-* `N_max` MUST be `<= MAX_BARRIER_N_MAX`.
-* The server MUST retain the current committed snapshot plus the most recent committed historical snapshots up to `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS`.
-* Older committed snapshots MAY be retired once they fall outside that bounded retained window. Retirement MUST fail closed: the server MUST return an authenticated "retired / not available" style outcome, or an equivalent deployment-defined typed error for that authenticated member request; it MUST NOT silently substitute the current snapshot.
-* This contract constrains fetch semantics, not internal storage layout. Implementations MAY satisfy it via deltas, structural sharing, compression, or other equivalent internal representations, provided FetchBarrierPublicTree(kem_tree_hash_after) deterministically reconstructs the exact pk_entries array for the requested committed snapshot.
-* `pk_entries` pages MUST enumerate heap indices in increasing order, starting at `entry_offset`, and `total_entries` MUST equal exactly `(2*N_max-1)` for every page of that same logical snapshot result.
-
-D) LookupMergeAcceptance(merge_locator) -> MergeAcceptanceRecord
-`merge_locator := [pending_barrier_version:uint, pending_barrier_update_digest:bstr32, pending_we_epoch_id:bstr32]`
-`MergeAcceptanceRecord := [status, history_view_id, history_commitment, accepted_barrier_version?, accepted_fs_ec?, accepted_reason?, accepted_digest?]`
-where:
-* `status` is one of `{accepted, superseded, pending, final_rejected}`,
-* `history_commitment` is the current authenticated `HistoryCommitment` under which `status` was evaluated,
-* `accepted_*` fields MUST be present iff `status == accepted`,
-* `accepted`, `superseded`, and `final_rejected` are statements about one `HistoryAuthorityScope`, not a cross-scope/global consensus claim.
-* `final_rejected` means authenticated finality within that same `HistoryAuthorityScope` establishes that the specific merge identified by `merge_locator` can no longer become accepted there.
-* A deployment that cannot establish scope-local authenticated finality for a locator MUST return `pending` rather than synthesizing `final_rejected`.
-The authenticated response MUST bind `merge_locator`, `status`, `history_commitment`, and any populated `accepted_*` fields to the returned `history_view_id`.
-Implementations MAY store additional stable identifiers, but any such identifier MUST be injectively bound to `merge_locator` within `gid`; it MUST NOT identify two distinct merge attempts.
-
-E) Optional local history authority extension (legacy/test-only; not part of base profile)
-Deployments MAY negotiate `local-history-authority-v1` only for explicitly scope-local legacy compatibility paths, fixtures, and tests. It strengthens one `HistoryAuthorityScope` with explicit signed objects for helper completeness, current-state attestation, and server-verifiable FULL-verification receipts, but it is not the recommended production profile and it does NOT claim federated/global canonity across scopes.
-Requirements on that extension:
-* One negotiated `HistoryAuthorityDescriptor` object MUST identify the scope and the public verification key for that scope-local history authority.
-* `HistoryAuthorityDescriptor := [scope_id:bstr32, public_key:bstr]`.
-* The signature suite for `public_key` MUST be fixed by the negotiated extension. The current implementation uses ML-DSA-87 / Dilithium5 for this scope-local authority.
-* When this extension is negotiated, every successful A), B), C), and D) response consumed for one decision MUST carry the same non-empty `history_authority_descriptor`, and clients MUST reject descriptor drift across those responses.
-* When this extension is negotiated, every successful join/merge/provisioning/helper/lookup response carrying extension-defined objects MUST also carry `history_authority_extension == "local-history-authority-v1"`.
-* When this extension is negotiated, key `182` and the API fields named `global_history_attestation` / `current_global_history_attestation` carry a scope-local `GlobalHistoryAttestation` object rather than a federated/global consensus proof.
-* Under `local-history-authority-v1`, `GlobalHistoryAttestation := [scope_id:bstr32, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, parent_attestation_id:bstr32, finality_kind:tstr, signature:bstr]`.
-* Under `local-history-authority-v1`, `finality_kind` MUST be exactly `"local-append-only"`.
-* Under `local-history-authority-v1`, `parent_attestation_id` MUST equal `H_L("barrier/global-history/parent-attestation", [scope_id, gid, prev_history_commitment_id])`, except that it MUST be all-zero when `prev_history_commitment_id` is all-zero.
-* Under `local-history-authority-v1`, the signed payload for `GlobalHistoryAttestation` MUST bind at minimum `(scope_id, gid, history_view_id, history_commitment_id, prev_history_commitment_id, history_seq, barrier_version, kem_tree_hash_after, parent_attestation_id, finality_kind)`.
-* Under `local-history-authority-v1`, `helper_completeness_attestation` MUST be non-empty on successful A), B), and C) responses and MUST be signed over `(scope_id, helper_kind, history_view_id, history_commitment_id, page_offset, total_entries, selector/page payload)`.
-* `helper_kind` MUST be one of `resolve_revoked_occupancies`, `resolve_join_occupancies_since`, or `fetch_public_tree`. These are the canonical helper identifiers bound by history-authority completeness attestations.
-* When this extension is negotiated, any join/merge/provisioning artifact that carries current-state helper payloads for a client decision SHOULD also carry the same `HistoryAuthorityDescriptor` and matching scope-local attestation objects for those helper payloads.
-* This extension proves append-only correlation, current-state binding, and helper-page completeness only inside one `HistoryAuthorityScope`. It does NOT, by itself, prove non-equivocation across multiple servers, independent witnesses, or any stronger globally canonical finality.
-* Production deployments conforming to the base profile defined by this document MUST prefer `global-history-authority-v1` instead. `local-history-authority-v1` is retained only so existing tests and explicitly negotiated non-base compatibility paths have a stable identifier.
-
-F) Deployment-global history authority (REQUIRED in base profile)
-The base profile REQUIRES `global-history-authority-v1`, a deployment-global extension that lifts one whole deployment onto one authenticated append-only history authority. It is stronger than `local-history-authority-v1` because it defines one deployment-global attested lineage, but it still does NOT claim federated cross-deployment consensus.
-Requirements on that extension:
-* Successful join/merge/provisioning/helper/lookup responses carrying objects from this extension MUST carry `history_authority_extension == "global-history-authority-v1"`.
-* One negotiated `HistoryAuthorityDescriptor` object MUST identify the deployment-global history authority and its public verification key.
-* `HistoryAuthorityDescriptor := [scope_id:bstr32, public_key:bstr]`.
-* The signature suite for `public_key` MUST be fixed by the negotiated extension. The current implementation uses ML-DSA-87 / Dilithium5 for this deployment-global authority.
-* Under `global-history-authority-v1`, `GlobalHistoryAttestation := [scope_id:bstr32, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, parent_attestation_id:bstr32, finality_kind:tstr, signature:bstr]`.
-* Under `global-history-authority-v1`, `finality_kind` MUST be exactly `"global-append-only"`.
-* Under `global-history-authority-v1`, `parent_attestation_id` MUST equal `H_L("barrier/global-history/parent-attestation", [scope_id, gid, prev_history_commitment_id])`, except that it MUST be all-zero when `prev_history_commitment_id` is all-zero.
-* Under `global-history-authority-v1`, the signed payload for `GlobalHistoryAttestation` MUST bind at minimum `(scope_id, gid, history_view_id, history_commitment_id, prev_history_commitment_id, history_seq, barrier_version, kem_tree_hash_after, parent_attestation_id, finality_kind)`.
-* Under `global-history-authority-v1`, `helper_completeness_attestation` MUST be non-empty on successful A), B), and C) responses and MUST be signed over `(scope_id, helper_kind, history_view_id, history_commitment_id, page_offset, total_entries, selector/page payload)`.
-* Under `global-history-authority-v1`, `accepted`, `superseded`, and `final_rejected` in D) MUST be interpreted as statements about that deployment-global append-only authority rather than one merely local server view.
-* Under `global-history-authority-v1`, provisioning artifacts and `header[182]` / `header[181]` / `header[183]` decisions MUST bind to one exact deployment-global attestation lineage.
-* A deployment MUST NOT describe itself as providing federated cross-deployment canonical/final history under this profile unless a stronger negotiated extension explicitly defines that property.
-
-Security-scope clarifications (normative):
-* In this document, "global" in `global-history-authority-v1` means deployment-global for one authenticated `HistoryAuthorityScope`. It does NOT mean federated across independently operated deployments or witnesses.
-* Helper completeness, `LookupMergeAcceptance` finality, and `header[182]` / `header[181]` / `header[183]` statements are only claims about that one deployment-global append-only authority unless a stronger negotiated extension says otherwise.
-* `header[181]` proves exact author/updater binding to one exact attested helper/current-state decision within the negotiated `HistoryAuthorityScope`.
-* `header[183]` proves that the negotiated history authority replayed the exact `reason in {0,1}` `barrier_update` against the authenticated current tree plus authenticated A/B helper outputs and deployment-profile manifest for that same scope/current state. It is the stronger server-verifiable authoring witness used by the base profile for reasons `0` and `1`.
-* The signed artifacts defined by this document commit only the fields they explicitly name: `provisioning_artifact`, `merge_ticket_artifact`, and `deployment_profile_manifest` cover the client-consumed provisioning/helper/profile fields carried by those surfaces. They do NOT, by themselves, commit broader admin/governance state unless another normative document or negotiated extension explicitly adds those fields.
-* The base profile is fail-closed for safety inside one `HistoryAuthorityScope`; it does NOT guarantee liveness or progress when that authority withholds snapshots/history or otherwise refuses to serve authenticated helper material.
-* Deployment-global non-equivocation across multiple independently operated history authorities is out of profile unless a stronger extension explicitly defines it.
-* Reserved stronger-profile identifiers:
-  * `witnessed-full-verification-v1` MAY be defined by a future profile to add independently authenticated remote attestation of the author's FULL-verification path beyond `header[181]`'s current helper-state binding semantics.
-  * `federated-history-authority-v1` MAY be defined by a future profile to add multi-witness or cross-deployment non-equivocation/finality stronger than `global-history-authority-v1`.
-* The current base profile does not define either reserved stronger-profile identifier. Implementations receiving them today MUST reject them as unsupported unless another negotiated profile explicitly defines them.
-
-Snapshot-auth failure handling (normative; 960.9 wiring):
-If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(root_node) != kem_tree_hash_after, the caller MUST treat the server as faulty/active, MUST NOT proceed with barrier_update creation/activation/verification that depends on that tree, and MUST surface local diagnostic code 960.9 barrier_tree_snapshot_auth_failure.
-
-Verification levels (normative):
-* A client that has A) and B) but not C) MUST NOT claim FULL barrier chain-check (it may still recover K_barrier via unique match).
-* A client that has A), B), and C) and performs the MUST checks in S11.11.2 (FULL chain-check) and S11.13.6 (ek_n verification) is a FULL-verifying client.
-Terminology clarification (normative):
-* `recover-only` means the client may recover or correlate local state from authenticated headers and helper material, but has not established FULL verification of the current public tree for the exact stored current state.
-* `join-finalize bootstrap-eligible` means a newly joined recover-only client that has satisfied the S11.11.1 bootstrap exception for the provisioned current state and therefore MAY originate reason 2 only.
-* `current_barrier_full_verified` is a client-local predicate for one exact stored current state; it is not self-authenticating on the wire.
-
-S3.4 Header[97] HP envelope transport (normative)
-`header[97]` carries the opaque HP transport envelope used by merge/join-finalize publication and client recovery.
-
-In profile `v0.1.4`, the only in-profile encoding is:
-* `BarrierHpEnvelope := ["barrier-sealed-v1", hp_context:tstr, hp_ciphertext:bstr, "chacha20-poly1305"]`
-* `BarrierHpPlaintext := hp_k:bstr`
-* `HpArtifact := { hp_a:bstr, hp_b:bstr, m_a:bstr32, m_b:bstr32, params_id:tstr, hp_version:uint }`
-
-Scope / presence clarification (normative):
-* `header[97]` remains REQUIRED on all anchors by S4.2.1.
-* On JOIN, REGULAR, and MERGE anchors, `BarrierHpPlaintext` is the exact `hp_k` byte string bound to that anchor's final authenticated header context.
-* `BarrierHpPlaintext` MUST be non-empty.
-* `hp_k` MUST equal `CBOR_det(HpArtifact)`. No additional outer wrapper is permitted inside `BarrierHpPlaintext`.
-* `header[99]` MUST equal `H_L("msphf/hp/commit", [BarrierHpPlaintext])`.
-* Receivers MAY ignore `header[97]` on code paths that do not perform HP recovery, but any implementation that attempts recovery from `header[97]` MUST apply the validation and binding rules below.
-
-Normative constants:
-* `MAX_HP_BYTES := 16384`                                          /* maximum BarrierHpPlaintext byte length */
-* `AEAD_TAG_LEN := 16`
-* `MAX_HP_ENVELOPE_BYTES := MAX_HP_BYTES + AEAD_TAG_LEN = 16400`  /* maximum hp_ciphertext byte length; excludes the surrounding CBOR array/tag overhead */
-
-Constraints (MUST):
-* the array length MUST equal 4,
-* element 0 MUST equal the UTF-8 text string `"barrier-sealed-v1"`,
-* element 1 MUST equal exactly one of the UTF-8 text strings `"author-local"` or `"barrier-recovery"`,
-* element 2 MUST be a non-empty ciphertext byte string whose length is at least `AEAD_TAG_LEN` and at most `MAX_HP_ENVELOPE_BYTES`,
-* element 3 MUST equal the UTF-8 text string `"chacha20-poly1305"`.
-
-Publication contexts (normative):
-* `header[97]` carries an explicit publication-context discriminator in `element 1`:
-  * `author-local form`: `hp_context == "author-local"`; this is the form produced by the author while constructing a new JOIN/REGULAR anchor, and by a locally built MERGE bundle before it is rebound/sealed for peer recovery;
-  * `barrier-recovery form`: `hp_context == "barrier-recovery"`; this is the form carried by a MERGE publication intended for cross-client recovery from serialized wire state.
-* The initial JOIN anchor published by a pending joiner MUST use the `author-local form`; the joiner does not yet know `K_barrier`, and no server-side provisioning of `K_barrier` is permitted.
-* Cross-client recovery from serialized wire state is defined only for the `barrier-recovery form`. A JOIN anchor by itself is not a peer-recoverable HP transport artifact.
-* Any MERGE publication that is intended to remain peer-recoverable after acceptance/persistence MUST carry the `barrier-recovery form`. `author-local form` is ephemeral local construction state only and MUST NOT be treated as satisfying cross-client recovery from accepted wire state.
-
-Author-local sealing algorithm (normative):
-* Let `xk_hash` be the transcript hash / handshake binding for the published anchor.
-* Let `hp_commit := header[99]`.
-* Let `hp_key_local` be a fresh uniformly random 32-byte key sampled by the author for this authored bundle only.
-* Let:
-  * `hp_nonce := H_L("hp/nonce", [xk_hash, hp_commit])[0..11]`
-  * `hp_aad := hp_commit`
-* Then:
-  * `hp_ciphertext := AEAD_Seal(hp_key_local, hp_nonce, hp_aad, BarrierHpPlaintext)`
-* `hp_key_local` is author-local secret material and MUST NOT be transmitted. Any implementation consuming the author-local form from wire without retained local key material MUST treat it as non-recoverable.
-
-Barrier-recovery sealing algorithm (normative):
-* Let `barrier_version := header[176]`.
-* Let `xk_hash` be the transcript hash / handshake binding for the published anchor.
-* Let `hp_commit := header[99]`.
-* Let `barrier_key` be the client's locally held barrier key for the authenticated barrier state selected for this recovery attempt.
-* For a MERGE carrying `header[175]`, `barrier_key` MUST be the post-activation barrier key corresponding to the published `barrier_version = header[176]`.
-* For a MERGE that does not carry `header[175]`, `barrier_key` MUST be the currently authenticated barrier key already bound locally to the published `barrier_version = header[176]`.
-* Let:
-  * `hp_salt := H_L("hp/barrier/salt", [gid, barrier_version, xk_hash])`
-  * `hp_info := ASCII("city-g|hp/barrier/v1") || hp_commit`
-  * `hp_key := HKDF-BLAKE3(ikm=barrier_key, salt32=hp_salt, info_bytes=hp_info, L=32)`
-  * `hp_nonce := H_L("hp/nonce", [xk_hash, hp_commit])[0..11]`
-  * `hp_aad := hp_commit`
-* Then:
-  * `hp_ciphertext := AEAD_Seal(hp_key, hp_nonce, hp_aad, BarrierHpPlaintext)`
-  * `BarrierHpPlaintext := AEAD_Open(hp_key, hp_nonce, hp_aad, hp_ciphertext)`
-
-Semantics / security properties (normative):
-* `hp_ciphertext` is an opaque client-to-client transport blob.
-* The server MAY store, replay, and authenticate this blob as part of the anchor header, but MUST treat it as opaque and MUST NOT claim knowledge of the underlying HP keying material.
-* `header[99]` is the authenticated commitment to `BarrierHpPlaintext`. Implementations MUST freshly sample each authored `HpArtifact` and MUST NOT deliberately reuse a prior `BarrierHpPlaintext` for a distinct anchor publication.
-* In `barrier-recovery form`, the confidentiality/binding tuple is `(gid, barrier_key, barrier_version, xk_hash, hp_commit)`.
-* A cut-and-paste of `hp_ciphertext` into another anchor with a different `gid`, `barrier_version`, `xk_hash`, `hp_commit`, or barrier key MUST fail client recovery.
-* `BarrierHpPlaintext` length MUST be in `[1, MAX_HP_BYTES]` both before encryption and after decryption.
-* Any implementation that successfully decrypts `header[97]` MUST recompute `H_L("msphf/hp/commit", [BarrierHpPlaintext])` from the recovered plaintext and MUST require exact equality with `header[99]` before parsing or using `HpArtifact`.
-
-Validation / rejection rules (normative):
-* Server-side acceptance MUST validate `header[97]` during S10.1 pre-filters before JOIN/MERGE-specific acceptance logic continues.
-* JOIN/MERGE validation that explicitly consumes `header[97]` MUST re-check the S3.4 shape/mode/size/AEAD constraints on the decoded value before using it.
-* Any parse failure, wrong mode, wrong AEAD suite, empty ciphertext, ciphertext shorter than `AEAD_TAG_LEN`, or ciphertext longer than `MAX_HP_ENVELOPE_BYTES` MUST be rejected as malformed.
-* A client recovery path that expects `barrier-recovery form` MUST derive `hp_key` exactly as above and MUST reject/ignore the envelope for recovery if:
-  * `header[176]` is missing or malformed,
-  * AEAD open fails,
-  * the recovered plaintext length is zero or exceeds `MAX_HP_BYTES`,
-  * recomputed `H_L("msphf/hp/commit", [BarrierHpPlaintext]) != header[99]`.
-* A client MUST NOT silently substitute another transport mode or fall back to a legacy room-secret transport when `header[97]` validation fails.
-
-Out-of-profile rule (normative):
-* Any other header[97] transport mode is out of profile for `v0.1.4` and MUST be rejected as malformed.
-
-S4. ANCHOR TYPES, HEADER-KEY REGISTRY, AND PRESENCE MATRIX (NORMATIVE)
-
-S4.1 Anchor types (normative)
-This profile defines three anchor types:
-* JOIN anchor: introduces a new device leaf and MUST carry barrier_leaf_pk (key 177).
-* MERGE anchor: carries merge/checkpoint state and MAY carry barrier_update (key 175) with barrier_update_reason (key 178); see predicates in S10.4, S10.4A, S10.4B, and S10.4C.
-* REGULAR anchor: any anchor that is neither JOIN nor MERGE.
-
-Anchor type determination (normative):
-* If any key in S4.2.3 is present OR any key in S4.2.4 is present OR any key in S4.2.5 is present, anchor_type := MERGE.
-* Else if key 177 is present, anchor_type := JOIN.
-* Else anchor_type := REGULAR.
-
-Mutual exclusivity (normative):
-* JOIN anchors MUST NOT contain any merge-only keys (S4.2.3/S4.2.4) nor any SRX-only keys (S4.2.5).
-* MERGE anchors MUST NOT contain key 177.
-* REGULAR anchors MUST NOT contain key 177 and MUST NOT contain any merge-only/SRX-only keys.
-
-S4.2 Closed-world registry (normative)
-Anchors using keys outside this registry MUST be rejected with 907.1 malformed CBOR/unknown key.
-
-S4.2.1 Keys REQUIRED on ALL anchors (JOIN, REGULAR, MERGE)
-Core keys required:
-20, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-104, 105, 106, 107, 108, 109,
-110, 111, 112, 113,
-116, 119, 125
-
-FS keys (all anchors):
-Key 139: fs_policy_version (uint)
-Key 141: fs_ec (uint)
-Key 142: fs_epoch_commit (bstr32)
-Key 143: fs_epoch_base_ts (uint64)
-Key 146: smallwood (bstr)
-
-Device-chain keys (all anchors):
-Key 152: fs_dev_prev_commit (bstr32)
-Key 153: fs_dev_commit (bstr32)
-
-Barrier keys (all anchors):
-Key 176: barrier_version (uint)
-
-S4.2.2 Keys REQUIRED on JOIN anchors and FORBIDDEN on REGULAR/MERGE (join-only)
-Key 177: barrier_leaf_pk (bstr; ML-KEM ek; MUST be 1184 bytes)
-
-S4.2.3 Keys PERMITTED only on MERGE anchors and FORBIDDEN on JOIN/REGULAR (merge-only)
-Key 175: barrier_update (bstr; optional; only when permitted by S10.4, S10.4A, S10.4B, S10.4C, and S11)
-Key 178: barrier_update_reason (uint; required iff key 175 is present)
-Key 179: join_finalize_auth (bstr32; required iff key 178 == 2; opaque server-issued capability for reason-2 join_finalize)
-Key 180: barrier_history_commitment (bstr; required iff key 175 is present; CBOR_det(HistoryCommitment) for the authenticated current-state snapshot_base/A/B view used to construct the barrier_update)
-Key 181: barrier_full_verification_receipt (bstr; REQUIRED iff key 175 is present in the base profile; optional only for explicitly negotiated non-base variants such as `local-history-authority-v1`)
-Key 182: barrier_global_history_attestation (bstr; REQUIRED iff key 175 is present in the base profile; optional only for explicitly negotiated non-base variants such as `local-history-authority-v1`)
-Key 183: barrier_full_verification_witness (bstr; REQUIRED iff key 175 is present and key 178 ∈ {0,1} in the base profile; FORBIDDEN for reason 2 and optional only for explicitly negotiated non-base variants that define an equivalent witness)
-
-S4.2.4 Merge/checkpoint keys (merge-only set)
-130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148
-Restriction: key 136 kbroad_replay is FORBIDDEN (presence -> reject 907.1).
-
-Base-profile merge/checkpoint profile (normative):
-* For `v0.1.4`, there is no unstated external "merge profile" document. The merge/checkpoint profile for this document is exactly the closed-world key set of S4.2.4 together with the per-key presence/absence rules stated in this document.
-* Implementations MUST NOT rely on any deployment-local or out-of-document rule to decide the in-profile presence or absence of keys `130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148`.
-* Key 136 is always FORBIDDEN in this profile.
-* Key 135 is not a general-purpose extension point in this profile; when key 175 is present, key 135 MUST be absent and presence MUST be rejected per S11.12.1.A.
-* No key outside S4.2.4 may be treated as a merge/checkpoint key in `v0.1.4`.
-
-S4.2.5 SRX-only keys (MERGE-only, conditional)
-Key 121: srx_commit (bstr32)
-Key 122: srx_payload (bstr)
-Key 160: srx_root_sw (bstr32)
-Key 161: srx_smallwood (bstr)
-Rules: FORBIDDEN on JOIN/REGULAR.
-On MERGE: either all present (SRX applies) or all absent (SRX forbidden). See S9.3.
-
-S4.3 Presence matrix summary (normative)
-* JOIN: MUST include S4.2.1 + S4.2.2; MUST NOT include any of S4.2.3/S4.2.4/S4.2.5.
-* REGULAR: MUST include S4.2.1; MUST NOT include any of S4.2.2/S4.2.3/S4.2.4/S4.2.5.
-* MERGE: MUST include S4.2.1; MUST use only the S4.2.4 merge/checkpoint key set, with exact presence/absence determined only by this document's normative rules;
-  MAY include S4.2.3 (subject to S10.4/S10.4A/S10.4B/S10.4C/S11) and MAY include S4.2.5 (subject to S9.3);
-  MUST NOT include S4.2.2.
-Additional presence rule (normative):
-* key 178 MUST be present if and only if key 175 is present.
-* key 179 MUST be present if and only if key 178 == 2; it MUST be absent for merge reasons 0/1 and on all non-MERGE anchors.
-* key 180 MUST be present if and only if key 175 is present; it MUST be absent on anchors without barrier_update.
-* In the base profile, keys 181 and 182 MUST both be present if and only if key 175 is present.
-* In the base profile, key 183 MUST be present if and only if key 175 is present and key 178 ∈ {0,1}; it MUST be absent for key 178 == 2 and on anchors without barrier_update.
-* Outside the base profile, key 181, key 182, or key 183 MUST be absent unless an explicitly negotiated history-authority extension enables them.
-
-S4.4 Size limits (normative; deployments MAY tighten)
-Max bytes per header field (unless otherwise specified by type):
-* header[95]  max 8192
-* header[146] max 16384
-* header[161] max 16384
-* header[122] max 1048576
-* header[177] MUST be exactly 1184 bytes
-* header[179] MUST be exactly 32 bytes
-* header[181] is extension-defined and therefore has no universal size semantic beyond deterministic CBOR of the negotiated receipt object
-* header[182] is extension-defined and therefore has no universal size semantic beyond deterministic CBOR of the negotiated attestation object
-* header[183] is extension-defined and therefore has no universal size semantic beyond deterministic CBOR of the negotiated witness object
-
-BarrierUpdate size policy (normative)
-* Deployment MUST define max_barrier_update_bytes (a positive integer).
-* header[175] MUST be present only if its byte length is <= max_barrier_update_bytes.
-* Servers MUST reject anchors with header[175] length > max_barrier_update_bytes with 960.7.
-* Clients MUST reject barrier_update bytes length > max_barrier_update_bytes locally with 960.7.
-
-Consistency requirement (normative)
-* max_barrier_update_bytes is a deployment configuration parameter and MUST be consistent across the server and all clients in the group.
-* If a client detects a configuration mismatch (e.g., via provisioning metadata or policy channel), it MUST fail closed and MUST NOT process barrier_update bytes under an unknown limit.
-Implementations SHOULD choose max_barrier_update_bytes to safely cover worst-case expected revocation patterns for the configured N_max, while bounding memory and CPU usage.
-
-S5. GROUP AND DEVICE STATE (NORMATIVE)
-
-S5.1 Server persistent group state
-* fs_epoch_base_ts (T_base) : uint64 -- immutable
-* last_checkpoint_ec : uint -- monotone
-* last_accepted_ec (A) : uint -- monotone
-* per-device map: DeviceState[device_pk] = (last_commit:bstr32, last_ec:uint, last_pcs_refresh_ec:uint/null)
-* srx_root_sw : bstr32 -- durable SRX shadow root (if SRX used)
-* last_pcs_refresh_ec : uint/null -- null if no accepted PCS refresh yet
-
-PCS refresh policy state (time-blind; deployment-defined):
-* pcs_refresh_min_delta_device_ec : uint (>=1)
-* pcs_refresh_min_delta_group_ec : uint (>=1)
-* pcs_refresh_slot_width_ec : uint (>=1)
-
-Barrier public state:
-* barrier_initialized : bool
-* barrier_version : uint
-* barrier_roots_hash : bstr32
-* kem_tree_hash_after : bstr32
-* N_max : uint (power of two; fixed group lifetime; deployment/profile MUST define and enforce a finite `N_max_max`, and groups with `N_max > N_max_max` are out of profile)
-* Server MUST store pk_entries matching kem_tree_hash_after and a bounded retained historical map from committed `kem_tree_hash_after` values to their corresponding `pk_entries`, and MUST serve the current retained snapshot window via FetchBarrierPublicTree per S3.3.C.
-
-S5.2 Client persistent secret state
-FS state:
-* K_fs : bstr32
-* fs_ec : uint
-* optional tau_e cache bounded by policy
-
-Barrier secret state:
-* barrier_initialized : bool
-* barrier_version : uint
-* barrier_roots_hash : bstr32 -- covered revocation-roots baseline for the client's current authenticated barrier state
-* K_barrier : bstr32
-* kem_tree_hash_after : bstr32
-* current_barrier_full_verified : bool -- true iff the client's currently stored `(barrier_version, barrier_roots_hash, kem_tree_hash_after)` has been FULL-verified per S11.11.2 for that same stored state; false if the state was learned or advanced only via recover-only processing
-* dk_leaf for the client's barrier leaf (join-generated)
-* pkhash_leaf := H_pk(ek_leaf) for the client's barrier leaf (bstr32)
-* dk_n keys for internal nodes on the client's SelfPath (derived per S11.13.5)
-* pkhash_n := H_pk(ek_n) for each stored dk_n (bstr32)
-* pending_barrier_recovery : bool -- true for a newly joined client until it has successfully derived `K_barrier` via S11.13/S12.3
-Normative note:
-* `pending_barrier_recovery == false` by itself MUST NOT be interpreted as FULL verification. Clients MUST persist `current_barrier_full_verified` (or an equivalent crash-safe marker) across restart.
-* If a later authenticated helper / provisioning / merge-ticket / epoch-sync artifact changes the stored `(barrier_version, barrier_roots_hash, kem_tree_hash_after)` without the client completing S11.11.2 FULL verification for that exact new stored state as part of the same crash-safe decision, the client MUST set `current_barrier_full_verified := false`.
-
-Updater-local pending activation state:
-* If the client has published a local barrier_update that is not yet correlated/activated, it MUST persist the pending_* fields required by S11.14.1, including pending_barrier_version, pending_we_epoch_id (or equivalent stable merge identifier), pending_fs_ec, pending_revocation_roots_hash, pending_kem_tree_hash_after, pending_K_barrier_new, pending_barrier_update_reason, pending_K_fs_after_pcs (if any), pending_barrier_update_digest, and pending_on_path_key_material.
-
-Clients MUST maintain, for each stored dk_t (leaf or internal), a corresponding pkhash_t value such that pkhash_t == H_pk(ek_t), where ek_t is the public key paired with dk_t.
-
-Atomicity requirement (normative)
-* Any update to a stored (dk_t, pkhash_t) pair MUST be written atomically (crash-safe) to persistent storage.
-* If atomic persistence is not available, the client MUST treat barrier recovery capability as degraded and MUST fail closed on barrier_update processing (implementation-defined diagnostics).
-
-Barrier verification state (optional but REQUIRED for FULL chain-check):
-* ability to refetch and verify pk_entries for stored kem_tree_hash_after values
-
-S6. FS-HYBRID CORE (NORMATIVE)
-
-S6.1 FS epoch counter
-t := header[141] (fs_ec).
-
-S6.2 FS chain evolution (normative)
-K_fs_next := HKDF-BLAKE3(
-  ikm  = K_fs,
-  salt = H_L("fs/step/salt", [weid, t+1]),
-  info = "city-g|fs/step|v1",
-  L=32
-)
-K_fs := K_fs_next
-Devices SHOULD zeroize superseded K_fs material except for bounded offline cache policy.
-
-S6.3 tau_e derivation (normative)
-tau_e(t) := HKDF-BLAKE3(
-  ikm  = K_fs_at_epoch_t,
-  salt = H_L("fs/tau/salt", [weid, t]),
-  info = "city-g|fs/tau|v1",
-  L=32
-)
-
-S6.4 epoch_sk and fs_epoch_commit (normative)
-epoch_sk(t) := HKDF-BLAKE3(
-  ikm  = K_fs_at_epoch_t,
-  salt = H_L("fs/epoch/sk_salt", [weid, t]),
-  info = "city-g|fs/epoch/sk|v1",
-  L=32
-)
-fs_epoch_commit := H_L("fs/epoch/commit", [epoch_sk(t)])
-Requirement: header[142] MUST equal fs_epoch_commit.
-
-S6.5 Time-blind base timestamp (normative)
-Requirement: header[143] MUST equal GroupState.fs_epoch_base_ts else reject 945.0.
-Server acceptance MUST NOT consult wall clocks for FS validity.
-
-S6.6 PCS reseed of FS chain (normative; applies only to PCS refresh)
-When processing an accepted MERGE anchor carrying key 175 with key 178 = 1 (pcs_refresh), clients MUST reseed K_fs at activation time:
-K_fs := HKDF-BLAKE3(
-  ikm  = (K_fs || K_barrier_new),
-  salt = H_L("fs/pcs/salt", [weid, header[141], header[176]]),
-  info = "city-g|fs/pcs|v1",
-  L=32
-)
-This reseed MUST be applied atomically with barrier activation state updates (S11.13.7 for non-updater clients; S11.14.2 for updater activation).
-This reseed takes effect immediately at activation time for the accepted pcs_refresh anchor. Therefore, after an accepted pcs_refresh at epoch t, any subsequent anchor in the group MUST use fs_ec > t; same-t anchors are invalid and MUST be rejected per S10.3.
-Servers do not learn K_fs and do not execute this derivation.
-
-S7. DEVICE-CHAIN BINDING + BARRIER DIGEST PATCH (NORMATIVE)
-
-S7.1 revocation_roots_hash binding
-revocation_roots_hash := H_L("barrier/roots", [header[112], header[113]])
-
-S7.2 barrier_update raw-bytes rule
-raw_barrier_update_bytes :=
-  if header[175] absent: empty bstr
-  else: header[175] bytes exactly as transmitted/stored
-MUST treat raw_barrier_update_bytes as opaque for digest purposes (no parse/re-encode).
-
-S7.3 barrier_update_digest
-barrier_update_digest :=
-  if header[175] absent: ZERO32
-  else: H_L("barrier/update/digest", [raw_barrier_update_bytes])
-
-S7.4 fs_dev_commit (normative v2; REQUIRED)
-fs_dev_commit := H_L("fs/dev/chain/v2", [
-  header[108],   /* author_device_pk */
-  header[141],   /* fs_ec */
-  header[152],   /* fs_dev_prev_commit */
-  header[176],   /* barrier_version */
-  barrier_update_digest
-])
-Requirement: header[153] MUST equal fs_dev_commit.
-Anchor authentication MUST bind to header[153] and to the canonical header map.
-
-S8. PAYLOAD ENVELOPE + KEY SCHEDULE (FS-HYBRID + PRS BARRIER) (NORMATIVE)
-
-S8.1 PayloadEnvelope wire format
-PayloadEnvelope = [
-  "fs-hybrid-msg-v2",
-  msg_index : uint,
-  ct_payload : bstr
-]
-Normative constants:
-* `MAX_CT_PAYLOAD_BYTES := 1048576`
-* `MAX_PAYLOAD_ENVELOPE_BYTES := 1048640`  /* total serialized PayloadEnvelope size, including CBOR wrapper */
-Define sender_leaf_id (normative):
-* sender_leaf_id is the authenticated 32-byte current membership `leaf_id` of the sending device for this group, supplied by the outer message transport / authenticated sender context for this payload. It is NOT the sender's current slot lease or current `slot_index`.
-* Every in-profile payload transport MUST carry an authenticated sender device identifier (for example `author_device_pk`) and an authenticated membership view sufficient to derive that device's current `leaf_id` for this group. A transport that omits authenticated sender device identity is out of profile for S8.
-* The same sender_leaf_id MUST be supplied to both the encrypt and decrypt paths for S8.3/S8.4 derivations.
-* If sender_leaf_id is missing, malformed, or not exactly 32 bytes, the implementation MUST fail closed and MUST NOT attempt payload decryption.
-* Implementations MUST verify that `sender_leaf_id` corresponds to the authenticated sender device's current membership `leaf_id` in the authenticated membership view for this payload; mismatch -> drop payload.
-* The membership subsystem MUST ensure `leaf_id(device_pk)` is injective within a `gid` across distinct authenticated device public keys. Re-using the same `device_pk` in the same `gid` MUST re-derive the same `leaf_id`; assigning that same `leaf_id` to a different `device_pk` at any later time in the same `gid` is out of profile.
-Wire encoding requirement (normative, MUST):
-* PayloadEnvelope MUST be encoded as CBOR_det array of length exactly 3.
-* `PayloadEnvelope[0]` MUST be the CBOR text string exactly equal to `"fs-hybrid-msg-v2"`.
-* `PayloadEnvelope[1]` MUST be the cleartext `msg_index:uint`.
-* `PayloadEnvelope[2]` MUST be `ct_payload:bstr`.
-* `ct_payload` length MUST be in `[1, MAX_CT_PAYLOAD_BYTES]`.
-* The total serialized `PayloadEnvelope` length MUST be in `[1, MAX_PAYLOAD_ENVELOPE_BYTES]`.
-* Receivers MUST verify CBOR_det determinism per S1.3 for PayloadEnvelope bytes; if invalid, receivers MUST discard the message as malformed.
-
-S8.2 msg_index uniqueness rule (CRITICAL)
-For any fixed sender-scoped tuple (gid, weid, t, xk_hash, E_k, barrier_version, sender_leaf_id), implementations MUST keep the probability of `msg_index` reuse negligible across all payloads encrypted under that tuple.
-Normative anti-replay bounds:
-* `MAX_MSGS_PER_TUPLE := 4096`
-* `MAX_REPLAY_TUPLES_PER_CONTEXT := N_max`
-Implementations MUST enforce:
-* fresh uniformly random uint64 `msg_index` sampled independently per payload from a cryptographically secure random source local to the sender, plus anti-replay state.
-* `msg_index` MUST be obtained at send time from the platform CSPRNG or an equivalent entropy source; it MUST NOT be derived from rollback-prone persisted local state.
-* counter-based, timestamp-based, boot-identifier-based, or otherwise deterministic `msg_index` generation MUST NOT be used in this profile.
-Collision-risk rule (normative):
-* Senders MUST provision tuple rotation so the probability of a same-tuple `msg_index` collision remains negligible for the maximum expected send volume under that tuple.
-* Deployments SHOULD rotate to a fresh tuple well before same-tuple send volume approaches the birthday bound of the 64-bit space. As an operational reference point, keeping same-tuple sends at or below 2^20 yields a random-collision bound below approximately 2^-25.
-Crash-safety requirement (normative, MUST):
-Receiver-local anti-replay state for accepted `(tuple_tag, msg_index)` pairs MUST be persisted durably (crash-safe) before the accepted payload is released to the application, or as part of the same logical transaction that makes the accepted payload durable to the application. If crash-safe anti-replay persistence is not available, this profile MUST NOT be used.
-Receivers MAY persist multiple accepted `(tuple_tag, msg_index)` pairs in one crash-safe batch, provided that no payload covered by that batch is released to the application before the whole batch is durable.
-If sender-side collision risk cannot be kept negligible, or receiver-side anti-replay cannot be enforced, this profile MUST NOT be used.
-Receiver duplicate-rejection rule (normative, MUST):
-Define `tuple_context_id` (normative):
-* `tuple_context_id := H_L("fs/msg/replay/context", [gid, weid, t, xk_hash, E_k, header[176]])`
-Define `tuple_tag` (normative):
-* `tuple_tag := H_L("fs/msg/replay/tuple", [gid, weid, t, xk_hash, E_k, header[176], sender_leaf_id])`
-Receivers MUST derive this exact `tuple_tag` and MUST reject a payload if the pair `(tuple_tag, msg_index)` has already been accepted locally. Duplicate detection MUST occur before the payload is released to the application.
-Receivers MUST retain at most `MAX_MSGS_PER_TUPLE` accepted indices per `tuple_tag`.
-Receivers MUST make persisted tuple state collectable once its `tuple_context_id` no longer matches the authenticated receive context for the current local session state. Under the base profile, receivers MUST retain at most `MAX_REPLAY_TUPLES_PER_CONTEXT` sender-scoped tuples for one current `tuple_context_id`; any excess or obsolete tuple state MUST be pruned before further accepted payloads are released.
-
-S8.3 K_msg_epoch
-K_msg_epoch := HKDF-BLAKE3(
-  ikm  = E_k,
-  salt = H_L("fs/msg/epoch_salt", [weid, t, xk_hash, E_k, header[176], K_barrier, sender_leaf_id]),
-  info = "city-g|fs/msg/epoch|v2",
-  L=32
-)
-Where `E_k` is the locally derived epoch key for the active `weid`.
-`tau_e(t)` remains normative for FS chain/proof context per S6, while payload encryption in this profile binds to `E_k` in S8.
-
-Security note (informative):
-K_msg_epoch depends on E_k (ME-OR derived, independent of K_fs) and K_barrier (PRS derived, independent of K_fs). Compromise of K_fs alone does NOT yield K_msg_epoch or any payload decryption capability. Payload confidentiality requires compromise of both E_k and K_barrier for the authenticated epoch. Within an epoch, K_msg_epoch is shared across all messages; compromise of K_msg_epoch enables derivation of all K_msg values for that epoch via the deterministic msg_index binding in S8.4.
-
-S8.4 K_msg, nonce, and AAD
-K_msg := HKDF-BLAKE3(
-  ikm  = K_msg_epoch,
-  salt = H_L("fs/msg/key_salt", [weid, t, sender_leaf_id, msg_index]),
-  info = "city-g|fs/msg/key|v2",
-  L=32
-)
-nonce_msg := H_L("fs/msg/nonce", [gid, weid, t, xk_hash, E_k, header[176], sender_leaf_id, msg_index])[0..11]
-aad_msg := CBOR_det([gid, weid, t, xk_hash, E_k, header[176], sender_leaf_id, msg_index])
-ct_payload := AEAD_Seal(key=K_msg, nonce=nonce_msg, aad=aad_msg, pt=payload_plaintext)
-payload_plaintext := AEAD_Open(key=K_msg, nonce=nonce_msg, aad=aad_msg, ct=ct_payload)
-
-S8.5 No-fallback rule (CRITICAL)
-Receivers MUST derive K_msg_epoch only with the barrier_version authenticated in the anchor (header[176]) and MUST NOT try alternate cached K_barrier values to "make decryption succeed".
-
-Delayed-delivery rule (normative)
-This profile defines payload decryption only for the receiver's current authenticated `(barrier_version, K_barrier)` state. Payloads bound to an older barrier_version are stale and MUST be discarded. Implementations MUST NOT retain or probe cached old `K_barrier` values unless a future profile explicitly standardizes old-version payload support.
-
-S9. PROOFS, BIND TUPLES, AND SRX (NORMATIVE INTERFACE)
-
-S9.1 proofs_commit
-Define proofs_commit_args (normative):
-* If header[160] is absent (SRX absent), then:
-  proofs_commit_args := [header[95], header[146]]
-* If header[160] is present (SRX present), then (by S4.2.5 rules, header[161] is also present):
-  proofs_commit_args := [header[95], header[146], header[160], header[161]]
-Requirement (normative, MUST):
-header[125] MUST equal H_L("msphf/proofs", proofs_commit_args).
-Server MUST verify header[125] before expensive proofs.
-
-S9.2 VRF bind_fs tuple (values not key-IDs)
-bind_fs := CBOR_det([
-  xk_hash,
-  header[93], header[94], header[98], header[99], header[106],
-  header[110], header[111], header[112], header[113],
-  proof_mode,
-  profile_version,
-  header[139],
-  meor_vrf_id,
-  header[142],
-  header[141],
-  header[152],
-  header[153],
-  (header[160] if present)
-])
-ZK-VRF verification MUST be performed against bind_fs.
-
-S9.3 SRX carve-out (normative; pivot clarified)
-SRX applies only on MERGE anchors.
-* JOIN and REGULAR anchors MUST NOT carry any of keys 121/122/160/161 (else reject 930).
-
-Define (normative):
-pivot_revocation_roots_hash :=
-  if GroupState.barrier_initialized == true then GroupState.barrier_roots_hash
-  else revocation_roots_hash
-
-On MERGE anchors:
-* SRX is REQUIRED iff revocation_roots_hash != pivot_revocation_roots_hash.
-* Otherwise (revocation_roots_hash == pivot_revocation_roots_hash), SRX is FORBIDDEN.
-
-When SRX is REQUIRED:
-* merge MUST carry 121/122/160/161 and satisfy SRX/Smallwood-v1 verification.
-
-When SRX is FORBIDDEN:
-* merge MUST NOT carry any of 121/122/160/161.
-
-SRX raw-bytes binding:
-raw_srx_payload_bytes := header[122] bytes exactly as transmitted
-srx_payload_digest := H_L("srx/payload/digest", [raw_srx_payload_bytes])
-srx_bridge_ctx := H_L("srx/bridge/v1", [
-  header[110], header[111], header[112], header[113],
-  header[121], srx_payload_digest, header[160]
-])
-Verifier MUST source srx_root_sw_before from persisted GroupState.srx_root_sw.
-
-S10. ACCEPTANCE (SERVER-SIDE) -- TIME-BLIND + BARRIER INTEGRATION (NORMATIVE)
-
-S10.1 Pre-filters
-* Parse header as CBOR_det map; reject floats/indefinite/duplicate keys.
-* Reject unknown keys (closed-world registry).
-* Enforce size limits.
-* Validate required `header[97]` against S3.4 before JOIN/MERGE-specific acceptance logic continues.
-* Determine anchor_type per S4.1 and enforce mutual exclusivity.
-* header[139] fs_policy_version MUST be supported by the deployment/profile. Unsupported values MUST be rejected with 944.6.
-
-S10.2 Presence rules by anchor type
-Presence MUST follow S4.3 exactly.
-
-S10.3 FS base + device-chain integrity + Forward-Leap Guard (FLG)
-FS base:
-* header[143] MUST equal GroupState.fs_epoch_base_ts else reject 945.0.
-
-Device-chain:
-* Look up (stored_last_commit, stored_last_ec, stored_last_pcs_refresh_ec) by header[108] author_device_pk.
-* New device: header[152] MUST equal ZERO32.
-* Known device: header[152] MUST equal stored_last_commit AND header[141] MUST be >= stored_last_ec else reject 947.0.
-* header[153] MUST equal H_L("fs/dev/chain/v2", [header[108], header[141], header[152], header[176], barrier_update_digest]) else reject 947.2.
-* PCS epoch-boundary rule: if GroupState.last_pcs_refresh_ec is not null and header[141] == GroupState.last_pcs_refresh_ec, the server MUST reject the anchor with 947.0. This prevents the same fs_ec value from spanning both pre-reseed and post-reseed K_fs meanings.
-
-Forward-Leap Guard (time-blind; normative):
-Deployment defines integers: H (>0), checkpoint_interval (>=H), S_anchor, S_first, S_device (>=0).
-Configuration invariant check (normative):
-If (H <= 0) OR (checkpoint_interval < H) OR (S_anchor < 0) OR (S_first < 0) OR (S_device < 0), the server is misconfigured and MUST reject anchors with 948.0.
-W := ceil(checkpoint_interval / H)
-D_anchor_max   := W + S_anchor
-D_first_device := W + S_first
-D_device_max   := W + S_device
-Let A := GroupState.last_accepted_ec.
-Enforce:
-* header[141] MUST be <= A + D_anchor_max else reject 947.6.
-* If device is new: header[141] MUST be <= A + D_first_device else reject 947.5.
-* If known: header[141] MUST be <= stored_last_ec + D_device_max else reject 947.4.
-
-S10.4 Barrier version gating (normative)
-Let BV := GroupState.barrier_version.
-Define barrier_update_reason:
-* If header[175] is absent: header[178] MUST be absent.
-* If header[175] is present: header[178] MUST be present and MUST be one of:
-  * 0 = revocation_or_bootstrap
-  * 1 = pcs_refresh
-  * 2 = join_finalize
-
-Genesis (barrier_initialized == false):
-* Reject JOIN or REGULAR with 960.10.
-* First accepted anchor MUST be MERGE and MUST include header[175].
-* header[178] MUST equal 0.
-* header[176] MUST equal 0.
-* BarrierUpdate.barrier_version MUST equal 0 and BarrierUpdate.prev_barrier_version MUST equal 0.
-* After acceptance: barrier_initialized := true; barrier_version := 0.
-
-Non-genesis:
-* JOIN and REGULAR: header[176] MUST equal BV and header[175] MUST be absent.
-* MERGE without barrier_update: header[176] MUST equal BV.
-* MERGE with barrier_update: header[176] MUST equal BV + 1.
-
-S10.4A Revocation-change gating (PRS-critical)
-Let RRH := revocation_roots_hash computed per S7.1.
-Let BV := GroupState.barrier_version.
-If GroupState.barrier_initialized == true AND RRH != GroupState.barrier_roots_hash, then:
-* The anchor MUST be a MERGE anchor.
-* header[175] MUST be present (barrier_update required).
-* header[178] MUST equal 0 (revocation_or_bootstrap).
-* header[176] MUST equal BV + 1.
-* If the anchor is not a MERGE, OR header[175] is absent, OR header[176] != BV + 1, the server MUST reject with 960.11 barrier_update_required_on_revocation_change.
-* If header[175] is present but header[178] != 0, the server MUST reject with 960.13.
-
-Clarification (normative):
-* Since JOIN and REGULAR anchors MUST NOT carry header[175] by S4.3, any JOIN or REGULAR anchor for which RRH != GroupState.barrier_roots_hash MUST be rejected with 960.11.
-* Clients MUST ensure that revocation roots have been barrier-covered (i.e., GroupState.barrier_roots_hash updated via an accepted MERGE with barrier_update) before emitting JOIN or REGULAR anchors.
-
-If GroupState.barrier_initialized == true AND RRH == GroupState.barrier_roots_hash, then:
-* JOIN and REGULAR anchors proceed under S10.4.
-* MERGE anchors MAY omit header[175] and proceed under S10.4 and S11.12 gating.
-* If MERGE carries header[175], same-RRH proactive barrier behavior is controlled by S10.4B and S10.4C.
-
-S10.4B Proactive PCS refresh gating (time-blind; normative)
-This section applies only when:
-* GroupState.barrier_initialized == true
-* RRH == GroupState.barrier_roots_hash
-* header[175] is present
-* the server-observable S10.4C JoinSet predicate does NOT hold for the author
-
-Then:
-* header[178] MUST equal 1 (pcs_refresh), else reject 960.5.
-* The anchor MUST be a MERGE anchor.
-* header[176] MUST equal BV + 1.
-
-Policy parameters (deployment-defined; from GroupState):
-* pcs_refresh_min_delta_device_ec >= 1
-* pcs_refresh_min_delta_group_ec >= 1
-* pcs_refresh_slot_width_ec >= 1
-
-Let t := header[141].
-Let g_last := GroupState.last_pcs_refresh_ec (or null if none yet).
-Let d_last := stored_last_pcs_refresh_ec for header[108] (or null if none yet).
-
-Rate-limit checks (MUST):
-* If g_last is not null and t < g_last + pcs_refresh_min_delta_group_ec: reject 960.12.
-* If d_last is not null and t < d_last + pcs_refresh_min_delta_device_ec: reject 960.12.
-* If g_last is not null and floor(t / pcs_refresh_slot_width_ec) == floor(g_last / pcs_refresh_slot_width_ec): reject 960.12.
-
-Client behavior note:
-* Clients SHOULD back off and retry with jitter after 960.12 to avoid synchronized refresh storms.
-
-S10.4C Join-finalize gating (normative)
-This section applies only when:
-* GroupState.barrier_initialized == true
-* RRH == GroupState.barrier_roots_hash
-* header[175] is present
-* the server-observable JoinSet predicate below holds for the author
-
-Then:
-* header[178] MUST equal 2 (join_finalize), else reject 960.5.
-* The anchor MUST be a MERGE anchor.
-* header[176] MUST equal BV + 1.
-* Revocations MUST NOT be pending for this update; if RRH != GroupState.barrier_roots_hash, reject 960.13.
-* Let JoinSet := ResolveJoinOccupanciesSince(prev_barrier_version), where prev_barrier_version is the value carried in the BarrierUpdate under header[175].
-* The author's updater leaf MUST appear in JoinSet for that prev_barrier_version, else reject 960.5.
-* join_finalize is exempt from S10.4B PCS rate-limit checks and MUST NOT be treated as pcs_refresh for S6.6.
-
-S10.5 Proof verification order (normative)
-* Verify proofs_commit.
-* If header[175] is present, the server MUST execute S11.12.1 steps A through H before running expensive cryptographic proof verification in this section.
-* Verify Smallwood (FS) -> ZK-VRF -> SRX (if applies).
-* Any failure rejects with deployment registry codes (e.g., 923/930).
-
-S10.6 Atomic commit (normative)
-On acceptance:
-* DeviceState[author_device_pk].last_commit := header[153]
-* DeviceState[author_device_pk].last_ec := header[141]
-* GroupState.last_accepted_ec := max(GroupState.last_accepted_ec, header[141])
-* If SRX applies: update GroupState.srx_root_sw := header[160]
-* If barrier_update accepted: update barrier public state per S11.12.1 step I
-* If barrier_update accepted and header[178] == 1:
-  * GroupState.last_pcs_refresh_ec := header[141]
-  * DeviceState[author_device_pk].last_pcs_refresh_ec := header[141]
-All updates MUST commit atomically.
-
-S11. PRS BARRIER (K_barrier + KEM-TREE COVER) (NORMATIVE)
-
-S11.1 Barrier derived bindings
-revocation_roots_hash := H_L("barrier/roots", [header[112], header[113]])
-pending_revocations :=
-  (barrier_initialized == false) OR (revocation_roots_hash != barrier_roots_hash)
-
-S11.2 Barrier tree parameters and indexing (normative)
-Fixed size:
-* N_max fixed for group lifetime, power of two, MUST NOT be extended.
-
-Heap indexing:
-nodes indexed 0..(2*N_max - 2)
-root_node := 0
-left(i)   = 2*i+1
-right(i)  = 2*i+2
-parent(i) = floor((i-1)/2) for i > 0
-leaf_base = N_max - 1
-leaf_node(l) = leaf_base + l
-
-Leaf predicates (normative):
-is_leaf(i) := (i >= leaf_base)
-is_internal(i) := (i < leaf_base)
-Shorthand: throughout this document, the condition "i is leaf" is equivalent to is_leaf(i).
-
-sibling(i) = i+1 if i odd, else i-1 for i > 0
-
-Blank marker:
-pk_i is bstr: empty bstr means blank (BOTTOM), else ML-KEM ek (1184 bytes).
-
-Path helper (normative):
-direct_path(i) :=
-  if i == root_node then [i]
-  else [i] ++ direct_path(parent(i))
-The result is the ordered node sequence from i (inclusive) to root_node (inclusive)
-following parent links.
-
-Direct path blanking on revocation:
-Revoke leaf l -> blank pk at leaf_node(l) and all nodes on direct_path(leaf_node(l)) including root_node.
-
-Resolution:
-resolution(i):
-  if pk_i != BOTTOM then {i}
-  else if i is leaf then EMPTYSET
-  else union(resolution(left(i)), resolution(right(i)))
-
-Deterministic enumeration note (normative):
-If an implementation needs to enumerate resolution(i) as an ordered list (e.g., to iterate targets),
-it MUST use increasing node-index order.
-
-S11.3 Public key hash (normative)
-H_pk(ek) := H_L("barrier/pk-hash", [ek])
-target_pk_hash := H_pk(ek)[0..15]
-
-NOTE (defense-in-depth):
-* target_pk_hash is a 16-byte hint used only for matching/filtering.
-* Security MUST NOT depend on target_pk_hash collision resistance: the full pkhash_t (32 bytes) is bound into AAD in S11.13.4,
-  and AEAD_Open MUST fail if the wrong key is used.
-
-S11.4 kem_tree_hash commitment (normative; internal pk included)
-TreeHash(i):
-  if i is leaf:
-    H_L("barrier/tree/leaf-hash", [N_max, i, pk_i])
-  else:
-    H_L("barrier/tree/node-hash", [N_max, i, pk_i, TreeHash(left(i)), TreeHash(right(i))])
-kem_tree_hash := TreeHash(root_node)
-
-S11.5 Wire structures (normative)
-BarrierUpdate (CBOR bytes in header[175]):
-BarrierUpdate = [
-  "barrier-v1",
-  barrier_version        : uint,
-  prev_barrier_version   : uint,
-  tree_size              : uint,
-  revocation_roots_hash  : bstr32,
-  kem_tree_hash_before   : bstr32,
-  kem_tree_hash_after    : bstr32,
-  cover_payload          : bstr
-]
-`BarrierUpdate` MUST be a CBOR array of length exactly 8.
-KemTreeCoverPayload (CBOR bytes inside cover_payload):
-KemTreeCoverPayload = [
-  updater_slot_index               : uint,
-  updater_slot_generation    : uint,
-  path_nodes                 : [* uint],
-  revoked_leaf_indices_hint  : null / [* uint],
-  node_ciphertexts           : [* NodeCiphertext],
-  new_public_keys            : [* [uint, bstr]]
-]
-`updater_slot_index` is the wire field name and semantically binds the updater `slot_index`.
-`KemTreeCoverPayload` MUST be a CBOR array of length exactly 6.
-NodeCiphertext:
-NodeCiphertext = [
-  source_node      : uint,
-  target_node      : uint,
-  target_pk_hash   : bstr16,
-  kem_ct           : bstr,       1088 bytes
-  wrapped_ps       : bstr        48 bytes (32 secret + 16 tag)
-]
-`NodeCiphertext` MUST be a CBOR array of length exactly 5.
-Each `new_public_keys` entry MUST be a CBOR array of length exactly 2.
-SRX privacy default:
-* revoked_leaf_indices_hint MUST be null unless deployment explicitly allows it.
-* Security MUST NOT depend on it.
-
-S11.5.1 Canonicalization and duplicate rules (normative, MUST)
-All CBOR for BarrierUpdate and KemTreeCoverPayload MUST be CBOR_det per S1.3, including deterministic-encoding verification.
-A) path_nodes: MUST pass S11.7.
-B) revoked_leaf_indices_hint (if not null): MUST be strictly increasing, no duplicates.
-C) node_ciphertexts:
-* MUST be lexicographically sorted by (source_node, target_node).
-* MUST contain no duplicate (source_node, target_node) pairs.
-* MUST contain only indices in range [0..2*N_max-2].
-* Each kem_ct MUST be 1088 bytes.
-* Each wrapped_ps MUST be 48 bytes.
-* Each target_pk_hash MUST be 16 bytes.
-D) new_public_keys:
-* MUST be strictly increasing by node_index.
-* MUST contain no duplicate node_index.
-* Each node_index MUST be in range [0..2*N_max-2].
-* Each ek MUST be exactly 1184 bytes.
-* Each node_index MUST be an internal node (node_index < leaf_base) and MUST NOT be a leaf.
-Violations:
-* server reject 960.7
-* clients reject locally
-
-S11.6 Canonical pre-update tree construction (normative)
-Source of prev_barrier_version (normative):
-* For validation of a received barrier_update: prev_barrier_version := BU.prev_barrier_version.
-* For updater construction of a to-be-published barrier_update: prev_barrier_version := local barrier_version before increment.
-
-RevokedLeafSet := ResolveRevokedOccupancies(revocation_roots_hash)
-JoinSet        := ResolveJoinOccupanciesSince(prev_barrier_version)
-Canonical-view requirement (normative):
-* When S11.6 is executed for FULL client chain-check, updater chain-check, join-finalize eligibility, or server acceptance, `RevokedLeafSet`, `JoinSet`, and the non-genesis `snapshot_base` MUST all be authenticated under the same `HistoryCommitment`.
-* If the non-genesis `snapshot_base` is the caller's locally stored current committed tree for the same `barrier_version` being validated or incremented, equality with that current-state `HistoryCommitment` is mandatory, not optional.
-Genesis convention:
-When barrier_initialized == false, prev_barrier_version MUST be treated as 0 for JoinSet enumeration, and ResolveJoinOccupanciesSince(0) MUST return the complete active leaf set for genesis.
-Leaf-allocation invariant (normative):
-* `N_max` defines concurrent slot capacity, not lifetime slot consumption.
-* cover leaf indices MAY be reused after revocation or leave, but only with a strictly increasing `slot_generation`.
-* For any selected committed `history_view_id`, the authenticated unresolved `JoinSet` returned by `ResolveJoinOccupanciesSince(prev_barrier_version)` MUST contain at most one active occupancy record per currently active leaf and therefore at most `N_max` records.
-* Servers MUST prune or compact historical join-activation state so that `ResolveJoinOccupanciesSince(...)` depends only on activations that remain active at the selected committed view.
-
-Concurrent-capacity note (informative):
-Because cover leaf indices are reusable under versioned `slot_generation`, churn alone does not exhaust address space. Deployments SHOULD monitor concurrent occupancy `(active + pending)` relative to `N_max`. When concurrent demand approaches saturation, the deployment SHOULD either reject further joins or retire/re-create the group with a larger `N_max`. This profile still does not define an in-protocol `N_max` extension mechanism; such a mechanism MAY be defined by a future profile.
-snapshot_base:
-* genesis: all-blank tree (every pk_i := empty bstr for all 2*N_max-1 nodes)
-* non-genesis: current committed pk_entries
-snapshot_pre construction (order is normative):
-1. Apply JoinSet:
-   For each JoinOccupancyRecord (device_pk, slot_index=l, ek_leaf, slot_generation):
-   * set pk at leaf_node(l) := ek_leaf
-   * for each internal node on direct_path(leaf_node(l)) excluding the leaf: set pk := empty bstr
-2. Apply RevokedLeafSet:
-   For each revoked occupancy (slot_index=r, slot_generation):
-   * blank pk at leaf_node(r)
-   * blank pk at every node on direct_path(leaf_node(r)) including root_node
-kem_tree_hash_before := TreeHash(root_node) over snapshot_pre (per S11.4)
-
-S11.7 Mandatory path_nodes validation (normative)
-Let pn := path_nodes and u := updater_slot_index.
-All checks MUST hold:
-* len(pn) >= 1
-* pn[0] == leaf_node(u)
-* pn[last] == root_node
-* For all i in [0..len(pn)-2]: parent(pn[i]) == pn[i+1]
-* All pn[i] in range [0..2*N_max-2]
-* No duplicates (strictly unique sequence)
-Failure: reject 960.7.
-
-S11.8 On-path-only cover semantics (normative, critical)
-For each step i from 0 to len(pn)-2:
-child_node  := pn[i]
-source_node := pn[i+1]
-targets     := resolution(sibling(child_node)) on snapshot_pre
-NodeCiphertext MUST wrap path_secret[source_node] to each target in targets.
-
-S11.9 new_public_keys contract (normative)
-ExpectedNodeSet := { pn[i] | i in [1..len(pn)-1] }
-Requirements (MUST):
-* new_public_keys MUST contain exactly len(pn)-1 entries.
-* For each i in [1..len(pn)-1], new_public_keys MUST contain exactly one entry [pn[i], ek].
-* new_public_keys MUST contain NO other nodes besides ExpectedNodeSet.
-* Order MUST be strictly increasing by node_index (also required by S11.5.1.D).
-Updater generation requirement (MUST):
-The updater MUST compute path_secret[n] for every n in ExpectedNodeSet and MUST populate ek for each [n, ek] as the deterministic ek_n derived from S11.10.
-Client verifiability requirement (MUST for FULL clients):
-Any client that derives path_secret[n] for some n in ExpectedNodeSet (see S11.13.5) MUST verify that the corresponding ek in new_public_keys equals ek_n derived from S11.10; mismatch -> reject barrier_update (fail closed).
-
-S11.9.1 Updater generation of path_secret, wraps, and K_barrier_new (normative)
-This subsection normatively specifies the updater procedure required for interoperability (seed -> path -> wrap). It does not change the cover semantics of S11.8.
-Definitions:
-* v_new := BarrierUpdate.barrier_version (the new barrier version to activate on acceptance)
-* RRH := revocation_roots_hash
-* u := cover_payload.updater_slot_index
-* pn := cover_payload.path_nodes
-* snapshot_pre is constructed per S11.6 using the authenticated snapshot_base (see S11.11.1)
-Requirements (MUST):
-U1) Updater leaf seed (fresh entropy):
-* The updater MUST sample a fresh 32-byte uniformly random secret ps_leaf32 from a cryptographically secure RNG.
-* Set path_secret[leaf_node(u)] := ps_leaf32.
-* ps_leaf32 MUST be freshly sampled for each barrier_update; it MUST NOT be derived solely from K_barrier or other values potentially known to revoked members.
-U2) Derive path_secret upward on pn:
-* For k = 1 .. len(pn)-1:
-  parent_node := pn[k]
-  child_node  := pn[k-1]
-  path_secret[parent_node] := HKDF-BLAKE3(
-    ikm  = path_secret[child_node],
-    salt = H_L("barrier/tree/path", [gid, parent_node]),
-    info = "city-g|barrier/tree|v1",
-    L=32
-  )
-This derivation MUST be used so that client Recover (S11.13.4) computes identical path_secret values.
-U3) Compute K_barrier_new:
-* Set K_barrier_new := HKDF-BLAKE3(
-    ikm  = path_secret[root_node],
-    salt = H_L("barrier/derive/salt", [gid, v_new, RRH]),
-    info = "city-g|barrier/key|v1",
-    L=32
-  )
-U4) Populate new_public_keys deterministically:
-* For each n in ExpectedNodeSet (which is pn[1..last]), the updater MUST derive (ek_n, dk_n) using S11.10 with path_secret[n] and MUST output ek_n in new_public_keys for node n.
-* The updater MUST retain dk_n for nodes on its SelfPath for local activation per S11.14.
-U5) Create NodeCiphertext entries:
-For each step i from 0 to len(pn)-2:
-  child_node  := pn[i]
-  source_node := pn[i+1]
-  targets := resolution(sibling(child_node)) computed over snapshot_pre
-  For each target_node t in targets:
-  * Let ek_t := snapshot_pre.pk_entries[t] (the ML-KEM ek at node t). It MUST be non-blank.
-  * Compute target_pk_hash := H_pk(ek_t)[0..15].
-  * Compute (kem_ct, ss32) := ML-KEM-768.Encaps(ek_t).
-  * Define aad := CBOR_det([gid, v_new, BU.prev_barrier_version, BU.tree_size, RRH, BU.kem_tree_hash_before, BU.kem_tree_hash_after, u, source_node, t, H_pk(ek_t)]).
-  * Define nonce := H_L("barrier/wrap/nonce", [source_node, t])[0..11].
-  * Define wrapped_ps := AEAD_Seal(
-      key32     = ss32,
-      nonce12   = nonce,
-      aad_bytes = aad,
-      pt_bytes  = path_secret[source_node]   /* 32 bytes */
-    ).
-  The NodeCiphertext entry MUST be:
-    [source_node, t, target_pk_hash, kem_ct, wrapped_ps]
-All node_ciphertexts MUST then be sorted lexicographically by (source_node, target_node) and MUST satisfy S11.5.1.C (no duplicates, correct sizes).
-
-S11.10 Deterministic internal-node key derivation (normative)
-Applicability:
-* applies ONLY to internal nodes whose ek is distributed via new_public_keys and whose dk may be stored on SelfPath.
-* Does NOT apply to barrier leaf keys generated at join (header[177]) and stored as dk_leaf.
-For node index n with context (gid, barrier_version=v, revocation_roots_hash=RRH, tree_size=N_max):
-d_n := HKDF-BLAKE3(
-  ikm  = path_secret[n],
-  salt = H_L("barrier/keygen/d_salt", [gid, v, RRH, N_max, n]),
-  info = "city-g|barrier/keygen-d|v1",
-  L=32
-)
-z_n := HKDF-BLAKE3(
-  ikm  = path_secret[n],
-  salt = H_L("barrier/keygen/z_salt", [gid, v, RRH, N_max, n]),
-  info = "city-g|barrier/keygen-z|v1",
-  L=32
-)
-(ek_n, dk_n) := ML-KEM-768.KeyGen_internal(d_n, z_n)
-Constraints (MUST):
-* new_public_keys entries MUST use ek_n produced by this derivation.
-* Implementations MUST reject any ek in new_public_keys that is not 1184 bytes.
-
-S11.11 Active-server resistance (normative; 960.9 wired)
-
-Threat-model scope clarification (normative):
-* The base profile's "active-server resistance" means fail-closed resistance to tampering, stale/mismatched helper state, and local append-only history steering within one authenticated `HistoryAuthorityScope` when the client actually performs the required S11.11.2 checks.
-* The base profile does NOT by itself define a federated/global consensus object across multiple independent history authorities. Cross-scope canonity/finality is therefore out of scope unless a deployment-specific extension defines it.
-* A client that later observes authenticated but incompatible lineage claims for the same `gid` from different `HistoryAuthorityScope`s, or incompatible append-only lineage claims within one claimed scope, MUST enter `recovery_required/history_inconsistent` and MUST NOT treat either lineage as a valid base for barrier activation or origination until reprovisioned or otherwise repaired by deployment-defined recovery.
-
-S11.11.1 Updater MUST authenticate snapshot_base (CRITICAL)
-Before constructing any barrier_update, the updater MUST:
-* already hold FULL-verified current barrier state at its locally stored current `barrier_version`, OR satisfy the join_finalize bootstrap exception below.
-* A client whose current `kem_tree_hash_after` was learned only via recover-only processing MUST first re-establish FULL verification at the current version before originating any `barrier_update` with reason 0 or 1, acting as updater generally, or originating any pcs_refresh merge. This rule does not by itself forbid a just-joined client from originating reason 2 under the join_finalize bootstrap exception below.
-* In the base profile, any client originating reason `0` or `1` MUST also obtain a fresh key `183` `FullVerificationWitness` for the exact `(gid, header[175], header[178], header[180], header[181], header[182])` tuple before publish. Absence of that witness means the client is not authoring-eligible for reasons `0` or `1` under the base profile.
-* Let H_prev := updater's locally stored kem_tree_hash_after for current barrier_version.
-* Genesis special case:
-  * if barrier_initialized == false (genesis updater), H_prev is the TreeHash(root_node) of the all-blank tree of size N_max.
-  * This value is deterministic and MUST be computed locally without fetching from the server.
-* Non-genesis:
-  * Fetch `pk_entries_prev := FetchBarrierPublicTree(H_prev)`, OR use a locally retained authenticated current public-tree snapshot for the same `(gid, barrier_version, H_prev, N_max)` if the client previously authenticated and retained that exact current committed tree while on the same current committed state.
-  * In either case, compute `TreeHash(root_node)` over `pk_entries_prev` per S11.4 and require it equals `H_prev`.
-  * If `pk_entries_prev` came from `FetchBarrierPublicTree(H_prev)`, the authenticated `HistoryCommitment` returned with `pk_entries_prev` MUST equal the authenticated current-state `HistoryCommitment` used for `ResolveJoinOccupanciesSince(...)` and `ResolveRevokedOccupancies(...)`; mismatch -> 960.9.
-  * If `pk_entries_prev` came from a locally retained authenticated current snapshot, the client MUST already hold the authenticated current-state `HistoryCommitment` for that same current committed state locally, and the A/B responses used for this origination MUST validate to that same local current-state `HistoryCommitment`; otherwise the retained-snapshot fast path is forbidden and the client MUST refetch.
-  * If the deployment exposes a merge-ticket helper/API for this current state, that helper MUST also identify the same current-state `HistoryCommitment`; clients MUST reject the helper result if the fetched current snapshot/A/B responses do not match it.
-  * The emitted MERGE anchor MUST carry that exact current-state `HistoryCommitment` as `header[180]`.
-  * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
-Join-finalize bootstrap exception (normative):
-* A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
-  * the S12.2 provisioned current barrier metadata for the current committed state,
-  * the S12.2 provisioned `join_finalize_auth` capability bound to its `(gid, leaf_id, slot_index, slot_generation)`,
-  * authenticated access to S3.3.A/B for that same current committed state, with those A/B responses validating to the provisioned `current_history_commitment`,
-  * authenticated access to `FetchBarrierPublicTree(current kem_tree_hash_after)` for that same current committed state,
-  * the authenticated accepted current `barrier_update` bytes for that same current committed state, together with authenticated history material sufficient to authenticate the predecessor snapshot named by that accepted update,
-  * and has executed the bootstrap verification context below for that accepted current committed state,
-  * successfully performed the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 for that current committed state.
-Bootstrap verification context (normative):
-* For this exception only, the `H_prev` used by the S11.11.2-style checks is NOT the joiner's locally stored current `kem_tree_hash_after`.
-* Instead, define `BU_current :=` the authenticated accepted current `barrier_update` bytes provisioned for the current committed state, and define `H_prev_bootstrap :=` the provisioned committed predecessor `kem_tree_hash_after` used as `snapshot_base` when authoring `BU_current`.
-* The joiner MUST fetch/authenticate `snapshot_current := FetchBarrierPublicTree(current kem_tree_hash_after)` and require that its tree bytes validate to the provisioned current `kem_tree_hash_after`.
-* Exact equality of `snapshot_current`'s returned `HistoryCommitment` to the provisioned `current_history_commitment` is NOT required if the returned tree bytes validate to that provisioned current `kem_tree_hash_after`; after the JOIN itself is accepted, the same current tree MAY legitimately be re-attested under a later `HistoryCommitment` from the same `HistoryAuthorityScope`.
-* The joiner MUST fetch/authenticate `snapshot_base := FetchBarrierPublicTree(H_prev_bootstrap)`.
-* `snapshot_base` MAY be a retained historical predecessor snapshot whose own `HistoryCommitment` predates the provisioned current commitment; this retained snapshot MAY come either from `FetchBarrierPublicTree(H_prev_bootstrap)` or from a bounded local retained-snapshot cache populated from a previously authenticated snapshot for the same `(gid, H_prev_bootstrap, N_max)` within the same `HistoryAuthorityScope`. For this bootstrap exception, authenticity of `snapshot_base` is established by `TreeHash(snapshot_base) == H_prev_bootstrap`, not by requiring `snapshot_base` to carry the same current `HistoryCommitment`.
-* The joiner MUST execute the S11.11.2 chain-checks against `BU_current`, the provisioned predecessor `H_prev_bootstrap`, the provisioned `current_history_commitment`, and the corresponding authenticated current-state A/B responses for that same provisioned `HistoryCommitment`.
-* A joiner MUST NOT treat its provisioned current `kem_tree_hash_after` alone as a sufficient trust root for this bootstrap check.
-* Satisfying the bullets above establishes FULL public-state verification sufficient for join_finalize eligibility even though the client has not yet derived the current `K_barrier`.
-* A pending joiner admitted under this exception MUST still NOT originate reason 0 or reason 1 while `pending_barrier_recovery == true`.
-If this check fails, the updater MUST abort barrier_update creation, MUST NOT sign/emit an anchor containing barrier_update, and MUST surface 960.9.
-
-S11.11.2 FULL clients MUST chain-check (CRITICAL)
-A FULL-verifying client processing a barrier_update MUST:
-* Let H_prev := client's locally stored kem_tree_hash_after.
-* Fetch `pk_entries_prev := FetchBarrierPublicTree(H_prev)`, OR use a locally retained authenticated current public-tree snapshot for the same `(gid, barrier_version, H_prev, N_max)` if the client already authenticated and retained that exact current committed tree for the same current committed state.
-* If `pk_entries_prev` came from `FetchBarrierPublicTree(H_prev)`, record its authenticated `HistoryCommitment := hc_tree`; if it came from a locally retained authenticated current snapshot, set `hc_tree :=` the client's locally stored authenticated current-state `HistoryCommitment`. In either case, verify `TreeHash(pk_entries_prev) == H_prev`; failure -> 960.9.
-* H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
-* If `H_prev` is the immediate predecessor committed tree of the current accepted barrier state within the same `HistoryAuthorityScope`, `FetchBarrierPublicTree(H_prev)` MUST return that predecessor tree authenticated under the current-state `HistoryCommitment` used by A/B for the current committed state.
-* The retained-snapshot fast path above always applies to the client's current committed tree.
-* Additionally, a client MAY satisfy an explicitly named historical predecessor snapshot dependency from a bounded local retained-snapshot cache instead of refetching if, and only if, that exact `(gid, H_prev, N_max)` snapshot was previously authenticated and retained locally either as:
-  * a fetched historical predecessor snapshot, or
-  * a formerly current FULL-verified committed tree within the same `HistoryAuthorityScope`.
-* Clients that implement this retained historical predecessor fast path MUST bound the local cache to `MAX_RETAINED_LOCAL_PUBLIC_TREE_SNAPSHOTS`.
-* For uncached historical predecessor snapshots, S3.3.C fetch/authentication remains required.
-* The base profile's worst-case work for one uncached historical predecessor chain-check is therefore the exact reconstruction and hashing of one `pk_entries` array of size `(2*N_max-1)`, plus the bounded A)/B) helper pages for that same result. Because `N_max <= MAX_BARRIER_N_MAX`, this path is normatively bounded even when no retained-snapshot fast path applies. Proof/subtree shortcuts are optional optimization extensions, not required for base-profile conformance.
-* Obtain `RevokedLeafSet := ResolveRevokedOccupancies(revocation_roots_hash)` and `JoinSet := ResolveJoinOccupanciesSince(BU.prev_barrier_version)` and record their authenticated view identifiers `hv_revoked` and `hv_join`.
-* Require `hv_revoked == hv_join`; mismatch or missing authenticated current-state view binding -> 960.9.
-* In this FULL-client flow, `H_prev` is the client's locally stored current committed tree, so `hc_tree` MUST equal the current-state `HistoryCommitment` authenticated by A/B; mismatch -> 960.9.
-* The weaker rule where `TreeHash(pk_entries_prev) == H_prev` is sufficient without current-state commitment equality applies only to explicitly historical predecessor snapshots such as the join-finalize bootstrap exception, where the spec calls that exception out by name.
-* Using pk_entries_prev as snapshot_base, construct snapshot_pre using S11.6 (with verifiable JoinSet and RevokedLeafSet).
-* Verify BU.kem_tree_hash_before equals hash(snapshot_pre).
-* Parse CP := KemTreeCoverPayload from BU.cover_payload bytes and enforce CBOR_det determinism per S1.3; parse or determinism failure -> 960.7.
-* Apply CP.new_public_keys to snapshot_pre to obtain snapshot_post.
-* Verify BU.kem_tree_hash_after equals hash(snapshot_post).
-Error precedence (normative):
-* Snapshot-auth failures (FetchBarrierPublicTree failure, or TreeHash(root_node) != H_prev) MUST surface 960.9 and MUST terminate processing.
-* If snapshot-auth succeeds but kem_tree_hash_before/kem_tree_hash_after chain-checks fail, the client MUST reject locally (fail closed) with 960.8.
-
-S11.11.3 Non-full clients (recover-only)
-A client that cannot fetch/verify snapshot_base MAY still attempt recovery (unique match) but MUST:
-* enforce S11.7 path_nodes validation,
-* enforce S11.5.1 canonicalization rules,
-* enforce unique-match fail-closed semantics (S11.13.1),
-* enforce deterministic storage rule (S11.13.5),
-* treat barrier_update as untrusted for public-tree correctness beyond its local recovery.
-Additional restriction (normative):
-* A recover-only client MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
-* In the base profile, acceptors independently enforce the same safety boundary for reasons `0` and `1` by requiring a valid key `183` witness under `global-history-authority-v1`; client honesty is not the only line of defense for those reasons.
-* Exception: a newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, after satisfying the S11.11.1 join_finalize bootstrap exception. Until then, and for all other reasons, the restriction above remains absolute.
-* A client originating reason 2 MUST carry the exact provisioned `header[179] join_finalize_auth` value from S12.2. Clients MUST NOT reuse a cleared or zero value.
-* Any client originating a `barrier_update`, including reason 2 under the bootstrap exception, MUST carry `header[180]` equal to the authenticated current-state `HistoryCommitment` used for the A/B/current-snapshot checks that justified origination.
-* `current_barrier_full_verified` remains a client-local safety predicate even in the base profile.
-* `header[180]` proves only that the author claims one authenticated current-state `HistoryCommitment` for its helper inputs; it does NOT, by itself, prove to the server that the author actually executed S11.11.2 correctly.
-* In the base profile, `header[181]` + `header[182]` make that helper-state binding wire-visible and server-checkable within `global-history-authority-v1`, but they still do NOT, by themselves, prove federated consensus or any stronger cross-deployment finality than S3.3.F defines.
-* The base profile intentionally does NOT remotely attest whether the author reached that attested helper/current-state decision via a locally FULL path or a locally recover-only path. The remote/server-visible guarantee in this profile is exact binding to one authenticated helper/current-state decision plus the local origination restrictions above. Deployments that require a stronger remote distinction MUST define an extension with an independently authenticated verifier for that distinction.
-Catch-up over multi-version gaps (normative):
-* If the client knows that the currently accepted head is newer than `local barrier_version + 1`, it is in catch-up mode.
-* In catch-up mode, if the currently observed accepted bundle itself carries `header[178] == 1 (pcs_refresh)` and the client lacks authenticated lineage sufficient to order the intervening accepted heads, it MUST enter `recovery_required/insufficient_authenticated_history` (or an equivalent fail-closed state). It MUST NOT best-effort apply that bundle and MUST NOT reseed `K_fs`.
-* In catch-up mode, if the currently observed accepted bundle does NOT carry `header[178] == 1`, the client MAY attempt best-effort recovery of that exact currently accepted head via the unique-match rules of S11.13 only.
-* If that best-effort recovery succeeds, the client MAY activate the recovered barrier state using S11.13.7, but MUST set `current_barrier_full_verified := false` for that post-state unless it also completed S11.11.2 for that exact post-state in the same crash-safe decision.
-* If best-effort recovery yields no unique match, or if authenticated history remains insufficient to prove ordering/completeness for the current head, the client MUST remain in `barrier_recovery_pending` or `recovery_required`, and MUST keep payload send/fetch disabled until a later authenticated sync or targeted barrier update resolves the state.
-
-S11.11.4 FULL-verification receipt
-In the base profile, key `181` is bound to `global-history-authority-v1`. Additional non-base deployments MAY define stronger receipts, but they MUST satisfy the generic requirements below.
-Generic requirements on any such extension:
-* The extension MUST define negotiation / profile identification so both client and server know that key `181` is in use.
-* The receipt carried in key `181` MUST be cryptographically bound, at minimum, to `(gid, HistoryAuthorityScope, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author leaf_id, barrier_update_reason, header[180])`.
-* The extension MUST define freshness / anti-replay for the receipt. A static reusable blob is insufficient.
-* The extension MUST define who signs or authenticates the receipt and why that authenticator can distinguish FULL verification from recover-only processing.
-* A mere restatement of helper inputs, or a client self-assertion without an authenticated verifier/challenge, MUST NOT be documented as sufficient proof of FULL verification.
-
-Concrete extensions defined by this document:
-* `local-history-authority-v1` and `global-history-authority-v1` are two concrete extensions satisfying these requirements within one deployment-local or deployment-global `HistoryAuthorityScope`, respectively.
-* Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_slot_index:uint, updater_slot_generation:uint64, signature:bstr }` encoded as deterministic CBOR. `updater_slot_index` is the wire field name and semantically binds the updater `slot_index`.
-* Under `local-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_slot_index, updater_slot_generation, header[180], header[182], header[175])`.
-* Under `local-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the server's authenticated membership view.
-* Under `local-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_slot_index`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
-* Under `local-history-authority-v1`, key `181` MUST NOT appear without a matching key `182` for the same current `HistoryCommitment`; receipt validation fails closed if the attestation or commitment differs.
-* Under `local-history-authority-v1`, any accepted `barrier_update` originated under that extension MUST carry both key `181` and key `182`; a bundle carrying key `182` without key `181`, or vice versa, is malformed for this extension.
-* Under `local-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact scope-local attested helper state. It does NOT upgrade that scope-local attestation into a globally canonical finality proof.
-* Under `global-history-authority-v1`, key `181` MUST carry the same `FullVerificationReceipt` object and deterministic CBOR form as above.
-* Under `global-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_slot_index, updater_slot_generation, header[180], header[182], header[175])`.
-* Under `global-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the deployment-global authenticated membership view being used for acceptance.
-* Under `global-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, `updater_slot_index`, and `updater_slot_generation` in key `181` match the actual author/current update being accepted.
-* Under `global-history-authority-v1`, key `181` MUST NOT appear without a matching key `182` for the same current `HistoryCommitment`; receipt validation fails closed if the attestation or commitment differs.
-* Under `global-history-authority-v1`, any accepted `barrier_update` originated under that extension MUST carry both key `181` and key `182`; a bundle carrying key `182` without key `181`, or vice versa, is malformed for this extension.
-* Under `global-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact deployment-global attested helper state. It does NOT, by itself, prove federated consensus across multiple deployments.
-
-Base-profile rule:
-* In the base profile defined by this document, key `181` MUST carry the `global-history-authority-v1` receipt whenever key `175` is present, and servers MUST reject its absence or mismatch as malformed.
-
-S11.11.4A Full-verification witness
-Key `183` is the generic wire slot for an authority-issued `FullVerificationWitness` on `barrier_update` reasons `0` and `1`.
-Generic requirements:
-* The negotiated extension MUST define the exact witness object, signature suite, and negotiation/profile identifier.
-* The witness MUST bind at minimum `(HistoryAuthorityScope, gid, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author_leaf_id, barrier_update_reason, updater_slot_index, updater_slot_generation, digest(header[175]), digest(ResolveJoinOccupanciesSince result), digest(ResolveRevokedOccupancies result), digest(deployment_profile_manifest))`.
-* The signer/authenticator for key `183` MUST be able to replay the exact `reason in {0,1}` authoring decision against the authenticated current tree and authenticated helper outputs for that same current state. A static blob or pure client self-assertion is insufficient.
-* Under `global-history-authority-v1`, `FullVerificationWitness := { scope_id:bstr32, history_authority_extension:tstr, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, author_leaf_id:bstr32, barrier_update_reason:uint, updater_slot_index:uint, updater_slot_generation:uint64, barrier_update_digest:bstr32, joins_digest:bstr32, revoked_digest:bstr32, deployment_profile_manifest_digest:bstr32, signature:bstr }` encoded as deterministic CBOR. `updater_slot_index` is the wire field name and semantically binds the updater `slot_index`.
-* Under `global-history-authority-v1`, the server/history authority MUST issue key `183` only after replaying the exact S11.11.2-style chain-check for the candidate `barrier_update` against the authenticated current public tree, the authenticated A/B helper outputs, and the authenticated deployment-profile manifest for that same current committed state.
-* Under `global-history-authority-v1`, accepted `barrier_update` bundles with reason `0` or `1` MUST carry key `183`; a missing, stale, or mismatched witness is malformed for this extension.
-* Under `global-history-authority-v1`, key `183` proves server-verifiable authoring eligibility for that exact `reason in {0,1}` bundle within one deployment-global `HistoryAuthorityScope`. It still does NOT, by itself, prove federated consensus across multiple independent deployments.
-
-S11.11.5 Global-history attestation
-Key `182` is the generic wire slot for authenticated history attestations. Two cases exist:
-
-1. `local-history-authority-v1` (defined by this document, not part of the base profile):
-* Under `local-history-authority-v1`, key `182` MUST carry the scope-local `GlobalHistoryAttestation` object defined in S3.3.E.
-* The client MUST verify key `182` under the negotiated `HistoryAuthorityDescriptor` and MUST require its `scope_id`, `history_view_id`, `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` to match the helper/current-state decision it is about to make.
-* The server MUST reject key `182` if it does not exactly match the current authenticated `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` that the server is using for acceptance.
-* When a client or server validates a `barrier_update` under `local-history-authority-v1`, key `182` MUST be accompanied by key `181`; a lone attestation is invalid.
-* When `local-history-authority-v1` is negotiated, successful A)/B)/C)/D) responses and any join/merge/provisioning current-state helper bundles used for one decision MUST all validate to the same `HistoryAuthorityDescriptor` and the same scope-local attestation lineage.
-* `local-history-authority-v1` uses `finality_kind = "local-append-only"` and therefore proves only scope-local append-only correlation. It MUST NOT be described as a globally canonical/final history proof.
-
-2. Base profile `global-history-authority-v1` or another stronger globally canonical/final-history extension:
-* The base profile requires `global-history-authority-v1`. A deployment that requires stronger globally canonical/final history than that deployment-global authority provides MUST negotiate an extension at least as strong.
-* Under `global-history-authority-v1`, key `182` MUST carry the deployment-global `GlobalHistoryAttestation` object defined in S3.3.F.
-* The client MUST verify key `182` under the negotiated `HistoryAuthorityDescriptor` and MUST require its `scope_id`, `history_view_id`, `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` to match the helper/current-state decision it is about to make.
-* The server MUST reject key `182` if it does not exactly match the current authenticated `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` that the server is using for acceptance under that deployment-global authority.
-* When a client or server validates a `barrier_update` under `global-history-authority-v1`, key `182` MUST be accompanied by key `181`; for reasons `0` and `1` in the base profile it MUST also be accompanied by key `183`. A lone attestation is invalid.
-* When `global-history-authority-v1` is negotiated, successful A)/B)/C)/D) responses and any join/merge/provisioning current-state helper bundles used for one decision MUST all validate to the same `HistoryAuthorityDescriptor` and the same deployment-global attestation lineage.
-* `global-history-authority-v1` uses `finality_kind = "global-append-only"` and therefore proves one deployment-global append-only lineage. It still does NOT, by itself, prove federated consensus across multiple independent deployments.
-* A bare client self-assertion, or a restatement of one local `HistoryCommitment`, MUST NOT be documented as sufficient global-history attestation.
-
-Base-profile rule:
-* In the base profile defined by this document, key `182` MUST carry the `global-history-authority-v1` attestation whenever key `175` is present, and servers MUST reject its absence or mismatch as malformed.
-
-S11.12 Server-side validation of barrier_update (normative; MUST)
-
-S11.12.1 Validation procedure (MUST)
-If header[175] present, the server MUST execute steps A through I in order:
-
-A) Gating
-* If header[178] is absent: reject 960.7.
-* If header[178] is present and header[178] is not in {0,1,2}: reject 960.7.
-* If header[178] == 2 and header[179] is absent or not exactly 32 bytes: reject 960.1.
-* If header[178] != 2 and header[179] is present: reject 960.7.
-* If header[180] is absent, not a bstr, or not valid CBOR_det(HistoryCommitment): reject 960.7.
-* If header[175] is present and header[181] is absent in the base profile: reject 960.7.
-* If header[175] is present and header[182] is absent in the base profile: reject 960.7.
-* If header[178] is in {0,1} and header[183] is absent in the base profile: reject 960.7.
-* If header[178] == 2 and header[183] is present: reject 960.7.
-* Later steps MUST validate keys `181` / `182` / `183` exactly per the negotiated history-authority extension and MUST fail closed on any mismatch against `(header[175], header[178], header[180], gid, current authenticated state)`.
-* If barrier_initialized == true and pending_revocations == false and header[178] == 0: reject 960.5 barrier_proactive_forbidden.
-* If barrier_initialized == true and pending_revocations == true and header[178] != 0: reject 960.13.
-* If header[178] == 1, later steps MUST enforce S10.4B.
-* If header[178] == 2, later steps MUST enforce S10.4C.
-* If merge_delegation_sig (key 135) is present: reject 960.4 barrier_merge_delegation_forbidden.
-
-B) Parse + structure
-* If length(header[175]) > max_barrier_update_bytes: reject 960.7.
-* Parse BarrierUpdate and KemTreeCoverPayload from raw bytes; reject malformed CBOR with 960.7.
-* Enforce CBOR_det determinism verification per S1.3 for both structures; non-determinism -> 960.7.
-* Require BU.tree_size == N_max.
-* Require BU.revocation_roots_hash == computed revocation_roots_hash (from S11.1).
-* Require BU.barrier_version == header[176].
-* If computed revocation_roots_hash != GroupState.barrier_roots_hash and GroupState.barrier_initialized == true:
-  * Require header[178] == 0, else reject 960.13.
-* Genesis: require BU.prev_barrier_version == 0.
-* Non-genesis: require BU.prev_barrier_version == GroupState.barrier_version.
-
-C) Canonicalization + duplicates MUST
-* Enforce S11.5.1; failure -> 960.7.
-
-D) Mandatory validation of path_nodes MUST
-* Enforce S11.7; failure -> 960.7.
-
-E) Contract for new_public_keys MUST
-* Let CP := parsed KemTreeCoverPayload.
-* Define pn := CP.path_nodes.
-* Compute ExpectedNodeSet per S11.9 from pn.
-* Require CP.new_public_keys contains exactly len(pn)-1 entries and exactly the nodes in ExpectedNodeSet; failure -> 960.7.
-
-F) Updater identity binding + updater-not-revoked
-* Define updater_slot_index := CP.updater_slot_index.
-* Define `current_slot_lease(header[108]) := (slot_index, slot_generation)` as the unique currently active or pending slot lease for the acting `leaf_id`.
-* Require `updater_slot_index == current_slot_lease(header[108]).slot_index` and `CP.updater_slot_generation == current_slot_lease(header[108]).slot_generation`; else reject 960.1.
-* Require the exact updater lease `(updater_slot_index, CP.updater_slot_generation)` NOT appear in RevokedLeafSet for this update; else reject 960.1.
-* Let JoinSet := ResolveJoinOccupanciesSince(BU.prev_barrier_version).
-* Let JoinSlotSet := the set of active `slot_index` values carried by JoinSet.
-* The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `HistoryCommitment`; inability to establish a single common commitment -> reject 960.9.
-* The server MUST require `header[180]` to equal that same authenticated current-state `HistoryCommitment`; mismatch -> reject 960.9.
-* These checks establish helper-state coherence only. They MUST NOT be documented or relied upon as proof that the client performed FULL verification, unless a deployment-defined extension adds such a proof.
-* If header[178] == 1:
-  * Require updater_slot_index NOT IN JoinSlotSet, else reject 960.5.
-  * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
-* If header[178] == 2:
-  * Require updater_slot_index IN JoinLeafSet, else reject 960.5.
-  * Require `header[179]` to match one server-issued pending `join_finalize_auth` capability bound to the acting `(gid, leaf_id, updater_slot_index, CP.updater_slot_generation)`; otherwise reject 960.1.
-  * join_finalize MUST NOT execute S10.4B PCS rate-limit checks.
-
-G) Hash-chain checks MUST
-* Construct snapshot_base:
-  * genesis: all-blank tree of size N_max
-  * non-genesis: server's stored current pk_entries for kem_tree_hash_after
-* Build snapshot_pre using S11.6 and compute expected_before.
-* Require expected_before == BU.kem_tree_hash_before; else 960.8.
-* Apply CP.new_public_keys to snapshot_pre to obtain snapshot_post.
-* Compute expected_after := TreeHash(root_node) over snapshot_post.
-* Require expected_after == BU.kem_tree_hash_after; else 960.8.
-
-H) ExpectedPairs completeness/minimality MUST
-* Using snapshot_pre and S11.8, compute ExpectedPairs:
-  For each i = 0..len(pn)-2:
-    child=pn[i], source=pn[i+1], targets = resolution(sibling(child))
-    include (source, target) for each target in targets.
-* Verify node_ciphertexts correspond exactly to ExpectedPairs (no missing pairs, no extra pairs).
-* Verify each NodeCiphertext.target_pk_hash equals H_pk(pk_target)[0..15] for the pk_target in snapshot_pre.
-* Failure -> reject 960.3.
-
-I) State update on acceptance
-Upon acceptance of this merge, server MUST set:
-* barrier_initialized := true
-* barrier_version := BU.barrier_version
-* barrier_roots_hash := BU.revocation_roots_hash
-* kem_tree_hash_after := BU.kem_tree_hash_after
-and MUST persist the corresponding pk_entries snapshot_post as the current public tree.
-If header[178] == 2, the matched pending `join_finalize_auth` capability for that leaf MUST be consumed/cleared on acceptance.
-If any leaves are revoked by the accepted delta, any pending `join_finalize_auth` capability for those revoked leaves MUST be cleared.
-
-NOTE (security model): server-side checks alone do not protect against an actively malicious server. Active-server injection protections are enforced by updater chain-check (S11.11.1), FULL client chain-check (S11.11.2), and FULL client ek_n verification (S11.13.6).
-
-S11.13 Client recover (non-updater) (normative)
-Definitions (normative)
-* BU := the parsed BarrierUpdate from header[175]
-* CP := the parsed KemTreeCoverPayload from BU.cover_payload
-let self_slot_lease := the locally provisioned or persisted `(slot_index, slot_generation)` for `self_device_pk`
-SelfPath := direct_path(leaf_node(self_slot_lease.slot_index))     /* node indices */
-own_barrier_update := (header[108] == self_device_pk)
-  AND (CP.updater_slot_index == self_slot_lease.slot_index)
-  AND (CP.updater_slot_generation == self_slot_lease.slot_generation)
-
-Updater exclusion (normative, MUST):
-If own_barrier_update == true, the client MUST NOT run Recover for that barrier_update. The updater activates via S11.14 (persisted pending state). Attempting Recover for one's own update would produce a spurious 960.6 (no NodeCiphertext targets the updater's own leaf by design).
-
-S11.13.1 Unique match (fail-closed)
-Client-local prerequisite (normative, MUST):
-Allowing barrier recovery requires that, for each stored dk_t (for a node t on SelfPath), the client also has pkhash_t := H_pk(ek_t) (bstr32) where ek_t is the corresponding public key paired with dk_t.
-
-A NodeCiphertext matches a client iff:
-* client possesses dk_t for target_node=t on its SelfPath,
-* client possesses pkhash_t for the same target_node=t,
-* target_pk_hash == pkhash_t[0..15],
-* Decaps(dk_t, kem_ct) yields ss and AEAD_Open succeeds with normative AAD/nonce (see S11.13.4), where the AAD uses pkhash_t.
-
-Rules:
-* |Matches| == 0 -> 960.6 barrier_recover_no_match (client-local; NOT a global reject)
-* |Matches| > 1 -> 960.2 barrier_recover_multi_match (reject barrier_update; fail closed)
-* |Matches| == 1 -> proceed
-
-S11.13.2 On-path-only enforcement (normative)
-For the unique match (s=source_node, t=target_node), client MUST verify:
-* t IN SelfPath AND s IN SelfPath
-Else reject barrier_update with 960.7.
-
-S11.13.3 Mandatory validation (MUST)
-Clients MUST enforce:
-* S11.5.1 canonicalization rules (including CBOR_det determinism verification where applicable)
-* S11.7 path_nodes validation
-* Define barrier_update_bytes := raw bytes of header[175].
-* length(barrier_update_bytes) <= max_barrier_update_bytes
-* Require BU.tree_size == N_max.
-* Require BU.barrier_version == header[176].
-* Require BU.revocation_roots_hash == revocation_roots_hash (computed per S11.1).
-* Local version adjacency:
-  * allow genesis-local case only if `(local barrier_initialized == false AND BU.prev_barrier_version == 0 AND BU.barrier_version == 0)`,
-  * otherwise require `local barrier_initialized == true`, `BU.prev_barrier_version == local barrier_version`, and `BU.barrier_version == local barrier_version + 1`.
-* Local barrier_update_reason mirror:
-  * if local `barrier_roots_hash != BU.revocation_roots_hash`, then `header[178] MUST equal 0`,
-  * else let `JoinSet_local := ResolveJoinOccupanciesSince(BU.prev_barrier_version)` and `JoinSlotSet_local := { slot_index | record in JoinSet_local }`,
-  * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_slot_index IN JoinSlotSet_local`, then `header[178] MUST equal 2`,
-  * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_slot_index NOT IN JoinSlotSet_local`, then `header[178] MUST equal 1`,
-  * except for the genesis-local case above, where `header[178] MUST equal 0`.
-* Clients MUST reject stale, duplicate, or gap barrier updates that do not satisfy the local version-adjacency rules above.
-* If a client is operating in a catch-up path outside this exact-adjacency recover rule because it has already learned that the current accepted head is newer than `local barrier_version + 1`, it MUST NOT best-effort apply or reseed `K_fs` across an unauthenticated `pcs_refresh` boundary. At minimum, if the currently observed accepted bundle itself carries `header[178] == 1`, the client MUST enter `recovery_required` or an equivalent non-active buffered state unless authenticated history proves the ordering and completeness of the intervening accepted lineage.
-Failure -> reject barrier_update locally with 960.7.
-
-S11.13.4 Recover derivation (normative)
-Given the unique match (s, t) and the accepted BarrierUpdate with barrier_version=v_new:
-ss := ML-KEM-768.Decaps(dk_t, kem_ct)
-aad := CBOR_det([gid, v_new, BU.prev_barrier_version, BU.tree_size, revocation_roots_hash, BU.kem_tree_hash_before, BU.kem_tree_hash_after, CP.updater_slot_index, s, t, pkhash_t])
-nonce := H_L("barrier/wrap/nonce", [s, t])[0..11]
-pt := AEAD_Open(key=ss, nonce=nonce, aad=aad, ct=wrapped_ps)
-If AEAD_Open fails -> reject with 960.7.
-If length(pt) != 32 -> reject with 960.7.
-path_secret[s] := pt
-Find s in CP.path_nodes at index j; if absent -> 960.7.
-Derive upward along pn to root:
-Let pn := CP.path_nodes.
-For k = j+1 .. last:
-  parent_node := pn[k]
-  child_node  := pn[k-1]
-  path_secret[parent_node] := HKDF-BLAKE3(
-    ikm  = path_secret[child_node],
-    salt = H_L("barrier/tree/path", [gid, parent_node]),
-    info = "city-g|barrier/tree|v1",
-    L=32
-  )
-Compute K_barrier_new:
-K_barrier_new := HKDF-BLAKE3(
-  ikm  = path_secret[root_node],
-  salt = H_L("barrier/derive/salt", [gid, v_new, revocation_roots_hash]),
-  info = "city-g|barrier/key|v1",
-  L=32
-)
-
-S11.13.5 Deterministic dk_n storage rule (normative)
-Let pn := CP.path_nodes and let s := source_node for the unique match.
-Let j be the unique index such that pn[j] == s (must exist, else reject 960.7).
-SuffixNodes := { pn[k] | k in [j..len(pn)-1] }
-Client MUST:
-* Maintain dk_leaf (join-generated) for n == leaf_node(self_slot_lease.slot_index); it is NOT derived from path_secret.
-* Maintain pkhash_leaf := H_pk(ek_leaf) for the same leaf (bstr32).
-* For each node n in (SuffixNodes INTERSECT SelfPath) such that n != leaf_node(self_slot_lease.slot_index):
-  * derive (d_n, z_n) and (ek_n, dk_n) using S11.10 with path_secret[n]
-  * store dk_n (overwriting any prior dk_n for that node)
-  * store pkhash_n := H_pk(ek_n) alongside dk_n (overwriting any prior pkhash_n for that node)
-* MUST NOT store derived keys for nodes outside SelfPath.
-
-S11.13.6 Client verification of new_public_keys where derivable (normative; fail closed)
-Let pn := CP.path_nodes.
-Let ExpectedNodeSet := { pn[i] | i in [1..len(pn)-1] }
-For each node n in (SuffixNodes INTERSECT ExpectedNodeSet):
-* Client MUST locate the corresponding [n, ek_pub] entry in CP.new_public_keys (it exists by S11.9).
-* Client MUST compute ek_n from S11.10 and MUST verify ek_pub == ek_n.
-* If any mismatch occurs, client MUST reject barrier_update locally (fail closed) with 960.7.
-
-S11.13.7 State update (normative)
-Before committing the recovered post-state, the client MUST replay every server-side S10 invariant that is both client-visible and checkable from authenticated headers plus locally persisted state. At minimum:
-* `header[143]` MUST equal the locally persisted `fs_epoch_base_ts` for the current session state.
-* `header[153]` MUST equal `H_L("fs/dev/chain/v2", [header[108], header[141], header[152], header[176], barrier_update_digest])`.
-* If `header[108]` equals the local author's device key, then `header[152]` MUST equal the locally persisted `fs_dev_prev_commit` and `header[141]` MUST be >= the locally persisted local-device `fs_ec`.
-* If the client cannot perform these checks from authenticated headers plus locally persisted state, it MUST NOT commit the recovered post-state and MUST enter `barrier_recovery_pending` or `recovery_required`.
-* This replay subset is intentionally limited to invariants derivable from authenticated headers plus locally persisted state. Remote membership/governance/rate-limit checks that are not client-visible remain server-side acceptance responsibilities in this base profile.
-On successful processing:
-* barrier_initialized := true
-* barrier_version     := v_new
-* barrier_roots_hash := BU.revocation_roots_hash
-* K_barrier           := K_barrier_new
-* kem_tree_hash_after := BU.kem_tree_hash_after
-* pending_barrier_recovery := false
-* `current_barrier_full_verified := false`, unless the same logical activation path already completed S11.11.2 FULL verification for this exact stored post-state as part of the same crash-safe decision.
-* If header[178] == 1 (pcs_refresh), apply FS reseed per S6.6 using K_barrier_new at the same atomic activation point.
-* If header[178] == 2 (join_finalize), `K_fs` MUST remain unchanged by this activation.
-Atomicity requirement (normative, MUST):
-* The entire successful activation above, together with all `dk_n/pkhash_n` updates from S11.13.5 and any PCS reseed of `K_fs`, MUST commit crash-safely as one logical transaction.
-* After restart, the client MUST observe either the complete pre-activation state or the complete post-activation state, never a mixture.
-
-S11.14 Updater local state management (normative; crash-safe; REQUIRED)
-This section specifies how the updater activates its own barrier_update locally. The updater MUST NOT use the Recover path (S11.13) for its own updates.
-
-S11.14.1 Persist-before-publish (MUST)
-Before publishing/submitting any merge carrying header[175], the updater MUST persist durably (crash-safe):
-* pending_barrier_version = v_new
-* pending_we_epoch_id = the to-be-published `bundle.we_epoch_id`
-* pending_fs_ec = header[141]
-* pending_revocation_roots_hash = revocation_roots_hash
-* pending_kem_tree_hash_after = kem_tree_hash_after /* BU.kem_tree_hash_after for the to-be-published barrier_update */
-* pending_K_barrier_new = K_barrier_new
-* pending_barrier_update_reason = header[178]
-* pending_K_fs_after_pcs = (if header[178] == 1 then
-    HKDF-BLAKE3(
-      ikm  = (K_fs || K_barrier_new),
-      salt = H_L("fs/pcs/salt", [weid, header[141], v_new]),
-      info = "city-g|fs/pcs|v1",
-      L=32
-    )
-  else null)
-* pending_barrier_update_digest = H_L("barrier/update/digest", [raw header[175] bytes to publish])
-* pending_activation_source = locally persisted pre-publish source state consisting at minimum of:
-  * source_barrier_version
-  * source_barrier_roots_hash
-  * source_kem_tree_hash_after
-  * source_current_history_commitment when the pre-publish source state was authenticated under a `HistoryAuthorityExtension`
-  * source_current_history_authority_extension when the pre-publish source state was authenticated under a `HistoryAuthorityExtension`
-  * source_current_global_history_attestation when the pre-publish source state was authenticated under a `HistoryAuthorityExtension`
-  * source_fs_ec
-  * source_fs_dev_prev_commit
-* pending_on_path_key_material = { for each node n in ExpectedNodeSet:
-    [ n:uint, dk_n:bstr(2400 bytes), pkhash_n:bstr32 ]
-  }
-Where:
-* ExpectedNodeSet is computed from the to-be-published CP.path_nodes per S11.9.
-* pkhash_n MUST equal H_pk(ek_n), where ek_n is derived from S11.10 for node n.
-* Nodes in pending_on_path_key_material MUST be exactly ExpectedNodeSet, sorted strictly increasing by n, and contain no duplicates.
-* Define `pending_merge_locator := [pending_barrier_version, pending_barrier_update_digest, pending_we_epoch_id]`.
-Persistence ordering:
-* MUST complete persistence BEFORE making the merge eligible for acceptance.
-* If persistence fails, updater MUST abort emission of the barrier_update.
-
-S11.14.2 Acceptance correlation + activation (MUST)
-Upon observing acceptance of the merge carrying this barrier_update, or after `LookupMergeAcceptance(pending_merge_locator)` returns `status == accepted` under an authenticated `HistoryCommitment`:
-* The observed acceptance / lookup result used for activation MUST come from the same `HistoryAuthorityScope` as the authenticated helper state used when the pending merge was constructed. If that cannot be established, the updater MUST enter `recovery_required/history_inconsistent` and MUST NOT activate.
-* Compute accepted_digest := H_L("barrier/update/digest", [accepted raw header[175] bytes]).
-* Require accepted_digest == pending_barrier_update_digest.
-* Require the observed accepted `barrier_version` to equal `pending_barrier_version`.
-* Require the observed accepted `header[141]` to equal `pending_fs_ec`.
-* Require the observed accepted `header[178]` to equal `pending_barrier_update_reason`.
-* Require the client's current locally persisted pre-activation source state to equal `pending_activation_source`; if not, the updater MUST enter `recovery_required/history_inconsistent` and MUST NOT activate.
-* If the activating bundle is authored by the same local device, matches the locally persisted pending merge, and carries authority-bound headers (`header[181]` / `header[182]`), the client MUST validate those headers against the persisted `pending_activation_source` from the original pre-publish decision. The client MUST NOT silently reseed this validation from a later `merge_ticket_refresh` or other post-acceptance current-state artifact, because those artifacts may already describe the accepted post-state rather than the original pre-publish state bound into the bundle.
-* Before local activation, clients MUST replay the client-visible subset of S10 using locally persisted state and the authenticated helper/provisioning values carried for that current state. At minimum this subset MUST reject:
-  * unsupported/mismatched `fs_policy_version` (944.6),
-  * mismatched `fs_epoch_base_ts` (945.0),
-  * invalid `fs_dev_chain_bind` / local device continuity (947.2 / 947.0),
-  * group forward jumps beyond the carried `last_accepted_ec + D_anchor_max` window (947.6),
-  * new-device forward jumps beyond the carried `last_accepted_ec + D_first_device` window when `header[152] == ZERO32` (947.5),
-  * local-device forward jumps beyond the persisted `stored_last_ec + D_device_max` window when the activating bundle is authored by the same local device (947.4).
-* The helper/provisioning artifact used for these local checks MUST therefore carry the current FLG window parameters `(H, checkpoint_interval, S_anchor, S_first, S_device)` or an equivalent authenticated derivation of `(D_anchor_max, D_first_device, D_device_max)`, together with the current group `last_accepted_ec`.
-* This client-side replay subset does not replace broader server-side S10 authorization, governance, or rate-limit checks that are not derivable from authenticated headers plus locally persisted state.
-* If match: activate -- update local state:
-  * barrier_initialized := true
-  * barrier_version := pending_barrier_version
-  * barrier_roots_hash := pending_revocation_roots_hash
-  * K_barrier := pending_K_barrier_new
-  * kem_tree_hash_after := pending_kem_tree_hash_after
-  * pending_barrier_recovery := false
-  * If pending_barrier_update_reason == 1: K_fs := pending_K_fs_after_pcs
-  * If pending_barrier_update_reason IN {0,2}: `K_fs` MUST remain unchanged by this activation
-  * for each entry [n, dk_n, pkhash_n] in pending_on_path_key_material:
-    * if n IN SelfPath (updater's SelfPath), store (dk_n, pkhash_n) as the atomic pair for node n
-    * if n NOT IN SelfPath, ignore (defense-in-depth)
-* If mismatch: updater MUST NOT advance barrier_version locally and MUST surface 960.9 for diagnostics.
-  Note: this mismatch diagnostic is conservative; it can indicate active-server tampering OR a race/loss scenario where a different update path won before local activation correlation succeeded.
-
-S11.14.3 Pending state cleanup (MUST)
-* After successful acceptance correlation and activation, updater MUST delete/clear all pending_* state.
-* The updater MUST NOT infer "lost race" solely from `current barrier_version > pending_barrier_version`.
-* The updater MUST determine non-acceptance status using `LookupMergeAcceptance(pending_merge_locator)`.
-* The updater MUST discard pending_* state only when `LookupMergeAcceptance(pending_merge_locator)` authenticatedly returns either:
-  * `status == superseded`, meaning the specific pending merge was not accepted and has been superseded by a different committed update, or
-  * `status == final_rejected`, meaning authenticated finality guarantees the specific pending merge can no longer become accepted.
-* If `LookupMergeAcceptance(pending_merge_locator)` returns `status == pending`, or authenticated history is otherwise insufficient to establish acceptance or non-acceptance, the updater MUST retain pending_* state or enter an explicit recovery-required state; it MUST NOT silently discard pending_* state and continue as though the pending merge had lost.
-
-S11.14.4 Crash restart (normative)
-On restart, the updater MUST check for pending_* state:
-* The updater MUST determine acceptance status by consulting `LookupMergeAcceptance(pending_merge_locator)`, not merely by comparing against the current `GroupState.barrier_version`.
-* If `LookupMergeAcceptance(pending_merge_locator)` returns `status == accepted`, the updater MUST obtain the accepted fields required by S11.14.2 and apply acceptance correlation, even if the current group `barrier_version` is already greater than `pending_barrier_version`.
-* If `LookupMergeAcceptance(pending_merge_locator)` returns `status == superseded` or `status == final_rejected`, the updater MUST discard pending_* state.
-* If `LookupMergeAcceptance(pending_merge_locator)` returns `status == pending`, or authenticated history is still insufficient to establish acceptance or non-acceptance under the rule above, the updater MUST retain pending_* state or transition to an explicit recovery-required state until authenticated history resolves acceptance or non-acceptance.
-
-S12. JOIN PROVISIONING REQUIREMENTS (NORMATIVE)
-
-S12.0 Genesis provisioning artifact (normative)
-Before the first accepted MERGE when `barrier_initialized == false`, the deployment MUST establish the initial active leaf set as a genesis provisioning artifact. This artifact is the source consumed by `ResolveJoinOccupanciesSince(0)` in S11.6.
-Requirements:
-* it MUST contain the complete initial active set,
-* each entry MUST bind exactly one active device to exactly one `(slot_index, slot_generation)` occupancy and one `ek_leaf`,
-* entries MUST be strictly sorted by increasing `slot_index`,
-* `slot_index` values MUST be unique and `< N_max`,
-* `ek_leaf` MUST be exactly 1184 bytes for every entry,
-* the artifact MUST be authenticated and persisted before genesis MERGE acceptance.
-If the genesis provisioning artifact is absent, incomplete, or inconsistent, the server MUST reject genesis MERGE processing and MUST NOT claim this profile is fully implemented.
-
-S12.1 Join anchor requirement
-Joiner generates (ek_leaf, dk_leaf) := ML-KEM-768.KeyGen() and publishes ek_leaf in header[177].
-Joiner MUST store dk_leaf locally and MUST also store pkhash_leaf := H_pk(ek_leaf) locally.
-The initial JOIN anchor published by the joiner MUST carry `header[97]` in the S3.4 `author-local form`, not the `barrier-recovery form`; no knowledge of the current `K_barrier` is required or permitted for this initial JOIN publication.
-
-S12.2 Provisioning to joiner
-Join provisioning MUST deliver to the joiner as a signed and confidential provisioning artifact bound, at minimum, to `(gid, profile_version, current_history_view_id, current_history_commitment, current barrier_version, current kem_tree_hash_after, slot_index, slot_generation, N_max, max_barrier_update_bytes)`, and carrying a unique nonce, issuance time, and expiry. Joiners MUST reject artifacts that are stale, expired, replayed for the same join attempt, or not bound to the current `(gid, profile_version)`.
-The provisioning artifact, the provisioned `current_history_commitment`, the provisioned accepted current `barrier_update`, and any subsequent authenticated S3.3 A/B/C lookups used to justify `join_finalize` bootstrap MUST all come from one common `HistoryAuthorityScope`; otherwise the joiner MUST fail closed and remain pending.
-Base-profile wire/API requirement (normative):
-* `JoinTicketResponse` MUST carry a non-empty `provisioning_artifact`.
-* `provisioning_artifact` MUST be signed under the negotiated `history_authority_extension`.
-* That signed artifact MUST bind exactly the client-visible provisioning fields consumed for bootstrap and local activation checks, including at minimum:
-  * `history_authority_extension`
-  * `history_authority_descriptor`
-  * `current_global_history_attestation`
-  * `current_join_occupancies_completeness_attestation`
-  * `current_revoked_occupancies_completeness_attestation`
-  * `current_history_view_id`
-  * `current_history_commitment`
-  * `current_barrier_update`
-  * `current_predecessor_kem_tree_hash_after`
-  * `current_join_occupancies`
-  * `current_revoked_occupancies`
-  * `join_finalize_auth`
-  * `provisioning_nonce`
-  * `provisioning_issued_at_ms`
-  * `provisioning_expires_at_ms`
-  * authenticated FLG window parameters and current `last_accepted_ec`
-* Joiners MUST verify `provisioning_artifact` before consuming any provisioned current-state field.
-Base-profile wire/API requirement for merge/current-state helper tickets (normative):
-* Successful `MergeTicketResponse` and `expel_member_ticket` responses that carry authenticated current-state/helper objects MUST carry a non-empty `merge_ticket_artifact`.
-* `merge_ticket_artifact` MUST be signed under the negotiated `history_authority_extension`.
-* That signed artifact MUST bind exactly the client-visible current-state/helper fields consumed before originating reason 0/1 updates or local activation checks, including at minimum:
-  * `history_authority_extension`
-  * `history_authority_descriptor`
-  * `current_global_history_attestation`
-  * `current_history_view_id`
-  * `current_history_commitment`
-  * `barrier_version`
-  * `slot_index`
-  * `slot_generation`
-  * `n_max`
-  * `max_barrier_update_bytes`
-  * `kem_tree_hash_after`
-  * authenticated FLG window parameters and current `last_accepted_ec`
-  * `we_epoch_id`
-  * `pivot_parity_cbor`
-  * `witness_cbor`
-  * `srx_cbor`
-  * the accepted current-state roots / suite identifiers consumed by local merge or expel authoring checks
-* Clients MUST verify `merge_ticket_artifact` before consuming any delivered current-state/helper field from a merge/expel ticket.
-Base-profile wire/API requirement for join/merge/helper/lookup profile/config delivery (normative):
-* Successful `JoinTicketResponse`, `MergeTicketResponse`, `expel_member_ticket`, `ResolveRevokedOccupancies`, `ResolveJoinOccupanciesSince`, `FetchBarrierPublicTree`, and `LookupMergeAcceptance` responses that carry client-consumed profile/config fields MUST carry a non-empty `deployment_profile_manifest`.
-* `deployment_profile_manifest` MUST be signed under the negotiated `history_authority_extension`.
-* That signed manifest MUST bind at minimum:
-  * `history_authority_extension`
-  * `(gid, profile_version)`
-  * `n_max`
-  * `max_barrier_update_bytes`
-  * authenticated FLG window parameters `(H, checkpoint_interval, S_anchor, S_first, S_device)`
-* For paginated helper responses, every page for one logical helper result MUST carry the same authenticated `deployment_profile_manifest`; clients MUST fail closed on mismatch.
-* Clients MUST verify `deployment_profile_manifest` before consuming those delivered profile/config fields.
-Join provisioning MUST deliver to the joiner:
-Barrier required fields:
-* current barrier_initialized (bool) -- for joins into an already-existing group under this profile, this MUST be true
-* slot_index (uint)
-* slot_generation (uint64)
-* current barrier_version (uint)
-* current_history_view_id (bstr32)
-* current_history_commitment (`HistoryCommitment`)
-* provisioning_nonce (bstr32)
-* provisioning_issued_at_ms (uint64)
-* provisioning_expires_at_ms (uint64; MUST be >= provisioning_issued_at_ms)
-* current predecessor committed `kem_tree_hash_after` (bstr32) for the accepted current `barrier_update` used by `join_finalize` bootstrap; this MAY be zero only when no accepted current `barrier_update` exists yet for the provisioned state
-* authenticated current `JoinSet` / `ResolveJoinOccupanciesSince(BU_current.prev_barrier_version)` records for the provisioned current committed state, or an equivalent authenticated artifact from which the same set can be deterministically recovered
-* authenticated current `RevokedLeafSet` / `ResolveRevokedOccupancies(BU_current.revocation_roots_hash)` records for the provisioned current committed state, or an equivalent authenticated artifact from which the same set can be deterministically recovered
-* `join_finalize_auth` (bstr32), an opaque server-issued capability bound at minimum to `(gid, leaf_id, slot_index, slot_generation)` and required as `header[179]` when the joiner later originates reason 2
-* current barrier_roots_hash (bstr32), OR authenticated current revocation-root material sufficient to deterministically compute the same barrier_roots_hash before any local S11.13.3 checks are applied
-* current kem_tree_hash_after (bstr32)
-* N_max (uint)
-* max_barrier_update_bytes (uint)
-* pcs_refresh_min_delta_device_ec (uint; >=1)
-* pcs_refresh_min_delta_group_ec (uint; >=1)
-* pcs_refresh_slot_width_ec (uint; >=1)
-* authenticated accepted current `barrier_update` bytes for the current committed state, together with authenticated history material sufficient to authenticate the predecessor committed snapshot `H_prev_bootstrap` used by that update and to execute the S11.11.2 chain-checks for `join_finalize` bootstrap eligibility against that current `history_view_id`; this MUST include the authenticated current-state `JoinSet` and `RevokedLeafSet` needed for that check unless the deployment provides an equivalent authenticated lookup keyed to the provisioned `current_history_commitment`
-* clients MUST reject a join provisioning artifact whose `provisioning_issued_at_ms` is implausibly far in the future, whose `provisioning_expires_at_ms` is in the authenticated past beyond bounded clock skew, or whose `provisioning_nonce` is absent or malformed
-FS-hybrid required fields:
-* initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to deterministically compute the same initial `K_fs` and `fs_ec`
-* Joiners MUST NOT locally sample an unrelated fresh `K_fs` for an already-existing group, because PCS reseed in S6.6 requires all honest clients to evolve from the same pre-refresh `K_fs`.
-* group fs_epoch_base_ts (T_base; uint64)
-* fs_policy_version (uint)
-* authenticated FLG policy window parameters `(H, checkpoint_interval, S_anchor, S_first, S_device)` or equivalent authenticated derived caps `(D_anchor_max, D_first_device, D_device_max)`
-* authenticated current group `last_accepted_ec`
-* any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
-Eligibility note (normative):
-* A just-provisioned joiner into an already-existing group MUST be able to invoke S3.3.A/B and `FetchBarrierPublicTree(current kem_tree_hash_after)` for the provisioned current committed barrier state immediately after provisioning.
-* The authenticated current-state A/B responses used for `join_finalize` bootstrap MUST validate to the provisioned `current_history_commitment`.
-* `FetchBarrierPublicTree(current kem_tree_hash_after)` for that provisioned current state MUST at minimum return tree bytes that validate to the provisioned current `kem_tree_hash_after`; it MAY return a later same-scope `HistoryCommitment` if the current tree bytes are unchanged.
-* The joiner MUST also be able to invoke `FetchBarrierPublicTree(H_prev_bootstrap)` for the provisioned accepted current `barrier_update`; that predecessor committed snapshot MAY carry an older retained `HistoryCommitment`, but MUST authenticate exactly to the provisioned predecessor committed `kem_tree_hash_after`.
-* For reason 2 (`join_finalize`) eligibility only, a joiner that has the S12.2 current barrier metadata and successfully performs the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 against that provisioned current state is deemed FULL-verifying for current public state, even before it has derived the current `K_barrier`.
-* This deeming rule is still a client-local predicate in the base profile. The server validates `join_finalize_auth` and helper-state coherence, not a cryptographic proof that the joiner performed those checks.
-
-S12.3 Pending barrier recovery (normative)
-Because the server is untrusted and blind to `K_barrier`, it CANNOT provision `K_barrier` directly to the joiner. Joiners MUST begin in a `pending_barrier_recovery` state.
-While in `pending_barrier_recovery`:
-* The joiner CANNOT encrypt outgoing payload messages (`SendParams` MUST be suspended or buffered).
-* The joiner CANNOT decrypt incoming payload messages encoded with `K_barrier` (or subsequent epochs).
-* The joiner MUST process any observed `barrier_update` messages (S11.13.4).
-* The joiner MUST NOT assume its own initial JOIN-anchor `header[97]` is peer-recoverable from wire; peer-recoverable HP transport begins only once a `barrier-recovery form` envelope is published on an accepted MERGE.
-* The joiner MUST NOT originate reason 0 (`revocation_or_bootstrap`) or reason 1 (`pcs_refresh`) while `pending_barrier_recovery == true`.
-* Exception: the joiner MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if:
-  * it satisfies the S11.11.1 join_finalize bootstrap exception,
-  * its own leaf is still present in the unresolved JoinSet for the current `barrier_version`,
-  * and revocations are not pending for the update.
-* A pending joiner that originates reason 2 MUST activate via S11.14, not via S11.13, for that self-authored update.
-When the joiner successfully processes a `barrier_update` via S11.13 and derives `K_barrier_new` from the unique matching NodeCiphertext for its own path, it clears `pending_barrier_recovery` and may proceed with normal payload send/decrypt operation.
-If the joiner successfully activates its own accepted reason 2 update via S11.14, it likewise clears `pending_barrier_recovery` and may proceed with normal payload send/decrypt operation.
-If that current barrier state was learned only via recover-only processing (S11.11.3), the client MUST still NOT originate reason 0 or reason 1, MUST NOT act as updater generally, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
-Race/retry rule (normative):
-* If a pending joiner's reason 2 attempt is not accepted, loses a race, or remains unresolved, the joiner MUST remain in `pending_barrier_recovery` and MUST continue processing observed `barrier_update` messages.
-* Once authenticated history establishes that the specific reason 2 merge was not accepted, the joiner MAY originate a new reason 2 attempt against the then-current committed version only if it still satisfies the join_finalize eligibility predicate above; otherwise it MUST await and process another accepted `barrier_update`.
-
-S13. ERROR CODES (NORMATIVE)
-
-Encoding note (normative):
-* Dotted forms (e.g., `960.10`) are the canonical documentation form.
-* In machine fields that carry numeric freeze codes, implementations MUST encode the same code as decimal digits without a dot (e.g., `96010`).
-
-Barrier codes
-960.1  barrier_updater_invalid
-Scope: Server + client
-960.2  barrier_recover_multi_match
-Scope: Client
-960.3  barrier_expectedpairs_failure
-Scope: Server
-960.4  barrier_merge_delegation_forbidden
-Scope: Server
-960.5  barrier_proactive_forbidden
-Scope: Server
-960.6  barrier_recover_no_match
-Scope: CLIENT-LOCAL only; not a global rejection reason
-960.7  barrier_update_malformed
-Scope: Server + client
-960.8  barrier_tree_hash_chain_failure
-Scope: Server + FULL client
-960.9  barrier_tree_snapshot_auth_failure
-Scope: CLIENT-LOCAL / UPDATER-LOCAL; MUST surface on snapshot/auth/correlation failures
-960.10 barrier_genesis_required
-Scope: Server
-960.11 barrier_update_required_on_revocation_change
-Scope: Server (acceptance gating)
-960.12 pcs_refresh_rate_limited
-Scope: Server (acceptance gating)
-960.13 barrier_non_revocation_reason_forbidden_while_pending_revocations
-Scope: Server (acceptance gating)
-
-FS/acceptance codes
-907.1  malformed CBOR / unknown key / duplicate key
-945.0  fs_base_mismatch
-947.0  fs_dev_chain_break
-947.2  fs_dev_chain_bind_mismatch
-947.4  fs_forward_jump_device
-947.5  fs_forward_jump_first
-947.6  fs_forward_jump_group
-948.0  fs_policy_window_incompatible
-944.6  fs_policy_version_unsupported
-
-S14. KAT REQUIREMENTS (NORMATIVE)
-
-S14.1 KAT: new_public_keys exact ExpectedNodeSet + ordering (MUST)
-A reference test vector set MUST include at least one barrier_update where:
-* pn has length >= 4,
-* new_public_keys contains exactly len(pn)-1 entries,
-* entries are strictly sorted by node_index and match ExpectedNodeSet exactly,
-* server validation (S11.12.1) MUST accept,
-* a FULL client chain-check (S11.11.2) MUST accept.
-The KAT MUST also include a negative variant with:
-* one missing ExpectedNodeSet node OR one extra node in new_public_keys,
-and server validation MUST reject with 960.7.
-
-S14.2 KAT: FULL client ek_n mismatch detection (MUST)
-Threat model:
-* malicious (or buggy) updater that can sign the anchor and produces a barrier_update whose public-tree hashes are internally consistent.
-* Server does not have access to secrets and validates only structural + hash-chain + ExpectedPairs.
-The KAT MUST include at least one barrier_update where:
-* new_public_keys is modified by replacing exactly one ek_pub at some node n in ExpectedNodeSet with a different 1184-byte value,
-* kem_tree_hash_after is recomputed accordingly so that server hash-chain checks (S11.12.1.G) still pass,
-* all other MUST-checked server fields are updated as required for internal consistency,
-* server validation (S11.12.1) MUST accept,
-* a FULL-verifying client that derives path_secret[n] MUST compute ek_n via S11.10 and MUST reject locally per S11.13.6 (fail closed, 960.7).
-
-S14.3 KAT: recover AAD binds full barrier metadata (MUST)
-A reference test vector set MUST include at least one barrier_update where a client recovers using S11.13 and:
-* the client stores pkhash_t for its matching target node t,
-* the client constructs AAD using pkhash_t plus `BU.prev_barrier_version`, `BU.tree_size`, `BU.kem_tree_hash_before`, and `BU.kem_tree_hash_after` as specified in S11.13.4,
-* decryption succeeds and yields a 32-byte path_secret[s].
-A negative variant MUST modify pkhash_t (client-side) and MUST cause AEAD_Open failure (client rejects with 960.7).
-Additional negative variants MUST modify exactly one of `BU.prev_barrier_version`, `BU.kem_tree_hash_before`, or `BU.kem_tree_hash_after` while leaving the candidate ciphertext and target selection otherwise unchanged; recovery MUST fail closed and MUST NOT yield an activated/persisted barrier state from that tampered bundle.
-
-S14.4 KAT: updater activation stores pkhash_n (MUST)
-A reference test vector set (or implementation conformance test) MUST include a scenario where:
-* a client acts as updater, persists pending_* state per S11.14.1 including pkhash_n,
-* the merge is accepted and the updater activates per S11.14.2,
-* subsequently, the updater processes another barrier_update for which its unique match targets an internal node on its SelfPath (not necessarily the leaf),
-* the updater is able to perform matching and AAD construction using the stored pkhash_t values, and recovery succeeds or fails only according to the normative match rules (no missing pkhash due to updater activation).
-
-S14.5 KAT: proactive PCS refresh gating and rate-limit (MUST)
-The test suite MUST include:
-* Positive case:
-  * RRH == GroupState.barrier_roots_hash,
-  * MERGE with header[175], header[178]=1, header[176]=BV+1,
-  * all S10.4B policy checks satisfied,
-  * server accepts.
-* Negative cases:
-  * header[175] present with header[178]=0 while RRH unchanged -> reject 960.5,
-  * RRH changed with header[178]=1 -> reject 960.13,
-  * RRH unchanged but group/device/slot rate-limit violated -> reject 960.12.
-
-S14.6 KAT: PCS reseed consistency and crash-safe activation (MUST)
-The test suite MUST include a case where:
-* header[178]=1 and barrier activation succeeds,
-* updater and non-updater client derive identical K_fs after applying S6.6 at activation,
-* after simulated crash/restart before activation completion, the implementation applies reseed at most once and converges to the same final K_fs.
-
-S14.7 KAT: join_finalize gating, activation, and no-K_fs-reseed (MUST)
-The test suite MUST include:
-* Positive case:
-  * RRH == GroupState.barrier_roots_hash,
-  * MERGE with header[175], header[178]=2, header[176]=BV+1,
-  * updater_slot_index is in the unresolved JoinSet for BU.prev_barrier_version,
-  * server accepts,
-  * updater activation via S11.14.2 clears `pending_barrier_recovery`,
-  * `K_barrier` advances,
-  * `K_fs` remains unchanged across the activation.
-* Negative cases:
-  * header[175] present with header[178]=2 while updater_slot_index is not in the unresolved JoinSet -> reject 960.5,
-  * RRH changed with header[178]=2 -> reject 960.13,
-  * RRH unchanged, updater_slot_index in unresolved JoinSet, but header[178]=1 -> reject 960.5.
-
-S14.8 KAT: join_finalize race / loss behavior (MUST)
-The test suite MUST include a scenario where:
-* a pending joiner publishes a reason 2 merge and persists pending_* state,
-* a different accepted barrier_update is committed first at the competing next barrier version,
-* updater acceptance correlation for the pending reason 2 merge does not falsely activate,
-* the joiner remains `pending_barrier_recovery == true` until it either:
-  * recovers from the accepted competing barrier_update, or
-  * retries reason 2 after authenticated history establishes non-acceptance and the join_finalize eligibility predicate still holds,
-* the implementation MUST NOT clear `pending_barrier_recovery` solely because a timer elapsed or because the current barrier version advanced.
-
-S14.9 KAT: barrier-sealed-v1 transport validation and binding (MUST)
-The test suite MUST include:
-* Positive case:
-  * a valid author-local JOIN envelope with mode `"barrier-sealed-v1"` and context `"author-local"` is accepted by S10.1/S12.1 shape validation without requiring `K_barrier`,
-  * a valid `BarrierHpEnvelope` with mode `"barrier-sealed-v1"` and context `"barrier-recovery"`,
-  * ciphertext length in `[AEAD_TAG_LEN, MAX_HP_ENVELOPE_BYTES]`,
-  * AEAD suite `"chacha20-poly1305"`,
-  * decryption using the authenticated `(gid, barrier_key, barrier_version, xk_hash, hp_commit)` tuple succeeds and recovers the original `BarrierHpPlaintext`.
-* Negative cases:
-  * any legacy/unknown transport mode in `header[97]` -> reject as malformed,
-  * any unknown or wrong publication context in `element 1` -> reject as malformed,
-  * empty ciphertext, ciphertext shorter than `AEAD_TAG_LEN`, or ciphertext longer than `MAX_HP_ENVELOPE_BYTES` -> reject as malformed,
-  * successful AEAD open to an empty `BarrierHpPlaintext` -> reject as malformed,
-  * successful AEAD open where recomputed `H_L("msphf/hp/commit", [BarrierHpPlaintext]) != header[99]` -> reject as malformed,
-  * wrong AEAD suite or malformed UTF-8/text shape -> reject as malformed,
-  * replay / cut-and-paste of a valid `hp_ciphertext` into a different `(gid, barrier_version, xk_hash, hp_commit)` context -> recovery MUST fail,
-  * recovery attempted under the wrong barrier key -> recovery MUST fail.
-
-END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.4
+# City-G protocol specification
+
+| | |
+| --- | --- |
+| Profile | `city-g/v0.4` |
+| Status | Initial version. The key schedule, the tree, windows, welcomes, joins and the delivery-service rules are specified and implemented; the items of section 19 are not yet. |
+| Implementation | [`crates/cityg-core`](../crates/cityg-core) 0.4.0: protocol core and an in-memory delivery service, no I/O. Since then, the crate implements stage 1 of the v0.5 draft (row "Next") |
+| Design | [design.md](design.md) (decisions E-1 to E-14) |
+| Formal model | [`formal/`](formal/README.md) (ProVerif) |
+| Research | [`research/grands-groupes-2026-09-25.md`](research/grands-groupes-2026-09-25.md) (in French); cost model [`research/rekey_sim.py`](research/rekey_sim.py); a proposed message plane, [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md), the guarantees of MLS at this scale, [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md), who may re-key the tree, [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md), îlots under a flat top, [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md), a synthesis beyond v0.4, [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md), its open problems, [`research/problemes-ouverts-2026-09-26.md`](research/problemes-ouverts-2026-09-26.md), proofs and measurements, [`research/preuves-et-mesures-2026-09-26.md`](research/preuves-et-mesures-2026-09-26.md), the proof of the tree, [`research/preuve-arbre-2026-09-26.md`](research/preuve-arbre-2026-09-26.md), the X25519 half of a dispute, [`research/litige-x25519-2026-09-26.md`](research/litige-x25519-2026-09-26.md), a dispute without setup, [`research/litige-sans-mise-en-place-2026-09-26.md`](research/litige-sans-mise-en-place-2026-09-26.md), the whole dispute, [`research/litige-entier-2026-09-26.md`](research/litige-entier-2026-09-26.md), and both branches of a dispute, [`research/litige-deux-branches-2026-09-27.md`](research/litige-deux-branches-2026-09-27.md) (all in French); computational model [`research/formal-computational/`](research/formal-computational/README.md) |
+| Conformance | None yet: no test vectors (section 19) |
+| Next | [specs-v0.5-draft.md](specs-v0.5-draft.md), profile `city-g/v0.5-draft`: a delta on this profile, whose stage 1 (islands read through relays, urgent and ordinary removals) `cityg-core` implements |
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be
+interpreted as in RFC 2119 and RFC 8174 when they appear in capitals.
+
+City-G is an end-to-end encrypted group protocol with post-quantum
+primitives, built for groups of millions of members, bursts of hundreds of
+thousands of joins and departures, and groups where no member may be online
+for long periods. Its group key agreement follows the structure of MLS
+(RFC 9420): a ratchet tree whose root secret feeds an epoch-chained key
+schedule, transcript hashes and confirmation tags, welcomes for members
+added by someone else, and an external init for a device that is not yet a
+member (section 20). It changes how the group is re-keyed:
+
+* the group changes by *windows*: the delivery service collects requests
+  for up to a minute, and one epoch seals them all;
+* the tree is split into *districts* under a *city*; each district that
+  changes is re-keyed by its own committer, in parallel, and a *sealer*
+  re-keys the city and creates the epoch;
+* any member can commit any district or seal a window; when no member is
+  online, a joiner or a returning member seals the window itself;
+* a group can be *open*: any device joins without an admin's signature, and
+  every join stays visible (section 6.1);
+* a member downloads one small packet per window and keeps O(log N) state.
+
+A delivery service (DS) orders and checks everything without holding any
+group secret.
+
+## Contents
+
+1. [Architecture](#1-architecture)
+2. [Security goals and threat model](#2-security)
+3. [Cryptographic suite and encodings](#3-suite)
+4. [Identifiers](#4-identifiers)
+5. [Tree](#5-tree)
+6. [Signed requests](#6-requests)
+7. [Re-key](#7-rekey)
+8. [Registry](#8-registry)
+9. [Key schedule](#9-key-schedule)
+10. [Windows: district commits and seals](#10-windows)
+11. [Welcomes](#11-welcomes)
+12. [Members](#12-members)
+13. [Packets, seal links and entries](#13-packets)
+14. [Delivery service](#14-delivery-service)
+15. [Audits and fraud proofs](#15-audits)
+16. [Parameters](#16-parameters)
+17. [Label registry](#17-labels)
+18. [Security considerations](#18-security-considerations)
+19. [Open items](#19-open-items)
+20. [Relation to MLS](#20-mls)
+
+<a id="1-architecture"></a>
+## 1. Architecture
+
+* **Device and occupancy.** A member device holds an ML-DSA-65 device key
+  per group, and occupies one leaf from the epoch it entered, `since`. The
+  pair `[leaf, since]`, its *occupancy*, names the member for good: it is
+  never reused, even when the leaf is.
+* **Tree.** A binary tree of `2^height` leaves, split into districts of
+  `2^L` leaves (section 5). Members hold X-Wing leaf keys; every non-blank
+  parent node holds an X-Wing key and its *taint*, the occupancy of the
+  committer that drew its secret.
+* **Window.** The delivery service (DS) collects requests: joins, removals,
+  evictions, key updates, re-entries and catch-ups (section 6). It closes a
+  window after at most `WINDOW_MAX`, or `WINDOW_REMOVAL` when a removal is
+  pending (section 14.2). A window is sealed in three phases:
+  1. one *district commit* per district the window changes (section 10.3);
+  2. one *seal*, which re-keys the city and creates the epoch (section
+     10.4);
+  3. the *welcomes* of the window's joiners and returning members
+     (section 11).
+* **Roles.** The DS assigns the committers and the sealer of a window among
+  online members. With no member online, the window's *entrant* (a joiner
+  or a member re-entering its leaf) takes every role and seals with an
+  external init (section 12.7). With no member online and no entrant, the
+  window stays open and recorded removals are enforced at delivery
+  (section 14.6).
+* **Members.** A member keeps its leaf key, the secrets of its path, the
+  secrets of its epoch and the epoch's header (section 12.1). It follows the
+  group from one *packet* per window (section 13.1).
+* **Delivery service.** The DS holds the public state, checks every request
+  and every commit, stores the windows, and serves packets, chains of seals
+  and entries. It never draws a group secret and never signs a group
+  object.
+
+<a id="2-security"></a>
+## 2. Security goals and threat model
+
+### 2.1 Adversaries
+
+| ID | Adversary | Capabilities |
+| --- | --- | --- |
+| A1 | Passive DS | Reads everything the DS stores and relays. |
+| A2 | Active DS | A1, and drops, delays, reorders or replays traffic, answers requests arbitrarily, decides which requests enter which window, and creates its own device keys. |
+| A3 | Malicious member | Holds the secrets of its own membership; deviates arbitrarily from the protocol, including as a committer, sealer, welcomer or entrant. |
+| A4 | Removed member | A3 for the epochs it belonged to, keeping whatever it learned then, including the secrets it drew as a committer. |
+| A5 | Temporarily compromised device state | Learns the group state of one device (leaf key, path secrets, epoch secrets, pending keys) at one point in time, then loses access. The device key stays secret, for instance in a hardware keystore. |
+| A6 | Compromised device key | Learns the ML-DSA-65 device key of one member device. |
+
+The network is controlled by A2. In a closed group, admins are trusted to
+admit members: an admin that admits the adversary gives it membership.
+Anyone can join an open group (section 6.1).
+
+### 2.2 Properties
+
+"Guaranteed" means: under the assumptions of section 2.3, the property holds
+against that adversary for members that follow the group (section 12.2), and
+for joiners and returning members from the epoch they enter (sections 12.9
+and 12.10). *Epoch secrets* are the secrets of section 9; the message plane
+encrypts under `msg_secret_n` (section 19), so the confidentiality of what it
+carries rests on theirs. A deployment MUST NOT advertise a property that
+this table does not list as guaranteed for the stated adversary.
+
+| Property | A1 | A2 | A3 | A4 | A5 | A6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Confidentiality of epoch secrets | guaranteed | guaranteed in a closed group; none in an open group, which the DS can join | no (insider) | guaranteed from the window that applies its removal | guaranteed outside the FS and PCS windows | no, until the device is removed |
+| Membership agreement | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed | guaranteed |
+| Authenticity of requests, commits and seals | guaranteed | guaranteed | guaranteed (cannot act as another member) | guaranteed | guaranteed | guaranteed for the other members |
+| Admission control, in a closed group | guaranteed | guaranteed | detected: an entry it places without a valid admission is caught by sampled audits and leaves a fraud proof (section 15) | guaranteed | guaranteed | as A3; none if the device is an admin |
+| Post-removal secrecy (PRS) | n/a | n/a | n/a | guaranteed from the window that applies the removal, including for the nodes it drew as a committer | n/a | guaranteed once the device is removed |
+| Forward secrecy (FS) | guaranteed | guaranteed | n/a | n/a | guaranteed for epochs whose secrets the device erased | guaranteed |
+| Post-compromise security (PCS) | n/a | n/a | n/a | n/a | after the device's next update | no, until the device is removed |
+| Join secrecy | guaranteed | guaranteed | guaranteed | n/a | guaranteed | guaranteed |
+| Visibility of joins | guaranteed | guaranteed (the DS can refuse to show a window's joins, not misrepresent them) | guaranteed | n/a | guaranteed | guaranteed |
+| Liveness, availability | no | no | no | no | no | no |
+| Metadata privacy (who is a member, who sends when, group size) | no | no | no | no | no | no |
+
+Definitions (normative):
+
+* **Membership agreement.** Two members that accept epoch `n` with the same
+  interim transcript hash agree on the tree hash, the registry and the
+  transcript of epochs `0..n`: they are bound into `GroupContext_n`, from
+  which every secret of the epoch derives, and the confirmation tag proves
+  it (section 9). For a window sealed by an entrant the tag alone proves
+  nothing against the DS, which knows the external public key; members also
+  check the entrant's admission and signature (section 12.2).
+* **Admission control.** In a closed group no device becomes a member
+  without an admission signed by an admin of the previous epoch, directly
+  or through an invite, and an admission admits once. The DS checks every
+  request, each committer the entries of its districts, the sealer the
+  structure of every district commit, and members audit random entries
+  (section 15): an invalid entry placed by a malicious committer escapes
+  every auditor with probability about `e^-AUDIT_K`, and a fraud proof then
+  names the committer.
+* **PRS.** A member whose occupancy a window ends MUST NOT be able to
+  derive any secret of an epoch `>= n`, where `n` is the epoch that window
+  creates. The window re-keys the member's path and every node it taints,
+  so what it drew as a committer is useless to it (section 10.2; model
+  `taint.pv`); the external init of a window sealed by an entrant does not
+  help it either (model `entrant_removal.pv`). A removal is recorded when
+  the DS accepts its proposal and applied by the next window (section
+  14.2): until then the DS refuses the removed member's requests and stops
+  delivering to it (section 14.6), which is not cryptographic, and members
+  do not send while a removal recorded more than `WINDOW_REMOVAL` ago waits
+  (section 12.8).
+* **FS.** Compromise of a device at time `T` MUST NOT reveal the secrets of
+  epochs the device erased before `T`. Members erase the secrets of an epoch
+  when the next one is active; the init chain makes a leaked leaf key
+  useless for past epochs (model `forward_secrecy.pv`).
+* **PCS.** After a device whose state was compromised completes an update
+  (section 12.6), which re-keys its path and every node it taints, the
+  attacker MUST NOT derive the secrets of later epochs, unless it
+  compromises a member again (model `post_compromise.pv`). Members SHOULD
+  update at least every `UPDATE_INTERVAL`.
+* **Join secrecy.** A joiner that enters with a welcome receives only
+  `joiner_secret_n` and the secrets of its path (section 9), from which
+  nothing of epoch `n - 1` or before derives. Its init key is used for one
+  welcome.
+* **Device keys.** Whoever holds a device key can sign as the device:
+  requests, including a re-entry that gives the member a leaf key of its
+  choice, district commits and seals if it is given the role, and
+  admissions if the device is an admin. The repair is to remove the device,
+  together with any device it admitted, and to admit a new one. A catch-up
+  gives nothing to a thief that lacks the member's leaf key, since its
+  welcome is sealed to that key too (section 11; models
+  `catch_up_stolen_key.pv` and `catch_up_init_only.pv`). An update or a
+  re-entry signed by a thief changes the member's leaf: the member can no
+  longer follow, notices, and treats its device key as stolen (section
+  12.2). After the member's next update, a thief that also had its state
+  keeps reading only by changing its leaf in the same way.
+* **Visibility of joins.** Every join is a change of a district commit that
+  the seal lists; a member that holds the seal of an epoch it accepted can
+  list the devices that window let in (section 12.11). Nobody can take a
+  member's place: a request claiming a member's device key fails its
+  signature, and a device already a member cannot join again.
+
+### 2.3 Assumptions and limits
+
+* X-Wing is IND-CCA2 if either ML-KEM-768 or X25519 is; ML-DSA-65 is
+  EUF-CMA (and strongly unforgeable); BLAKE3 in keyed mode is a PRF;
+  ChaCha20-Poly1305 is an AEAD. Random numbers come from a CSPRNG.
+* The DS decides which requests enter which window, can delay any window
+  indefinitely, and can deny service. It cannot make a member accept an
+  epoch it forged.
+* The DS sees the members (device keys, leaves, occupancies, admins), every
+  request, the timing and size of windows, and who downloads what.
+* A committer learns the secrets of the nodes it re-keys, including off its
+  own path. An honest committer erases them once its commit is sent (section
+  12.4); taints bound the damage of one that does not.
+* An entrant learns every secret of the window it seals. It is a member of
+  the new epoch: admitted by an admin, a device of an open group, or already
+  a member.
+* In a window sealed by an entrant, the external init secret is known to
+  every member of the previous epoch, including those the window removes.
+  The new epoch's secrecy against them rests on the root secret, which the
+  window re-keys away from them.
+* A committer can wrap a secret that some members cannot open. They reject
+  the window (the confirmation tag does not check) and are cut off until
+  they re-enter; reports that would expose such a committer are an open
+  item (section 19).
+* Group encryption is not end-to-end between subsets of a group: every
+  member of an epoch holds its secrets.
+* **Forks.** The DS decides what each member sees. It can show different
+  members different valid histories (a fork) and keep each branch going;
+  members on one branch reject the windows of the other. Members that
+  follow the group check tags, not the history, and would not notice a
+  fork: comparing the interim transcript hash of an epoch out of band
+  detects it. A joiner checks the chain of seals from an admin checkpoint
+  (section 12.9), so the DS cannot lead it into an epoch it forged.
+* `time_ms` of a seal is the sealer's clock, not a trusted time.
+
+<a id="3-suite"></a>
+## 3. Cryptographic suite and encodings
+
+### 3.1 Suite
+
+| Function | Primitive | Use |
+| --- | --- | --- |
+| KEM | X-Wing (ML-KEM-768 and X25519), draft-connolly-cfrg-xwing-kem-06 | leaf and node keys, the init keys of welcomes, external keys |
+| Signature | ML-DSA-65 (FIPS 204), hedged, with context strings | requests, district commits, seals, checkpoints, policies |
+| Hash `H` | BLAKE3, 256-bit output | labelled hashes, digests |
+| PRF / KDF | BLAKE3 keyed mode and its XOF | Extract, ExpandLabel, MAC |
+| AEAD | ChaCha20-Poly1305 (RFC 8439) | wraps and welcomes |
+
+* **X-Wing.** A private key is held as its 32-byte decapsulation key (a
+  seed from which X-Wing derives the ML-KEM-768 and X25519 keys).
+  Encapsulation draws its 64 random bytes (32 for ML-KEM, 32 for the X25519
+  ephemeral key) from the caller's generator. Encapsulation keys are 1216
+  bytes (the ML-KEM-768 key, then the X25519 key), ciphertexts 1120 bytes,
+  shared secrets 32 bytes. An encapsulation key MUST pass the FIPS 203
+  input check of its ML-KEM part before use. The hybrid keeps
+  confidentiality if either component holds, against an adversary that
+  records traffic today to decrypt it with a quantum computer later.
+* **ML-DSA-65.** Key pairs derive from a 32-byte seed `xi`
+  (`ML-DSA.KeyGen_internal`). Signing is hedged: the 32-byte `rnd` input is
+  drawn from the caller's generator. Public keys are 1952 bytes, secret
+  keys 4032 bytes, signatures 3309 bytes. Every signature uses a FIPS 204
+  context string (`ctx`) naming its usage (section 17.3); a signature
+  produced under one context MUST NOT verify under another.
+* **Randomness.** Every random value of the protocol (seeds, nonces, node
+  secrets, KEM randomness, signing randomness, invite seeds) MUST come from
+  a CSPRNG.
+
+### 3.2 Deterministic CBOR
+
+`CBOR_det(x)` is the core deterministic encoding of RFC 8949, section
+4.2.1:
+
+* integers and lengths use the shortest head;
+* only definite lengths;
+* map keys are sorted by the bytewise lexicographic order of their
+  encodings, and no key appears twice;
+* no floating-point values and no tags; the simple values `false`, `true`,
+  `null` are allowed.
+
+A decoder MUST re-encode every decoded object and reject it unless the
+result is byte-identical to its input. Every object is exchanged as the
+exact bytes of its deterministic encoding; an implementation MUST NOT
+re-encode an object it relays or hashes. `h''` denotes the empty byte
+string and `ZERO32` 32 zero bytes. Integers are unsigned.
+
+### 3.3 Hashing and key derivation
+
+```text
+H(x)                               := BLAKE3-256(x)
+H_L(label, args)                   := H(CBOR_det(["city-g/v0.4", label, args]))
+Extract(salt, ikm)                 := BLAKE3-keyed(key = salt, ikm)                (32 bytes)
+ExpandLabel(secret, label, ctx, L) := BLAKE3-keyed-XOF(key = secret,
+                                        CBOR_det(["city-g/v0.4 expand", label, ctx, L]))[0..L]
+DeriveSecret(secret, label)        := ExpandLabel(secret, label, h'', 32)
+MAC(key, data)                     := BLAKE3-keyed(key, CBOR_det(["city-g/v0.4 mac", data]))
+KemKey(secret, label)              := the X-Wing key whose decapsulation key is
+                                      ExpandLabel(secret, label, h'', 32)
+kem_pk_hash(pk)                    := H_L("kem-pk", [pk])
+```
+
+`label` is a text string and `args` a CBOR array; a map MUST NOT appear as
+the argument list (the labels are listed in section 17.1). `salt`, `secret`
+and `key` are 32 bytes, `ctx` is a byte string and `L` an unsigned integer.
+BLAKE3 in keyed mode is a PRF and its XOF output a PRF output of any length,
+so `Extract` and `ExpandLabel` follow the HKDF structure with BLAKE3 in
+place of HMAC. The key schedule also needs `Extract` to be a dual PRF:
+pseudorandom when keyed by its input keying material under a known salt,
+as analyses of HKDF assume of HMAC. Post-compromise security and external
+inits rest on it, as do the exclusion of a removed member that missed a
+window and the binding of a catch-up's welcome to the leaf key (research
+model
+[`research/formal-computational/`](research/formal-computational/README.md)).
+MAC tags MUST be compared in constant time.
+
+### 3.4 Signed arrays
+
+Every signed object except the seal is a signed array:
+
+```text
+TBS       := CBOR_det([label, field_2, ..., field_k])
+Signed    := CBOR_det([label, field_2, ..., field_k, signature])
+signature := ML-DSA-65.Sign(sk, TBS, ctx)
+```
+
+The label names the object and its version; every label of this profile
+ends in `/v4`, and the signature context of each signed array is its label
+(section 17). A verifier checks the label and the number of fields before
+verifying the signature over `TBS`, which it rebuilds from the received
+fields. Seals are signed differently (section 10.4).
+
+**Occupancies and node addresses** are encoded `[leaf, since]` and
+`[level, index]`.
+
+<a id="4-identifiers"></a>
+## 4. Identifiers
+
+```text
+gid       := H_L("group-id",  [creator_device_pk, group_nonce])     group_nonce: 32 random bytes
+device_id := H_L("device-id", [gid, device_pk])
+invite_id := H_L("invite-id", [invite_pk])
+request_ref := H(encoded request)
+```
+
+<a id="5-tree"></a>
+## 5. Tree
+
+### 5.1 Shape and addresses
+
+A tree has `2^height` leaves, `1 <= height <= MAX_HEIGHT`. Node
+`(k, i)` is the ancestor at level `k` of leaves `i·2^k .. (i+1)·2^k`;
+leaves are level 0. With `L = district_bits` (fixed at genesis,
+`1 <= L <= MAX_HEIGHT`):
+
+* the *district level* is `min(L, height)`;
+* if `height > L`, there are `2^(height - L)` districts; district `d` is
+  the subtree under node `(L, d)`, and the *city* is the set of levels
+  `L + 1 .. height`;
+* otherwise there is one district, whose root is the tree's root, and no
+  city.
+
+The district of a leaf `i` is `i >> L` when `height > L`, else 0.
+
+### 5.2 Nodes
+
+```text
+LeafNode   := [device_pk, since, encryption_key, admission_hash, updated]
+ParentNode := [encryption_key, taint]            taint: an occupancy
+```
+
+* `encryption_key` of a leaf is chosen by the member; `admission_hash` is
+  the hash of the admission it entered with (`ZERO32` for the creator);
+  `updated` is the epoch its leaf key last changed.
+* A parent node is **blank exactly when its subtree holds no member**.
+  Every other parent node holds the key derived from its secret and its
+  taint. There are no unmerged leaves.
+
+### 5.3 Hashes
+
+```text
+leaf_hash(i)   := H_L("tree/leaf", [LeafNode or null])
+content(n)     := H_L("tree/node", [encryption_key, taint])
+node_hash(n)   := H_L("tree/parent", [content(n) or null, node_hash(left), node_hash(right)])
+tree_hash      := node_hash(root)
+district_hash  := node_hash(district root)
+```
+
+Positions are not hashed: they follow from the structure. The hash of an
+empty subtree at level `k` is fixed, and equals the generic formula.
+
+**Leaf proofs.** A leaf proof of leaf `i` is the leaf (or `null`) and, for
+each level `1..height` from the bottom, `content` of the ancestor (or
+`null`) and the hash of the sibling subtree. It recomputes `tree_hash`. It
+MUST be rejected if `i >= 2^height` for the height it claims. A proof of a
+member's path parents checks each against the `content` of its level.
+
+### 5.4 Growth
+
+The tree grows by raising `height`. Addresses are unchanged: the old root
+becomes node `(old_height, 0)`. The nodes `(k, 0)` for
+`old_height < k <= height` hold the old tree, so a window that grows a
+non-empty tree re-keys them (section 10.2). The height of a window is the
+smallest height, not below the current one, whose width holds every
+changed leaf. This version never shrinks the tree (section 19).
+
+<a id="6-requests"></a>
+## 6. Signed requests
+
+Every request is a signed array (section 3.4), except the eviction, which
+the DS writes under an admin-signed policy. Members are named by
+occupancy. Sizes are bounded by the parameters of section 16.
+
+```text
+Invite         := ["city-g/invite/v4", gid, invite_pk, expires_at_ms, max_uses,
+                   inviter, inviter_pk, signature]
+Admission      := ["city-g/admission/v4", gid, device_id, not_after_epoch, kind,
+                   admin or null, authorizer_pk, invite or null, signature]
+JoinRequest    := ["city-g/join-request/v4", gid, device_pk, encryption_key,
+                   init_key, not_after_epoch, admission or null, signature]
+RemoveProposal := ["city-g/remove/v4", gid, target, proposer, signature]
+Eviction       := ["city-g/eviction/v4", gid, target, policy_hash]
+GroupPolicy    := ["city-g/group-policy/v4", gid, admission_mode,
+                   max_idle_epochs or null, admin, signature]   admission_mode: 0 closed, 1 open
+UpdateRequest  := ["city-g/update/v4", gid, member, replaces, encryption_key, signature]
+CatchUpRequest := ["city-g/catch-up/v4", gid, member, prev_interim, init_key, signature]
+ReEntryRequest := ["city-g/re-entry/v4", gid, member, replaces, encryption_key,
+                   init_key, signature]
+Checkpoint     := ["city-g/checkpoint/v4", gid, epoch, interim, tree_hash,
+                   registry_hash, height, district_bits, external_pk_hash,
+                   time_ms, admin, signature]
+```
+
+* **Invite.** Signed by the inviter, an admin (`inviter` its occupancy,
+  `inviter_pk` its device key). The invite key pair derives from a 32-byte
+  seed shared out of band, for instance in an invite link. It is valid for a
+  window if the
+  inviter is an admin of the previous epoch with that key. Expiry and the
+  number of uses are enforced by the DS.
+* **Admission.** Kind 0: signed by the admin `admin`, whose key is
+  `authorizer_pk`, `invite = null`. Kind 1: `admin = null`, signed by the
+  invite key `authorizer_pk` of the enclosed invite, which MUST name the
+  same group and key. `admission_hash := H(Admission)`. For a join creating
+  epoch `n`, an admission is valid if it names the device
+  (`device_id`), `n <= not_after_epoch <= n + MAX_ADMISSION_EPOCHS`, its
+  signer is an admin of epoch `n - 1` (directly or through a valid invite),
+  and it was never used (section 8): **an admission is good for one join.**
+  Its *anchor key*, which the joiner trusts, is the admin's key (kind 0) or
+  the inviter's key (kind 1).
+* **JoinRequest.** Signed by the joining device. `encryption_key` and
+  `init_key` are distinct X-Wing keys that MUST pass the input check; the
+  init key is used for one welcome. For a join creating epoch `n`,
+  `n <= not_after_epoch <= n + MAX_ADMISSION_EPOCHS`. In a closed group the
+  request MUST carry an admission; in an open group it MAY carry none. Its
+  *token*, which the admission map records so that it enters once, is
+  `admission_hash`, or `H(JoinRequest)` without admission; the joiner's
+  leaf holds the token as its `admission_hash`.
+* **RemoveProposal.** Signed by an admin of the previous epoch, or by the
+  target itself (`proposer = target`).
+* **Eviction.** Written by the DS. Valid in a window creating epoch `n` if
+  the registry holds `policy_hash`, the policy object hashes to it, sets
+  `max_idle_epochs`, and the target's leaf key has not changed for more
+  than that: `n - updated > max_idle_epochs`.
+* **GroupPolicy.** Signed by an admin of the previous epoch, or by the
+  creator at genesis. It says whether the group is open and after how long
+  an idle member may be evicted. A group without policy is closed and
+  evicts nobody.
+* **UpdateRequest** and **ReEntryRequest.** Signed with the member's device
+  key. `replaces := kem_pk_hash(current leaf key)`: the request is valid
+  only while that key is the member's leaf key, so it applies once and
+  cannot be replayed after the key changed. A re-entry adds a one-time init
+  key.
+* **CatchUpRequest.** Signed with the member's device key. `prev_interim`
+  is the interim transcript hash of the epoch the next window builds on:
+  the request is valid for that window only, so it cannot be replayed to
+  obtain a later epoch under an old init key.
+* **Checkpoint.** Signed by an admin; states an epoch, its interim
+  transcript hash, tree hash, registry hash, shape and
+  `external_pk_hash := kem_pk_hash(external_pk)`. Admins SHOULD sign one
+  every `CHECKPOINT_INTERVAL`.
+
+Decoding checks encodings and key lengths only; signatures are checked by
+whoever the rules of sections 10, 14 and 15 name.
+
+### 6.1 Open and closed groups
+
+A group is *closed* unless the group policy in force opens it. The registry
+binds the policy's hash and the admission mode (section 8), so every member
+knows the mode, and the mode changes only by a new policy signed by an admin
+(section 12.2). In an open group:
+
+* a device joins with its own signed request and no admission; nothing
+  else about joining changes (placement, welcomes, anchoring);
+* when no member is online, any new device can be the entrant of a window,
+  including one the DS controls (section 12.7);
+* the checks of sections 10 and 15 skip the admission of a join that has
+  none, and keep all others: signatures, the device not already a member,
+  the token unused, the request not expired.
+
+The joiner of an open group trusts an admin key from the group's public
+link to check checkpoints (section 12.9). Nothing in an open group is signed
+per join by an admin.
+
+<a id="7-rekey"></a>
+## 7. Re-key
+
+### 7.1 Node secrets and keys
+
+```text
+node key pair        := KemKey(secret, "tree node key")
+chain(child_secret)  := DeriveSecret(child_secret, "tree path")
+fresh(hedge)         := DeriveSecret(Extract(hedge, r), "fresh node")      r: 32 random bytes
+```
+
+`hedge` is the committer's `init_secret` of the previous epoch, or the
+external init secret for an entrant (`ZERO32` at genesis): a weak
+generator alone does not expose a fresh secret to an outsider through its
+derivation. The encapsulations of section 7.2 take their coins from the
+generator, though, so a weak generator exposes the secrets they wrap, and
+a member that a window removes knows the `init_secret` it hedged with. The
+v0.5 draft hedges both the secrets and the coins with the device's leaf
+seed ([specs-v0.5-draft.md](specs-v0.5-draft.md), section 3.3).
+
+### 7.2 Wraps
+
+A *wrap* gives the new secret of node `v` to the holder of the key of its
+child `t`:
+
+```text
+context := CBOR_det([gid, epoch, v.level, v.index, t.level, t.index, kem_pk_hash(t_pk)])
+(ct, ss) := X-Wing.Encaps(t_pk)
+sealed  := ChaCha20-Poly1305(key   = ExpandLabel(ss, "wrap key", context, 32),
+                             nonce = ExpandLabel(ss, "wrap nonce", context, 12),
+                             aad   = context, plaintext = secret)            (48 bytes)
+Wrap    := [v.level, v.index, t.level, t.index, ct, sealed]
+```
+
+`epoch` is the epoch the window creates.
+
+### 7.3 Plans
+
+The *plan* of a re-key is its public structure: which nodes, blank or not,
+the chain source and the wrap targets of each. It depends only on public
+data, so the DS and every verifier recompute it.
+
+**Re-key set.** For district `d`: every ancestor, at levels
+`1..district_level`, of a changed leaf of `d`, and every forced node of
+`d` (section 10.2) with its ancestors up to the district root. For the
+city: every ancestor, at levels `L + 1..height`, of the root of each
+district of the window, and every forced city node with its ancestors up
+to the root.
+
+**Order.** Nodes are processed by level, then index.
+
+**Each node `v`.** A child `c` of `v` is *live* if: `c` is in the re-key set
+and not blank after it; `c` is a leaf occupied after the window; `c` is a
+district root whose new state the city plan is given; otherwise `c` is not
+blank in the tree before the window. Then:
+
+* if no child is live, `v` becomes blank;
+* otherwise, unless `v`'s level is a *boundary*, the secret of `v` is
+  `chain(secret of c)` for the first live child `c`, left first, that is in
+  the re-key set and not blank; if there is none, or at a boundary, it is
+  `fresh(hedge)`;
+* the secret is wrapped to every live child except the one it was chained
+  from.
+
+The boundaries are level 1 in a district (the children are members'
+leaves) and level `L + 1` in the city (the children are district roots
+re-keyed by other committers).
+
+**Keys of wrap targets.** The new key of a node this commit re-keyed; the
+new leaf key of a changed leaf; in the city plan, the new key of a
+district root from its district commit; otherwise the key in the tree
+before the window.
+
+**Following a plan.** A commit lists one node update per planned node, in
+plan order: the new public key, or `null` exactly for the nodes the plan
+blanks. Its wraps follow the plan: for each node, one wrap per target, in
+target order. A verifier recomputes the plan and checks the list of nodes,
+the keys (X-Wing input check), the wrap addresses and sizes. It cannot
+check the ciphertexts; a member that cannot open its wrap rejects the
+window (the tag check fails).
+
+### 7.4 Member paths
+
+A member holds the secret of each of its ancestors, by level. The *steps*
+of a window along its path are, for each ancestor `v` at level `k` that
+the window re-keys: `Wrap` if the window wrapped `v`'s secret to `v`'s
+child toward the member, `Chain` otherwise. Bottom-up:
+
+* `Wrap`: open it with the key of the child toward the member: its leaf key
+  at level 1, else `KemKey(secret at level k - 1, "tree node key")`;
+* `Chain`: `chain(secret at level k - 1)`, valid only if level `k - 1` was
+  re-keyed by the same window (never at level 1);
+* a level the window does not re-key keeps its secret;
+* a re-keyed ancestor that becomes blank means the member was removed.
+
+**Recovery.** A joiner, a member re-entering its leaf and a member jumping
+to the present recover their whole path from the last step of each level,
+each tagged with the epoch of the window that last re-keyed the node. A
+`Chain` step is valid only if the child's step has the same epoch. The
+member checks every recovered secret against the public key of its node in
+the tree it enters (section 12.9). This works because a window that
+re-keys a node re-keys all its ancestors: the last re-key of a node
+happened at or after the last re-key of its child toward the member, and
+either chained from that child (re-keyed in the same window) or wrapped to
+the child's key of that time, which is still its key.
+
+<a id="8-registry"></a>
+## 8. Registry
+
+```text
+RegistryHeader := [admins, devices_root, admissions_root, policy_hash or null, open]
+registry_hash  := H_L("registry", [[[admin, admin_pk], ...], devices_root,
+                                   admissions_root, policy_hash or null, open])
+```
+
+* `admins`: occupancies of the admins with their device keys, in
+  occupancy order;
+* `devices`: a sparse Merkle map from the `device_id` of every member to
+  its occupancy;
+* `admissions`: a sparse Merkle map from the token of every join ever
+  made (its admission's hash, or its request's hash without admission) to
+  the occupancy it admitted. Entries are never removed;
+* `policy_hash`: hash of the group policy in force, if any;
+* `open`: 1 if the policy in force opens the group, else 0 (a group without
+  policy is closed).
+
+Members keep the header; the DS and committers keep the maps.
+
+**Sparse Merkle maps.** Keys are 32-byte digests, read most significant
+bit first; values are occupancies. The map is a binary trie in which a
+subtree holding one entry is that entry:
+
+```text
+subtree(prefix) := ZERO32                                   no entry under prefix
+                 | H_L("smm/leaf", [key, value])             one entry
+                 | H_L("smm/node", [subtree(prefix‖0), subtree(prefix‖1)])
+root            := subtree(empty prefix)
+```
+
+The root depends only on the set of entries. A proof for key `k` lists the
+sibling hashes along `k`'s branch, from the root down to the first subtree
+holding at most one entry, and that entry if any. It shows `k`'s value (the
+entry's key is `k`) or `k`'s absence (no entry, or an entry with another
+key that shares the prefix). A proof whose entry does not share the prefix
+MUST be rejected.
+
+**Changes of a window** creating epoch `n`, applied in this order:
+
+1. every removed or evicted member leaves `devices`, and `admins` if it
+   was an admin;
+2. every join adds `device_id -> [leaf, n]` to `devices` and
+   `token -> [leaf, n]` to `admissions`. The device MUST NOT be in
+   `devices` before the window, and neither the device nor the token MAY
+   appear twice in the window or be in the maps already;
+3. a group policy in the seal body, signed by an admin of epoch `n - 1`,
+   sets `policy_hash` and `open`;
+4. if no admin is left, the sealer becomes admin, with its device key (the
+   promotion rule).
+
+<a id="9-key-schedule"></a>
+## 9. Key schedule
+
+One epoch per window. The window's root secret, which every member of the
+new epoch derives from its path (section 7.4), feeds the schedule:
+
+```text
+GroupContext_n := CBOR_det(["city-g/group-context/v4", gid, n, tree_hash_n,
+                            registry_hash_n, height_n, district_bits,
+                            "city-g/v0.4", confirmed_transcript_hash_n])
+commit_secret_n := DeriveSecret(root_secret_n, "commit")
+joiner_secret_n := ExpandLabel(Extract(init_n-1, commit_secret_n), "joiner", H(GroupContext_n), 32)
+epoch_secret_n  := DeriveSecret(joiner_secret_n, "epoch")
+init_n, msg_secret_n, confirm_key_n, external_secret_n
+                := DeriveSecret(epoch_secret_n, "init" | "msg" | "confirm" | "external")
+external key pair_n := KemKey(external_secret_n, "external kem")
+confirmed_transcript_hash_n := H_L("confirmed-transcript", [interim_transcript_hash_n-1, seal_hash_n])
+confirmation_tag_n := MAC(confirm_key_n, confirmed_transcript_hash_n)
+interim_transcript_hash_n := H_L("interim-transcript", [confirmed_transcript_hash_n, confirmation_tag_n])
+```
+
+* `init_-1` and `interim_transcript_hash_-1` are `ZERO32`.
+* `seal_hash_n := H(SealHeader_n)` (section 10.4).
+* **External init.** In a window sealed by an entrant, `init_n-1` is
+  replaced by the external init secret:
+
+  ```text
+  (kem_output, ss) := X-Wing.Encaps(external_pk_n-1)
+  external_init    := ExpandLabel(Extract(ZERO32, ss), "external init", H(kem_output), 32)
+  ```
+
+  Every member of epoch `n - 1` recovers it with its external key.
+* A window that re-keys nothing (catch-ups or a policy only) keeps the root
+  secret; its epoch is still fresh through the init chain.
+* Members keep the secrets of epoch `n` while it is active, including
+  `joiner_secret_n`, with which the window's welcomers seal their welcomes
+  (section 11), and erase them when the next epoch is active.
+* `msg_secret_n` is the root of the message plane of epoch `n`, which this
+  version does not specify yet (section 19).
+
+**Genesis.** The creator draws a nonce and computes `gid`. The tree has
+height 1: the creator at leaf 0 (`since = 0`, `admission_hash = ZERO32`)
+and the root `(1, 0)`, keyed from a fresh secret with the creator's
+taint. The registry has the creator as admin and its device in `devices`,
+and the group policy the creator chose, if any (an open group has one from
+genesis). `init_-1 = ZERO32`. The genesis seal (kind 0, section 10.4)
+carries in its body `[nonce, creator_pk, encryption_key, root_pk]` and that
+policy, signed by the creator as admin `[0, 0]`; the DS rebuilds the state
+from it and checks the hashes, `gid`, the policy's signature and the seal's
+signature.
+
+<a id="10-windows"></a>
+## 10. Windows: district commits and seals
+
+### 10.1 Changes
+
+```text
+Change := [kind, leaf, request_ref]
+kind   := 0 removal | 1 eviction | 2 join | 3 update | 4 re-entry
+```
+
+A window creating epoch `n` lists changes sorted by `(leaf, kind,
+request_ref)`. The changes of one leaf MUST be one of:
+
+| Changes of the leaf | Condition in the tree before the window | New leaf |
+| --- | --- | --- |
+| join | the leaf is blank | `[device_pk, n, encryption_key, admission_hash, n]` |
+| removal, or eviction | the leaf is occupied by the target | blank |
+| removal or eviction, then join | the leaf is occupied by the target | the joiner's leaf: the join takes the leaf the removal empties |
+| update, or re-entry | the leaf is occupied by the member, whose key `replaces` names | the same leaf with the new key and `updated = n` |
+
+A device takes the request of a change from the DS only if it hashes to
+the change's `request_ref` (section 4), and treats any other as missing: the
+DS holds the requests, and a request of its own under a reference it does
+not hash to would otherwise place its keys in a leaf or a welcome.
+
+Catch-up requests are not changes (section 11).
+
+### 10.2 Structure of a window
+
+From the tree before the window and its changes:
+
+* **Height.** The window's height MUST be the smallest height, not below
+  the current one, whose width holds every changed leaf.
+* **Affected members.** The occupancies the window removes, evicts, updates
+  or re-enters. The *removed* ones are those it removes or evicts.
+* **Forced nodes.** Every node an affected member taints in the tree before
+  the window (the taint rule, E-4), and, if the window grows a non-empty
+  tree, the nodes `(k, 0)` for `old_height < k <= height` (section 5.4). A
+  forced node at or below the district level belongs to its district;
+  above it, to the city.
+* **Districts of the window.** Those with a changed leaf or a forced node.
+  A window commits exactly these districts.
+
+### 10.3 District commits
+
+```text
+DistrictCommit := ["city-g/district-commit/v4", gid, epoch, district, height,
+                   prev_district_hash, committer, changes, nodes, wraps,
+                   district_hash, signature]
+  nodes := [[level, index, public_key or null], ...]       in plan order
+  wraps := [Wrap, ...]                                     in plan order
+```
+
+Signed by the committer under `DISTRICT_COMMIT`. A verifier holding the
+state before the window (the DS, the sealer) checks:
+
+1. `gid`, `epoch = n`, `height` (section 10.2), `district` is a district of
+   the window;
+2. `changes` are exactly the window's changes of the district, in order;
+3. `prev_district_hash` is the hash of the district root in the tree before
+   the window, grown to the window's height;
+4. the committer (section 10.5);
+5. each change's request is available, of the change's kind and group, and
+   names the leaf's occupant (except a join); the rest of section 10.1
+   holds; the entry checks of section 6 hold if the verifier checks entries
+   (the DS and the committer do, the sealer does not, section 15);
+6. the nodes and wraps follow the district's plan (section 7.3), with the
+   district's forced nodes;
+7. `district_hash` is the hash of the district root after the new leaves
+   and the nodes are set, each node tainted by `committer`;
+8. the signature, under the committer's device key.
+
+### 10.4 Seals
+
+```text
+SealHeader := ["city-g/seal/v4", gid, epoch, prev_interim, kind, sealer, height,
+               district_bits, tree_hash, registry_hash, body_hash, time_ms,
+               [kem_output, request_ref] or null]
+SealBody   := ["city-g/seal-body/v4", [[district, H(district commit)], ...],
+               city_nodes, city_wraps, group_policy or null,
+               [nonce, creator_pk, encryption_key, root_pk] or null]
+Seal       := [SealHeader, SealBody, confirmation_tag, external_pk, signature]
+
+seal_hash := H(SealHeader)              body_hash := H(SealBody)
+signature := ML-DSA-65.Sign(sealer_sk, CBOR_det([seal_hash, confirmation_tag, external_pk]), SEAL)
+```
+
+* `kind` is 0 (genesis), 1 (sealed by a member of the previous epoch) or 2
+  (sealed by the window's entrant). The last header field is set exactly
+  for kind 2: the external init ciphertext and the entrant's request.
+* One signature covers the header, the confirmation tag and the next
+  external key: a joiner that checks it knows the tag is authentic, so an
+  unsigned welcome cannot be replaced (model
+  `anchored_join_unsigned_tag.pv`).
+* Members and joiners download *seal proofs*, `[SealHeader,
+  confirmation_tag, external_pk, signature]`, not bodies.
+
+The DS checks a seal against the state before the window:
+
+1. `gid`, `epoch = n`, `prev_interim` is the current interim transcript
+   hash, `district_bits`, `time_ms` not below the previous seal's;
+2. the body lists the window's district commits, in district order, with
+   their hashes;
+3. the window's structure (section 10.2) from the union of the commits'
+   changes; the districts listed are exactly the window's districts;
+4. the sealer and every committer (section 10.5);
+5. every district commit (section 10.3);
+6. the last node of each district commit is its district root; the city
+   nodes and wraps follow the city plan (section 7.3) with the city's forced
+   nodes, each city node tainted by the sealer; with no city, both lists are
+   empty;
+7. `tree_hash` and `registry_hash` after the window (section 8);
+8. `body_hash`, and no genesis field;
+9. the signature, under the sealer's device key.
+
+The confirmation tag cannot be checked without the epoch's secrets: members
+check it (section 12.2).
+
+### 10.5 Who may commit and seal
+
+* **Member windows (kind 1).** The sealer and every committer MUST be
+  members of epoch `n - 1` that the window does not affect: a committer
+  never removes or updates itself. Their device keys come from the tree.
+* **Entrant windows (kind 2).** The entrant's request MUST be a join or a
+  re-entry among the window's changes. The sealer is the entrant: for a
+  join, `[leaf, n]` where `leaf` is the join's leaf, with the key of the
+  join request, whose signature and admission (none, in an open group) MUST
+  be checked; for a
+  re-entry, the member's occupancy and device key, and the request's
+  signature MUST be checked. Every district commit of the window is by the
+  entrant.
+
+### 10.6 Applying a window
+
+The tree grows to the window's height; changed leaves take their new
+state; every node of a district commit takes its new key (or becomes
+blank) with the committer's taint, and every city node with the sealer's;
+the registry changes (section 8); the group policy of the body, if any,
+comes into force; the epoch, interim transcript hash, external key and
+time are those of the seal.
+
+<a id="11-welcomes"></a>
+## 11. Welcomes
+
+```text
+Welcome := ["city-g/welcome/v4", gid, epoch, request_ref, kem_ciphertext,
+            leaf_ciphertext or null, sealed]
+context := CBOR_det([gid, epoch, request_ref, kem_pk_hash(init_key),
+                     kem_pk_hash(leaf_key) or null])
+(ct, ss)           := X-Wing.Encaps(init_key)
+(ct_leaf, ss_leaf) := X-Wing.Encaps(leaf_key)                    a catch-up only
+welcome_secret     := ss                        for a join or a re-entry
+                      Extract(ss, ss_leaf)       for a catch-up
+sealed  := ChaCha20-Poly1305(ExpandLabel(welcome_secret, "welcome key", context, 32),
+                             ExpandLabel(welcome_secret, "welcome nonce", context, 12),
+                             aad = context, joiner_secret_n)
+```
+
+A welcome gives `joiner_secret_n` to the holder of a one-time init key: a
+joiner, a member re-entering its leaf, or a member that asked to jump
+(catch-up). It is not signed: the joiner secret must reproduce the
+confirmation tag the sealer signed.
+
+A catch-up's welcome is also sealed to the member's leaf key, which the
+member keeps through a jump (section 12.10): `leaf_ciphertext` is `ct_leaf`
+and the context names the leaf key. A catch-up is signed with the device
+key alone and changes nothing in the tree, so without this a device key,
+stolen without the member's state, would obtain the epoch of every window
+it asks for, unseen. The init key keeps the welcome closed if the leaf key
+leaks later. For a join or a re-entry, `leaf_ciphertext` and the last
+entry of the context are `null`.
+
+**Who welcomes.** In a member window, the committer of the district of the
+leaf welcomes joins and re-entries; the committer of the member's district
+welcomes a catch-up if that district is in the window, and the sealer
+otherwise. In an entrant window, the entrant welcomes everyone but itself.
+A welcomer seals its welcomes once it has followed the window (it then
+knows `joiner_secret_n` as a member of epoch `n - 1`).
+
+**Welcomer's checks.** A welcomer takes the init key from the request that
+hashes to the change's `request_ref` (section 10.1), never from the DS, and:
+
+* welcomes a join or a re-entry only if it is a change of a district commit
+  of its own that the seal lists (so that no device learns an epoch without
+  being in its tree);
+* welcomes a catch-up only if its member is in the tree of epoch `n` with a
+  leaf the window did not change, the request is signed with that member's
+  device key, and its `prev_interim` is the seal's (section 6). It takes the
+  leaf key from that tree, which it checked against its header (section
+  12.3), never from the request or the DS.
+
+<a id="12-members"></a>
+## 12. Members
+
+### 12.1 State
+
+A member keeps:
+
+* its device key, occupancy and leaf key (and the new leaf key of an update
+  it requested, until a window applies it);
+* the secrets of its path, by level;
+* the secrets of its epoch (section 9) and the hash of the epoch's seal;
+* the *header* of its epoch: `gid`, epoch, shape, `tree_hash`, the
+  registry header, the interim transcript hash and the external public key;
+  and the header of the previous epoch, against which it audits the last
+  window (section 15).
+
+This is O(log N) whatever the size of the group: no member needs the whole
+tree.
+
+### 12.2 Following a window
+
+For the packet of the window creating epoch `n` (section 13.1), a member
+of epoch `n - 1`:
+
+1. checks `gid`, `epoch = n`, `prev_interim` (its interim transcript hash)
+   and `district_bits`; the height is not below its own;
+2. rebuilds the registry header from the update and checks it hashes to the
+   header's `registry_hash`. If the policy changed, the update carries the
+   new policy object: it MUST hash to the new `policy_hash`, match the new
+   `open` flag, and be signed by an admin of epoch `n - 1`; if the policy
+   did not change, `open` MUST NOT change either. So a closed group cannot
+   be opened, even by a sealer that colludes with the DS;
+3. takes `init_n-1`: its own for kind 1; for kind 2, the external init
+   secret recovered from `kem_output` with its external key;
+4. takes its leaf key: the current one, or the pending one if the packet
+   names it (an update or re-entry of its own was applied);
+5. derives its path from the packet's steps (section 7.4), then the root
+   secret, `GroupContext_n`, the epoch secrets, and checks the
+   confirmation tag;
+6. for kind 2 only, rebuilds the seal proof with the external key it
+   derived and checks the entrant evidence against its header of epoch
+   `n - 1` (section 13.2): the entrant's request, its admission (none in an
+   open group) or its leaf, and the seal signature;
+7. only then replaces its state.
+
+A member that cannot derive its path (a blank ancestor, a wrap it cannot
+open) or whose tag does not check rejects the window. A packet that names
+a leaf key the member neither holds nor requested means that an update or
+a re-entry was signed with its device key: the member MUST treat that key
+as stolen, SHOULD tell its user and propose its own removal (section 6),
+and comes back as a new device, admitted again in a closed group. Members
+that follow the group do not check the sealer's signature of a member
+window: the init chain makes the tag sufficient (E-5; model
+`fabrication.pv`).
+
+### 12.3 Checking the state it is shown
+
+A committer, a sealer or an entrant works on the public state the DS shows
+it. It MUST first check that state against its header (member) or its
+anchor (entrant): tree hash, registry, epoch, interim transcript hash and
+external key. Otherwise it could wrap secrets to keys the DS chose. The
+implementation checks the whole state; a deployment would send the
+districts concerned with proofs to the tree hash (section 19).
+
+### 12.4 Committing a district
+
+The committer of district `d`:
+
+1. checks the entries of the district (section 6), E-12;
+2. computes the district's new leaves and its plan (section 7.3), draws the
+   secrets hedged with its `init_secret`, and wraps them;
+3. signs the district commit (section 10.3);
+4. erases every secret it drew once the commit is sent. It learns its own
+   path's new secrets from the window like any member.
+
+A committer need not belong to the district it commits (E-3).
+
+### 12.5 Sealing
+
+The sealer:
+
+1. checks every district commit of the window (section 10.3, without the
+   entry checks);
+2. re-keys the city (section 7.3), hedged with its `init_secret`;
+3. takes the root secret: from its city re-key; with no city, by
+   following the single district commit along its own path; with nothing
+   re-keyed, its current root secret;
+4. computes the hashes, `GroupContext_n`, the epoch secrets from its
+   `init_secret`, the confirmation tag and the external key;
+5. signs the seal (section 10.4) and erases what it drew.
+
+### 12.6 Updating
+
+A member refreshes its leaf key with an `UpdateRequest` (section 6), keeps
+the new key pending, and uses it once a packet names it. The window re-keys
+its path and every node it taints. Members SHOULD update at least every
+`UPDATE_INTERVAL`, and an admin MAY evict members that do not (section 14.7).
+
+### 12.7 Sealing as an entrant
+
+With no member online, the DS makes the window's entrant (a joiner or a
+member re-entering its leaf) its only committer and sealer (section 14.4).
+The entrant:
+
+1. brings its anchor to the current epoch by following the chain of seals
+   (section 12.9) and checks the state against it (section 12.3);
+2. encapsulates to the current external key (section 9), and uses the
+   external init secret as `init_n-1` and as its hedge;
+3. commits every district of the window (section 12.4), then seals with
+   kind 2 (section 12.5), its request in the header;
+4. seals the welcomes of every other joiner, re-entering member and
+   catch-up of the window (section 11);
+5. keeps the secrets it drew on its own path (its whole path, since its
+   leaf changed) and erases the rest.
+
+### 12.8 Not sending while a removal waits
+
+A member MUST NOT send a message in an epoch while a removal the DS
+recorded more than `WINDOW_REMOVAL` ago waits: it applies the removal
+first, as a committer or sealer of the next window. The DS lists the
+recorded removals with their times (section 14.6); a DS that hides one can
+also relay ciphertexts to the removed member, so the rule protects against
+a DS that leaks later, not one that colludes now.
+
+### 12.9 Joining
+
+1. **Anchor.** The joiner trusts the anchor key of its admission (section
+   6), or, for an open group, an admin key from the group's public link. It
+   obtains a checkpoint signed with that key by an admin of the
+   checkpointed registry, and from the DS the registry header and external
+   key of the checkpointed epoch, which it checks against the checkpoint
+   (`registry_hash`, `external_pk_hash`).
+2. **Request.** It draws a leaf key and a one-time init key and records a
+   join request, with its admission or, in an open group, without one.
+3. **Chain of seals.** For every window from the checkpoint to the one it
+   enters, it follows the seal link (section 13.3): the seal is signed by a
+   member of the previous epoch, shown by a leaf proof against the previous
+   tree hash, or by an admitted entrant, and the transcript and registry
+   chain from the checkpoint.
+4. **Entry.** For the window that places it, it receives an entry (section
+   13.4): its leaf proof against the new tree hash, which MUST show its
+   device key, its leaf key and its token at `[leaf, n]`; the parents of
+   its path, checked against that proof; the steps of its path, from which
+   it recovers its path secrets (section 7.4) and checks each against its
+   node's key; and its welcome, whose joiner secret MUST reproduce the
+   signed confirmation tag and external key of the seal.
+
+If no member is online, the DS may instead make the joiner the window's
+entrant (section 12.7).
+
+### 12.10 Coming back
+
+A member that missed windows has three ways back (E-8):
+
+* **Replay.** It follows every packet it missed, in order.
+* **Jump.** It records a `CatchUpRequest` bound to the current interim
+  transcript hash, with a one-time init key. The next window welcomes it,
+  to that init key and to its leaf key (section 11). It follows the chain
+  of seals from its own last epoch, and recovers its path from the last
+  step of each of its nodes (section 7.4) with its leaf key: the current
+  one, or the pending one if a window it missed applied its update. The
+  epochs it skipped stay unreadable to it.
+* **Re-entry.** It records a `ReEntryRequest` with a new leaf key and a
+  one-time init key. A member window re-keys its path and welcomes it; with
+  no member online, it seals the window itself as an entrant (section
+  12.7).
+
+### 12.11 Seeing who joined
+
+Every join is a change of a district commit that the seal lists. A member
+that holds the seal of an epoch it accepted can list the devices that
+window let in: it checks that the seal hashes to its transcript, that the
+body hashes to `body_hash`, that the body lists exactly the district
+commits it was given, and that each join's request hashes to its reference.
+In an open group this is how members see the devices of strangers, the DS's
+included. A device can never take a member's place: it cannot sign with the
+member's device key (a request claiming that key fails its signature), and
+a device key already in `devices` cannot join again.
+
+The protocol has no names. A client that shows names MUST bind each name
+to a device key and show when a name appears with another key, as when a
+contact's safety number changes.
+
+<a id="13-packets"></a>
+## 13. Packets, seal links and entries
+
+This version fixes the content of these objects, not yet their encoding
+(section 19). Sizes below are those of the scale test (section 16).
+
+### 13.1 Packets
+
+The packet of member `m` for the window creating epoch `n` holds:
+
+* the seal header and the confirmation tag;
+* for kind 2, the seal signature and the entrant evidence (section 13.2);
+* the registry update: the new roots, policy hash and `open` flag, the
+  admins only when they changed, and the new group policy object when the
+  window set one;
+* `kem_pk_hash` of `m`'s leaf key after the window;
+* the steps of `m`'s path (section 7.4): for each ancestor the window
+  re-keyed, the wrap to the child toward `m`, or `Chain`.
+
+The member does not need the new public keys of its path: a wrong secret
+fails the tag check. In the scale test (section 16), packets average 7.7 KB
+for 2,000 changes among 16,384 members, and 8.3 KB for 4,000 among 65,536.
+
+### 13.2 Entrant evidence
+
+* For a joiner: its join request, and proofs against the registry of epoch
+  `n - 1` that its device is not in `devices` and its token not in
+  `admissions`. A verifier checks the request's reference in the header,
+  `sealer.since = n`, the request's signature and validity, its admission
+  against the admins of epoch `n - 1` (or, without admission, that the
+  group of epoch `n - 1` is open), both proofs, and the seal signature
+  under the request's device key.
+* For a re-entering member: its re-entry request and its leaf proof against
+  the tree hash of epoch `n - 1`. A verifier checks the request's reference,
+  that the member is the sealer and is at the proven leaf, that `replaces`
+  names the proven leaf key, the request's signature and the seal signature
+  under the proven device key.
+
+### 13.3 Seal links
+
+A seal link holds the seal proof, the sealer evidence (the sealer's leaf
+proof against the previous tree hash, or the entrant evidence), the
+registry header after the window, and the group policy object if the
+window set one. Following a link from the header of
+epoch `n - 1`:
+
+1. `gid`, `epoch = n`, `prev_interim`, `district_bits`, height not below;
+2. kind 1: the leaf proof checks against the previous tree hash and shows
+   the sealer; the seal signature checks under its device key. Kind 2: the
+   entrant evidence (section 13.2). Other kinds are refused;
+3. the registry header hashes to `registry_hash`, and a change of policy
+   or of the `open` flag is checked as in section 12.2;
+4. the next header takes the seal's hashes, height and external key, and
+   `interim = H_L("interim-transcript", [H_L("confirmed-transcript",
+   [prev_interim, seal_hash]), tag])`.
+
+A link costs about a seal proof (4.8 KB), a leaf proof (3.2 KB plus 64
+bytes per level) and the registry roots: 9.0 KB in a tree of `2^14`
+leaves.
+
+### 13.4 Entries
+
+An entry holds the links from the entrant's anchor to the epoch it enters,
+its welcome, the last step of each level of its path with the epoch of that
+step, its leaf proof in the tree it enters, and the parents of its path in
+that tree.
+
+<a id="14-delivery-service"></a>
+## 14. Delivery service
+
+### 14.1 Recording requests
+
+The DS checks every request against the current state before recording it:
+
+* a join: its signature and validity, its admission (none needed in an
+  open group, section 6.1), its device not a member, its token unused, no
+  other queued join with the same device or token; for an invite, not
+  expired and not used up (uses applied plus uses queued). In an open
+  group, the DS SHOULD also limit the rate of joins, since anyone can
+  request one;
+* a removal: its target is a member, the proposer may remove it, the
+  signature; one per target;
+* an update or a re-entry: the member exists, `replaces` names its current
+  key, the signature; the latest one per member;
+* a catch-up: the member exists, `prev_interim` is current, the signature;
+  the latest one per member;
+* a group policy: signed by an admin, and not the policy in force;
+* a checkpoint: signed by an admin of the current registry, and matching
+  the epoch it names.
+
+### 14.2 Closing windows
+
+A window is due when its oldest request has waited `WINDOW_MAX`, or its
+oldest removal or eviction `WINDOW_REMOVAL`. The DS builds the window from
+the queue: removals and evictions (one per target), updates and re-entries
+of members the window does not remove (if `replaces` still names their
+key), joins, catch-ups bound to the current epoch whose member the window
+does not affect, and the pending policy.
+
+What may have changed since a request was recorded is checked again, so
+that no committer is handed an entry it must refuse: a request's and an
+admission's expiry, the admission's signer's admin status (or, without
+admission, that the group is still open), a device or token used
+meanwhile, a removal proposer's admin status, an eviction's policy and the
+member's `updated` epoch, and the admin status of the pending policy's
+signer. Signatures are not checked again. Entries that fail are
+left out, and joins and catch-ups that can no longer be valid leave the
+queue.
+
+### 14.3 Placement
+
+Joins go, in order (E-11):
+
+1. into the leaves the window empties by removals and evictions (a join
+   paired with a removal changes one leaf instead of two);
+2. into the lowest free leaves;
+3. into the leaves of a taller tree: the height is the smallest that holds
+   them (section 5.4), at most `MAX_HEIGHT`.
+
+### 14.4 Roles
+
+* **Volunteers.** Members of the current epoch the DS knows to be online,
+  that the window does not affect.
+* **Member window.** Each district of the window goes to a volunteer of that
+  district if there is one, otherwise to volunteers in turn. The sealer is a
+  volunteer without a district, if any, else the first volunteer. Welcomes
+  are assigned as in section 11.
+* **Entrant window.** With no volunteer, the first join or re-entry of the
+  window, in change order, makes its author the entrant: every district,
+  the seal and every welcome go to it.
+* **No window.** With no volunteer and no entrant, the window stays open.
+* **Failover.** The DS MAY give a district of an open member window to
+  another volunteer; a commit of the replaced committer is then refused,
+  and the welcomes it owed for the district (joins, re-entries, and
+  catch-ups of members of the district) go to the new committer. Districts
+  are those of the window's height.
+
+### 14.5 Checking and applying
+
+The DS checks every district commit as it arrives (section 10.3, with its
+committer) and the seal against them (section 10.4). It then applies the
+window (section 10.6) and keeps, for later requests:
+
+* the window: task, district commits, seal, requests, catch-ups, and the
+  index of its re-keyed nodes and wraps;
+* the sealer evidence of its seal link, and the registry header before and
+  after it;
+* for every node, its *latest re-key*: the epoch and the wraps by target,
+  which serve jumps; a node the window blanks leaves the index;
+* for every welcome of the window, the entry data: steps, leaf proof and
+  path parents in the new tree;
+* the audit records of its entries, with proofs against the state before
+  the window (section 15);
+* the leaf proofs of its committers and sealer in the new tree, for fraud
+  proofs.
+
+A welcome is accepted only for a request the window welcomes, and only from
+the welcomer the window assigned it: welcomes are not signed, so the DS
+authenticates their sender, and otherwise any member could replace a
+joiner's welcome with one it cannot open. Packets, links and entries are
+served as in section 13.
+
+### 14.6 Recorded removals
+
+From the moment it records a removal or an eviction until a window applies
+it, the DS:
+
+* refuses the target's messages, district commits and seals;
+* serves it no packet;
+* lists the recorded removals with their times to members (section 12.8).
+
+When no member is online and no entrant comes, nothing more happens until
+the first participant, member or entrant, whose window applies the removal
+(E-7). Removal without any participant cannot be cryptographic: it would
+need a non-interactive key agreement among the removed member's copath
+subtrees.
+
+### 14.7 Eviction
+
+Under a group policy in force that sets `max_idle_epochs`, the DS MAY queue
+an eviction of every member whose leaf key has not changed for more than
+that (section 6). Otherwise it MUST NOT evict. Verifiers check the policy
+and the leaf's `updated` epoch.
+
+<a id="15-audits"></a>
+## 15. Audits and fraud proofs
+
+No single device can check every entry of a large window: two signatures
+per join take about 210 s of CPU for 500,000 joins. Checking is split
+(E-12):
+
+| Who | Checks |
+| --- | --- |
+| DS | every request as it records it (section 14.1) |
+| Committer of a district | every entry of the district (section 12.4) |
+| Sealer | every district commit: signature, structure, taints, hashes (section 10.3 without entry checks) |
+| Members | random entries of the window, `AUDIT_K` audits per entry on average |
+
+**Audit records.** For each change of a window, the DS keeps the district,
+the committer, the change, the request, and the proofs against the state
+before the window: the changed leaf's proof (not for a join); for a join,
+the proofs that its device is not a member and its admission unused; for an
+eviction, the policy in force.
+
+**Auditing.** A member of the window's epoch checks sampled records
+against its header of the previous epoch. The verdict is:
+
+* an error, if the record's proofs do not check (nothing can be
+  concluded);
+* *fraud*, if the entry fails the rules of section 6 or section 10.1: an
+  invalid signature or admission, a join without admission in a closed
+  group, an expired request, a device already a member, a token already
+  used, a target that is not the leaf's occupant, a `replaces` that names
+  another key, an eviction without policy or of a member not idle long
+  enough;
+* *valid* otherwise.
+
+**Sampling.** With `E` entries and `M` auditing members, each member audits
+`ceil(AUDIT_K·E / M)` distinct entries drawn at random (all of them if
+fewer). With `AUDIT_K = 20`, an invalid entry escapes every auditor with
+probability about `e^-20 ≈ 2·10^-9`.
+
+**Fraud proofs.** A fraud proof holds the signed district commit, the audit
+record of the invalid entry, and the committer's leaf proof in the tree
+after the window. Anyone holding the headers before and after the window
+checks: the commit is of that window and signed by the committer shown by
+the leaf proof, it lists the change, the request matches the change's
+reference, and the audit verdict is fraud. What the group does with a
+fraud proof (removing the committer and the entry) is up to its admins.
+
+<a id="16-parameters"></a>
+## 16. Parameters
+
+| Name | Value |
+| --- | --- |
+| `L` (`district_bits`) | 12 by default, fixed at genesis (the tests use 2) |
+| `WINDOW_MAX` | 60 s |
+| `WINDOW_REMOVAL` | 5 s |
+| `UPDATE_INTERVAL` | 7 days |
+| `CHECKPOINT_INTERVAL` | 1 hour |
+| `AUDIT_K` | 20 audits per entry on average |
+| `MAX_HEIGHT` | 24 (`2^24` leaves) |
+| `MAX_ADMISSION_EPOCHS` | 65,536 |
+| Invite / admission / other requests and checkpoints / welcome | 12 / 24 / 48 / 4 KiB |
+| District commit / seal | 64 MiB each |
+
+**Measured costs.** The scale test (`crates/cityg-core/tests/scale.rs`, one
+core, release build) builds a full group and runs a window of half removals
+and half joins paired with them. The number of wraps and new keys equals
+the count of the cost model (`research/rekey_sim.py`) for the same leaves;
+times vary with the machine:
+
+| | N = 16,384, L = 10, 2,000 changes | N = 65,536, L = 12, 4,000 changes |
+| --- | --- | --- |
+| Wraps (against the bound `D·ln(N/D)`) | 5,333 (×1.27) | 12,475 (×1.12) |
+| New keys | 4,349 | 10,506 |
+| District commits | 16, 11.7 MB in all, busiest 852 KB | 16, 27.8 MB in all, busiest 1.9 MB |
+| Seal | 51 KB | 51 KB |
+| Packet per member | mean 7.7 KB, max 13.4 KB | mean 8.3 KB, max 14.6 KB |
+| DS check of the whole window, every entry included | 0.8 s | 1.6 s |
+
+<a id="17-labels"></a>
+## 17. Label registry
+
+### 17.1 Labelled hashes (`H_L`)
+
+| Label | Arguments | Section |
+| --- | --- | --- |
+| `group-id` | `[creator_device_pk, group_nonce]` | 4 |
+| `device-id` | `[gid, device_pk]` | 4 |
+| `invite-id` | `[invite_pk]` | 4 |
+| `kem-pk` | `[pk]` | 3 |
+| `tree/leaf` | `[LeafNode or null]` | 5.3 |
+| `tree/node` | `[encryption_key, taint]` | 5.3 |
+| `tree/parent` | `[content or null, left_hash, right_hash]` | 5.3 |
+| `smm/leaf` | `[key, occupancy]` | 8 |
+| `smm/node` | `[left, right]` | 8 |
+| `registry` | `[admins, devices_root, admissions_root, policy_hash or null, open]` | 8 |
+| `confirmed-transcript` | `[prev_interim, seal_hash]` | 9 |
+| `interim-transcript` | `[confirmed, confirmation_tag]` | 9 |
+
+### 17.2 Derivation labels and object labels
+
+| Kind | Labels |
+| --- | --- |
+| `ExpandLabel` / `DeriveSecret` / `KemKey` | `tree node key`, `tree path`, `fresh node`, `wrap key`, `wrap nonce`, `commit`, `joiner`, `epoch`, `init`, `msg`, `confirm`, `external`, `external kem`, `external init`, `welcome key`, `welcome nonce` |
+| Framing tags | `city-g/v0.4` (H_L), `city-g/v0.4 expand`, `city-g/v0.4 mac`; profile identifier `city-g/v0.4` |
+| Encoded objects | `city-g/group-context/v4`, `city-g/invite/v4`, `city-g/admission/v4`, `city-g/join-request/v4`, `city-g/remove/v4`, `city-g/eviction/v4`, `city-g/group-policy/v4`, `city-g/update/v4`, `city-g/catch-up/v4`, `city-g/re-entry/v4`, `city-g/checkpoint/v4`, `city-g/district-commit/v4`, `city-g/seal/v4`, `city-g/seal-body/v4`, `city-g/welcome/v4` |
+
+### 17.3 Signature contexts (FIPS 204 `ctx`)
+
+The context of a signed array is its label (section 3.4); the seal has a
+context of its own.
+
+| Context | Signed object |
+| --- | --- |
+| `city-g/district-commit/v4` | DistrictCommit, by its committer |
+| `city-g/seal/v4` | `[seal_hash, confirmation_tag, external_pk]`, by the sealer |
+| `city-g/invite/v4` | Invite, by the inviter |
+| `city-g/admission/v4` | Admission, by an admin or an invite key |
+| `city-g/join-request/v4` | JoinRequest, by the joining device |
+| `city-g/remove/v4` | RemoveProposal, by an admin or the target |
+| `city-g/update/v4` | UpdateRequest, by the member |
+| `city-g/catch-up/v4` | CatchUpRequest, by the member |
+| `city-g/re-entry/v4` | ReEntryRequest, by the member |
+| `city-g/checkpoint/v4` | Checkpoint, by an admin |
+| `city-g/group-policy/v4` | GroupPolicy, by an admin |
+
+<a id="18-security-considerations"></a>
+## 18. Security considerations
+
+* **Windows sealed by an entrant.** The external public key is public, so
+  the DS can compute a correct confirmation tag for a window it seals itself
+  (model `external_tag_only.pv`). Members MUST check the entrant evidence of
+  every kind-2 window: an admin-signed admission never used (or, in an open
+  group, none) and a device not a member, or a re-entry signed by the
+  member's device key, and the seal signature under the entrant's key
+  (`external_checked.pv`). The DS refuses such a window too (section 10.5),
+  but members cannot rely on it.
+* **Open groups.** Anyone can join an open group, so it has no
+  confidentiality against the DS or anyone else who joins: a device kept in
+  the group reads from its join on (`open_group.pv`). Epochs before that
+  join stay closed to it. What an open group keeps: joins are visible
+  (section 12.11); nobody can speak as a member, since messages and
+  requests are signed with the member's device key (`open_group.pv`);
+  removals, evictions and admin rights keep their rules; and the admission
+  mode changes only by an admin's policy, which members check themselves
+  (section 12.2). A DS that seals a window with a device of its own acts as
+  committer of every district: an invalid removal or update it places is
+  caught by audits, as any committer's (section 15), and its victim sees
+  it. Rate limits and abuse control belong to the DS and the application.
+* **Removed members and the external init.** Every member of epoch `n - 1`
+  can recover the external init secret of window `n`, including the members
+  the window removes. The new epoch is secret from them only because the
+  window re-keys every node they know: their path, and every node they
+  taint (`entrant_removal.pv`, `taint.pv`).
+* **Committers and entrants.** They learn the secrets they draw. Erasure is
+  required; taints make a removed committer's knowledge useless, at the cost
+  of re-keying what it drew (for an entrant, possibly the whole window).
+  `taint_without_rule.pv` shows the attack without the rule, and the test
+  `removing_a_committer_rekeys_the_nodes_it_drew` shows it on real commits.
+* **No one online.** Removals then wait for the first participant; the DS
+  enforces them meanwhile (section 14.6) and members do not send while one
+  waits (section 12.8). A DS that colludes with a removed member can keep
+  relaying to it until the removal is applied.
+* **The state a role is shown** MUST be checked against a trusted header or
+  anchor (section 12.3); otherwise the DS could have secrets wrapped to keys
+  of its choosing.
+* **Audits are probabilistic.** An invalid entry that escapes the DS, its
+  committer and every sampled auditor enters the group. A fraud proof names
+  the committer, but only after the fact: admins should remove both the
+  committer and the entry. The probability of escape is about `e^-AUDIT_K`
+  per entry, if members audit honestly. A fraud proof is checked against
+  the verifier's own headers of the epochs around the window; it does not
+  show by itself that the commit was sealed (section 19).
+* **Forks.** The DS decides what each member sees and can split the group
+  into branches. Joiners anchor on admin checkpoints and check the chain of
+  seals (`anchored_join.pv`); a joiner that checked only the epoch it
+  enters could be led into an epoch the DS fabricated
+  (`join_without_anchor.pv`). Members that follow the group check only tags
+  and would not notice a fork; they SHOULD compare the interim transcript
+  hash out of band.
+* **Replays.** A leaf-key request names the key it replaces; a catch-up is
+  bound to one window; an admission admits once; occupancies are never
+  reused. A welcome is bound to its epoch, request and init key, and a
+  catch-up's welcome to the member's leaf key.
+* **Jumps.** A member that jumps checks every recovered path secret against
+  the key of its node in the tree it enters, itself checked by its leaf
+  proof against the tree hash of a seal it verified: stale or forged wraps
+  are detected. Its welcome is sealed to its leaf key too, so a device key
+  stolen without the member's state does not jump
+  (`catch_up_stolen_key.pv`); welcomed to the request's init key alone, the
+  thief would read every window, unseen (`catch_up_init_only.pv`).
+* **Placement and roles** do not affect security: a bad placement costs
+  bandwidth, a bad role assignment delays a window.
+* **Time.** `time_ms` of a seal is the sealer's clock, only required not to
+  go backwards.
+
+<a id="19-open-items"></a>
+## 19. Open items
+
+This version does not yet specify or implement:
+
+* **The message plane.** The members of epoch `n` share `msg_secret_n`.
+  The framing of application messages, per-sender ratchets derived from
+  that secret, sender authentication with device keys, and messages that
+  arrive after the next epoch remain to be specified. With millions of
+  members, per-sender chains must be derived on demand (for instance from a
+  secret tree over the leaves, as in MLS), not one per member at every
+  epoch. The research note
+  [`research/plan-de-messages-2026-09-26.md`](research/plan-de-messages-2026-09-26.md)
+  proposes one, and
+  [`research/parite-mls-2026-09-26.md`](research/parite-mls-2026-09-26.md)
+  what a next profile needs for the guarantees of MLS (encrypted sender
+  data, unique keys, a mode where the service authorizes joins, a
+  membership log, urgent and ordinary removals); none of it is part of
+  this profile.
+* test vectors of this profile (the v0.5 draft has them, under its own
+  labels: [`vectors/`](vectors/README.md)), an independent verifier and a
+  conformance manifest;
+* the encodings of packets, seal links, entries, audit records and fraud
+  proofs, and district views with proofs for committers (section 12.3);
+* the delivery service's API, persistence, and the clients;
+* device-key rotation, admin changes beyond the promotion rule, invite
+  revocation;
+* reports of wraps a member cannot open, so that a malicious committer
+  cannot silently cut members off (section 2.3); the research note
+  [`research/rekey-serveur-2026-09-26.md`](research/rekey-serveur-2026-09-26.md)
+  proposes disputes proved in zero knowledge, and repairs;
+* a lighter structure for continuous churn: above about 2^14 leaves every
+  subtree changes in almost every window, and the binary city makes each
+  member download a wrap per such level. The research note
+  [`research/ilots-2026-09-26.md`](research/ilots-2026-09-26.md) proposes
+  îlots of 2^8 leaves under a flat top that sends each window's secret to
+  every îlot root, relays inside îlots, and joiners that re-key their own
+  paths; following the group then costs about 19 times less at a million
+  members. The synthesis
+  [`research/au-dela-0.4-2026-09-26.md`](research/au-dela-0.4-2026-09-26.md)
+  keeps this profile's tree, read through relays, and ranks what is still
+  open; stage 1 of the [v0.5 draft](specs-v0.5-draft.md) specifies the
+  relays;
+* fraud proofs that also bind the district commit to the seal that listed
+  it, so that a proof holds on its own across forks (section 15);
+* shrinking the tree; pruning the admission map;
+* for open groups, optional unique handles bound to device keys, so that a
+  name cannot move to another key without every client noticing;
+* newer checkpoints signed by later admins, so that a joiner holding an old
+  checkpoint does not check a long chain;
+* a formal model of this specification: the model of [`formal/`](formal/)
+  checks the design choices it rests on.
+
+<a id="20-mls"></a>
+## 20. Relation to MLS
+
+City-G keeps the structure of MLS (RFC 9420) where it can, and departs from
+it where a group of millions of members needs something else.
+
+| | MLS (RFC 9420) | City-G |
+| --- | --- | --- |
+| Key schedule | init secret chain, joiner secret from the init secret, the commit secret and the group context, epoch secret, confirmation tag over the confirmed transcript hash, interim transcript hash | the same structure (section 9), with the commit secret taken from the window's root secret |
+| Tree | left-balanced array, unmerged leaves, resolutions of blank nodes | sparse, up to `2^24` leaves, split into districts under a city; a parent is blank exactly when its subtree is empty (section 5) |
+| Changes | proposals, then one commit by one member per epoch | one window per epoch: district commits built in parallel by several members, then a seal (section 10) |
+| Re-key | the committer's update path, encrypted to the resolutions of its copath | a multi-path re-key of each changed district and of the city, chained where possible (section 7.3) |
+| Who knows a node's secret | a committer re-keys only its own path, which its removal blanks | a committer re-keys other members' nodes too; taints record who drew each node, and a removal or an update re-keys every node its member drew (section 10.2) |
+| Joining | a welcome for a member added by a commit, or an external commit to the group's external key | a welcome for a join a member committed, or, with nobody online, an entrant that seals the window itself with an external init (sections 11 and 12.7) |
+| What a joiner checks | the group information signed by a member | the chain of seals from an admin checkpoint (section 12.9) |
+| What a member keeps | the public tree | its path, the secrets and the header of its epoch: O(log N) (section 12.1) |
+| What a member receives per epoch | the commit | one packet with the steps of its own path (section 13.1) |
+| Who validates changes | every member, every proposal | the DS and the committers every entry, the sealer every commit's structure, members random samples (section 15) |
+| Suite | the cipher suites of RFC 9420 (classical KEMs and signatures) | X-Wing, ML-DSA-65, BLAKE3 and ChaCha20-Poly1305 (section 3) |

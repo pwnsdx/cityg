@@ -1,0 +1,40 @@
+(* Scenario ILOT_CITY_STALE: a binary city above the îlots that a flat
+   window does not re-key; two removed members collude.
+
+   Îlots k and j are under city node P, îlot l under city node Q; the city
+   root sits above P and Q. In epoch 1, M1 (in îlot k) and M2 (in îlot l)
+   are members: M1 knows the secret of P. Window 2 removes M1 with a flat
+   top: îlot k gets a fresh root and the window secret goes to every îlot
+   root, but the city is not re-keyed, so P keeps the secret M1 knows. M2
+   is a member of epoch 2. Window 3 removes M2 in tree mode: îlot l gets a
+   fresh root, the city re-keys l's path, Q and the root, and the new root
+   secret, the window secret, is wrapped to P's current key. M1 and M2 work
+   with the server. A member sends M3 in epoch 3.
+
+   Expected: attack. M1 opens the window secret of window 3 with P's old
+   secret, and M2 gives the init secret of epoch 2. Every window re-keys
+   the city along the paths of the îlots it changes
+   (ilot_city_maintained.pv). *)
+
+free M3: bitstring [private].
+query attacker(M3).
+
+process
+  new es1: key; new sk: key; new sj: key; new sl: key; new p1: key; new q1: key;
+  new sk2: key; new r2: key; new sl3: key; new q3: key; new r3: key;
+  new a1: key; new a2: key; new a3: key; new a4: key; new a5: key; new a6: key;
+  (* What M1 knows: epoch 1, the old root of îlot k, P's secret. *)
+  out(c, (es1, sk, p1));
+  (* Window 2, flat: îlot k re-keyed, the window secret to every îlot root. *)
+  out(c, (seal(node_pk(sk2), a1, N2, r2), seal(node_pk(sj), a2, N2, r2), seal(node_pk(sl), a3, N2, r2)));
+  let g2 = (N2, node_pk(sk2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), commit_secret(r2), g2)) in
+  (* What M2 knows as a member of epoch 2. *)
+  out(c, es2);
+  (* Window 3, tree mode: îlot l re-keyed, its city path Q and the root. *)
+  out(c, (seal(node_pk(sl3), a4, N3, q3), seal(node_pk(q3), a5, N3, r3), seal(node_pk(p1), a6, N3, r3)));
+  let g3 = (N3, node_pk(sl3), node_pk(q3)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), commit_secret(r3), g3)) in
+  (* The group contexts are public. *)
+  out(c, (g2, g3));
+  out(c, aenc(msg_key(es3), M3))

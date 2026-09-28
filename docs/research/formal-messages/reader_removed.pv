@@ -1,0 +1,62 @@
+(* Scenario READER_REMOVED: a reader is removed without any re-key.
+
+   R and Q are readers of epoch 1: both hold its reader secret rs1, and
+   neither holds an epoch secret nor any secret of the keepers' tree.
+   Window 2 removes R and changes nothing in the keepers' tree: its root r
+   stays, and epoch 2 is fresh only through the init chain (docs/specs.md,
+   section 9). The attacker is R with the delivery service: it knows rs1,
+   R's device key and every public value. Keeper K serves bundles for
+   epoch 2 to Q only, since R is no longer in the roster, and sends a
+   message in epoch 2.
+
+   Two properties:
+   * R cannot read epoch 2 on the branch where its removal is applied:
+     K's message stays secret;
+   * R and the delivery service can fork Q: Q checks only the chained
+     reader tag, which rs1 keys, so they can make Q accept an epoch 2 of
+     their own. Expected: this is the fork that any member of epoch 1 can
+     make, with the delivery service, against a member that checks only
+     tags (docs/specs.md, section 2.3); reader_removed_signed_bundle.pv
+     closes it. *)
+
+free skR: skey.
+free skQ: skey [private].
+
+(* K's message in the real epoch 2. *)
+free MK: bitstring [private].
+query attacker(MK).
+
+(* Q's message in the epoch 2 it accepted. *)
+free MQ: bitstring [private].
+query attacker(MQ).
+
+process
+  new es1: key; new r: key; new interim1: bitstring;
+  let rs1 = reader_secret(es1) in
+  out(c, (rs1, interim1, spk(skQ)));
+  let gc2 = (N2, node_pk(r)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r, gc2)) in
+  let rs2 = reader_secret(es2) in
+  new seal_hash2: bitstring;
+  let cth2 = hash((interim1, seal_hash2)) in
+  out(c, (gc2, seal_hash2, reader_tag(rs1, cth2, rs2)));
+  (
+    (* Keeper K: bundles for Q only; a message in epoch 2. *)
+    out(c, aenc(msg_key(rs2), MK))
+  ) | (
+    !
+    in(c, (req: bitstring, sg: bitstring));
+    if checksign(spk(skQ), req, sg) = true then
+    let (=L_request, =N2, otpk: kpk) = req in
+    new rk: key;
+    out(c, seal(otpk, rk, hash(req), rs2))
+  ) | (
+    (* Reader Q. *)
+    new otk: key;
+    let req = (L_request, N2, kempk(otk)) in
+    out(c, (req, sign(skQ, req)));
+    in(c, (b: bitstring, sh: bitstring, rt: bitstring));
+    let rs = open(otk, hash(req), b) in
+    if rt = reader_tag(rs1, hash((interim1, sh)), rs) then
+    out(c, aenc(msg_key(rs), MQ))
+  )

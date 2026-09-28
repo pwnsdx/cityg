@@ -1,0 +1,52 @@
+(* Scenario HISTORY_LINK: a member back from an absence reads the epoch it
+   missed through a history link; a removed member does not.
+
+   Epochs 1, 2, 3. R was a member throughout but offline in epoch 2: it
+   holds the init secret of epoch 1 and its leaf key. M was a member of
+   epoch 1 and window 2 removes it: it knows the init secret of epoch 1 too.
+   The roots of epochs 2 and 3 reach R's leaf, not M's. The seal of epoch 3
+   carries the history link: the commit secret of epoch 2 under a key
+   derived from that of epoch 3. Back in epoch 3, R derives the root, opens
+   the link, computes epoch 2 from its init secret of epoch 1, and checks
+   its confirmation tag. The attacker is M with the delivery service; a
+   member sends M2 in epoch 2.
+
+   Two properties:
+   * M does not read the real epoch 2;
+   * R accepts only the real epoch 2. Expected to fail: M knows the init
+     secret of epoch 1, so with the delivery service it can make up an
+     epoch 2 for R, as any member of an epoch can for a member that follows
+     the group and checks tags (docs/specs.md, section 2.3). *)
+
+free M2: bitstring [private].
+query attacker(M2).
+
+event RReads(key).
+event Epoch2(key).
+query es: key; event(RReads(es)) ==> event(Epoch2(es)).
+
+process
+  new es1: key; new lsR: key; new r2: key; new r3: key; new q2: key; new q3: key;
+  let init1 = init_secret(es1) in
+  (* What the removed M holds from epoch 1; R's leaf key is public. *)
+  out(c, (init1, leaf_pk(lsR)));
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, commit_secret(r2), gc2)) in
+  let gc3 = (N3, node_pk(r3)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), commit_secret(r3), gc3)) in
+  event Epoch2(es2);
+  (* Seals and wraps: roots wrapped to R's leaf; the history link of epoch 3. *)
+  out(c, (gc2, tag(es2, gc2), seal(leaf_pk(lsR), q2, N2, r2)));
+  out(c, (gc3, seal(leaf_pk(lsR), q3, N3, r3),
+          history_link(commit_secret(r3), gc3, commit_secret(r2))));
+  out(c, aenc(msg_key(es2), M2));
+  (
+    (* R, back in epoch 3: its root, then the link, then epoch 2. *)
+    in(c, (g3: bitstring, w3: bitstring, hl: bitstring));
+    let root3 = open(leaf_sk(lsR), N3, w3) in
+    let cs2 = sdec(kdf(commit_secret(root3), L_hist), g3, hl) in
+    in(c, (g2: bitstring, tg2: bitstring));
+    let es = epoch_secret(joiner_secret(init1, cs2, g2)) in
+    if tag(es, g2) = tg2 then
+    event RReads(es)
+  )

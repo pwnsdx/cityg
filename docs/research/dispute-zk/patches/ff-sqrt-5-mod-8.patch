@@ -1,0 +1,35 @@
+diff --git a/ff_codegen/src/lib.rs b/ff_codegen/src/lib.rs
+index 9062d40..2e7f109 100644
+--- a/ff_codegen/src/lib.rs
++++ b/ff_codegen/src/lib.rs
+@@ -352,6 +352,30 @@ fn prime_field_constants_and_sqrt(
+                     v = k;
+                 }
+ 
++                ::ff::derive::subtle::CtOption::new(
++                    x,
++                    (x * &x).ct_eq(self), // Only return Some if it's the square root.
++                )
++            }
++        } else if (modulus % BigUint::from_str("8").unwrap()) == BigUint::from_str("5").unwrap() {
++            // Addition chain for (r - 5) // 8
++            let mod_minus_5_over_8 = pow_fixed::generate(
++                &quote! {two_a},
++                (modulus - BigUint::from_str("5").unwrap()) >> 3,
++            );
++
++            quote! {
++                use ::ff::derive::subtle::ConstantTimeEq;
++
++                // Atkin's algorithm for r = 5 (mod 8): b = (2a)^((r - 5) // 8),
++                // i = 2a b^2, x = a b (i - 1).
++                let two_a = self.double();
++                let b = {
++                    #mod_minus_5_over_8
++                };
++                let i = two_a * b.square();
++                let x = *self * b * (i - #name::one());
++
+                 ::ff::derive::subtle::CtOption::new(
+                     x,
+                     (x * &x).ct_eq(self), // Only return Some if it's the square root.

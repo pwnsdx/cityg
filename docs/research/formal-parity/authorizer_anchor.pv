@@ -1,0 +1,47 @@
+(* Scenario AUTHORIZER_ANCHOR: a joiner anchored on the authorizer's
+   checkpoint of the epoch it enters.
+
+   The authorizer signs a checkpoint for every window: the group context and
+   the confirmation tag of the epoch it creates. Joiner J trusts the
+   authorizer's key and holds a one-time init key, whose public part is in
+   its join request. A welcomer of window 2 seals the joiner secret to that
+   key. J accepts the epoch only if the checkpoint is signed and the joiner
+   secret of the welcome reproduces its confirmation tag: it needs no chain
+   of seals. The attacker is the network and the delivery service, without
+   the authorizer's key and without the group's secrets; J's init key is
+   public, so it can seal a joiner secret of its own to it. *)
+
+free skAuth: skey [private].
+
+free MJ: bitstring [private].
+query attacker(MJ).
+
+event Epoch(key).
+event JoinerAccepts(key).
+query es: key; event(JoinerAccepts(es)) ==> event(Epoch(es)).
+
+process
+  new init1: key; new r2: key; new ikJ: key;
+  out(c, (spk(skAuth), kempk(ikJ)));
+  let gc2 = (N2, node_pk(r2)) in
+  let js2 = joiner_secret(init1, commit_secret(r2), gc2) in
+  let es2 = epoch_secret(js2) in
+  event Epoch(es2);
+  (
+    (* The authorizer's checkpoint of epoch 2. *)
+    out(c, (gc2, tag(es2, gc2), sign(skAuth, (L_ckpt, gc2, tag(es2, gc2)))))
+  ) | (
+    (* The welcomer: the joiner secret, sealed to J's init key. *)
+    new rw: key;
+    out(c, seal(kempk(ikJ), rw, hash(gc2), js2))
+  ) | (
+    (* Joiner J. *)
+    in(c, (gc: bitstring, tg: bitstring, sg: bitstring));
+    if checksign(spk(skAuth), (L_ckpt, gc, tg), sg) = true then
+    in(c, w: bitstring);
+    let js = open(ikJ, hash(gc), w) in
+    let es = epoch_secret(js) in
+    if tag(es, gc) = tg then
+    event JoinerAccepts(es);
+    out(c, aenc(msg_key(es), MJ))
+  )

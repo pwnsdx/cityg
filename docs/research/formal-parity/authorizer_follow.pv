@@ -1,0 +1,45 @@
+(* Scenario AUTHORIZER_FOLLOW: a member that follows the group also checks
+   the authorizer's checkpoint of every window.
+
+   A and M are members of epoch 1; both hold its init secret. M is hostile
+   and works with the delivery service. The real window 2 is sealed
+   honestly, and the authorizer, after checking it, signs its checkpoint:
+   one per epoch. M and the delivery service can make up another window 2
+   for A: a root of their choice wrapped to A's leaf key, which is public,
+   and the tag from the init secret they know. A accepts a window only if
+   its path gives a secret that checks the tag and the authorizer signed
+   the checkpoint of that epoch. *)
+
+free skAuth: skey [private].
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event Epoch2(key).
+event FollowerAccepts(key).
+query es: key; event(FollowerAccepts(es)) ==> event(Epoch2(es)).
+
+process
+  new es1: key; new lsA: key; new r2: key; new q: key;
+  let init1 = init_secret(es1) in
+  (* What M knows from epoch 1; A's leaf key is public. *)
+  out(c, (init1, spk(skAuth), leaf_pk(lsA)));
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, commit_secret(r2), gc2)) in
+  event Epoch2(es2);
+  (
+    (* The real window 2 and its checkpoint. *)
+    out(c, (gc2, seal(leaf_pk(lsA), q, N2, r2), tag(es2, gc2),
+            sign(skAuth, (L_ckpt, gc2, tag(es2, gc2)))))
+  ) | (
+    (* Member A. *)
+    in(c, (gc: bitstring, w: bitstring, tg: bitstring, sg: bitstring));
+    if checksign(spk(skAuth), (L_ckpt, gc, tg), sg) = true then
+    let (=N2, pkr: kpk) = gc in
+    let root = open(leaf_sk(lsA), N2, w) in
+    if node_pk(root) = pkr then
+    let es = epoch_secret(joiner_secret(init1, commit_secret(root), gc)) in
+    if tag(es, gc) = tg then
+    event FollowerAccepts(es);
+    out(c, aenc(msg_key(es), MA))
+  )

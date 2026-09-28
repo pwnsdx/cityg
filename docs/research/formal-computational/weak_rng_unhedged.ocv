@@ -1,0 +1,35 @@
+(* Control for weak_rng.ocv: the committer uses its broken generator's
+   output directly, fresh = DeriveSecret(r, "fresh node"), without the
+   hedge of section 7.1. Expected: not proved. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+
+proba Psalt.
+proba Pikm.
+expand dual_PRF(key, key, Extract, Psalt, Pikm).
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+const empty: hash.
+letfun DeriveSecret(s: key, l: label) = ExpandLabel(s, l, empty).
+
+const l_fresh: label.
+
+param Nf.
+
+query secret fresh.
+
+process
+  Ostart() :=
+    init <-R key;
+    return();
+    foreach i <= Nf do
+    (* The adversary chooses the generator's output. *)
+    Ofresh(r: key) :=
+      find u <= Nf suchthat defined(r[u], fresh[u]) && r = r[u] then yield else
+      let fresh: key = DeriveSecret(r, l_fresh) in
+      return()

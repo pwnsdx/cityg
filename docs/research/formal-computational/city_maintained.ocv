@@ -1,0 +1,86 @@
+(* The maintained city above the îlots, in the computational model: the
+   counterpart of formal-parity/ilot_city_maintained.pv.
+
+   Node P is above îlots k and j, node Q above îlot l. M1 (îlot k) and M2
+   (îlot l) are members of epoch 1. Window 2 removes M1: îlot k gets a
+   fresh root, P a fresh secret wrapped to the new root of k and to the
+   root of j, and the window secret r2 goes flat to the three îlot roots.
+   M2 is a member of epoch 2. Window 3 removes M2: îlot l gets a fresh
+   root, Q a fresh secret wrapped to it, and the window secret r3 is
+   wrapped to the current keys of Q and P. M1 and M2 work with the server.
+   Query: the message secret of epoch 3 stays secret. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+
+proba Psalt.
+proba Pikm.
+expand dual_PRF(key, key, Extract, Psalt, Pikm).
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+const empty: hash.
+letfun DeriveSecret(s: key, l: label) = ExpandLabel(s, l, empty).
+
+type nonce [large, fixed].
+fun to_nonce(key): nonce.
+equiv(to_nonce_random)
+  k <-R key; O() := return(to_nonce(k))
+<=(0)=>
+  n <-R nonce; O() := return(n).
+
+type ciphertext.
+proba Penc.
+proba Pencctxt.
+expand AEAD_nonce(key, key, ciphertext, hash, nonce, aead_enc, aead_dec, injbot, Z, Penc, Pencctxt).
+const Zkey: key.
+equation forall x: key; Z(x) = Zkey.
+
+type pkey [bounded].
+type skey [bounded].
+type kemct [fixed].
+type encapoutput [fixed].
+proba Pcca.
+proba Pkeycoll.
+proba Pctxtcoll.
+expand IND_CCA2_KEM(key, pkey, skey, key, kemct, encapoutput, pkgen, skgen, encap, pair, decap, injbot_kem, Pcca, Pkeycoll, Pctxtcoll).
+
+const l_node, l_wrap_key, l_wrap_nonce, l_commit, l_joiner, l_epoch, l_init, l_msg: label.
+
+letfun node_pk(x: key) = pkgen(ExpandLabel(x, l_node, empty)).
+
+fun wrapped(kemct, ciphertext): bitstring [data].
+letfun wrap(pk: pkey, s: key) =
+  let pair(ss: key, ct: kemct) = encap(pk) in
+  wrapped(ct, aead_enc(s, empty, ExpandLabel(ss, l_wrap_key, empty),
+                       to_nonce(ExpandLabel(ss, l_wrap_nonce, empty)))).
+
+letfun epoch(init: key, root: key, gc: hash) =
+  DeriveSecret(ExpandLabel(Extract(init, DeriveSecret(root, l_commit)), l_joiner, gc), l_epoch).
+
+query secret msg3.
+
+process
+  Ostart() :=
+    (* Epoch 1: M1 knows the root of îlot k and P, M2 the root of îlot l and Q. *)
+    es1 <-R key; sk1 <-R key; sj <-R key; sl <-R key; p1 <-R key; q1 <-R key;
+    return(es1, sk1, p1, sl, q1, node_pk(sj));
+    O2(gc2: hash) :=
+      (* Window 2 removes M1. *)
+      sk2 <-R key; p2 <-R key; r2 <-R key;
+      let es2 = epoch(DeriveSecret(es1, l_init), r2, gc2) in
+      (* M2 is a member of epoch 2. *)
+      return(node_pk(sk2), node_pk(p2),
+             wrap(node_pk(sk2), p2), wrap(node_pk(sj), p2),
+             wrap(node_pk(sk2), r2), wrap(node_pk(sj), r2), wrap(node_pk(sl), r2),
+             es2, r2);
+      O3(gc3: hash) :=
+        (* Window 3 removes M2. *)
+        sl3 <-R key; q3 <-R key; r3 <-R key;
+        let es3 = epoch(DeriveSecret(es2, l_init), r3, gc3) in
+        let msg3: key = DeriveSecret(es3, l_msg) in
+        return(node_pk(sl3), node_pk(q3),
+               wrap(node_pk(sl3), q3), wrap(node_pk(q3), r3), wrap(node_pk(p2), r3))

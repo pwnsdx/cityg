@@ -1,0 +1,33 @@
+(* Scenario ILOT_REMOVAL: a removal in an îlot, under a flat top.
+
+   Îlot j holds members A and M; îlot i holds B. Window 2 removes M: the
+   îlot task draws a fresh root for îlot j and wraps it to A's leaf; îlot i
+   does not change. The top draws the epoch secret of window 2 and seals it
+   to every îlot root: the new root of j, the unchanged root of i. There is
+   no tree above the îlots. M gives the server, which is the network here,
+   everything it holds: the epoch secret of epoch 1 and the old root of
+   îlot j. A member sends MA in the real epoch 2, the one the top creates.
+
+   Expected: proved. M knows neither the new root of j nor the root of i,
+   and the server knows no root. As in member_rekey_removed.pv, the
+   property is about the real epoch; a member that checks only the tag can
+   still be led into another epoch by M and the server (the fork of
+   docs/specs.md, section 2.3). *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+process
+  new es1: key; new sj: key; new si: key; new lsA: key;
+  new sj2: key; new r2: key; new q1: key; new q2: key; new q3: key;
+  (* What M gives the server; the leaf key of A and the root key of i are
+     public. *)
+  out(c, (es1, sj, leaf_pk(lsA), node_pk(si)));
+  (* The îlot task: the new root of j, wrapped to A's leaf. *)
+  out(c, seal(leaf_pk(lsA), q1, N2, sj2));
+  (* The top: the epoch secret to both îlot roots. *)
+  out(c, (seal(node_pk(sj2), q2, N2, r2), seal(node_pk(si), q3, N2, r2)));
+  let gc2 = (N2, node_pk(sj2), node_pk(si)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), commit_secret(r2), gc2)) in
+  out(c, (gc2, tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), MA))

@@ -1,0 +1,30 @@
+(* Scenario CARD_CACHED (sanity check): the removal of card_revalidated.pv,
+   with a reader that learned S's card in epoch 1 and keeps accepting it in
+   later epochs without checking the roster of the message's epoch. *)
+
+free skS: skey.
+free skT: skey [private].
+
+event Member(spkey, bitstring).
+event Accepted(spkey, bitstring, bitstring).
+query pk: spkey, n: bitstring, m: bitstring;
+  event(Accepted(pk, n, m)) ==> event(Member(pk, n)).
+
+process
+  event Member(spk(skS), N1);
+  event Member(spk(skT), N1);
+  event Member(spk(skT), N2);
+  out(c, spk(skT));
+  (
+    !
+    new m: bitstring;
+    out(c, (N1, m, sign(skT, (L_card, N1, m))));
+    out(c, (N2, m, sign(skT, (L_card, N2, m))))
+  ) | (
+    (* The cards the reader checked in epoch 1. *)
+    !
+    in(c, (n: bitstring, pk: spkey, m: bitstring, s: bitstring));
+    if pk = spk(skS) || pk = spk(skT) then
+    if checksign(pk, (L_card, n, m), s) = true then
+    event Accepted(pk, n, m)
+  )

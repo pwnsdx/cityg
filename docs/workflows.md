@@ -1,836 +1,182 @@
-# City-G Workflows and Sequence Diagrams
+# Workflows
 
-This document provides visual representations of key City-G workflows using sequence diagrams.
+Sequence diagrams of the main operations. "DS" is the delivery service;
+section numbers refer to the [specification](specs.md). The DS checks
+everything it records or receives against the public state, and never
+holds a group secret.
 
----
-
-## Table of Contents
-
-1. [Room Bootstrap](#room-bootstrap)
-2. [Join Flow](#join-flow)
-3. [Merge Flow](#merge-flow)
-4. [Message Send and Receive](#message-send-and-receive)
-5. [Epoch Acceptance](#epoch-acceptance)
-6. [Forward Secrecy Pivot Rotation](#forward-secrecy-pivot-rotation)
-7. [WebSocket Real-Time Notifications](#websocket-real-time-notifications)
-8. [Member Roster Query](#member-roster-query)
-9. [Visual Guides](#visual-guides)
-   - [Two Proof Systems](#two-proof-systems)
-   - [What the Server Sees (and Doesn't)](#what-the-server-sees-and-doesnt)
-   - [Policy vs Cryptography](#policy-vs-cryptography)
-
----
-
-## Room Bootstrap
-
-**First member creates a new room**
+## Creating a group
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant API Server
-    participant Database
-
-    Note over Client: First member (room creator)
-
-    Client->>Client: Load or create persistent room identity
-    Client->>Client: Generate KBROAD key + RoomAdminProof
-    Client->>API Server: POST /v1/rooms/bootstrap<br/>{room_id, kbroad_public, admin_proof}
-    API Server->>Database: Store room metadata
-    API Server->>Database: Register initial room admin identity
-    API Server->>Database: Initialize empty member roster
-    Database-->>API Server: OK
-    API Server-->>Client: 200 OK {room created}
-
-    Note over Client,Database: Room is now ready for members to join
+    participant A as Alice (creator)
+    participant DS
+    A->>A: device key, nonce, gid = H_L("group-id", [pk_A, nonce])
+    A->>A: tree of height 1: A at leaf 0, root keyed from a fresh secret
+    A->>A: registry: A admin, and a group policy if the group is open
+    A->>A: epoch-0 secrets, confirmation tag, external key
+    A->>DS: genesis seal (kind 0), signed by A
+    DS->>DS: rebuild the state, check gid, hashes, policy and signature
 ```
 
-**Key Points:**
-- Only the first member bootstraps the room
-- The creator becomes the initial room admin
-- Room admin authority is tied to the persisted room identity, not the alias
-- Room-admin delegation and revocation happen through `grant_admin` and `revoke_admin`
-  using the same persisted room identity model
-- Normal join/leave/refresh flows do not require a manual KBROAD rotation call
-- Room ID becomes the persistent identifier
+The genesis seal is section 9 ("Genesis").
 
----
-
-## Join Flow
-
-**New member joins an existing room**
+## Joining a closed group
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant API Server
-    participant cityg-server
-    participant Database
-
-    Note over Client: New member wants to join
-
-    Client->>API Server: POST /v1/rooms/join_ticket<br/>{room_id, alias, identity_binding?}
-    API Server->>cityg-server: Generate join ticket
-    cityg-server->>Database: Fetch current window state
-    Database-->>cityg-server: Window heads, parities
-    cityg-server->>cityg-server: Build JoinTicketBundle<br/>(witness, parities, config)
-    cityg-server-->>API Server: Join ticket
-    API Server-->>Client: 200 OK {join_ticket}
-
-    Note over Client: Client generates first epoch (2-5 sec)
-
-    Client->>Client: Derive leaf_id from ticket
-    Client->>Client: Generate CAPSS proof
-    Client->>Client: Create Merkle witness
-    Client->>Client: Build ClientEpochBundle
-
-    Client->>API Server: POST /v1/accept_epoch<br/>{bundle_cbor}
-    API Server->>cityg-server: Validate epoch bundle
-
-    cityg-server->>cityg-server: Verify Merkle witness
-    cityg-server->>cityg-server: Verify SPHF proof
-    cityg-server->>cityg-server: Check parent root in window
-    cityg-server->>cityg-server: Insert into window
-
-    alt Epoch accepted
-        cityg-server-->>API Server: Accepted {we_epoch_id}
-        API Server->>Database: Store epoch bundle
-        API Server->>Database: Update member roster
-        Database-->>API Server: OK
-        API Server-->>Client: 200 OK {accepted: true, we_epoch_id}
-        Note over Client: Member joined successfully!
-    else Epoch frozen
-        cityg-server-->>API Server: Frozen {freeze_code, reason}
-        API Server-->>Client: 409 Conflict {accepted: false, freeze_code}
-        Note over Client: Join failed - see freeze code
-    end
+    participant J as Joiner
+    participant Ad as Admin
+    participant DS
+    participant C as Committer of J's district
+    participant S as Sealer
+    participant M as Members
+    Ad->>J: admission for J's device (or an invite), out of band
+    Ad->>DS: checkpoint of the current epoch
+    J->>DS: checkpoint, registry header and external key of that epoch
+    J->>J: check them against the admin key (anchor)
+    J->>DS: join request (leaf key, one-time init key, admission)
+    DS->>DS: check the request, then queue it
+    Note over DS: window due (WINDOW_MAX)
+    DS->>DS: place J (a freed leaf, else the lowest free leaf), assign roles
+    DS->>C: window task, district state
+    C->>C: check the entries, re-key the district, sign
+    C->>DS: district commit
+    DS->>S: district commits
+    S->>S: check them, re-key the city, key schedule, tag
+    S->>DS: seal
+    DS->>M: one packet per member
+    M->>M: derive the path and the epoch, check the tag
+    C->>C: follow the window, then seal J's welcome
+    C->>DS: welcome (joiner secret to J's init key)
+    J->>DS: entry: seal links from the anchor, welcome, steps, leaf proof
+    J->>J: check the chain of seals, recover the path, open the welcome
 ```
 
-**Key Points:**
-- Join ticket provides initial cryptographic material
-- Client generates proof offline (no server interaction)
-- Server validates all cryptographic proofs before accepting
-- Identity binding is optional but recommended
+Sections 11, 12.9 and 14.
 
-### Detailed Join Flow (Bob's Perspective)
+## A window of changes
 
-The following ASCII diagram shows the join flow from a new member's perspective, illustrating what Bob does step-by-step when joining a 7000-person group:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│              JOIN FLOW (Bob Joins 7000-Person Group)            │
-└─────────────────────────────────────────────────────────────────┘
-
-  Bob's Device                            Server
-  (New Member)                        (Blind Validator)
-       │                                     │
-       │  1. Fetch group state               │
-       │────────────────────────────-───────>│
-       │   GET /groups/city-chat/state       │
-       │                                     │
-       │   Returns:                          │
-       │   • parent_root (current members)   │
-       │   • frontier (O(log N) hashes)      │
-       │   • kbroad_pub (group key)          │
-       │   • policy (e.g., "open_join")      │
-       │<─────────────────────────────────-──│
-       │                                     │
-       │   Note: For 7000 members, frontier  │
-       │   is ~13 hashes (log₂ 7000), not    │
-       │   the full tree. Scales to millions.│
-       │                                     │
-       │  2. Bob creates anchor locally:     │
-       │     • Adds his leaf_id to tree      │
-       │     • Computes new_root (7001)      │
-       │     • Generates hp, Y*, E_k         │
-       │     • Creates proofs:               │
-       │       - CAPSS Smallwood (≤16KB)     │
-       │       - ZK-VRF (≤8KB)               │
-       │     • Encrypts hp in KBROAD         │
-       │     • Builds SRX witnesses          │
-       │                                     │
-       │  3. Submit anchor                   │
-       │   POST /anchors                     │
-       │   Body: complete anchor header      │
-       │────────────────────────────-───────>│
-       │                                     │
-       │                                     │  4a. Crypto validation:
-       │                                     │     (accept_anchor function)
-       │                                     │     ✓ PoP signature valid?
-       │                                     │     ✓ CAPSS Smallwood transcript valid?
-       │                                     │     ✓ ZK-VRF proof valid?
-       │                                     │     ✓ SRX witnesses correct?
-       │                                     │     ✓ Merkle consistency?
-       │                                     │     ✗ Never decrypts KBROAD
-       │                                     │
-       │                                     │  4b. Policy check:
-       │                                     │     (your application code)
-       │                                     │     ✓ join_leaf_ids.len()==1?
-       │                                     │     ✓ Not in blocklist?
-       │                                     │     ✓ Rate limit OK?
-       │                                     │
-       │                                     │     Accept & persist
-       │  5. Success                         │
-       │<────────────────────────────────-───│
-       │                                     │
-       │  6. Bob starts sending messages     │
-       │     (encrypted with E_k)            │
-       │                                     │
-
-Bob knows: hp, Y*, E_k              Server knows:
-Can read/write messages             • Merkle roots (7000→7001)
-                                    • Bob's leaf_id: H(device_pk)
-                                    • Timing metadata
-                                    ✗ NOT hp, Y*, or E_k
-                                    ✗ NOT Bob's device_pk
-                                    ✗ NOT message content
-
-Other 7000 members: Fetch anchor later, decrypt KBROAD, derive E_k
-```
-
-**Key insight**: Bob creates his own join anchor (he's the "publisher"). The server validates it cryptographically without learning secrets. No admin approval needed for open groups.
-
----
-
-## Merge Flow
-
-**Existing member resyncs after being offline**
+Removals, evictions, key updates and re-entries go through the same window
+as joins.
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant API Server
-    participant cityg-server
-    participant Database
-
-    Note over Client: Member has been offline, needs fresh state
-
-    Client->>API Server: POST /v1/rooms/merge_ticket<br/>{room_id, leaf_id}
-    API Server->>cityg-server: Generate merge ticket
-    cityg-server->>Database: Fetch current window state
-    cityg-server->>Database: Verify leaf_id exists in roster
-    Database-->>cityg-server: Window heads, member data
-    cityg-server->>cityg-server: Build MergeTicketBundle<br/>(fresh parities, witness)
-    cityg-server-->>API Server: Merge ticket
-    API Server-->>Client: 200 OK {merge_ticket}
-
-    Note over Client: Client generates new epoch based on current state
-
-    Client->>Client: Use fresh pivot parities
-    Client->>Client: Generate CAPSS proof
-    Client->>Client: Build ClientEpochBundle
-
-    Client->>API Server: POST /v1/accept_epoch<br/>{bundle_cbor}
-
-    Note over API Server,Database: Same validation as join flow
-
-    alt Epoch accepted
-        API Server-->>Client: 200 OK {accepted: true, we_epoch_id}
-        Note over Client: Resynced successfully!
-    else Epoch frozen
-        API Server-->>Client: 409 Conflict {accepted: false, freeze_code}
+    participant R as Requester
+    participant DS
+    participant C as Committers (one per district)
+    participant S as Sealer
+    participant M as Members
+    R->>DS: removal proposal (admin or self) / update / re-entry
+    DS->>DS: record it: a removal is enforced at once (no delivery to the target)
+    Note over DS: window due (WINDOW_REMOVAL when a removal waits)
+    DS->>C: tasks: changes, forced nodes (taints of affected members)
+    par each district
+        C->>C: plan, draw and wrap secrets, taint = committer
+        C->>DS: district commit
     end
+    DS->>DS: check every district commit
+    S->>DS: seal (city re-key, hashes, tag, next external key)
+    DS->>DS: check the seal, apply the window
+    M->>DS: packet for my leaf
+    DS-->>M: seal header, tag, registry update, steps of my path
 ```
 
-**Key Points:**
-- Merge is for existing members (leaf_id already in roster)
-- Fresh pivot parities ensure forward secrecy
-- Current merge tickets encode requester self-revocation in `revoked_since`
-- Accepted merge bundles therefore apply a leave/rekey-style roster delta
-- Admin-driven member expulsion uses `POST /v1/rooms/expel_member_ticket`,
-  which authorizes a revocation MERGE on behalf of another target leaf
+Sections 10, 12.2 to 12.6 and 14.
 
----
+## Following by island (v0.5 draft, stage 1)
 
-## Message Send and Receive
-
-**Sending and fetching encrypted messages**
+A member may read the tree by island: the root secret of a window comes
+from a member of its island, not from the upper levels of its path.
 
 ```mermaid
 sequenceDiagram
-    participant Alice
-    participant API Server
-    participant Database
-    participant Bob
-
-    Note over Alice: Alice wants to send a message
-
-    Alice->>Alice: Encrypt message with epoch key<br/>(witness extraction)
-    Alice->>API Server: POST /v1/send_message<br/>{we_epoch_id, ciphertext, sender}
-    API Server->>Database: Store message for epoch
-    Database-->>API Server: message_id, timestamp
-    API Server-->>Alice: 200 OK {message_id, timestamp}
-
-    Note over Alice,Bob: Message stored on server
-
-    opt WebSocket connected
-        API Server->>Bob: WS notification {new message available}
-    end
-
-    Note over Bob: Bob fetches messages (polling or WS trigger)
-
-    Bob->>API Server: POST /v1/messages<br/>{we_epoch_id}
-    API Server->>Database: Fetch all messages for epoch
-    Database-->>API Server: List of messages
-    API Server-->>Bob: 200 OK {messages: [{ciphertext, sender, timestamp}]}
-
-    Bob->>Bob: Decrypt each message with epoch key
-    Note over Bob: Bob sees Alice's plaintext message
+    participant DS
+    participant R as Relay (a member of island j)
+    participant F as Flat maker (another relay)
+    participant M as Member of island j
+    participant Q as Member of an island with nobody online
+    Note over DS: seal applied: one relay per island with a member online, flat elements for the others
+    R->>DS: island packet with a refresh (latest re-key of each node above the island)
+    R->>R: derive the path and the root, check the tag
+    R->>DS: relay element: the root sealed under island j's root secret (52 bytes)
+    F->>DS: flat elements: the root wrapped to the roots of the islands without relay
+    M->>DS: island packet: steps up to the island root, relay element
+    M->>M: advance the island path, open the element, check the tag
+    Q->>DS: island packet: steps up to the island root, flat element
+    Q->>Q: advance the island path, open the flat element, check the tag
+    Note over M: an element that fails: ask for the flat element or a refresh
 ```
 
-**Key Points:**
-- Messages are encrypted client-side before sending
-- Server stores ciphertext only (zero-knowledge)
-- Any client with the epoch key can decrypt
-- WebSocket provides instant notifications (optional)
+Sections 2.2 to 2.8 of the [v0.5 draft](specs-v0.5-draft.md).
 
----
+## Nobody online
 
-## Epoch Acceptance
-
-**Detailed validation pipeline for epoch bundles**
+With no volunteer, the first joiner or re-entering member of the window
+seals it alone.
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant API Server
-    participant Validation Pipeline
-    participant Window
-    participant Database
-
-    Client->>API Server: POST /v1/accept_epoch<br/>{bundle_cbor}
-    API Server->>Validation Pipeline: Validate epoch bundle
-
-    Validation Pipeline->>Validation Pipeline: 1. Deserialize CBOR
-    Validation Pipeline->>Validation Pipeline: 2. Extract we_epoch_id
-
-    Validation Pipeline->>Window: 3. Check duplicate epoch ID
-    alt Duplicate found
-        Window-->>Validation Pipeline: Duplicate!
-        Validation Pipeline-->>API Server: Freeze code 7 (duplicate)
-        API Server-->>Client: 409 Conflict {freeze_code: 7}
-    end
-
-    Validation Pipeline->>Validation Pipeline: 4. Verify Merkle witness
-    alt Witness invalid
-        Validation Pipeline-->>API Server: Freeze code 2 (witness failed)
-        API Server-->>Client: 409 Conflict {freeze_code: 2}
-    end
-
-    Validation Pipeline->>Validation Pipeline: 5. Verify SPHF proof
-    alt SPHF failed
-        Validation Pipeline-->>API Server: Freeze code 3 (SPHF failed)
-        API Server-->>Client: 409 Conflict {freeze_code: 3}
-    end
-
-    Validation Pipeline->>Window: 6. Check parent root exists
-    alt Parent not found
-        Window-->>Validation Pipeline: Not in window
-        Validation Pipeline-->>API Server: Freeze code 5 (parent not found)
-        API Server-->>Client: 409 Conflict {freeze_code: 5}
-    end
-
-    Validation Pipeline->>Window: 7. Check window capacity
-    alt Window full (h >= h_max)
-        Window-->>Validation Pipeline: Full!
-        Validation Pipeline-->>API Server: Freeze code 11 (window full)
-        API Server-->>Client: 409 Conflict {freeze_code: 11}
-    end
-
-    Note over Validation Pipeline: All checks passed!
-
-    Validation Pipeline->>Window: Insert epoch as new head
-    Window->>Database: Persist epoch bundle
-    Database-->>Window: OK
-    Window-->>Validation Pipeline: Inserted
-    Validation Pipeline-->>API Server: Accepted {we_epoch_id}
-    API Server-->>Client: 200 OK {accepted: true, we_epoch_id}
+    participant E as Entrant (joiner or returning member)
+    participant DS
+    participant M as Members (offline)
+    E->>DS: join or re-entry request
+    Note over DS: window due, no volunteer
+    DS->>E: every role: all districts, the seal, the welcomes
+    E->>DS: seal links from its anchor, and the public state
+    E->>E: check the chain of seals and the state
+    E->>E: external init to the current external key
+    E->>E: commit every district, seal (kind 2), welcome the others
+    E->>DS: district commits, seal, welcomes
+    Note over M: later
+    M->>DS: packet, with the entrant's evidence and signature
+    M->>M: recover the external init, derive the epoch, check the tag
+    M->>M: check the entrant's admission (or re-entry) and its signature
 ```
 
-**Key Points:**
-- Validation is multi-stage with specific freeze codes
-- Each failure returns immediately (fail-fast)
-- Window manages concurrency control (h_max)
-- All epochs are persisted for future retrieval
+With no volunteer and no entrant, the window stays open: recorded removals
+are enforced by the DS at delivery until a participant comes (sections 12.7,
+12.8 and 14.6).
 
----
-
-## Forward Secrecy Pivot Rotation
-
-**Automatic hourly pivot refresh for forward secrecy**
+## Coming back
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant API Server
-    participant FS Manager
-    participant Database
-
-    Note over Client: Client monitors epoch age
-
-    loop Every 5 minutes
-        Client->>Client: Check epoch timestamp
-        alt Epoch age > 1 hour
-            Note over Client: Trigger pivot rotation
-            Client->>Client: Generate fresh pivot bundle<br/>(new randomness, commitment)
-            Client->>API Server: POST /v1/pivot/refresh<br/>{bundle_cbor}
-
-            API Server->>FS Manager: Process pivot refresh
-            FS Manager->>FS Manager: Extract pivot commitment
-            FS Manager->>FS Manager: Verify FS policy version
-            FS Manager->>FS Manager: Update forward secrecy state
-            FS Manager->>Database: Store new pivot parity
-            Database-->>FS Manager: OK
-            FS Manager-->>API Server: Refresh complete
-            API Server-->>Client: 200 OK
-
-            Note over Client: Old pivot discarded<br/>(forward secrecy achieved)
-            Client->>Client: Update local epoch timestamp
-        else Epoch age < 1 hour
-            Note over Client: No rotation needed
+    participant R as Returning member
+    participant DS
+    participant W as Welcomer
+    alt replay
+        loop every missed window
+            R->>DS: packet of the window
+            R->>R: process it
         end
+    else jump
+        R->>DS: catch-up request (bound to the current interim, one-time init key)
+        Note over DS: next window
+        W->>DS: welcome for R, to its init key and to its leaf key from the tree
+        R->>DS: entry: seal links from its last epoch, welcome, last steps
+        R->>R: recover the path, check it against the tree, open the welcome with both keys
+    else re-entry
+        R->>DS: re-entry request (new leaf key, one-time init key)
+        Note over DS: next window re-keys R's path, or R seals it as entrant
+        R->>DS: entry
     end
 ```
 
-**Key Points:**
-- Automatic rotation every hour (configurable)
-- Old pivot keys are permanently discarded
-- Ensures past messages remain secure even if current keys leak
-- No user intervention required
+Section 12.10.
 
----
-
-## WebSocket Real-Time Notifications
-
-**Real-time message delivery via WebSocket**
+## Seeing who joined an open group
 
 ```mermaid
 sequenceDiagram
-    participant Client
-    participant WS Server
-    participant Message Queue
-    participant API Server
-
-    Note over Client: After joining, establish WebSocket
-
-    Client->>WS Server: WebSocket handshake<br/>GET /v1/ws?gid=...&leaf_id=...<br/>x-cityg-message-token: ...
-    WS Server-->>Client: 101 Switching Protocols
-
-    Note over Client,WS Server: WebSocket connection established
-
-    loop Periodic ping/pong
-        WS Server->>Client: Ping
-        Client-->>WS Server: Pong
-    end
-
-    Note over API Server: Another client sends message
-
-    API Server->>Message Queue: Publish message event<br/>{we_epoch_id, message_id}
-    Message Queue->>WS Server: Broadcast to subscribers
-    WS Server->>Client: WS message {type: "message", we_epoch_id, message_id}
-
-    Client->>Client: Trigger immediate fetch
-    Client->>API Server: POST /v1/messages<br/>{we_epoch_id}
-    API Server-->>Client: 200 OK {messages}
-
-    Note over Client: Message displayed instantly!
-
-    alt WebSocket disconnects
-        WS Server->>WS Server: Detect disconnect
-        Note over Client: Client falls back to polling (5 sec)
-        Client->>Client: Reconnect attempt
-        Client->>WS Server: WebSocket handshake
-        WS Server-->>Client: 101 Switching Protocols
-        Note over Client: Reconnected! Resume real-time
-    end
+    participant M as Member
+    participant DS
+    M->>DS: seal, district commits and join requests of a window
+    M->>M: seal hash = the one it accepted, then the body hash and the commits listed
+    M->>M: each join request hashes to its change's reference
+    M->>M: list the devices and occupancies the window let in
 ```
 
-**Key Points:**
-- WebSocket provides instant notifications (no polling delay)
-- Client still fetches messages via HTTP (notification is just a trigger)
-- Automatic reconnection on disconnect
-- Fallback to polling if WebSocket unavailable
-
----
-
-## Member Roster Query
-
-**Fetching and searching group members**
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API Server
-    participant Database
-
-    Note over Client: Fetch member roster
-
-    Client->>API Server: POST /v1/members<br/>{gid, parent_root?, offset?, limit?}
-    API Server->>Database: Query members for group
-    Database->>Database: Filter by parent_root (if specified)
-    Database->>Database: Apply pagination (offset, limit)
-    Database-->>API Server: Member list (default: 256 members)
-    API Server-->>Client: 200 OK<br/>{members, total_count, has_more}
-
-    Client->>Client: Display member roster
-
-    alt More members exist (has_more = true)
-        Note over Client: User clicks "Load More"
-        Client->>API Server: POST /v1/members<br/>{gid, offset: 256, limit: 256}
-        API Server->>Database: Query next page
-        Database-->>API Server: Next 256 members
-        API Server-->>Client: 200 OK {members, total_count, has_more}
-        Client->>Client: Append to roster
-    end
-
-    Note over Client: User searches for specific member
-
-    Client->>API Server: POST /v1/members/search<br/>{gid, query: "alice"}
-    API Server->>Database: Search by alias substring
-    Database-->>API Server: Matching members
-    API Server-->>Client: 200 OK {members matching "alice"}
-
-    Client->>Client: Display search results
-```
-
-**Key Points:**
-- Default pagination: 256 members per page
-- Maximum limit: 2000 members per request
-- Search supports alias substring and exact leaf_id hex
-- `parent_root` filter for historical roster queries
-
----
-
-## Complete Join-to-Message Flow
-
-**End-to-end workflow from joining to sending a message**
-
-```mermaid
-sequenceDiagram
-    participant Alice
-    participant Server
-    participant Bob
-
-    Note over Alice: Alice joins room "demo"
-
-    Alice->>Alice: Load or create persistent room identity
-    Alice->>Server: Bootstrap room (if first)<br/>POST /v1/rooms/bootstrap {room_id, kbroad_public, admin_proof}
-    Server-->>Alice: 200 OK
-
-    Alice->>Server: Request join ticket<br/>POST /v1/rooms/join_ticket
-    Server-->>Alice: Join ticket (witness, parities, config)
-
-    Alice->>Alice: Generate epoch bundle (5 sec)
-    Alice->>Server: Submit epoch<br/>POST /v1/accept_epoch
-    Server-->>Alice: 200 OK {accepted: true}
-
-    Alice->>Server: Establish WebSocket<br/>GET /v1/ws?gid=...&leaf_id=...<br/>x-cityg-message-token: ...
-    Server-->>Alice: 101 Switching Protocols
-
-    Note over Alice: Alice is now joined!
-
-    Note over Bob: Bob joins the same room
-
-    Bob->>Server: Request join ticket<br/>POST /v1/rooms/join_ticket
-    Server-->>Bob: Join ticket
-    Bob->>Bob: Generate epoch bundle
-    Bob->>Server: Submit epoch<br/>POST /v1/accept_epoch
-    Server-->>Bob: 200 OK {accepted: true}
-    Bob->>Server: Establish WebSocket
-
-    Note over Bob: Bob is now joined!
-
-    Note over Alice: Alice sends message to Bob
-
-    Alice->>Alice: Encrypt "Hello Bob!" with epoch key
-    Alice->>Server: POST /v1/send_message<br/>{we_epoch_id, ciphertext}
-    Server-->>Alice: 200 OK {message_id}
-    Server->>Bob: WS notification {new message}
-
-    Bob->>Server: POST /v1/messages<br/>{we_epoch_id}
-    Server-->>Bob: 200 OK {messages: [{ciphertext}]}
-    Bob->>Bob: Decrypt with epoch key
-
-    Note over Bob: Bob sees "Hello Bob!"
-
-    Note over Bob: Bob replies
-
-    Bob->>Bob: Encrypt "Hi Alice!"
-    Bob->>Server: POST /v1/send_message
-    Server-->>Bob: 200 OK
-    Server->>Alice: WS notification
-
-    Alice->>Server: POST /v1/messages
-    Server-->>Alice: 200 OK {messages}
-    Alice->>Alice: Decrypt
-
-    Note over Alice: Alice sees "Hi Alice!"
-```
-
-**Key Points:**
-- First member bootstraps with a room-admin proof, others join directly
-- Each member generates their own epoch bundle
-- Messages are encrypted end-to-end (server cannot read)
-- Normal room flows do not manually call `rotate_kbroad`; KBROAD maintenance is automatic/server-managed
-- WebSocket provides instant delivery
-
----
-
-## Error Handling Workflow
-
-**How the system handles validation failures**
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API Server
-    participant Validator
-    participant Window
-
-    Client->>API Server: POST /v1/accept_epoch
-    API Server->>Validator: Validate bundle
-
-    alt Freeze Code 2: Witness Failed
-        Validator->>Validator: Verify Merkle proof
-        Validator-->>API Server: Invalid witness!
-        API Server-->>Client: 409 Conflict<br/>{freeze_code: 2, freeze_reason: "Witness validation failed"}
-        Note over Client: Regenerate with correct parent
-    else Freeze Code 5: Parent Not Found
-        Validator->>Window: Find parent root
-        Window-->>Validator: Not found
-        Validator-->>API Server: Parent missing!
-        API Server-->>Client: 409 Conflict<br/>{freeze_code: 5, freeze_reason: "Parent root not in window"}
-        Note over Client: Wait or request merge ticket
-    else Freeze Code 11: Window Full
-        Validator->>Window: Check capacity
-        Window-->>Validator: h >= h_max
-        Validator-->>API Server: Window full!
-        API Server-->>Client: 409 Conflict<br/>{freeze_code: 11, freeze_reason: "Window full"}
-        Note over Client: Retry in a few seconds
-    else Success
-        Validator->>Window: Insert epoch
-        Window-->>Validator: OK
-        Validator-->>API Server: Accepted
-        API Server-->>Client: 200 OK {accepted: true}
-    end
-```
-
-**Key Points:**
-- Each freeze code has a specific meaning and recovery strategy
-- Client should handle all freeze codes gracefully
-- Some errors are transient (code 11) - retry works
-- Some errors require corrective action (code 2, 5)
-
----
-
-## Window Management
-
-**How the multi-head window handles concurrency**
-
-```mermaid
-sequenceDiagram
-    participant Client A
-    participant Client B
-    participant Window
-    participant Database
-
-    Note over Window: Initial state: 2 heads (h_max = 10)
-
-    Client A->>Window: Insert epoch E1<br/>(parent: head1)
-    Window->>Window: h = 3 (< h_max)
-    Window->>Database: Persist E1
-    Window-->>Client A: Accepted
-
-    Note over Window: Now 3 heads
-
-    Client B->>Window: Insert epoch E2<br/>(parent: head2)
-    Window->>Window: h = 4 (< h_max)
-    Window->>Database: Persist E2
-    Window-->>Client B: Accepted
-
-    Note over Window: Now 4 heads (concurrent branches)
-
-    loop Window cleanup (periodic)
-        Window->>Window: Check TTL expiry
-        alt Head age > ttl_ms
-            Window->>Window: Evict expired head
-            Window->>Database: Delete old epochs
-            Note over Window: h decreases
-        end
-    end
-
-    alt h reaches h_max
-        Client A->>Window: Insert epoch E3
-        Window->>Window: h = h_max (full!)
-        Window-->>Client A: Freeze code 11 (window full)
-        Note over Client A: Wait for eviction or merge
-    end
-```
-
-**Key Points:**
-- Window allows `h_max` concurrent branches
-- TTL evicts old heads automatically
-- When full, clients must wait or merge branches
-- This prevents unbounded memory growth
-
----
-
-## Visual Guides
-
-These diagrams provide educational overviews of key City-G concepts.
-
-### Two Proof Systems
-
-City-G uses two complementary zero-knowledge proofs that work together to enable server-blind validation:
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  CAPSS Smallwood Transcript (~12KB)  ZK-VRF Proof (≤8KB)         │
-│  ───────────────────────────────     ──────────────────────────  │
-│  "I derived hp deterministically     "Y* is correct and unique   │
-│   and bound the FS context"          for this context"           │
-│                                                                  │
-│  Prevents: Grinding attacks          Prevents: Forgery           │
-│  + FS tampering (mismatched epoch)   (Can't fake Y* values)      │
-│                                                                  │
-│  Server checks:                      Server checks:              │
-│  ✓ seed → hp was deterministic       ✓ Y* exists and is valid    │
-│  ✓ FS tuple matches header (146)     ✗ Learns nothing about Y*   │
-│  ✗ Learns nothing about hp/epoch_sk                              │
-└──────────────────────────────────────────────────────────────────┘
-
-Both proofs verify correctness without revealing secrets.
-```
-
-**See also**: [Proof Systems](./protocol/06-proof-systems.md), [CAPSS README](../crates/capss/README.md), [LB-VRF README](../crates/msphf-lb-vrf/README.md)
-
-### What the Server Sees (and Doesn't)
-
-This diagram explains the server's view of an anchor and what remains cryptographically hidden:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Server's View of an Anchor                                      │
-├─────────────────────────────────────────────────────────────────┤
-│ ✓ SEES (Public Metadata):                                       │
-│   • Merkle root transitions (parent → join_delta)               │
-│   • Leaf IDs: H(device_public_key) [32-byte hashes]             │
-│   • Number of members added/removed (from SRX witnesses)        │
-│   • Timing: when anchor occurred                                │
-│   • Structure: CBOR fields, proof sizes                         │
-│   • xk_hash: commitment to anchor context (group+roots)         │
-│                                                                 │
-│ ✓ CAN EXAMINE (Validated Anchor Fields):                        │
-│   • join_leaf_ids: which device hashes were added               │
-│   • PoP signer: who created this anchor (leaf_id)               │
-│   • Merkle delta: how many members added/removed                │
-│   • SRX witness counts: membership proof counts                 │
-│                                                                 │
-│ ✓ CAN ENFORCE (Application-Layer Policy):                       │
-│   • Group policy: open_join vs admin_only (your logic)          │
-│   • Delta limits: reject if join_leaf_ids.len() > 1             │
-│   • Rate limits: join frequency, abuse controls                 │
-│   • Allow/block lists: check PoP signer against lists           │
-│   • Cryptographic validity: accept_anchor validates this        │
-│                                                                 │
-│ ✗ NEVER SEES (Cryptographically Hidden):                        │
-│   • hp (hash projection key) - encrypted in KBROAD              │
-│   • Y* (VRF output) - hidden by ZK-VRF output-hiding            │
-│   • E_k (epoch key) - derived client-side from Y*               │
-│   • Device secret keys - only public keys transmitted           │
-│   • Human identities - not part of protocol                     │
-│   • Message content - encrypted with E_k                        │
-└─────────────────────────────────────────────────────────────────┘
-
-accept_anchor validates CRYPTOGRAPHY (proofs, signatures, witnesses).
-Your application enforces POLICY (who can join, rate limits, etc.) by
-examining validated fields. The server remains cryptographically BLIND
-to secret keys (hp, Y*, E_k). Identity linking (leaf_hash → user) is
-APPLICATION-LEVEL.
-```
-
-**See also**: [Security Model](./protocol/10-security-model.md), [Server Acceptance](./protocol/07-server-acceptance.md)
-
-### Policy vs Cryptography
-
-City-G separates cryptographic validation (protocol-level) from policy enforcement (application-level):
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Application Policy Layer (Your Server Logic)                    │
-├─────────────────────────────────────────────────────────────────┤
-│ Examines accepted anchor BEFORE persisting:                     │
-│                                                                 │
-│ Group: "city-announcements"                                     │
-│   ✓ join_leaf_ids.len() == 1?      ← Only 1 member per anchor   │
-│   ✓ PoP signer not in blocklist?   ← Check against allow list   │
-│   ✓ Rate limit check?              ← Join once per hour         │
-│   → Accept self-joins              ← Open policy                │
-│                                                                 │
-│ Group: "executive-team"                                         │
-│   ✓ PoP signer in admin_list?      ← Check Alice's leaf_id      │
-│   ✓ join_leaf_ids.len() <= 10?     ← Bulk adds allowed          │
-│   → Reject self-joins              ← Admin-only policy          │
-│                                                                 │
-│ Group: "alice-inbox"                                            │
-│   ✓ Sender not already member?     ← First-time senders only    │
-│   ✓ join_leaf_ids.len() == 1?      ← Personal inbox pattern     │
-│   → Accept sender_once             ← Inbox policy               │
-│                                                                 │
-│ NOTE: Policy is NOT in accept_anchor() — you implement this     │
-│ by examining the cryptographically-validated anchor fields      │
-│ (join_leaf_ids, PoP signer, etc.) before storing it.            │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│ Cryptographic Validation Layer (accept_anchor)                      │
-├─────────────────────────────────────────────────────────────────────┤
-│ Protocol ALWAYS validates:                                          │
-│   ✓ CAPSS Smallwood transcript: seed→hp deterministic + FS binding  │
-│   ✓ ZK-VRF proof: Y* correctness (output-hiding)                    │
-│   ✓ PoP signature: device key ownership                             │
-│   ✓ SRX witnesses: Merkle proofs (membership/non-membership)        │
-│   ✓ KBROAD structure: valid envelope (never decrypts!)              │
-│   ✓ Merkle consistency: roots computed correctly                    │
-│                                                                     │
-│ AcceptanceOptions (coarse policy hooks):                            │
-│   • allowed_srx_modes: e.g., ["srx/v1-complete"]                    │
-│   • allowed_params_ids: cryptographic suite allow-list              │
-│   • bootstrap_policy: genesis anchor rules                          │
-│   • min_policy_version: reject stale policy versions                │
-│                                                                     │
-│ Protocol NEVER learns (cryptographically enforced):                 │
-│   ✗ hp, Y*, E_k (even if server compromised)                        │
-│   ✗ Message content                                                 │
-│                                                                     │
-│ accept_anchor returns: Accept | Freeze(error_code)                  │
-│ → Your app decides: persist or reject based on group policy         │
-└─────────────────────────────────────────────────────────────────────┘
-
-Cryptography = "Are the proofs valid?" (accept_anchor always checks)
-Coarse policy = "Are the suites/modes allowed?" (AcceptanceOptions)
-Fine-grained policy = "Should I persist this anchor?" (your app logic)
-```
-
-**Example Policy Patterns:**
-
-| Scenario | Who Creates Anchor | Server Policy Check | Server Crypto Check |
-|----------|-------------------|---------------------|---------------------|
-| Bob joins open community | Bob (self) | ✓ Policy allows open_join? | ✓ Proofs valid? |
-| Bob joins private team | Alice (admin) | ✓ Alice is allowed_admin? | ✓ Proofs valid? |
-| Bob sends to Alice's inbox | Bob (sender) | ✓ Policy allows sender_once? | ✓ Proofs valid? |
-| Malicious actor tries to join | Anyone | ✗ Policy denies | ✗ Invalid proofs |
-
-**See also**: [Client Operations](./protocol/08-client-operations.md), [Deployment Guide](./protocol/14-deployment-guide.md)
-
----
-
-## See Also
-
-- [API Reference](./api-reference.md) - Complete HTTP API documentation
-- [Protocol Documentation](./protocol/00-README.md) - Cryptographic protocol details
-- [Error Reference](./protocol/12-error-reference.md) - Complete freeze code catalog
-- [GUI User Guide](./gui-user-guide.md) - Desktop application guide
-
----
-**These workflow diagrams are explanatory and should be read against the current base profile in [`./specs.md`](./specs.md).**
+A device of the DS that joined is listed like any other, and cannot pose as
+an existing member: its requests would not verify under that member's
+device key (sections 6.1 and 12.11).

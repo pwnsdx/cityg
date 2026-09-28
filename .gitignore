@@ -1,5 +1,7 @@
 # Build artifacts
 /target
+/docs/research/bench/target
+/docs/research/dispute-zk/build
 /artifacts
 
 # IDE / Editor
@@ -29,12 +31,5 @@ lcov.info
 /.cargo-target/
 /.home/
 
-# Whitepaper (LaTeX temporary artifacts)
-docs/whitepaper/*.aux
-docs/whitepaper/*.bbl
-docs/whitepaper/*.blg
-docs/whitepaper/*.out
-docs/whitepaper/*.toc
-docs/whitepaper/*.fdb_latexmk
-docs/whitepaper/*.fls
-docs/whitepaper/*.synctex.gz
+# Python bytecode
+__pycache__/

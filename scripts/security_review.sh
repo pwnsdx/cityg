@@ -9,20 +9,18 @@ cd "$REPO_ROOT"
 export CITYG_CARGO_TARGET_SLOT="${CITYG_CARGO_TARGET_SLOT:-security-review}"
 source "$REPO_ROOT/scripts/cargo_repo_env.sh"
 
-echo "[1/5] cargo test -p cityg-server"
-cargo test --locked -p cityg-server
+echo "[1/3] cargo test -p cityg-core -p cityg-pqc"
+cargo test --locked -p cityg-core -p cityg-pqc
 
-echo "[2/5] cargo test -p cityg-api"
-cargo test --locked -p cityg-api
-
-echo "[3/5] cargo test -p cityg-gui --features native-app"
-cargo test --locked -p cityg-gui --features native-app
-
-echo "[4/5] cargo test -p msphf-orchestrator"
-cargo test --locked -p msphf-orchestrator
-
-echo "[5/5] ./scripts/verify_no_secrets.sh"
+echo "[2/3] ./scripts/verify_no_secrets.sh"
 ./scripts/verify_no_secrets.sh
+
+echo "[3/3] docs/formal/run.sh"
+if command -v proverif >/dev/null 2>&1; then
+    docs/formal/run.sh
+else
+    echo "ProVerif 2.05 is not in PATH; skipping the symbolic model"
+fi
 
 if cargo audit --version >/dev/null 2>&1; then
     echo "[optional] cargo audit"

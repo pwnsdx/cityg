@@ -1,0 +1,54 @@
+(* Forward secrecy with stable tree keys. An honest member A holds epoch 1
+   and erases it when epoch 2 is active. The adversary learns every commit
+   secret (the tree keys that seal them stay the same across windows and
+   leak later) and A's whole state in epoch 3. Query: the message secret of
+   epoch 2 stays secret. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+type tag [fixed].
+type pkey [bounded].
+
+(* Extract(salt, ikm): a PRF keyed by its salt. *)
+proba Pextract.
+expand PRF(key, key, key, Extract, Pextract).
+
+(* ExpandLabel(secret, label, ctx): a PRF keyed by the secret. *)
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+const empty: hash.
+letfun DeriveSecret(s: key, l: label) = ExpandLabel(s, l, empty).
+
+(* MAC(key, transcript): a PRF keyed by the confirmation key. *)
+proba Pmac.
+expand PRF(key, hash, tag, MAC, Pmac).
+
+(* The external key pair is a deterministic function of its seed. *)
+fun pkgen(key): pkey.
+
+const l_joiner, l_epoch, l_init, l_msg, l_confirm, l_external, l_external_kem: label.
+
+query secret msg2.
+
+process
+  Ostart() :=
+    (* A's init secret of epoch 1, erased before the compromise. *)
+    init1 <-R key;
+    return();
+    O2(commit2: key, gc2: hash, th2: hash) :=
+      let joiner2 = ExpandLabel(Extract(init1, commit2), l_joiner, gc2) in
+      let epoch2 = DeriveSecret(joiner2, l_epoch) in
+      let init2 = DeriveSecret(epoch2, l_init) in
+      let msg2: key = DeriveSecret(epoch2, l_msg) in
+      let confirm2 = DeriveSecret(epoch2, l_confirm) in
+      let external2 = DeriveSecret(epoch2, l_external) in
+      (* Public: the confirmation tag and the external public key. *)
+      return(MAC(confirm2, th2), pkgen(DeriveSecret(external2, l_external_kem)));
+      O3(commit3: key, gc3: hash) :=
+        let joiner3 = ExpandLabel(Extract(init2, commit3), l_joiner, gc3) in
+        let epoch3 = DeriveSecret(joiner3, l_epoch) in
+        (* The compromise of A in epoch 3. *)
+        return(joiner3, epoch3)

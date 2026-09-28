@@ -1,38 +1,101 @@
 #![forbid(unsafe_code)]
+//! FIPS 204 ML-DSA-65 signatures for City-G.
+//!
+//! Every City-G signature (district commits and seals, join, update,
+//! catch-up and re-entry requests, admissions and invites, removal
+//! proposals, checkpoints and group policies) uses FIPS 204 ML-DSA-65
+//! through this crate. ML-DSA-65 is NIST security category 3, the category
+//! of the ML-KEM-768 half of the X-Wing KEM the protocol pairs it with. The
+//! backend (`fips204`) is pure Rust, so signatures produced by one build
+//! verify on every other build.
+//!
+//! Each signed object type has its own FIPS 204 context string
+//! ([`SignatureContext`]). A signature produced for one usage therefore never
+//! verifies for another, even when the signed byte strings coincide.
 
+use fips204::{
+    ml_dsa_65,
+    traits::{KeyGen, SerDes, Signer, Verifier},
+};
+use rand_core::OsRng;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
-/// Historical City-G wire label for POP/admin signatures.
+/// Name of the signature algorithm.
+pub const SIGNATURE_ALGORITHM: &str = "ML-DSA-65";
+/// Encoded public key size (1952 bytes).
+pub const PUBLIC_KEY_BYTES: usize = ml_dsa_65::PK_LEN;
+/// Encoded secret key size (4032 bytes).
+pub const SECRET_KEY_BYTES: usize = ml_dsa_65::SK_LEN;
+/// Signature size (3309 bytes).
+pub const SIGNATURE_BYTES: usize = ml_dsa_65::SIG_LEN;
+
+/// FIPS 204 context string (`ctx`) naming the usage of a signature.
 ///
-/// The repository currently emits Dilithium5-compatible key/signature sizes
-/// while carrying the `"ML-DSA-65"` label in protocol payloads. This crate
-/// preserves that wire compatibility behind one adapter surface.
-pub const CITYG_POP_SIGNATURE_ALGORITHM: &str = "ML-DSA-65";
-pub const CITYG_POP_PUBLIC_KEY_BYTES: usize = 2592;
-pub const CITYG_POP_SIGNATURE_BYTES: usize = 4627;
+/// The set is closed: callers pick one of the associated constants, so a
+/// context cannot be forged from arbitrary bytes at a call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SignatureContext(&'static [u8]);
 
-pub const ML_DSA_65_ALGORITHM: &str = CITYG_POP_SIGNATURE_ALGORITHM;
-pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = CITYG_POP_PUBLIC_KEY_BYTES;
-pub const ML_DSA_65_SIGNATURE_BYTES: usize = CITYG_POP_SIGNATURE_BYTES;
+impl SignatureContext {
+    /// District commit, signed by its committer.
+    pub const DISTRICT_COMMIT: Self = Self(b"city-g/district-commit/v5");
+    /// City task: the re-key of a sub-city or of the top, signed by its
+    /// performer.
+    pub const CITY_TASK: Self = Self(b"city-g/city-task/v5");
+    /// Seal of a window, signed by its sealer.
+    pub const SEAL: Self = Self(b"city-g/seal/v5");
+    /// Request of a device to join a group.
+    pub const JOIN_REQUEST: Self = Self(b"city-g/join-request/v5");
+    /// Admission of a joining device, by an admin or an invite key.
+    pub const ADMISSION: Self = Self(b"city-g/admission/v5");
+    /// Invite delegating admissions to an invite key.
+    pub const INVITE: Self = Self(b"city-g/invite/v5");
+    /// Removal proposal (voluntary leave or removal by an admin).
+    pub const REMOVE_PROPOSAL: Self = Self(b"city-g/remove/v5");
+    /// Request of a member to replace its leaf key.
+    pub const UPDATE_REQUEST: Self = Self(b"city-g/update/v5");
+    /// Request of a member to jump to the present.
+    pub const CATCH_UP: Self = Self(b"city-g/catch-up/v5");
+    /// Request of a member to re-enter its own leaf.
+    pub const RE_ENTRY: Self = Self(b"city-g/re-entry/v5");
+    /// Request of a member that a faulty task cut off, for a repair.
+    pub const REPAIR_REQUEST: Self = Self(b"city-g/repair-request/v5");
+    /// Dispute of a faulty wrap, with its proof.
+    pub const DISPUTE: Self = Self(b"city-g/dispute/v5");
+    /// Signature of a burst of messages by the sender's card.
+    pub const MESSAGE: Self = Self(b"city-g/message/v5");
+    /// Checkpoint of an epoch, signed by an admin.
+    pub const CHECKPOINT: Self = Self(b"city-g/checkpoint/v5");
+    /// Policy of a group (open or closed admission, eviction of idle
+    /// members), signed by an admin.
+    pub const GROUP_POLICY: Self = Self(b"city-g/group-policy/v5");
+    /// Batch of join requests that a group's authorizer authorizes.
+    pub const AUTHORIZATION_BATCH: Self = Self(b"city-g/authorization-batch/v5");
+    /// Checkpoint of an epoch, signed by a group's authorizer.
+    pub const AUTHORIZER_CHECKPOINT: Self = Self(b"city-g/authorizer-checkpoint/v5");
 
-pub struct MlDsa65SecretKey(backend::SecretKey);
+    /// Context bytes passed to FIPS 204 as `ctx`.
+    #[must_use]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        self.0
+    }
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum MlDsa65VerifyError {
+pub enum VerifyError {
     #[error("invalid ML-DSA-65 public key length")]
     InvalidPublicKeyLength,
     #[error("invalid ML-DSA-65 signature length")]
     InvalidSignatureLength,
     #[error("invalid ML-DSA-65 public key")]
     InvalidPublicKey,
-    #[error("invalid ML-DSA-65 signature")]
-    InvalidSignature,
     #[error("ML-DSA-65 verification failed")]
     VerificationFailed,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum MlDsa65SecretKeyError {
+pub enum SecretKeyError {
     #[error("invalid ML-DSA-65 secret key length")]
     InvalidSecretKeyLength,
     #[error("invalid ML-DSA-65 secret key")]
@@ -40,222 +103,332 @@ pub enum MlDsa65SecretKeyError {
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum MlDsa65SignError {
-    #[error("invalid ML-DSA-65 secret key length")]
-    InvalidSecretKeyLength,
-    #[error("invalid ML-DSA-65 secret key")]
-    InvalidSecretKey,
+pub enum SignError {
+    #[error("ML-DSA-65 key generation failed")]
+    KeyGenerationFailed,
     #[error("ML-DSA-65 signing failed")]
     SigningFailed,
 }
 
-impl MlDsa65SecretKey {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, MlDsa65SecretKeyError> {
-        backend::secret_key_from_bytes(bytes).map(Self)
+/// ML-DSA-65 signing key.
+///
+/// Holds the expanded key and its FIPS 204 encoding; both are zeroized on drop.
+/// The expanded key (~20 KiB) lives on the heap so that values and async
+/// futures holding a key stay small.
+#[derive(Clone)]
+pub struct SecretKey {
+    expanded: Box<ml_dsa_65::PrivateKey>,
+    encoded: Zeroizing<Vec<u8>>,
+}
+
+impl SecretKey {
+    fn from_expanded(expanded: ml_dsa_65::PrivateKey) -> Self {
+        let encoded = Zeroizing::new(expanded.clone().into_bytes().to_vec());
+        Self {
+            expanded: Box::new(expanded),
+            encoded,
+        }
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
-        backend::secret_key_into_bytes(self.0)
-    }
-}
-
-pub fn verify_cityg_pop_signature(
-    public_key: &[u8],
-    message: &[u8],
-    signature: &[u8],
-) -> Result<(), MlDsa65VerifyError> {
-    if public_key.len() != CITYG_POP_PUBLIC_KEY_BYTES {
-        return Err(MlDsa65VerifyError::InvalidPublicKeyLength);
-    }
-    if signature.len() != CITYG_POP_SIGNATURE_BYTES {
-        return Err(MlDsa65VerifyError::InvalidSignatureLength);
-    }
-
-    backend::verify(public_key, message, signature)
-}
-
-pub fn verify_ml_dsa_65_detached_signature(
-    public_key: &[u8],
-    message: &[u8],
-    signature: &[u8],
-) -> Result<(), MlDsa65VerifyError> {
-    verify_cityg_pop_signature(public_key, message, signature)
-}
-
-pub fn sign_ml_dsa_65_detached_signature(
-    secret_key: &MlDsa65SecretKey,
-    message: &[u8],
-) -> Result<Vec<u8>, MlDsa65SignError> {
-    backend::sign(&secret_key.0, message)
-}
-
-pub fn ml_dsa_65_keypair() -> Result<(Vec<u8>, MlDsa65SecretKey), MlDsa65SignError> {
-    let (public_key, secret_key) = backend::keypair()?;
-    Ok((public_key, MlDsa65SecretKey(secret_key)))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-mod backend {
-    use pqcrypto_dilithium::dilithium5;
-    use pqcrypto_traits::sign::{
-        DetachedSignature as DetachedSignatureTrait, PublicKey as PublicKeyTrait,
-        SecretKey as SecretKeyTrait,
-    };
-
-    use crate::{MlDsa65SecretKeyError, MlDsa65SignError, MlDsa65VerifyError};
-
-    pub type SecretKey = dilithium5::SecretKey;
-
-    pub fn secret_key_from_bytes(bytes: &[u8]) -> Result<SecretKey, MlDsa65SecretKeyError> {
-        <dilithium5::SecretKey as SecretKeyTrait>::from_bytes(bytes).map_err(|_| {
-            if bytes.len() == dilithium5::secret_key_bytes() {
-                MlDsa65SecretKeyError::InvalidSecretKey
-            } else {
-                MlDsa65SecretKeyError::InvalidSecretKeyLength
-            }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SecretKeyError> {
+        let array = <[u8; SECRET_KEY_BYTES]>::try_from(bytes)
+            .map_err(|_| SecretKeyError::InvalidSecretKeyLength)?;
+        let expanded = ml_dsa_65::PrivateKey::try_from_bytes(array)
+            .map_err(|_| SecretKeyError::InvalidSecretKey)?;
+        Ok(Self {
+            expanded: Box::new(expanded),
+            encoded: Zeroizing::new(bytes.to_vec()),
         })
     }
 
-    pub fn secret_key_into_bytes(secret_key: SecretKey) -> Vec<u8> {
-        secret_key.as_bytes().to_vec()
+    /// FIPS 204 encoding of the secret key (4032 bytes).
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.encoded.as_slice()
     }
 
-    pub fn sign(secret_key: &SecretKey, message: &[u8]) -> Result<Vec<u8>, MlDsa65SignError> {
-        Ok(dilithium5::detached_sign(message, secret_key)
-            .as_bytes()
-            .to_vec())
+    /// Owned copy of the FIPS 204 encoding; callers own its zeroization.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.encoded.to_vec()
     }
 
-    pub fn keypair() -> Result<(Vec<u8>, SecretKey), MlDsa65SignError> {
-        let (public_key, secret_key) = dilithium5::keypair();
-        Ok((public_key.as_bytes().to_vec(), secret_key))
-    }
-
-    pub fn verify(
-        public_key: &[u8],
-        message: &[u8],
-        signature: &[u8],
-    ) -> Result<(), MlDsa65VerifyError> {
-        let public_key = <dilithium5::PublicKey as PublicKeyTrait>::from_bytes(public_key)
-            .map_err(|_| MlDsa65VerifyError::InvalidPublicKey)?;
-        let signature =
-            <dilithium5::DetachedSignature as DetachedSignatureTrait>::from_bytes(signature)
-                .map_err(|_| MlDsa65VerifyError::InvalidSignature)?;
-
-        dilithium5::verify_detached_signature(&signature, message, &public_key)
-            .map_err(|_| MlDsa65VerifyError::VerificationFailed)
+    /// Serialized public key matching this secret key.
+    #[must_use]
+    pub fn public_key(&self) -> Vec<u8> {
+        self.expanded.get_public_key().into_bytes().to_vec()
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-mod backend {
-    use fips204::{
-        ml_dsa_87,
-        traits::{SerDes, Signer, Verifier},
-    };
-    use rand_core::OsRng;
-
-    use crate::{MlDsa65SecretKeyError, MlDsa65SignError, MlDsa65VerifyError};
-
-    pub type SecretKey = ml_dsa_87::PrivateKey;
-
-    pub fn secret_key_from_bytes(bytes: &[u8]) -> Result<SecretKey, MlDsa65SecretKeyError> {
-        let bytes = <[u8; ml_dsa_87::SK_LEN]>::try_from(bytes)
-            .map_err(|_| MlDsa65SecretKeyError::InvalidSecretKeyLength)?;
-        ml_dsa_87::PrivateKey::try_from_bytes(bytes)
-            .map_err(|_| MlDsa65SecretKeyError::InvalidSecretKey)
+impl core::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SecretKey(ML-DSA-65, redacted)")
     }
+}
 
-    pub fn secret_key_into_bytes(secret_key: SecretKey) -> Vec<u8> {
-        secret_key.into_bytes().to_vec()
+/// Generate a fresh key pair from the operating-system RNG.
+pub fn keypair() -> Result<(Vec<u8>, SecretKey), SignError> {
+    let mut rng = OsRng;
+    ml_dsa_65::try_keygen_with_rng(&mut rng)
+        .map(|(public_key, secret_key)| {
+            (
+                public_key.into_bytes().to_vec(),
+                SecretKey::from_expanded(secret_key),
+            )
+        })
+        .map_err(|_| SignError::KeyGenerationFailed)
+}
+
+/// Derive a key pair from a 32-byte seed (FIPS 204 `ML-DSA.KeyGen_internal`).
+///
+/// Only for deterministic fixtures and test vectors: production keys come
+/// from [`keypair`].
+#[must_use]
+pub fn keypair_from_seed(seed: &[u8; 32]) -> (Vec<u8>, SecretKey) {
+    let (public_key, secret_key) = ml_dsa_65::KG::keygen_from_seed(seed);
+    (
+        public_key.into_bytes().to_vec(),
+        SecretKey::from_expanded(secret_key),
+    )
+}
+
+/// Hedged FIPS 204 signature (fresh randomness per signature).
+pub fn sign(
+    secret_key: &SecretKey,
+    context: SignatureContext,
+    message: &[u8],
+) -> Result<Vec<u8>, SignError> {
+    let mut rng = OsRng;
+    secret_key
+        .expanded
+        .try_sign_with_rng(&mut rng, message, context.as_bytes())
+        .map(|signature| signature.to_vec())
+        .map_err(|_| SignError::SigningFailed)
+}
+
+/// FIPS 204 signature with caller-provided randomness `rnd` (hedged mode
+/// when `rnd` is fresh). Protocol cores that take an injectable RNG use this
+/// so that every random input comes from one source.
+pub fn sign_with_randomness(
+    secret_key: &SecretKey,
+    context: SignatureContext,
+    message: &[u8],
+    rnd: &[u8; 32],
+) -> Result<Vec<u8>, SignError> {
+    secret_key
+        .expanded
+        .try_sign_with_seed(rnd, message, context.as_bytes())
+        .map(|signature| signature.to_vec())
+        .map_err(|_| SignError::SigningFailed)
+}
+
+/// Verify a FIPS 204 ML-DSA-65 signature under the given usage context.
+pub fn verify(
+    public_key: &[u8],
+    context: SignatureContext,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), VerifyError> {
+    let public_key = <[u8; PUBLIC_KEY_BYTES]>::try_from(public_key)
+        .map_err(|_| VerifyError::InvalidPublicKeyLength)?;
+    let signature = <[u8; SIGNATURE_BYTES]>::try_from(signature)
+        .map_err(|_| VerifyError::InvalidSignatureLength)?;
+    let public_key = ml_dsa_65::PublicKey::try_from_bytes(public_key)
+        .map_err(|_| VerifyError::InvalidPublicKey)?;
+    if public_key.verify(message, &signature, context.as_bytes()) {
+        Ok(())
+    } else {
+        Err(VerifyError::VerificationFailed)
     }
+}
 
-    pub fn sign(secret_key: &SecretKey, message: &[u8]) -> Result<Vec<u8>, MlDsa65SignError> {
-        let mut rng = OsRng;
-        secret_key
-            .try_sign_with_rng(&mut rng, message, &[])
-            .map(|signature| signature.to_vec())
-            .map_err(|_| MlDsa65SignError::SigningFailed)
-    }
+/// Check the length of a serialized public key without parsing it.
+#[must_use]
+pub fn is_public_key_length(bytes: &[u8]) -> bool {
+    bytes.len() == PUBLIC_KEY_BYTES
+}
 
-    pub fn keypair() -> Result<(Vec<u8>, SecretKey), MlDsa65SignError> {
-        let mut rng = OsRng;
-        ml_dsa_87::try_keygen_with_rng(&mut rng)
-            .map(|(public_key, secret_key)| (public_key.into_bytes().to_vec(), secret_key))
-            .map_err(|_| MlDsa65SignError::SigningFailed)
-    }
-
-    pub fn verify(
-        public_key: &[u8],
-        message: &[u8],
-        signature: &[u8],
-    ) -> Result<(), MlDsa65VerifyError> {
-        let public_key = <[u8; ml_dsa_87::PK_LEN]>::try_from(public_key)
-            .map_err(|_| MlDsa65VerifyError::InvalidPublicKeyLength)?;
-        let signature = <[u8; ml_dsa_87::SIG_LEN]>::try_from(signature)
-            .map_err(|_| MlDsa65VerifyError::InvalidSignatureLength)?;
-        let public_key = ml_dsa_87::PublicKey::try_from_bytes(public_key)
-            .map_err(|_| MlDsa65VerifyError::InvalidPublicKey)?;
-
-        if public_key.verify(message, &signature, &[]) {
-            Ok(())
-        } else {
-            Err(MlDsa65VerifyError::VerificationFailed)
-        }
-    }
+/// Check the length of a serialized signature without parsing it.
+#[must_use]
+pub fn is_signature_length(bytes: &[u8]) -> bool {
+    bytes.len() == SIGNATURE_BYTES
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-    use pqcrypto_dilithium::dilithium5;
-    use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
+    use super::*;
 
-    use super::{
-        CITYG_POP_PUBLIC_KEY_BYTES, CITYG_POP_SIGNATURE_BYTES, MlDsa65SecretKey,
-        MlDsa65VerifyError, ml_dsa_65_keypair, sign_ml_dsa_65_detached_signature,
-        verify_cityg_pop_signature,
-    };
+    const ALL_CONTEXTS: [SignatureContext; 17] = [
+        SignatureContext::DISTRICT_COMMIT,
+        SignatureContext::CITY_TASK,
+        SignatureContext::SEAL,
+        SignatureContext::JOIN_REQUEST,
+        SignatureContext::ADMISSION,
+        SignatureContext::INVITE,
+        SignatureContext::REMOVE_PROPOSAL,
+        SignatureContext::UPDATE_REQUEST,
+        SignatureContext::CATCH_UP,
+        SignatureContext::RE_ENTRY,
+        SignatureContext::REPAIR_REQUEST,
+        SignatureContext::DISPUTE,
+        SignatureContext::MESSAGE,
+        SignatureContext::CHECKPOINT,
+        SignatureContext::GROUP_POLICY,
+        SignatureContext::AUTHORIZATION_BATCH,
+        SignatureContext::AUTHORIZER_CHECKPOINT,
+    ];
 
     #[test]
-    fn host_backend_verifies_native_signature() {
-        let (public_key, secret_key) = dilithium5::keypair();
-        let message = b"cityg-mldsa";
-        let signature = dilithium5::detached_sign(message, &secret_key);
-
-        verify_cityg_pop_signature(public_key.as_bytes(), message, signature.as_bytes())
-            .expect("signature should verify");
+    fn sizes_match_fips204_ml_dsa_65() {
+        assert_eq!(SIGNATURE_ALGORITHM, "ML-DSA-65");
+        assert_eq!(PUBLIC_KEY_BYTES, 1952);
+        assert_eq!(SECRET_KEY_BYTES, 4032);
+        assert_eq!(SIGNATURE_BYTES, 3309);
     }
 
     #[test]
-    fn host_backend_rejects_invalid_lengths() {
-        let error = verify_cityg_pop_signature(&[], b"msg", &[]).expect_err("lengths should fail");
-        assert_eq!(error, MlDsa65VerifyError::InvalidPublicKeyLength);
-
-        let public_key = vec![0u8; CITYG_POP_PUBLIC_KEY_BYTES];
-        let short_signature = vec![0u8; CITYG_POP_SIGNATURE_BYTES - 1];
-        let error = verify_cityg_pop_signature(&public_key, b"msg", &short_signature)
-            .expect_err("signature length should fail");
-        assert_eq!(error, MlDsa65VerifyError::InvalidSignatureLength);
+    fn sign_and_verify_round_trip() {
+        let (public_key, secret_key) = keypair().expect("keypair");
+        assert_eq!(secret_key.public_key(), public_key);
+        let signature = sign(&secret_key, SignatureContext::SEAL, b"hello").expect("sign");
+        assert_eq!(signature.len(), SIGNATURE_BYTES);
+        verify(&public_key, SignatureContext::SEAL, b"hello", &signature).expect("verify");
+        assert_eq!(
+            verify(&public_key, SignatureContext::SEAL, b"hellp", &signature),
+            Err(VerifyError::VerificationFailed)
+        );
     }
 
     #[test]
-    fn host_wrapper_signs_and_verifies() {
-        let (public_key, secret_key) = ml_dsa_65_keypair().expect("keypair");
+    fn contexts_are_distinct_and_bind_signatures() {
+        let unique: std::collections::BTreeSet<&[u8]> = ALL_CONTEXTS
+            .iter()
+            .map(|context| context.as_bytes())
+            .collect();
+        assert_eq!(unique.len(), ALL_CONTEXTS.len());
+        for context in ALL_CONTEXTS {
+            assert!(context.as_bytes().len() <= 255, "FIPS 204 ctx limit");
+        }
+
+        let (public_key, secret_key) = keypair_from_seed(&[7u8; 32]);
         let signature =
-            sign_ml_dsa_65_detached_signature(&secret_key, b"cityg-wrapper").expect("sign");
-
-        verify_cityg_pop_signature(&public_key, b"cityg-wrapper", &signature)
-            .expect("signature should verify");
+            sign(&secret_key, SignatureContext::REMOVE_PROPOSAL, b"payload").expect("sign");
+        for context in ALL_CONTEXTS {
+            let outcome = verify(&public_key, context, b"payload", &signature);
+            if context == SignatureContext::REMOVE_PROPOSAL {
+                assert_eq!(outcome, Ok(()));
+            } else {
+                assert_eq!(outcome, Err(VerifyError::VerificationFailed));
+            }
+        }
     }
 
     #[test]
-    fn host_secret_key_round_trips_from_bytes() {
-        let (_, secret_key) = dilithium5::keypair();
-        let secret_key = MlDsa65SecretKey::from_bytes(secret_key.as_bytes()).expect("secret key");
-        let signature = sign_ml_dsa_65_detached_signature(&secret_key, b"roundtrip")
-            .expect("sign with round-tripped key");
-        assert_eq!(signature.len(), CITYG_POP_SIGNATURE_BYTES);
+    fn seeded_keys_and_deterministic_signatures_are_reproducible() {
+        let (pk_a, sk_a) = keypair_from_seed(&[1u8; 32]);
+        let (pk_b, sk_b) = keypair_from_seed(&[1u8; 32]);
+        assert_eq!(pk_a, pk_b);
+        let sig_a =
+            sign_with_randomness(&sk_a, SignatureContext::DISTRICT_COMMIT, b"m", &[0u8; 32])
+                .expect("sign");
+        let sig_b =
+            sign_with_randomness(&sk_b, SignatureContext::DISTRICT_COMMIT, b"m", &[0u8; 32])
+                .expect("sign");
+        assert_eq!(sig_a, sig_b);
+        verify(&pk_a, SignatureContext::DISTRICT_COMMIT, b"m", &sig_a).expect("verify");
+
+        let hedged_a = sign(&sk_a, SignatureContext::DISTRICT_COMMIT, b"m").expect("sign");
+        let hedged_b = sign(&sk_a, SignatureContext::DISTRICT_COMMIT, b"m").expect("sign");
+        assert_ne!(hedged_a, hedged_b, "hedged signatures use fresh randomness");
+
+        let with_rnd =
+            sign_with_randomness(&sk_a, SignatureContext::DISTRICT_COMMIT, b"m", &[7u8; 32])
+                .expect("sign with randomness");
+        assert_ne!(with_rnd, sig_a);
+        verify(&pk_a, SignatureContext::DISTRICT_COMMIT, b"m", &with_rnd).expect("verify");
+    }
+
+    #[test]
+    fn secret_key_round_trips_through_bytes() {
+        let (public_key, secret_key) = keypair().expect("keypair");
+        let bytes = secret_key.to_bytes();
+        assert_eq!(bytes.len(), SECRET_KEY_BYTES);
+        assert_eq!(secret_key.as_bytes(), bytes.as_slice());
+        let restored = SecretKey::from_bytes(&bytes).expect("parse");
+        assert_eq!(restored.public_key(), public_key);
+        let signature = sign(&restored, SignatureContext::GROUP_POLICY, b"x").expect("sign");
+        verify(
+            &public_key,
+            SignatureContext::GROUP_POLICY,
+            b"x",
+            &signature,
+        )
+        .expect("verify");
+        assert_eq!(format!("{secret_key:?}"), "SecretKey(ML-DSA-65, redacted)");
+    }
+
+    #[test]
+    fn malformed_inputs_are_rejected() {
+        assert_eq!(
+            SecretKey::from_bytes(&[0u8; 12]).err(),
+            Some(SecretKeyError::InvalidSecretKeyLength)
+        );
+        assert_eq!(
+            verify(&[], SignatureContext::SEAL, b"m", &[]),
+            Err(VerifyError::InvalidPublicKeyLength)
+        );
+        let (public_key, _) = keypair_from_seed(&[3u8; 32]);
+        assert_eq!(
+            verify(
+                &public_key,
+                SignatureContext::SEAL,
+                b"m",
+                &[0u8; SIGNATURE_BYTES - 1]
+            ),
+            Err(VerifyError::InvalidSignatureLength)
+        );
+        assert_eq!(
+            verify(
+                &public_key,
+                SignatureContext::SEAL,
+                b"m",
+                &[0u8; SIGNATURE_BYTES]
+            ),
+            Err(VerifyError::VerificationFailed)
+        );
+        assert!(is_public_key_length(&public_key));
+        assert!(!is_public_key_length(&public_key[1..]));
+        assert!(is_signature_length(&[0u8; SIGNATURE_BYTES]));
+        assert!(!is_signature_length(&[0u8; 4]));
+    }
+
+    /// FIPS 204 final and the pre-standard Dilithium are not interoperable:
+    /// pin one known-answer key and signature so that a backend swap is
+    /// caught. Both values were cross-checked with an independent
+    /// implementation (dilithium-py 1.4.0, `ML_DSA_65.key_derive` and
+    /// `_sign_internal` with `rnd = 0^32` over `0 || len(ctx) || ctx || m`).
+    /// The context is pinned too, to the bytes of the check: it does not
+    /// follow the profile's labels.
+    #[test]
+    fn deterministic_known_answer_is_stable() {
+        const KAT_CONTEXT: SignatureContext = SignatureContext(b"city-g/district-commit/v4");
+        let (public_key, secret_key) = keypair_from_seed(&[0x42u8; 32]);
+        let signature = sign_with_randomness(&secret_key, KAT_CONTEXT, b"city-g kat", &[0u8; 32])
+            .expect("sign");
+        verify(&public_key, KAT_CONTEXT, b"city-g kat", &signature).expect("verify");
+        assert_eq!(
+            hex_digest(blake3::hash(&public_key).as_bytes()),
+            "3a46d0b0835485ef0558d7ef2a3be17f2fceb9ae3d80fe45265084d17f5a5ad3"
+        );
+        assert_eq!(
+            hex_digest(blake3::hash(&signature).as_bytes()),
+            "15a74756473477d449151647df6d9506ffeaccc2b630c6e212e2f96db2863cd0"
+        );
+    }
+
+    fn hex_digest(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }

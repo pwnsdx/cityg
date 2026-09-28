@@ -1,0 +1,38 @@
+(* Scenario SERVER_REKEY_REMOVED: the server re-keys the tree itself, and a
+   member it removed helps it.
+
+   M was a member of epoch 1 and window 2 removes it: it knows the epoch
+   secret of epoch 1, hence its init secret and its external key, and gives
+   them to the server. The server, which is the network here, draws the
+   roots of windows 2 and 3. Window 2 has entrant J, whose external init is
+   sealed to the external key of epoch 1 and signed by J; window 3 has no
+   join and chains the init secret. Member A follows both windows and sends
+   M2 in epoch 2 and M3 in epoch 3.
+
+   Expected: two attacks. M opens J's external init; with the root it drew,
+   the server derives epoch 2, then every later epoch, since it draws every
+   root: the removal never takes effect against the server and M
+   together. *)
+
+free M2, M3: bitstring [private].
+query attacker(M2).
+query attacker(M3).
+
+process
+  new es1: key; new lsA: key; new skJ: skey; new x: key; new q: key;
+  (* What M gives the server; A's leaf key and J's key are public. *)
+  out(c, (es1, leaf_pk(lsA), spk(skJ)));
+  let xi = seal(external_pk(es1), q, N2, x) in
+  out(c, (xi, sign(skJ, (L_ext, xi))));
+  (* Member A, window 2: the server's root and J's external init. *)
+  in(c, (w2: bitstring, xi2: bitstring, sg: bitstring, gc2: bitstring));
+  if checksign(spk(skJ), (L_ext, xi2), sg) = true then
+  let root2 = open(leaf_sk(lsA), N2, w2) in
+  let x2 = open(external_sk(es1), N2, xi2) in
+  let es2 = epoch_secret(joiner_secret(x2, commit_secret(root2), gc2)) in
+  out(c, aenc(msg_key(es2), M2));
+  (* Window 3: the server's root and the init chain. *)
+  in(c, (w3: bitstring, gc3: bitstring));
+  let root3 = open(leaf_sk(lsA), N3, w3) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), commit_secret(root3), gc3)) in
+  out(c, aenc(msg_key(es3), M3))

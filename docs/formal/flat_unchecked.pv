@@ -1,0 +1,62 @@
+(* Scenario FLAT_UNCHECKED (profile v0.5-draft, stage 1): the removal of
+   island_removal.pv, with a flat maker that takes the key of the island
+   root from the delivery service.
+
+   B follows the window as before, but wraps r2 for i2 to a key the network
+   gives it, instead of the key of i2 in the group context it checked.
+
+   Expected: attack. The delivery service gives a key of its own, opens the
+   flat element, and M brings the init secret of epoch 1. A flat maker
+   takes the island root keys from a state it checked against its header
+   (docs/specs-v0.5-draft.md, section 2.4). Reachable (sanity): D accepts
+   epoch 2. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event DAccepts(key).
+query es: key; event(DAccepts(es)).
+
+process
+  new lsA: key; new lsM: key; new lsB: key; new lsD: key;
+  new t0: key; new t1: key; new t2: key; new p1: key; new q1: key; new r1: key;
+  new es1: key;
+  let init1 = init_secret(es1) in
+  (* M's state of epoch 1, and the public keys. *)
+  out(c, (lsM, t0, p1, r1, es1));
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), leaf_pk(lsD), node_pk(t1), node_pk(t2), node_pk(q1)));
+  (* Window 2: M's path re-keyed. *)
+  new t0n: key; new w1: key; new w2: key; new w3: key;
+  let p2 = chain(t0n) in
+  let r2 = chain(p2) in
+  let gc2 = (N2, node_pk(t0n), node_pk(t1), node_pk(t2), node_pk(p2), node_pk(q1), node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+  out(c, (wrap(leaf_pk(lsA), w1, t0n), wrap(node_pk(t1), w2, p2), wrap(node_pk(q1), w3, r2),
+          gc2, tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), MA));
+  (
+    (* A: follows the window along its path, then relays for i0. *)
+    in(c, (wa: bitstring, g: bitstring, tg: bitstring));
+    let t = unwrap(leaf_sk(lsA), wa) in
+    let r = chain(chain(t)) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    out(c, senc(relay_key(t, (N2, I0)), r))
+  ) | (
+    (* B: follows by refresh, relays for i1, and makes the flat element of
+       i2 with a key the network gives it. *)
+    new wf: key;
+    in(c, (wb: bitstring, g: bitstring, tg: bitstring));
+    let r = up(up(t1, wrap_step(wb)), chain_step) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    in(c, k2: kpk);
+    out(c, (senc(relay_key(t1, (N2, I1)), r), wrap(k2, wf, r)))
+  ) | (
+    (* D: back online, takes the root secret from the flat element of i2. *)
+    in(c, (fl: bitstring, g: bitstring, tg: bitstring));
+    let r = unwrap(node_sk(t2), fl) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    event DAccepts(es)
+  )

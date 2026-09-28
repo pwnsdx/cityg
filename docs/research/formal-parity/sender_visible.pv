@@ -1,0 +1,13 @@
+(* Scenario SENDER_VISIBLE (sanity check): the message of sender_hidden.pv
+   with the sender's leaf in clear, as when the delivery service checks the
+   sender's signature before relaying. *)
+
+free cardA, cardB: skey [private].
+
+process
+  new es: key; new m: bitstring;
+  out(c, (spk(cardA), spk(cardB)));
+  let leaf = choice[LA, LB] in
+  let card = choice[cardA, cardB] in
+  let k_msg = kdf(msg_key(es), leaf) in
+  out(c, (leaf, aenc(k_msg, (m, sign(card, (L_card, m))))))

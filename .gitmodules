@@ -1,3 +1,0 @@
-[submodule "crates/capss/vendor/smallwood-python"]
-	path = crates/capss/vendor/smallwood-python
-	url = https://github.com/CryptoExperts/smallwood-python.git

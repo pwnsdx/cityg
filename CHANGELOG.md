@@ -1,235 +1,835 @@
 # Changelog
 
-All notable changes to the City-G project will be documented in this file.
+All notable changes to the City-G project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-- Optional `unsafe-ntt` feature flag in `msphf-core` to re-enable unchecked NTT indexing when benchmarking or running production builds that demand maximum speed.
-- Index-schedule unit tests in `msphf-core::rlwe::ntt` to assert the forward and inverse transforms never walk past buffer bounds.
-- Client-state hardening coverage for `cityg-gui`, including fault-injection cut points, restart/join-finalize crash tests, property/state-machine tests, a versioned client-state manifest, and a dedicated verification script.
-- `cityg-stress` support for `--client-restart-every-secs` and `--capture-client-state-artifacts`, plus anonymized `join_leave` session artifact export.
+### Conformance: test vectors of the v0.5 draft
 
-### Changed
-- Normalized the multi-head window TTL default to **120 seconds** across orchestrator code, configuration defaults, shipped TOML examples, and protocol docs, including guidance on how the knob impacts DoS posture vs. client jitter tolerance.
-- Restricted `msg_index` generation to randomized 64-bit values in the active profile spec and aligned the `join_leave` harness with that sender behavior.
-- Clarified that historical barrier public-tree retention is a fetch-semantics requirement, allowing servers to use internal structural sharing or delta-like storage instead of full snapshot clones.
+- Test vectors in [`docs/vectors/`](docs/vectors/README.md), eight JSON
+  files that list every input, secrets and the randomness each operation
+  draws included, and every output: the hash and derivation functions and
+  the identifiers, ML-DSA-65 signatures with a given `rnd`, X-Wing
+  encapsulations with given coins, hedged coins and a wrap
+  (`crypto-basics.json`); the key schedule over three epochs, the last
+  sealed by an entrant, with the group context, the transcript hashes, the
+  external key and the secrets of the message plane (`key-schedule.json`);
+  the secret tree and its chains (`secret-tree.json`); three messages of a
+  sender, signed, unsigned and signing the burst, with every intermediate
+  value and the log (`message-protection.json`); `MTH` roots and proofs
+  under the three labels and the membership log (`merkle.json`); the leaf
+  and parent nodes, node hashes and leaf proofs of a small tree
+  (`tree.json`); sparse Merkle maps and registry headers
+  (`registry.json`); one of each encoded object, signed from a recorded
+  seed and `rnd`, and two genesis seals with the secrets of epoch 0
+  (`objects.json`).
+- `crates/cityg-core/tests/vectors/` generates them: each module computes
+  the outputs by the implementation and by the definitions of the
+  specification written out again, and a check reads each file as a
+  verifier would. `cargo test -p cityg-core --test vectors` regenerates
+  the files in memory, compares them with the committed ones, naming the
+  first field that differs, and checks them; the ignored test
+  `write_vectors` rewrites them after an intended change. `serde_json` is
+  a dev-dependency.
+- They come from this implementation and no second one has checked them;
+  they cover derivations and encodings, not a window that applies. The
+  specifications, the README and the docs index say so where they said
+  there were none.
+
+### Protocol: the v0.5 draft, stage 3 (parity), specified and implemented
+
+- Stage 3 of the draft is specified in detail (section 4 of
+  [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
+  E-18), from the research notes on parity and on the message plane, and
+  implemented. Four parts, in the order of their implementation:
+  - **leaves with cards**: a card, the key that signs messages, beside the
+    leaf key, and changed with it; the leaf hash takes the leaf's summary
+    (`device_id`, the leaf key's hash, the card), so that a reader checks a
+    card with about 1 KB; the registry maps every leaf key and card, and
+    refuses one twice;
+  - **the message plane**: from `msg_secret`, the sender data, encryption,
+    exporter and authenticator secrets; a secret tree over the leaves with
+    a ratchet per sender; messages whose sender is encrypted, signed once
+    per burst by the sender's card and delivered after the signature, with
+    a key commitment for reports; the next seal commits the log of the
+    epoch's messages;
+  - **the authorized mode**: an authorizer's key in the group policy,
+    batches of authorized joins under one signature, and a checkpoint per
+    epoch, on which joiners anchor and which members may require before
+    they accept a window;
+  - **the membership log**: each seal commits the window's changes, about
+    50 bytes each, which members check on demand.
+- The leaf keeps its device key, unlike the research note's, so that no
+  rule that takes a device key from the tree changes: only its hash moves
+  to the summary.
+- **Cards, implemented** (`cityg_core::card`): a `Card` (ML-DSA-65, under
+  the new signature context `MESSAGE`) and its `CardKey`. `LeafNode` gains
+  the card and the `device_id` its summary names; `leaf_hash` takes
+  `LeafNode::summary`. Join, update and re-entry requests carry the card
+  with the leaf key (`LeafKeys`), as does the genesis seal for the creator.
+  A member draws a fresh card with each leaf key, keeps the pending one
+  with its pending leaf key, and holds its card once a window applies it
+  (`Member::card`); joiners and returning members bring theirs.
+- **Unique keys, implemented** (section 4.2): the registry maps every leaf
+  key and card to its occupancy (`Registry::key`, `Registry::key_proof`,
+  `keys_root` in `RegistryHeader`). A change may not set a key that is in
+  the map before its window, or that another change of the window sets,
+  as for devices: the DS refuses such a request as it records it (against
+  the map and its queue), `check_entry` as a committer checks an entry, and
+  `registry_delta` over the window. An update or a re-entry thus brings a
+  fresh card and a fresh leaf key.
+- **The admission mode** replaces the registry's `open` flag
+  (`AdmissionMode`: closed, open, authorized; `RegistryHeader::is_open`);
+  the header also carries the authorizer's key hash, `null` until the
+  authorized mode (part 3c).
+- Audits: the record of a join, an update or a re-entry carries the proofs
+  of its two keys against the previous `keys_root`
+  (`EntryProofs::keys`), and a key they show present is a fraud.
+- Breaking: `JoinRequest::sign`, `UpdateRequest::sign`,
+  `ReEntryRequest::sign` and `genesis_tree` take `LeafKeys`;
+  `LeafNode::new` and `LeafNode::from_value` take the group's id;
+  `EntrantEvidence::ReEntry` boxes its request. `RegistryHeader` and
+  `RegistryUpdate` lose `open` and gain `keys_root`, `admission` and
+  `authorizer`; `RegistryDelta` gains `keys`, and its `policy` carries the
+  admission mode and the authorizer's hash; `check_policy_change` compares
+  two registry headers; `EntryProofs` gains `keys`.
+- Tests in `crates/cityg-core/tests/parity.rs`: a leaf holds its member's
+  card, which an update replaces; a leaf's hash takes its summary; no leaf
+  key or card is set twice, whoever builds the window; an audit finds a
+  key already in use; members check the changes of a window against its
+  log, and the DS refuses a seal whose log differs.
+- **The message plane, implemented** (part 3b, `cityg_core::message`): from
+  `msg_secret`, which a member erases once it has derived them, the sender
+  data, encryption, exporter and authenticator secrets; a secret tree over
+  the leaves, of which a member keeps the frontier it has not derived, and
+  a chain per sender with `MAX_SKIP` skipped keys. A `Message` hides its
+  sender under the sender data, now of a fixed 12 bytes: the draft's CBOR
+  encoding would have shown the range of the sender's leaf by its length.
+  Its content carries the burst's `first_generation` and, at the end of a
+  burst, the card's signature over the chain of the sender's messages of
+  the epoch; its commitment binds it to its key. A receiver opens each
+  generation once, holds messages until a signature covers them, checks
+  the card against a leaf proof of the message's epoch, or of a later one
+  whose leaf shows `since` and `updated` no later (`sender_card`), and
+  drops a burst whose signature fails or does not come within `T_AUTH`,
+  after which it stops reading the sender in the epoch. `Member` sends,
+  opens and authenticates, signs a burst alone when it is due, exports
+  secrets and gives the epoch authenticator; it keeps the previous epoch's
+  plane until it forgets it.
+- **The sealed message log.** The DS records the messages of the current
+  epoch in the order they arrive (`submit_message`), closes the log when
+  it gives the sealer its work (`close_message_log`), refuses the epoch's
+  messages from then on, opens the log again if it aborts the window, and
+  refuses a seal that carries another log. The seal header carries the
+  log of the previous epoch, `[count, root]`, a Merkle tree hash in the
+  manner of RFC 6962, rather than the body, which members do not download;
+  the genesis seal carries the empty log. Members keep the log their seal
+  closed (`Member::sealed_log`), check it against the epoch's messages
+  (`MessageLog::check`) or a message's inclusion (`message_proof`,
+  `MessageLog::verify_inclusion`).
+- Breaking: `SealHeader` and `SealDraft` gain `message_log`;
+  `Member::seal`, `Joiner::seal_window` and `Returning::seal_window` take
+  the log the DS gave; `DeliveryService::submit_seal` requires the log it
+  closed; `EpochSecrets::msg_secret` returns an `Option`, and
+  `take_msg_secret` hands it over; `Member::msg_secret` gives way to
+  `Member::epoch_authenticator`.
+- **The authorized mode, batches and removals** (part 3c, section 4.9,
+  `cityg_core::authorizer`): the group policy names the admission mode
+  (closed, open or authorized) and, in an authorized group, the
+  authorizer's ML-DSA-65 key (`PolicyTerms`), whose hash the registry
+  keeps. The authorizer signs, for one window, the Merkle root of the join
+  requests it authorizes (`AuthorizationBatch`); the DS keeps a join
+  without admission until then (`awaiting_authorization`), checks each
+  batch's signature once and attaches to each join its authorization
+  (`submit_authorizations`). Committers, the sealer, auditors and members
+  checking an entrant check it against the authorizer's key, itself
+  checked against the registry's hash (`Admitters`). An admission is
+  refused in an authorized group. The authorizer's removals, which name no
+  proposer, are urgent. A shared module of labelled Merkle trees
+  (`cityg_core::merkle`) serves batches and the message log, and the
+  signature contexts `AUTHORIZATION_BATCH` and `AUTHORIZER_CHECKPOINT` are
+  new.
+- Breaking: `GroupPolicy::sign` and `Member::group_policy` take
+  `PolicyTerms`, and `GroupPolicy` gives `is_open()`, `max_idle_epochs()`
+  and `authorizer_pk()`; `JoinRequest::verify` and `RemoveProposal::verify`
+  take `Admitters`; `RemoveProposal::proposer` is optional; `JoinRequest`
+  carries its `authorization`; `EntrantEvidence::Join` and `EntryProofs`
+  carry the authorizer's key.
+- **Authorizer checkpoints.** The authorizer follows the group's public
+  state from a state it trusts, checks each window as the DS does, every
+  join's authorization included, and signs the checkpoint of the epoch it
+  creates (`AuthorizerCheckpoint`: the hash of the group context, the
+  confirmation tag and the external key's hash), one per epoch and only
+  while the registry names it. The DS keeps the checkpoints, and serves a
+  joiner that trusts the authorizer (`Joiner::trust_authorizer`) an entry
+  with the checkpointed epoch instead of a chain of seals
+  (`CheckpointedEpoch`, `checkpointed_entry`). A member may require the
+  checkpoint of each epoch before it accepts the window
+  (`Member::require_checkpoints`, `process_checkpointed`); a window that
+  names another authorizer brings the key, and the requirement lapses if
+  the group leaves the authorized mode. `GroupContext::of_seal` gives an
+  epoch's group context from its seal header.
+- Breaking: `Entry` gains `checkpoint`; a member that entered by a
+  checkpoint holds no header of the epoch before.
+- **A batch's signature, checked once.** The joins of a window share their
+  batch, which keeps the hash of the key its signature was checked
+  against (`AuthorizationBatch::verify`): the DS, committers, the sealer,
+  the authorizer and auditors check it once, not once per join, and the
+  DS gives the joins of a batch one copy of it. Checking 200 joins of a
+  batch takes 201 µs a join instead of 370 µs (release build, one core);
+  what remains is each device's signature.
+- **The membership log, implemented** (part 3d, section 4.10,
+  `cityg_core::membership`): each seal header carries the log of its
+  window's changes, `[count, root]`, a Merkle tree over one record per
+  change in change order (`[kind, leaf, device_id, card_prefix]`, about 50
+  bytes): the device and card that leave the leaf for a removal or an
+  eviction, those the leaf holds after the window otherwise; the genesis
+  seal logs the creator's join. The sealer computes it, the DS checks it
+  with the rest of the window and serves the records and their proofs
+  (`membership_records`, `membership_proof`), and members check them
+  against the log of the header they accepted (`Member::membership_log`,
+  `MembershipLog::check`). Like the message log, it is in the header rather
+  than the body, which members do not download.
+- Breaking: `SealHeader` gains `membership_log`.
+- Tests in `crates/cityg-core/tests/authorized.rs`: an authorized group
+  admits the joins its authorizer signs, window by window, and the joins
+  of a window share one copy of their batch; nobody lets in
+  a join the authorizer did not sign (the DS, a committer, an auditor); the
+  authorizer removes members urgently; an authorized joiner seals the
+  window when nobody is online; the authorizer checkpoints the windows it
+  checks, and refuses one whose joins lost their authorizations; a member
+  that requires checkpoints waits for the authorizer's; a joiner enters
+  with the authorizer's checkpoint instead of four seals.
+- Tests in `crates/cityg-core/tests/messages.rs` and in the module: members
+  exchange messages that the DS cannot attribute; a seal closes the log of
+  the epoch it ends, which members check; a card is checked against the
+  leaf of the message's epoch, before an update or a removal; a joiner
+  reads from the epoch it enters; the DS checks what it can see of a
+  message; an insider's forgery is never delivered; skipped generations
+  open later, within `MAX_SKIP`.
+- Symbolic model of stage 3 ([`docs/formal/`](docs/formal/README.md)): four
+  ProVerif scenarios, 37 in all. Two members that accept the same next
+  epoch read the same messages of the epoch, although an insider and the
+  delivery service show each its own, if each checks what it read against
+  the log the next seal header commits; without that check, they may not
+  (`sealed_log*.pv`). A joiner that enters with the authorizer's
+  checkpoint, which signs the confirmation tag and the external key with
+  the group context, gets the epoch's secret, which the service does not
+  know; a checkpoint that signs the group context alone lets the service
+  seal the joiner an epoch of its own (`authorizer_entry*.pv`).
+
+### Protocol: the v0.5 draft, stage 2 (tasks)
+
+- Stage 2 of the draft is specified in detail (section 3 of
+  [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md), design decision
+  E-17): sub-cities, city tasks, joiners as performers, entries by island,
+  repairs, and disputes, whose proof system stays open. All of it is
+  implemented in `cityg-core` but disputes.
+- **Sub-cities and the top.** The shape gains `subcity_bits` (`S`, 8 by
+  default, fixed at genesis), bound after `island_bits` in the seal header,
+  the group context and checkpoints: sub-cities of `2^S` districts, and a
+  top above them when the tree is taller than `L + S`. `Divisions` holds
+  the three sizes (8, 8 and 8 by default); `Shape::new`, `PublicTree::new`,
+  `genesis_tree` and `Member::create` take it.
+- **City tasks.** The city that the sealer re-keyed alone is re-keyed by
+  one task per sub-city of the window and one for the top (`CityTask`,
+  signed by its performer under `city-g/city-task/v5`). Each is planned over
+  the new roots of the tier below, with a boundary above them, and bound to
+  the state it was built on by the hash of its part's root before and after
+  the window. The task that holds the root draws the root secret. A task's
+  nodes take its performer's taint: removing a performer re-keys the parts
+  it drew.
+- **A sealer that draws nothing.** It checks every district commit and city
+  task, follows them along its own path to the root secret, and signs. The
+  seal body lists the city tasks by part and hash instead of the city's
+  nodes and wraps: in the scale test, the seal weighs 5.4 KB instead of
+  51 KB, and the city's task 48.9 KB.
+- **Joiners perform tasks.** A district commit or a city task may be
+  performed by a joiner of the window, as the occupancy `[leaf, n]` its
+  join takes (`Joiner::commit_district`, `Joiner::commit_city`). It follows
+  the chain of seals to the previous epoch first and checks the state it
+  is shown against it; it hedges its secrets with its leaf seed
+  (`task_hedge`), since it does not know the previous init secret. A
+  verifier takes its device key from its join, which it checks
+  (`check_committer` takes the window's requests); what it draws is tainted
+  by `[leaf, n]`. A joiner cannot welcome: the welcomes of its district go
+  to members in turn, and a member welcomes a join from its own commit or a
+  joiner's.
+- **Entries by island.** An entry carries the entrant's path up to its
+  island root, the root's node, which the leaf proof covers, and the relay
+  element or the flat element of its island (`DeliveryService::island_entry`,
+  `EntryTop`). The entrant takes the root secret from it and checks the
+  root's key against it; it then follows as an island follower. Joiners and
+  returning members open an entry without being consumed (`check_entry`),
+  so that one whose relay lied asks for the flat element, then its whole
+  path.
+- **Repairs.** A member that a faulty task cut off, which no top lets
+  follow, gets a repair: the root secret wrapped to its leaf key by a member
+  of the epoch, who takes the key from the tree it checked
+  (`Member::repair`, `Repair`, `city-g/repair/v5`, unsigned). The service
+  serves it as the top of a packet without steps (`submit_repair`,
+  `repair_packet`, `Top::Repair`). The member then holds the epoch but no
+  valid path, and asks for an update at once (`needs_update`); the window
+  of its update re-keys its path.
+- **Repair requests.** A member that cannot follow asks for its repair
+  with a signed `RepairRequest` (`city-g/repair-request/v5`, new signature
+  context `REPAIR_REQUEST`): it checks its leaf and the parents of its path
+  against the tree hash (`DeliveryService::path_proof`) and names the first
+  level whose secret the window does not let it derive
+  (`Member::repair_request`, `MemberPath::first_fault`). The service checks
+  the request, asks one online member outside the node's subtree for the
+  repair (`request_repair`), and keeps a repair from that maker alone;
+  asking again asks the next one.
+- **Exclusion without conviction.** Each request counts once against the
+  performer whose taint the named node bears (`blame`); once
+  `DsConfig::repair_threshold` members (2 by default, 0 for never) blamed
+  it, the service gives it no role: no district, city task, seal, relay,
+  flat element, repair, nor a task it would take over (`is_excluded`,
+  `pardon`). It binds no member and re-keys nothing; disputes are what
+  convict.
+- **Disputes.** A member proves a wrap faulty with a signed `Dispute`
+  (`city-g/dispute/v5`, new signature context `DISPUTE`): the window's
+  seal, the task and the wrap's index, one of the four statements of the
+  research notes (the wrap does not open; its re-encryption differs; it
+  opens to a secret whose node key differs in its matrix seed or X25519
+  key; or in `t`), and a proof of at most 1 MiB. Its public inputs are a
+  `DisputeStatement` (`city-g/dispute-statement/v5`): the wrap's context,
+  the key it is addressed to, the ciphertext, the sealed secret and, for
+  the second branch, the published node key. `classify` tells the member
+  which statement holds, and `Member::dispute_claim` finds the wrap
+  (`cityg_core::dispute`). The delivery service takes the proof system as
+  a `DisputeVerifier` (`set_dispute_verifier`), finds a wrap's task
+  (`wrap_origin`), and judges a dispute (`submit_dispute`) on a statement
+  it builds from its own copy of the task and of the tree. A conviction
+  excludes the performer from every role at once (`is_convicted`), and the
+  dispute stays with its window as evidence (`StoredWindow::disputes`).
+  The specification drops the re-key of a convicted performer's taints:
+  it stays a member of the epoch, and its removal re-keys them. The
+  circuits, measured in the research notes, are not in the core.
+- **Delivery service.** Tasks go to the window's joiners first: each
+  district to a joiner that takes one of its leaves, else to a joiner with
+  no task, else to a volunteer; city tasks to joiners with no task, then to
+  volunteers with no task, then to volunteers in turn
+  (`DsConfig::joiner_tasks`, on by default; `set_config`). An entrant
+  performs every task of its window. A sub-city task is
+  accepted once the commits of its districts are in, and the top's once
+  every sub-city task is; a second, different commit or task for the same
+  district or part is refused. `reassign_city` gives a part to another
+  performer, a member or a joiner; reassigning a district drops only the
+  tasks of its sub-city and of the top, and moves its welcomes.
+- Breaking: `submit_repair` keeps a repair only from the maker the service
+  asked; `DsConfig` gains `repair_threshold`.
+- Breaking: the seal header, the group context and checkpoints gain
+  `subcity_bits`; `SealBody` lists the city tasks (`city`) instead of
+  `city_updates` and `city_wraps`; `plan_part` and `build_city_task`
+  replace `plan_city` and `build_city`; `KeySource` takes the new roots of
+  the tier below (`below`); `Member::commit_city` performs a task and
+  `Member::seal` takes a `WindowWork`, the commits, tasks and requests it
+  seals; `check_window` takes the city tasks.
+- Scenario tests in `crates/cityg-core/tests/tasks.rs`: sub-cities and the
+  top re-keyed by their own tasks while the sealer performs none, tasks that
+  wait for what they build on, a failed performer replaced, a district
+  reassigned, a removed performer whose parts are re-keyed, an entrant that
+  performs every task, joiners that perform the tasks of the window they
+  enter and are welcomed by members, a joiner that performs only on the
+  state its chain of seals gives, a failed joiner replaced by a member, and
+  a member that welcomes a join only from its own commit or a joiner's.
+  Every other scenario test with joins now has joiners perform tasks; three
+  tests of member committers turn joiner tasks off. A sealer refuses a task
+  whose wrap to its side opens to another secret, and the top goes to
+  another performer. A joiner enters by island through the relay of its
+  island, and refuses a forged root node, relay element or top of another
+  island; one whose relay lied falls back to its whole path; a member that
+  a faulty commit cut off asks for its repair, naming its leaf's parent,
+  is repaired by the member the service asks, then updates, while a
+  bystander has nothing to ask; a performer that cut off two members gets
+  no role until pardoned; two members dispute a wrap of another secret and
+  a wrap with a broken tag, and convict their committers, while a proof of
+  another statement, a wrap off the member's path, a missing wrap or a
+  dispute signed in another's name convict no one.
+- Symbolic model of stage 2 ([`docs/formal/`](docs/formal/README.md)): ten
+  ProVerif scenarios, 33 in all. A device that hedges with its leaf seed,
+  the coins of its encapsulations included, keeps a weak generator from
+  giving the window's epoch to the member it removes; hedging the secrets
+  alone, or with the previous init secret, does not. A city task that
+  binds the roots it wraps to, checked by the sealer against the commits,
+  keeps the delivery service from slipping in a key of its own. A repair
+  wrapped to the leaf key of the context its maker checked gives the epoch
+  to the member alone; wrapped to a key the service gives, to the service.
+  A member that welcomes the entries of a joiner's district needs the seal
+  to list the commit and the init key to come from the request that hashes
+  to the change's reference; without either check, the service reads the
+  epoch.
+- A welcomer given, for the join a commit names, another request than the
+  one that hashes to its reference refuses to welcome (`tasks.rs`).
+- The scale test runs the city tasks and checks
+  the cost model with a boundary above the sub-cities
+  (`CITYG_SCALE_SUBCITY_BITS`, 8 by default): 33 tasks for 4,096 members
+  in sub-cities of eight districts. It draws the leaves of its window from
+  a generator of its own, so that the sample no longer depends on the
+  randomness the group took: its figures moved a little (5,261 wraps
+  instead of 5,333 for 16,384 members).
+
+### Protocol: the v0.5 draft, stage 1
+
+- A draft of the next profile, `city-g/v0.5-draft`, in
+  [`docs/specs-v0.5-draft.md`](docs/specs-v0.5-draft.md): a delta on v0.4
+  in three stages, from the research synthesis beyond 0.4. Stage 1 is
+  specified and implemented in `cityg-core`; stage 2 (tasks, repairs,
+  disputes) is specified and implemented, the proof system of disputes
+  aside, and stage 3 (parity with MLS) is specified (above). Design
+  decisions E-15 and E-16.
+- **Islands read through relays.** The tree is read in islands of `2^c`
+  leaves (`island_bits`, 8 by default, at most `L`, fixed at genesis and
+  bound in the seal header, the group context and checkpoints). An island
+  follower takes the steps of its path up to its island root, and the
+  window's root secret from a relay element that a member of its island
+  seals under the island root's secret (52 bytes), a flat element that
+  wraps it to the island root for an island without a relay, or a refresh
+  from the latest re-key of each node above its island. It checks the tag
+  as before; a relay can only delay it. The delivery service names a relay
+  per island among its online members, spreads the flat elements over the
+  relays, and serves whole or island packets. A sealer without a city
+  refreshes its path first. In the scale test, an island packet with a
+  relay element weighs 3.5 KB against 7.7 KB for the whole path (16,384
+  members, 2,000 changes), and 2.9 KB against 8.2 KB (65,536 members,
+  4,000 changes).
+- **Urgent and ordinary removals.** A removal proposal carries a signed
+  urgency. Urgent removals (an admin's, or a reported compromise) keep the
+  windows within `WINDOW_URGENT` (5 s) and the rule that members do not
+  send while one waits; ordinary ones (departures, evictions) wait for the
+  window their age closes, at most `WINDOW_ORDINARY`. `DsConfig` fields are
+  renamed `window_ordinary_ms` and `window_urgent_ms`.
+- Breaking: every label ends in `/v5` and the framing tags are
+  `city-g/v0.5-draft`, so nothing of v0.4 decodes. `Member::create` takes
+  `island_bits`; `Member::remove_proposal` and `RemoveProposal::sign` take
+  an `Urgency`; `Packet` gains `top`; `MemberPath` returns `PathSecrets`,
+  with the epoch of each secret. The ML-DSA known-answer test keeps its
+  original context string.
+- Symbolic model of stage 1 ([`docs/formal/`](docs/formal/README.md)):
+  five ProVerif scenarios, run by `run.sh` and the formal-model CI job. The
+  window that removes a member leaves it no top to open, while a relay
+  that seals under its island root's former secret, or a flat maker that
+  takes the island key from the delivery service, gives the removed member
+  the epoch; a refresh on its own leads only to the real path when checked
+  against the root secret, and to secrets the service chose otherwise. The
+  safety predicate mirrors the three removal scenarios (31 traces).
+- Scenario tests in `crates/cityg-core/tests/islands.rs`: relays, a flat
+  element for an island with nobody online, a relay that sends garbage,
+  replays through relays, flat elements and refreshes, a sealer that
+  refreshes its path, urgent and ordinary removals, a removed member facing
+  its island's top, an entrant window followed by refresh, and a window
+  that re-keys nothing.
 
 ### Documentation
-- Added comprehensive documentation index (`docs/README.md`) for improved navigation
-- Added A-Z glossary (`docs/GLOSSARY.md`) with 50+ cryptographic and protocol terms
-- Added troubleshooting guide (`docs/TROUBLESHOOTING.md`) covering common issues
-- Added contributing guide (`CONTRIBUTING.md`) with development workflow and standards
-- Added crate READMEs for `cityg-server` and `cityg-client` with usage examples
-- Added a client-state hardening audit pack and updated release/security/preproduction checklists to require restart-chaos evidence.
-- Fixed broken screenshot reference in GUI user guide
-- Documented the `unsafe-ntt` verification path in `docs/timing-verification.md` and added operational notes about the 120s TTL baseline in the configuration and MHW specs.
-- Marked the strict durable `msg_index` benchmark note as legacy after removing the counter-based option from the profile spec.
-- Added implementation guidance for crash-safe pending `join_finalize` handling during restart and retry flows.
 
-## [0.1.2] - 2026-02-11
-
-### Added
-
-#### PRS Barrier (Post-Revocation Secrecy)
-- KEM-tree cover subsystem (`K_barrier` + `barrier_version`) for post-revocation secrecy (spec S11)
-- Barrier error codes: 960.1–960.13, 945.0, 947.0/2/4/5/6, 948.0, 944.6
-- Proactive PCS refresh gating with time-blind rate limiting (spec S10.4B)
-- Updater local state management with crash-safe persist-before-publish (spec S11.14)
-- Client barrier recovery via unique-match and FULL chain-check modes (spec S11.13)
-- Join provisioning extended with barrier-required fields (spec S12.2)
-
-#### Payload Key Schedule
-- `K_msg_epoch` derivation bound to `K_barrier` and `barrier_version` (spec S8.3)
-- PayloadEnvelope wire format `"fs-hybrid-msg-v2"` (spec S8.1)
-- No-fallback rule: receivers MUST NOT try alternate `K_barrier` values (spec S8.5)
-
-#### Device-Chain Binding
-- `fs_dev_commit` v2 binds `barrier_version` and `barrier_update_digest` (spec S7.4)
-- PCS reseed of FS chain on accepted PCS-refresh barrier updates (spec S6.6)
-
-#### Acceptance
-- Barrier version gating, revocation-change gating, PCS refresh gating (spec S10.4–S10.4B)
-- Forward-Leap Guard with configuration invariant check (spec S10.3)
-- Server-side barrier_update validation pipeline (spec S11.12)
-
-### Changed
-- Profile ID updated to `tswe/msphf-we/fs-hybrid + prs-barrier`
-- Unified spec consolidated into `docs/specs.md` (v0.1.2 final)
-
-### Documentation
-- Updated all documentation to reference `docs/specs.md` (removed stale `specs-unified-fs.md` links)
-- Added PRS barrier terms to GLOSSARY (K_barrier, BarrierUpdate, barrier_version, etc.)
-- Updated README security model with post-revocation secrecy
-- Added Post-Revocation Secrecy to constraints
-- Added v0.1.2 error codes reference to error reference doc
-
-## [0.1.0] - 2025-11-12
-
-Initial alpha release of City-G `tswe/msphf-we/fs-hybrid` protocol.
-
-### Added
-
-#### Core Protocol
-- Server-blind epoch validation using CAPSS Smallwood + ZK-VRF proofs
-- Multi-head window (MHW) for parallel join operations (up to 16 concurrent heads)
-- Minutes-grade forward secrecy with time-blind enforcement
-- Offline join capability (no online handshake required)
-- Merkle tree-based membership tracking with O(log N) witness sizes
-- KBROAD envelope for group key broadcasting with ML-KEM-768 encryption
-- Structured Relational Witness (SRX) system for canonical membership proofs
-
-#### Cryptographic Primitives
-- ML-KEM-768 (NIST FIPS 203) for key encapsulation
-- ML-DSA-65 (NIST FIPS 204) for digital signatures
-- RLWE-HPS instantiation of Smooth Projective Hash Functions
-- LB-VRF (Lattice-Based Verifiable Random Function) with deterministic seeding
-- CAPSS Smallwood proof system (~12KB typical, ≤16KB maximum)
-- RPO-256 (BLAKE3-based) hash function for domain separation
-
-#### Crates
-- `msphf-core`: Core cryptographic primitives and Merkle tree operations
-- `msphf-rlwe`: RLWE polynomial arithmetic and NTT operations
-- `msphf-lb-vrf`: Lattice-based VRF implementation with output-hiding
-- `msphf-orchestrator`: High-level protocol orchestration and proof generation
-- `capss`: CAPSS Smallwood proof system with Sage reference compatibility
-- `cityg-config`: Centralized configuration management (TOML/JSON + env vars)
-- `cityg-client`: Client-side epoch generation and witness creation
-- `cityg-server`: Server-side validation with crash recovery journaling
-- `cityg-api`: HTTP REST API server with WebSocket support
-- `cityg-api-client`: Rust HTTP/WebSocket client library
-- `cityg-gui`: Desktop GUI application (GPUI-based)
-
-#### API Endpoints
-- `POST /v1/accept_epoch` - Submit epoch bundle for validation
-- `POST /v1/rooms/bootstrap` - Initialize new room with KBROAD key
-- `POST /v1/rooms/join_ticket` - Request join ticket with witness data
-- `POST /v1/rooms/merge_ticket` - Request merge ticket for existing member
-- `POST /v1/send_message` - Send encrypted message to epoch
-- `POST /v1/messages` - Fetch messages for epoch
-- `POST /v1/members` - Query group membership roster
-- `GET /v1/ws` - WebSocket connection for real-time notifications
-- `GET /health` - Health check endpoint (legacy protobuf)
-- `GET /health/live` - Liveness probe (JSON)
-- `GET /health/ready` - Readiness probe with circuit breaker status (JSON)
-- `GET /health/detailed` - Detailed health status (JSON)
-- `GET /metrics` - Prometheus-compatible metrics
-
-#### Configuration
-- TOML and JSON configuration file support
-- Environment variable overrides (`CITYG_*` prefix)
-- Per-component configuration (server, client, protocol, GUI)
-- Forward secrecy policy configuration (Annex H/J parameters)
-- Validation on startup with descriptive error messages
-
-#### Observability
-- Structured logging (JSON and human-readable formats)
-- Request tracing with correlation IDs (UUID v4)
-- Prometheus-compatible metrics (`/metrics` endpoint)
-- Multiple health check endpoints for Kubernetes
-- Circuit breaker with configurable thresholds
-- Retry logic with exponential backoff
-- Offline message queue (10,000 message capacity)
-
-#### GUI Features
-- Join flow with room ID generation
-- Real-time message display with WebSocket notifications
-- Member roster with pagination (200 members per page, configurable)
-- Automatic epoch rotation (default: 1 hour interval)
-- Trust-on-first-use (TOFU) identity binding with alerts
-- Session persistence (`~/.config/cityg-gui/config.json`)
-- Ciphertext debug view for troubleshooting
-- Keyboard shortcuts for common operations
-
-#### Testing & Verification
-- 416 passing tests across all crates
-- Known-Answer Tests (KATs) for cryptographic primitives
-- Side-channel analysis with dudect/cachegrind
-- Server-blindness verification script (`./scripts/verify_no_secrets.sh`)
-- Property-based tests for Merkle operations
-- Integration tests for full join/merge flows
-- Fixture-based regression testing for CAPSS
-
-#### Documentation
-- Complete protocol specification (`docs/specs.md`)
-- 18 protocol documentation files in `docs/protocol/`
-- GUI user guide with tutorials and troubleshooting
-- API reference with curl and Rust examples
-- Configuration guide with Docker/Kubernetes examples
-- Observability guide for production monitoring
-- Workflows with Mermaid sequence diagrams
-- Evidence directory with benchmarks and timing analysis
+- The README presents City-G 0.4: why it exists, its key ideas, a
+  comparison with MLS (design and guarantees, from RFC 9420 and RFC 9750),
+  how a window works, measured and modelled costs, including the cost of
+  following a group of a million members with 5-second windows, its limits,
+  and the research notes beyond 0.4.
+- The sequence diagrams of [`docs/workflows.md`](docs/workflows.md) no longer
+  put semicolons in messages, which Mermaid reads as line breaks.
+- The specification (section 3.3) states that the key schedule needs
+  `Extract` to be a dual PRF, pseudorandom when keyed by its input keying
+  material under a known salt: post-compromise security, external inits and
+  the exclusion of a removed member that missed a window rest on it.
 
 ### Security
-- Cryptographically enforced server-blindness (ML-KEM-768 IND-CCA2)
-- Zero-knowledge proofs for VRF output hiding
-- Constant-time verification for proof acceptance
-- Deterministic proof generation to prevent grinding attacks
-- Memory zeroization for sensitive cryptographic material
-- Timing side-channel analysis (dudect) with mitigation
-- Post-quantum security (~96-bit quantum, ~128-bit classical)
 
-### Performance
-- Epoch generation: ~90ms typical (Apple M1)
-- CAPSS Smallwood proof: ~50ms
-- ZK-VRF proof: ~30ms
-- Merkle witness: ~1ms for O(log N) size
-- Join latency: <100ms server-side validation
-- Proof sizes: ~22KB total (CAPSS + VRF + witnesses)
-- Supports millions of members (O(log N) scaling)
+- A device takes the request of a change only if it hashes to the change's
+  reference (specification, section 10.1). `Requests`, the requests of a
+  window by reference, was a map that the caller filled: the delivery
+  service could hand a welcomer, under the reference of a listed join, a
+  join of its own, and the welcomer sealed the joiner secret to the
+  service's init key. Only catch-ups were checked. `Requests` is now a type
+  that files each request under its own reference (`Requests::insert`), so
+  every lookup, in welcomes, entries, committers and sealers, yields the
+  request that hashes to the reference or nothing. Found while modelling
+  the welcomes of stage 2 (`welcome_request_unbound.pv`). Breaking:
+  `Requests::insert` takes the request alone, and a map is built with
+  `collect()` from requests.
+- The hedge against a weak generator covers the coins of every
+  encapsulation, and rests on the device's leaf seed (v0.5 draft, section
+  3.3). The specification hedged a committer's fresh secrets with its
+  previous init secret (section 7.1), but every wrap, welcome and external
+  init took its X-Wing coins from the generator: a weak generator gave
+  away every secret it wrapped, the fresh ones included, and a member that
+  the window removes knows that init secret anyway. Every device now hedges
+  with `ExpandLabel(leaf_seed, "task hedge", [gid, epoch])` and derives the
+  coins of each encapsulation from it (`encaps coins`, `hedged_encapsulate`,
+  `encapsulate_derand`); `wrap`, `Welcome::seal`, `flat_element` and
+  `external_init` take the hedge. Found while modelling the hedge of joiner
+  performers: three ProVerif scenarios show it (`task_hedge*.pv`), and the
+  research note on the GSD extensions corrects its invariant.
+- A sealer checks each secret it takes along its path against the key the
+  tasks publish, and does not seal otherwise (v0.5 draft, section 3.5).
+  Since it no longer draws the root, a task that holds the root and wraps
+  another secret to the sealer's side would have made it seal an epoch
+  that only that side of the tree follows.
+- A relay element of the v0.5 draft binds the interim transcript hash of
+  its epoch, which covers the window's seal and confirmation tag, in its
+  context (`RelayContext`). The branches of a fork share the epoch and the
+  islands that no branch re-keys: two sealers can seal two windows, and an
+  insider that knows the previous init secret can lead a member into a
+  root of its choice under the real seal. Bound to the epoch alone, two
+  honest relays of such an island sealed two branches' root secrets under
+  the same ChaCha20-Poly1305 key and nonce. Their XOR is the XOR of the
+  roots, so a member that one branch removes, and that knows another
+  branch's root, could read the root of the branch that removes it, then
+  its epoch with the init secret it held. Binding the seal alone does not
+  separate the insider's branch. Found while writing the proof that each
+  relay key seals one plaintext (research note on the GSD extensions).
+  `RelayElement::seal` and `open` now take a `RelayContext`.
+- A catch-up's welcome is sealed to the member's leaf key as well as to the
+  request's one-time init key (specification, section 11). A catch-up is
+  signed with the device key alone and changes nothing in the tree:
+  welcomed to the init key alone, a device key stolen without the member's
+  state obtained the epoch of every window it asked for, and nobody could
+  see it. The member keeps its leaf key through a jump, or opens the welcome
+  with its pending leaf key if a window it missed applied its update.
+  Breaking: the welcome gains a field, `leaf_ciphertext` (`null` for joins
+  and re-entries), and its context the hash of the leaf key, so welcomes of
+  0.4.0 do not decode. A jump's welcome grows by 1,120 bytes.
+- A member whose packet names a leaf key it neither holds nor requested
+  gets `LEAF_TAKEN`: an update or a re-entry was signed with its device key
+  without it, and it treats the key as stolen (specification, section
+  12.2).
+- The symbolic model gains the stolen-key catch-up and the rule it replaces
+  (18 scenarios), and the scenario tests a thief that asks for a jump or
+  changes a member's leaf.
 
-### Known Limitations
-- **Alpha software**: Not production-ready without security audit
-- **Metadata exposure**: Server sees join times, message counts, leaf IDs
-- **Forward secrecy granularity**: Minutes-grade (not per-message)
-- **Novel cryptography**: RLWE-HPS less battle-tested than MLS
-- **Rust-only**: No FFI bindings for other languages yet
-- **Real deployments**: Tested to ~10,000 members; >100k is research territory
+### Research
 
-### Breaking Changes
-N/A - Initial release
+- The GSD extensions written in full, in
+  [`docs/research/extensions-gsd-2026-09-27.md`](docs/research/extensions-gsd-2026-09-27.md)
+  (in French): the extended game, in which every encapsulation is a vertex
+  and an envelope an encapsulation then a symmetric seal, its theorem
+  (`2N²(ε_KEM + ε_AE) + mN/2^(λ−1)`) and its proof in both cases of the
+  event `E`, with a random oracle observed and never programmed; the
+  invariant of coherence, operation by operation, over the real formats of
+  v0.4 and stage 1. Writing the condition that each symmetric key seals one
+  plaintext found the relay flaw fixed above. The loss, recounted with a
+  vertex per encapsulation, is `2^69` for a million members over ten years
+  (123 bits left to ML-KEM-768). The safety predicate gains a rule for a
+  reused nonce and three traces of forks (34 traces); the cost model of the
+  open problems gains report 6; the security review checklist asks that
+  every deterministic AEAD key seal one plaintext across the branches of a
+  fork.
+- The adaptive argument of the proof of the tree, in
+  [`docs/research/argument-adaptatif-2026-09-27.md`](docs/research/argument-adaptatif-2026-09-27.md)
+  (in French): the game reduced to the modified generalized selective
+  decryption game of Alwen, Jost and Mularczyk (Crypto 2022), whose theorem
+  carries the order of replacements and the guessing; two more oracles for
+  external inits, jumps and relays; a simulation lemma and a combinatorial
+  lemma resting on an invariant of coherence. The loss, counted in secrets
+  drawn rather than as `(Qn)²`: `2^67` for a million members over ten
+  years, 125 bits left to ML-KEM-768 instead of 92. The safety predicate
+  gains three traces of stage 1 and checks that every trace is an acyclic
+  GSD hypergraph whose challenge is a sink; the cost model of the open
+  problems counts the secrets.
 
-## Version History
+- A message plane for very large groups, proposed in
+  [`docs/research/plan-de-messages-2026-09-26.md`](docs/research/plan-de-messages-2026-09-26.md)
+  (in French) and not part of profile `city-g/v0.4`:
+  - keepers and readers: only keepers stay in the tree; readers get the
+    reader secrets of the epochs they missed in key bundles, sealed to a
+    one-time key they sign and checked against a chained reader tag in the
+    seal. Removing a reader needs no re-key, and a reader recovers from a
+    compromise at its next session;
+  - sender cards: a compact message key per member (FN-DSA, and the
+    round-3 candidates for reference), checked against the roster of the
+    message's epoch;
+  - burst chains: one signature per burst of messages;
+  - committing messages and verifiable reports;
+  - a sealed message log in the next seal, for transcript consistency;
+  - checkpoints and signed bundles against forks of readers;
+  - for public groups, where any member may be hostile or offline: a public
+    chain of reader secrets in the seals, broken at bans, so that readers
+    need no member online between breaks; bundles served by any member;
+    windows sealed by any member, readers included, with an external init;
+    keepers admitted by an admin.
+- Its cost model, [`docs/research/msg_sim.py`](docs/research/msg_sim.py): for a reader of a group
+  of 2^20 members, 6 times fewer bytes per message and 32 times less
+  traffic to stay able to read. With 16,384 keepers, a burst of 100,000
+  joins and 100,000 departures takes 64 times fewer wraps.
+- Its symbolic model, [`docs/research/formal-messages/`](docs/research/formal-messages/README.md):
+  17 ProVerif scenarios, which the formal-model CI job and the local CI now
+  run.
+- The benchmarks measure FN-DSA-512 and FN-DSA-1024, the derivation of a
+  sender's chain, and ChaCha20-Poly1305.
+- The guarantees of MLS for a million members, in
+  [`docs/research/parite-mls-2026-09-26.md`](docs/research/parite-mls-2026-09-26.md)
+  (in French), not part of the profile:
+  - City-G compared with RFC 9420 and RFC 9750, guarantee by guarantee;
+  - an argument that members outside the tree cannot have them, which
+    takes the readers of the message-plane note out of the target profile;
+  - the proposed profile: every member in the tree; a mode where the
+    service authorizes joins, with batched authorizations and a checkpoint
+    per window that joiners anchor on and members may check; an MLS-style
+    message plane with encrypted sender data; unique leaf keys and cards; a
+    membership log; urgent and ordinary removals; exporter and epoch
+    authenticator;
+  - history links, studied and rejected: a removed member that joins again
+    would read the epochs it was out of.
+- Its cost model, [`docs/research/parity_sim.py`](docs/research/parity_sim.py), and its symbolic model,
+  [`docs/research/formal-parity/`](docs/research/formal-parity/README.md): 10 ProVerif scenarios, run by
+  the formal-model CI job and the local CI.
+- Whether the server could re-key the tree instead of members, in
+  [`docs/research/rekey-serveur-2026-09-26.md`](docs/research/rekey-serveur-2026-09-26.md)
+  (in French), not part of the profile:
+  - a server cannot draw the tree's secrets without knowing them, and no
+    zero-knowledge proof changes that; one that draws them reads, with a
+    single member it removed, every later epoch;
+  - the options compared with MLS: one server, k servers that each draw a
+    share of every node, an enclave, and members that draw while the server
+    manages the rest;
+  - the recommendation: members' work as background tasks the server hands
+    out, disputes of wraps proved in zero knowledge, which reveal no key and
+    no past secret, and repairs; a cheaper dispute, which reveals the
+    encapsulation's shared secret, is rejected (replay).
+- The parity cost model prints what members download and servers compute
+  when one or k servers re-key the tree, and the size of the members'
+  tasks; the parity symbolic model gains 9 scenarios (19 in all).
+- Îlots under a flat top, in
+  [`docs/research/ilots-2026-09-26.md`](docs/research/ilots-2026-09-26.md)
+  (in French), not part of the profile:
+  - with continuous churn at a million members, every subtree above about
+    2^14 leaves changes in almost every window, and the binary city makes
+    85 to 95 % of what a member downloads;
+  - the tree is cut into îlots of 2^8 leaves with no tree above them; every
+    window sends a fresh secret to every îlot root, with X-Wing or a
+    multi-recipient KEM; a member of an îlot may relay it to the others in
+    52 bytes, checked against the tag; joiners take the leaves removals
+    free and re-key their own paths, and share the top; a cut îlot is
+    repaired through its members' leaves;
+  - following a group of 2^20 members costs 94 KB a day with relays and
+    415 KB without, instead of 1.8 MB, and no longer grows with the group;
+  - a cheaper welcome, the init secret sealed to the îlots of joiners, is
+    rejected: it would open past epochs to a later compromise;
+  - with nobody online, a joiner seals the window alone with an external
+    init, as in v0.4: with no removal waiting, the top is not renewed and
+    the joiner sends 24 KB; with a removal waiting, it renews the top, which
+    costs 4.8 MB at a million members (the price of a flat top in a sparse
+    window, which the îlot size trades against following).
+- Its cost model, [`docs/research/ilots_sim.py`](docs/research/ilots_sim.py); the parity symbolic model
+  gains 10 scenarios (29 in all).
+- A synthesis beyond v0.4, in
+  [`docs/research/au-dela-0.4-2026-09-26.md`](docs/research/au-dela-0.4-2026-09-26.md)
+  (in French), not part of the profile:
+  - a candidate profile for the next version: the v0.4 tree read through
+    relays at îlots of 2^8 and re-keyed by small tasks given first to
+    joiners, with the authorized mode and the MLS-style message plane of
+    the parity note; it can follow v0.4 in three steps, relays first;
+  - what each research note kept and rejected, the guarantees of MLS with
+    the scenarios behind each, costs, and the open problems ranked: a
+    computational proof, dispute proofs for X-Wing, forks, standards,
+    sender cards, metadata;
+  - a leaf hash that keeps the leaf key apart, so that readers fetch only
+    the card part of a sender's leaf (39 % less for senders), and the
+    authorizer's checkpoints checked by their signature alone: 192 KB a day
+    with FN-DSA-512 instead of 278 KB, or 28 KB with a UOV key kept for
+    following.
+- The îlots note gains a city maintained above the îlots: every window
+  re-keys it along the paths of the îlots it changes, relays read it, and
+  the flat top becomes a fallback. A window that changes one îlot costs
+  30 KB instead of 4.8 MB, and a joiner alone that applies a removal 95 KB
+  instead of 4.8 MB. A city that a window does not re-key lets two removed
+  members read the epoch, while one alone stays out through the init
+  chain.
+- The îlots cost model gains reports 9 (the maintained city) and 10 (a
+  member's day at the candidate profile); the parity symbolic model gains
+  3 scenarios (32 in all).
+- The open problems of that note, in
+  [`docs/research/problemes-ouverts-2026-09-26.md`](docs/research/problemes-ouverts-2026-09-26.md)
+  (in French), not part of the profile:
+  - a computational model,
+    [`docs/research/formal-computational/`](docs/research/formal-computational/README.md):
+    14 CryptoVerif models, 7 properties proved (forward secrecy with stable
+    tree keys, a removed member that stays out once it missed a window, a
+    window sealed by an entrant, relays and flat items, the maintained
+    city, fresh secrets hedged against a weak generator) and 7 controls;
+    the formal-model CI job now builds CryptoVerif 2.13 and runs them, and
+    the local CI runs them when CryptoVerif is installed;
+  - the assumption those proofs need and the specification did not state:
+    `Extract` as a dual PRF;
+  - the statement of a wrap dispute and its size, about 1.1 million AND
+    gates and 6,140 multiplications in the field of X25519 (the matrix of
+    ML-KEM is public and its arithmetic linear); about 0.4 MB to prove to
+    the server as designated verifier, 1.5 to 2.2 MB for the boolean part
+    of a public post-quantum proof;
+  - witnesses against forks, three signatures out of four per window,
+    which tolerate one absent and one dishonest witness, falling back to
+    MLS when the quorum does not answer; sender cards kept in a cache;
+    what tasks and relays reveal to the server.
+- Its cost model, [`docs/research/open_problems_sim.py`](docs/research/open_problems_sim.py).
+- Proofs and measurements, in
+  [`docs/research/preuves-et-mesures-2026-09-26.md`](docs/research/preuves-et-mesures-2026-09-26.md)
+  (in French), not part of the profile:
+  - the zero-knowledge proof of a wrap dispute, measured with emp-zk
+    (QuickSilver) by [`docs/research/dispute-zk/`](docs/research/dispute-zk/README.md):
+    the hashing and the arithmetic of ML-KEM-768 take 9.7 million AND
+    gates, 2 MB (0.65 MB of setup) and under a second between a prover and
+    the server; the X25519 half would take 150 MB over bits and needs a
+    proof over its own field;
+  - authentication in the computational model: a lying relay is caught by
+    the tag under collision resistance, and three witnesses out of four
+    stop a fork with one of them dishonest;
+  - a weakness of profile `city-g/v0.4`: whoever holds a member's device
+    key, not its state, has catch-ups welcomed with init keys of its own
+    and reads every window, unseen, like the external operations of MLS
+    that ETK (Eurocrypt 2026) analyses; the fix, applied since (see
+    Security), also encapsulates a catch-up's welcome to the member's leaf
+    key;
+  - the plan of a proof of the whole tree under adaptive corruptions, with
+    random oracles, since the standard-model loss is beyond any security
+    level at a million members; the recommendation to make `Extract`
+    HKDF-Extract with SHA-384 in the next profile.
+- The computational model gains 7 models (21 in all), the parity symbolic
+  model 2 scenarios (34 in all), and the cost model a report on the loss
+  of adaptive proofs.
+- The proof of the whole tree, in
+  [`docs/research/preuve-arbre-2026-09-26.md`](docs/research/preuve-arbre-2026-09-26.md)
+  (in French): the security game of City-G under adaptive corruptions, a
+  CGKA by windows; its safety predicate over the graph of secrets, made
+  executable in
+  [`docs/research/safety_predicate.py`](docs/research/safety_predicate.py)
+  and checked against the verdicts of 24 formal models; the target theorem
+  with random oracles; and a sketch of the proof whose every step has a
+  mechanized lemma. The adaptive argument itself remains to be written.
+- The computational model gains the taint rule and the healing of a
+  leaked member by its update, with their controls (25 models in all).
+- The X25519 half of the wrap dispute, in
+  [`docs/research/litige-x25519-2026-09-26.md`](docs/research/litige-x25519-2026-09-26.md)
+  (in French):
+  - proved in the field of X25519 with Diet Mac'n'Cheese, from a SIEVE IR
+    relation that
+    [`docs/research/dispute-zk/x25519_ir.py`](docs/research/dispute-zk/x25519_ir.py)
+    generates and checks against RFC 7748: 5,048 multiplications and 1,024
+    bit conversions, 18.5 MB and 4.6 MB in under 3 s, of which 20.6 MB
+    before the first gate, for the setup of a 255-bit field; two patches
+    add that field to swanky;
+  - the dispute over emulated mobile links, with
+    [`docs/research/dispute-zk/link.py`](docs/research/dispute-zk/link.py):
+    1.8 s without the X25519 half and 21.6 s for it on a 4G-like link; no
+    phone was measured;
+  - revealing `ss_X` with a Chaum-Pedersen proof, priced at 97 bytes by
+    [`docs/research/dispute-zk/x25519_dleq.py`](docs/research/dispute-zk/x25519_dleq.py),
+    stays rejected: a server allied with a copier delivers the copied
+    `ct_X` before the honest wrap; a `ct_X` outside the prime-order
+    subgroup convicts the committer without any proof;
+  - the next step: a proof without setup over two fields, with sumcheck
+    and Ligero, as Longfellow's.
+- A wrap dispute without setup, in
+  [`docs/research/litige-sans-mise-en-place-2026-09-26.md`](docs/research/litige-sans-mise-en-place-2026-09-26.md)
+  (in French), with Longfellow (sumcheck and Ligero), whose proofs are
+  single messages anyone can verify:
+  - the X25519 half as a Longfellow circuit over the field of X25519, in
+    [`docs/research/dispute-zk/longfellow/`](docs/research/dispute-zk/longfellow/),
+    checked against OpenSSL and RFC 7748: 158 KB, proved in 65 ms and
+    verified in 48 ms, instead of 23 MB and 178 flights with Diet
+    Mac'n'Cheese;
+  - the 26 Keccak-f permutations of the dispute over GF(2^128): 552 KB,
+    0.69 s;
+  - this machine runs Longfellow's ECDSA benchmark in the time the paper
+    measured on a Pixel 9, so these times are close to a Pixel 9's;
+  - the lattice part of ML-KEM is not written; its anchor, an ML-DSA-65
+    verification, takes 3.2 s and 790 KB, so it would dominate.
+- The whole wrap dispute without setup, in
+  [`docs/research/litige-entier-2026-09-26.md`](docs/research/litige-entier-2026-09-26.md)
+  (in French), with Longfellow over the field of X25519 alone:
+  - ML-KEM-768's lattice part as polynomial identities checked at a point
+    drawn after the commitment: 109,000 to 184,000 terms instead of
+    1.57 million for dense products; a witness forged for a known point
+    fails elsewhere;
+  - a revised statement: the member's seed stays out (a norm bound keeps
+    the key close to honest ones), and so does the re-encryption check in
+    the usual case, 2 Keccak permutations instead of 26; a second
+    statement convicts a ciphertext whose re-encryption fails without
+    revealing which coefficient differs;
+  - the whole first branch, `ExpandLabel` (BLAKE3) and ChaCha20 included,
+    reveals only the wrap's Poly1305 key: 573 KB, 1.49 s to prove and
+    0.97 s to verify, at a Pixel 9's speed; the second statement takes
+    615 KB and 2.56 s;
+  - a C++ reference of ML-KEM-768 and X-Wing, checked against the X-Wing
+    draft's vectors, and a wrap made by `cityg-core`
+    ([`docs/research/bench/src/bin/wrap_vector.rs`](docs/research/bench/src/bin/wrap_vector.rs)),
+    whose altered version the proof convicts, in
+    [`docs/research/dispute-zk/longfellow/`](docs/research/dispute-zk/longfellow/).
+- Both branches of a wrap dispute, in
+  [`docs/research/litige-deux-branches-2026-09-27.md`](docs/research/litige-deux-branches-2026-09-27.md)
+  (in French):
+  - the second branch, a wrap that opens to a secret whose node key is
+    not the published `pk_v`: ChaCha20's second block opens the secret,
+    X-Wing's key generation derives its node key with the public matrix of
+    `pk_v`, and a hidden place shows where the keys differ; 787 KB, 3.72 s
+    to prove and 2.26 s to verify, at a Pixel 9's speed; it checks no tag
+    and reveals no Poly1305 key, since a wrong tag convicts as well;
+  - a short statement of the second branch for the common case, where the
+    committer sealed another secret: the node key's matrix seed or X25519
+    key differs from `pk_v`'s, so it stops before the six PRF calls and
+    `t'`: half the terms, 635 KB and 54% of the full statement's proving
+    time; the full one remains for a `pk_v` wrong in `t` alone;
+  - the decryption failure rate of ML-KEM-768 for the worst key of bounded
+    norm, computed exactly by
+    [`docs/research/dispute-zk/decryption_failure.py`](docs/research/dispute-zk/decryption_failure.py):
+    `2^-98.9` under the earlier joint bound, not the estimated `2^-129`;
+    the lattice part now bounds each half of the key, for `2^-121.2`;
+  - the verifier's public checks of `ct_X` (prime-order subgroup) and of
+    `pk_v` (canonical encoding), coded and tested;
+  - the circuits serialized and compressed with zstd (0.6 to 1.5 MB) and
+    loaded by a fresh process: the prover needs 104 MB for the first
+    branch and 251 MB for the second, not the 315 to 740 MB measured with
+    the compiler's heap;
+  - [`docs/research/bench/src/bin/wrap_vector.rs`](docs/research/bench/src/bin/wrap_vector.rs)
+    also prints slices of the node key that the wrap's secret gives.
 
-- **0.1.0** (2025-11-12) - Initial alpha release
+## [0.4.0] — initial version
 
----
+Profile `city-g/v0.4`, for end-to-end encrypted groups of millions of
+members.
 
-## Release Notes Format
+### Protocol
 
-Each release includes:
+- Specification ([`docs/specs.md`](docs/specs.md)) and design note
+  ([`docs/design.md`](docs/design.md), decisions E-1 to E-14).
+- One epoch per window of requests: district commits built in parallel,
+  then a seal that re-keys the city and creates the epoch, then welcomes.
+- A sparse tree of up to `2^24` leaves split into districts under a city;
+  a parent node is blank exactly when its subtree is empty; taints record
+  who drew each node's secret, and removing or updating a member re-keys
+  every node it drew.
+- Multi-path re-key plans that anyone can recompute from public data.
+- The key schedule of MLS with the window's root secret: init chain,
+  joiner secret, confirmation tag, transcript hashes, external init.
+- Registry of admins and two sparse Merkle maps (devices, used admissions);
+  an admission admits once.
+- Admissions by admins or invites, anchored joins on admin checkpoints,
+  replay, jump and re-entry for returning members.
+- A group with no member online: an entrant seals the window with an
+  external init; recorded removals are enforced at delivery until the first
+  participant applies them; eviction only under an admin-signed policy.
+- Open groups: an admin-signed policy lets any device join with its own
+  signed request; every join stays visible.
+- Sampled audits of the entries of a window, with transferable fraud
+  proofs.
+- One packet per member and window; seal links and entries for joiners and
+  returning members.
 
-### Added
-New features and capabilities
+### Implementation
 
-### Changed
-Changes to existing functionality
+- `cityg-core`: the protocol core without I/O and an in-memory delivery
+  service; 22 scenario tests on whole groups and a scale test that matches
+  the cost model's count of wraps and keys.
+- `cityg-pqc`: ML-DSA-65 (FIPS 204) with one context per signed object.
+- Symbolic model ([`docs/formal/`](docs/formal/)): 16 ProVerif scenarios.
+- Research note, cost model and primitive benchmarks
+  ([`docs/research/`](docs/research/)).
 
-### Deprecated
-Features marked for removal in future versions
+### Not yet
 
-### Removed
-Features removed in this release
-
-### Fixed
-Bug fixes
-
-### Security
-Security-related changes and advisories
-
----
-
-## Upgrade Guide
-
-See [UPGRADING.md](UPGRADING.md) for version-specific upgrade instructions (when available).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose changes to this project.
-
----
-
-**Note**: All cryptographic implementations in this project are research-grade. Independent security audit recommended before production use.
+The message plane, the networked delivery service and the clients, test
+vectors, and the other open items of the specification (section 19).

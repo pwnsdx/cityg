@@ -1,0 +1,56 @@
+(* Scenario READER_LINK_BAN: the public chain, broken at a ban.
+
+   R and Q are readers of epoch 1. Window 2 changes nothing for readers: its
+   seal carries the link. Window 3 bans R: its seal carries no link, only
+   the chained tag, and Q gets the reader secret of epoch 3 in a bundle.
+   Window 4 carries a link again. No window re-keys the keepers' tree, whose
+   root r stays. The attacker is R with the delivery service: it knows rs1
+   and every public value, and keepers serve bundles of epoch 3 to Q only.
+
+   Three properties:
+   * R reads epoch 2 (expected: it was still a member): a reachability
+     check that the chain works;
+   * R does not read epoch 3, nor epoch 4, whose link it cannot open. *)
+
+free skQ: skey [private].
+
+free M2, M3, M4: bitstring [private].
+query attacker(M2).
+query attacker(M3).
+query attacker(M4).
+
+process
+  new es1: key; new r: key; new interim1: bitstring;
+  let rs1 = reader_secret(es1) in
+  out(c, (rs1, interim1, spk(skQ)));
+  (* Window 2: a link. *)
+  let gc2 = (N2, node_pk(r)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r, gc2)) in
+  let rs2 = reader_secret(es2) in
+  new sh2: bitstring;
+  let cth2 = hash((interim1, sh2)) in
+  out(c, (gc2, sh2, reader_link(rs1, cth2, rs2)));
+  out(c, aenc(msg_key(rs2), M2));
+  (* Window 3 bans R: a break, the chained tag only. *)
+  let gc3 = (N3, node_pk(r)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), r, gc3)) in
+  let rs3 = reader_secret(es3) in
+  new sh3: bitstring;
+  let cth3 = hash((hash((cth2, L_interim)), sh3)) in
+  out(c, (gc3, sh3, reader_tag(rs2, cth3, rs3)));
+  out(c, aenc(msg_key(rs3), M3));
+  (* Window 4: a link again. *)
+  let gc4 = (N4, node_pk(r)) in
+  let es4 = epoch_secret(joiner_secret(init_secret(es3), r, gc4)) in
+  let rs4 = reader_secret(es4) in
+  new sh4: bitstring;
+  let cth4 = hash((hash((cth3, L_interim)), sh4)) in
+  out(c, (gc4, sh4, reader_link(rs3, cth4, rs4)));
+  out(c, aenc(msg_key(rs4), M4));
+  (* Keepers: bundles of epoch 3 for Q only. *)
+  !
+  in(c, (req: bitstring, sg: bitstring));
+  if checksign(spk(skQ), req, sg) = true then
+  let (=L_request, =N3, otpk: kpk) = req in
+  new rk: key;
+  out(c, seal(otpk, rk, hash(req), rs3))

@@ -1,0 +1,42 @@
+(* Scenario READER_BUNDLE_UNSIGNED_REQUEST (sanity check): the keeper serves
+   a request without checking that the reader's device key signed it (or,
+   equivalently, a request whose one-time key is not signed).
+
+   R checks the reader tag, so it still accepts only the real secret; but
+   the delivery service asks for a bundle with a one-time key of its own. *)
+
+free skR: skey [private].
+
+free MR: bitstring [private].
+query attacker(MR).
+
+event Epoch2(key).
+event ReaderAccepts(key).
+query rs: key; event(ReaderAccepts(rs)) ==> event(Epoch2(rs)).
+
+process
+  new es1: key; new r2: key; new interim1: bitstring;
+  let rs1 = reader_secret(es1) in
+  let gc2 = (N2, node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), r2, gc2)) in
+  let rs2 = reader_secret(es2) in
+  new seal_hash2: bitstring;
+  let cth2 = hash((interim1, seal_hash2)) in
+  event Epoch2(rs2);
+  out(c, (spk(skR), interim1, gc2, seal_hash2, reader_tag(rs1, cth2, rs2)));
+  (
+    !
+    in(c, req: bitstring);
+    let (=L_request, =N2, otpk: kpk) = req in
+    new rk: key;
+    out(c, seal(otpk, rk, hash(req), rs2))
+  ) | (
+    new otk: key;
+    let req = (L_request, N2, kempk(otk)) in
+    out(c, (req, sign(skR, req)));
+    in(c, (b: bitstring, sh: bitstring, rt: bitstring));
+    let rs = open(otk, hash(req), b) in
+    if rt = reader_tag(rs1, hash((interim1, sh)), rs) then
+    event ReaderAccepts(rs);
+    out(c, aenc(msg_key(rs), MR))
+  )

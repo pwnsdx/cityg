@@ -1,0 +1,39 @@
+(* Scenario WELCOME_UNLISTED (profile v0.5-draft, stage 2): the welcomer of
+   WELCOME_JOINER, which does not check that the seal lists the commit it
+   welcomes from.
+
+   Expected: attack: the service makes a commit of its own that names a
+   request of its own, and reads epoch 2. Reachable (sanity): K enters. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event KEnters(key).
+query js: key; event(KEnters(js)).
+
+process
+  new skAdm: skey; new skJ: skey; new skS: skey; new ikK: key; new js2: key;
+  out(c, (spk(skAdm), spk(skJ), spk(skS), kempk(ikK)));
+  let reqK = (N2, kempk(ikK)) in
+  let body = (N2, D1, hash(reqK)) in
+  out(c, (sign(skAdm, (ADMIT, spk(skJ))), reqK, body, sign(skJ, body)));
+  out(c, aenc(msg_key(epoch_secret(js2)), MA));
+  (
+    in(c, (pkj: spkey, adm: bitstring, b: bitstring, sj: bitstring));
+    if checksign(spk(skAdm), (ADMIT, pkj), adm) = true then
+    if checksign(pkj, b, sj) = true then
+    let (=N2, =D1, rf: bitstring) = b in
+    out(c, sign(skS, (N2, hash(b))))
+  ) | (
+    ! new w: key;
+    in(c, (b: bitstring, req: bitstring));
+    let (=N2, =D1, rf: bitstring) = b in
+    if hash(req) = rf then
+    let (=N2, ik: kpk) = req in
+    out(c, wrap(ik, w, js2))
+  ) | (
+    in(c, wk: bitstring);
+    let js = unwrap(ikK, wk) in
+    if js = js2 then
+    event KEnters(js)
+  )

@@ -1,0 +1,14 @@
+(* Scenario READER_REMOVED_RATCHET (sanity check): the removal of
+   reader_removed.pv in a design where the reader secret of an epoch is
+   ratcheted from the previous one, so that readers need no bundle (as a
+   Megolm session is ratcheted until its sender replaces it). *)
+
+free MK: bitstring [private].
+query attacker(MK).
+
+process
+  new rs1: key;
+  (* What the removed reader R held in epoch 1. *)
+  out(c, rs1);
+  let rs2 = kdf(rs1, L_reader_ratchet) in
+  out(c, aenc(msg_key(rs2), MK))

@@ -1,0 +1,84 @@
+(* The taint rule, in the computational model: the counterpart of
+   docs/formal/taint.pv. Four leaves in two districts, d1 = parent(A, B)
+   and d2 = parent(C, M), under the root. In window 1, M, a malicious
+   member of district 2, was the committer of district 1: it drew the
+   secret s1 of d1, which A and B hold, and kept it. The adversary holds
+   M's leaf key and everything M learned in epoch 1: s1, the secret of d2,
+   the root and the init secret. Window 2 removes M: district 2 gets a
+   fresh secret wrapped to C, district 1 a fresh one wrapped to A and B
+   because M tainted d1, and the city a fresh root wrapped to both new
+   district keys; the seal carries the confirmation tag. Query: the message
+   secret of epoch 2 stays secret. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+type tag [fixed].
+
+proba Psalt.
+proba Pikm.
+expand dual_PRF(key, key, Extract, Psalt, Pikm).
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+const empty: hash.
+letfun DeriveSecret(s: key, l: label) = ExpandLabel(s, l, empty).
+
+proba Pmac.
+expand PRF(key, hash, tag, MAC, Pmac).
+
+type nonce [large, fixed].
+fun to_nonce(key): nonce.
+equiv(to_nonce_random)
+  k <-R key; O() := return(to_nonce(k))
+<=(0)=>
+  n <-R nonce; O() := return(n).
+
+type ciphertext.
+proba Penc.
+proba Pencctxt.
+expand AEAD_nonce(key, key, ciphertext, hash, nonce, aead_enc, aead_dec, injbot, Z, Penc, Pencctxt).
+const Zkey: key.
+equation forall x: key; Z(x) = Zkey.
+
+type pkey [bounded].
+type skey [bounded].
+type kemct [fixed].
+type encapoutput [fixed].
+proba Pcca.
+proba Pkeycoll.
+proba Pctxtcoll.
+expand IND_CCA2_KEM(key, pkey, skey, key, kemct, encapoutput, pkgen, skgen, encap, pair, decap, injbot_kem, Pcca, Pkeycoll, Pctxtcoll).
+
+const l_node, l_wrap_key, l_wrap_nonce, l_commit, l_joiner, l_epoch, l_msg, l_confirm: label.
+
+letfun node_pk(x: key) = pkgen(ExpandLabel(x, l_node, empty)).
+
+fun wrapped(kemct, ciphertext): bitstring [data].
+letfun wrap(pk: pkey, s: key) =
+  let pair(ss: key, ct: kemct) = encap(pk) in
+  wrapped(ct, aead_enc(s, empty, ExpandLabel(ss, l_wrap_key, empty),
+                       to_nonce(ExpandLabel(ss, l_wrap_nonce, empty)))).
+
+letfun epoch(init: key, root: key, gc: hash) =
+  DeriveSecret(ExpandLabel(Extract(init, DeriveSecret(root, l_commit)), l_joiner, gc), l_epoch).
+
+query secret msg2.
+
+process
+  Ostart() :=
+    (* Leaf key seeds of A, B and C; what M knows of epoch 1. *)
+    seedA <-R key; seedB <-R key; seedC <-R key;
+    s1 <-R key; s2 <-R key; root1 <-R key; init1 <-R key; seedM <-R key;
+    return(s1, s2, root1, init1, seedM, pkgen(seedA), pkgen(seedB), pkgen(seedC));
+    O2(gc2: hash, th2: hash) :=
+      (* Window 2 removes M; d1 is re-keyed because M tainted it. *)
+      t1 <-R key; t2 <-R key; r2 <-R key;
+      let es2 = epoch(init1, r2, gc2) in
+      let msg2: key = DeriveSecret(es2, l_msg) in
+      return(node_pk(t1), node_pk(t2),
+             wrap(pkgen(seedA), t1), wrap(pkgen(seedB), t1), wrap(pkgen(seedC), t2),
+             wrap(node_pk(t1), r2), wrap(node_pk(t2), r2),
+             MAC(DeriveSecret(es2, l_confirm), th2))

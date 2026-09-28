@@ -1,0 +1,41 @@
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index dfd2121..cf73759 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -92,6 +92,7 @@ add_subdirectory(circuits/tests/base64)
+ add_subdirectory(circuits/tests/jwt)
+ add_subdirectory(circuits/tests/ripemd)
+ add_subdirectory(circuits/tests/pq/ml_dsa)
++add_subdirectory(circuits/tests/x25519)
+ 
+ # experimental mdoc stuff, not used in production
+ add_subdirectory(circuits/tests/mdoc)
+diff --git a/lib/circuits/tests/pq/ml_dsa/ml_dsa_circuit_test.cc b/lib/circuits/tests/pq/ml_dsa/ml_dsa_circuit_test.cc
+index eeb2ac7..b0c7e44 100644
+--- a/lib/circuits/tests/pq/ml_dsa/ml_dsa_circuit_test.cc
++++ b/lib/circuits/tests/pq/ml_dsa/ml_dsa_circuit_test.cc
+@@ -345,7 +345,7 @@ struct ProverEnv {
+     const auto& test = tests[0];
+     witness_gen.compute_witness(test.pkey, test.sig, test.msg, test.ctx);
+ 
+-    zkpr = std::make_unique<ZkProof<Field6>>(*circuit, 4, 128);
++    zkpr = std::make_unique<ZkProof<Field6>>(*circuit, 7, 132);
+     DenseFiller<Field6> filler(w);
+     filler.push_back(f.one());
+     witness_gen.fill_witness(filler, f);
+@@ -364,9 +364,14 @@ TYPED_TEST(MlDsaCircuitTest, AssertValidSignatureOnMu) {
+   env.prover.commit(*env.zkpr, env.w, env.tp, env.rng);
+   bool ok = env.prover.prove(*env.zkpr, env.w, env.tp);
+   EXPECT_TRUE(ok) << "Failed to prove witness for test case ";
++  set_log_level(INFO);
++  std::vector<uint8_t> proof_bytes;
++  env.zkpr->write(proof_bytes, env.f);
++  log(INFO, "ml-dsa: %zu inputs, proof %zu bytes", env.circuit->ninputs,
++      proof_bytes.size());
+ 
+   ZkVerifier<Field6, ReedSolomonExtensionFactory> verifier(
+-      *env.circuit, env.rsextf, 4, 128, env.f);
++      *env.circuit, env.rsextf, 7, 132, env.f);
+   Transcript tv((uint8_t*)"test", 4);
+   verifier.recv_commitment(*env.zkpr, tv);
+   Dense<Field6> pub(1, env.circuit->ninputs);

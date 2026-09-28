@@ -1,0 +1,55 @@
+(* Control for relay_tag.ocv: a tag that does not bind the window secret,
+   computed from the init secret and the transcript alone. Expected: not
+   proved.
+   A lying relay is caught by the tag. The relay of îlot j is a member of
+   epochs n - 1 and n: it knows the init secret of epoch n - 1 and the true
+   window secret r. It gives member B a secret r' instead of r. B derives
+   the epoch from r', recomputes the confirmation tag and accepts r' only if
+   the tag matches the one the sealer signed, which B receives authentically
+   (the seal's signature is left to the symbolic model). Every function of
+   the chain from window secret to tag is BLAKE3 with keys the relay knows,
+   so the argument is collision resistance, not pseudorandomness. Query: B
+   accepts only the true window secret. The computational counterpart of
+   the tag check of formal-parity/ilot_relay.pv. *)
+
+type key [large, fixed].
+type hash [fixed].
+type tag [fixed].
+type hashkey [large, fixed].
+
+proba Pcr.
+(* DeriveSecret(r, "commit"), Extract(init, commit), ExpandLabel(., "joiner",
+   H(GroupContext)), DeriveSecret(., "epoch"), DeriveSecret(., "confirm") and
+   MAC(confirm_key, transcript), each collision resistant in all its inputs. *)
+expand CollisionResistant_hash_1(hashkey, key, key, Commit, Commit_oracle, Pcr).
+expand CollisionResistant_hash_2(hashkey, key, key, key, Extract, Extract_oracle, Pcr).
+expand CollisionResistant_hash_2(hashkey, key, hash, key, Joiner, Joiner_oracle, Pcr).
+expand CollisionResistant_hash_1(hashkey, key, key, Epoch, Epoch_oracle, Pcr).
+expand CollisionResistant_hash_1(hashkey, key, key, Confirm, Confirm_oracle, Pcr).
+expand CollisionResistant_hash_2(hashkey, key, hash, tag, MAC, MAC_oracle, Pcr).
+
+letfun Tag(h1: hashkey, h2: hashkey, h3: hashkey, h4: hashkey, h5: hashkey, h6: hashkey,
+           init: key, r: key, gc: hash, th: hash) =
+  MAC(h6, Confirm(h5, Epoch(h4, Joiner(h3, Extract(h2, init, init), gc))), th).
+
+event sealed(key).
+event accepted(key).
+
+query x: key; event(accepted(x)) ==> event(sealed(x)).
+
+process
+  Ostart() :=
+    h1 <-R hashkey; h2 <-R hashkey; h3 <-R hashkey; h4 <-R hashkey; h5 <-R hashkey; h6 <-R hashkey;
+    return();
+    (run Commit_oracle(h1) | run Extract_oracle(h2) | run Joiner_oracle(h3) |
+     run Epoch_oracle(h4) | run Confirm_oracle(h5) | run MAC_oracle(h6) |
+     (Oseal(init: key, gc: hash, th: hash) :=
+        (* The true window secret, which the relay knows. *)
+        r <-R key;
+        event sealed(r);
+        let t = Tag(h1, h2, h3, h4, h5, h6, init, r, gc, th) in
+        return(r);
+        (* The relay gives B a secret of its choice. *)
+        Orelay(r2: key) :=
+          if Tag(h1, h2, h3, h4, h5, h6, init, r2, gc, th) = t then
+          event accepted(r2)))

@@ -1,0 +1,73 @@
+(* A window sealed by an entrant alone, with no removal waiting. The entrant
+   encapsulates to the external key of epoch 1; the epoch comes from this
+   external init alone, the commit secret being a public constant. The
+   adversary is the server with a member removed before epoch 1: it does
+   not know epoch 1. It sees the external public key and the encapsulation,
+   and has members decapsulate its own encapsulations (it may be an
+   admitted entrant too). Query: the message secret of epoch 2 stays
+   secret. *)
+
+type key [large, fixed].
+type hash [fixed].
+type label [fixed].
+type tag [fixed].
+
+proba Psalt.
+proba Pikm.
+expand dual_PRF(key, key, Extract, Psalt, Pikm).
+
+fun expand_input(label, hash): bitstring [data].
+proba Pexpand.
+expand PRF(key, bitstring, key, Expand, Pexpand).
+letfun ExpandLabel(s: key, l: label, c: hash) = Expand(s, expand_input(l, c)).
+const empty: hash.
+letfun DeriveSecret(s: key, l: label) = ExpandLabel(s, l, empty).
+
+proba Pmac.
+expand PRF(key, hash, tag, MAC, Pmac).
+
+(* X-Wing: an IND-CCA2 KEM whose key pair derives from a 32-byte seed. *)
+type pkey [bounded].
+type skey [bounded].
+type ciphertext [fixed].
+type encapoutput [fixed].
+proba Pcca.
+proba Pkeycoll.
+proba Pctxtcoll.
+expand IND_CCA2_KEM(key, pkey, skey, key, ciphertext, encapoutput, pkgen, skgen, encap, pair, decap, injbot, Pcca, Pkeycoll, Pctxtcoll).
+
+fun hash_ct(ciphertext): hash.
+const zero: key.
+
+const l_external, l_external_kem, l_external_init, l_joiner, l_epoch, l_init, l_msg, l_confirm: label.
+
+letfun ExternalInit(ss: key, c: ciphertext) =
+  ExpandLabel(Extract(zero, ss), l_external_init, hash_ct(c)).
+
+query secret msg2.
+
+param Nd.
+
+process
+  Ostart() :=
+    epoch1 <-R key;
+    let seed = ExpandLabel(DeriveSecret(epoch1, l_external), l_external_kem, empty) in
+    let pk = pkgen(seed) in
+    return(pk);
+    ((
+      (* The entrant's window. *)
+      O2(gc2: hash, th2: hash) :=
+        let pair(ss2: key, ct2: ciphertext) = encap(pk) in
+        let joiner2 = ExpandLabel(Extract(ExternalInit(ss2, ct2), zero), l_joiner, gc2) in
+        let epoch2 = DeriveSecret(joiner2, l_epoch) in
+        let msg2: key = DeriveSecret(epoch2, l_msg) in
+        let confirm2 = DeriveSecret(epoch2, l_confirm) in
+        return(ct2, MAC(confirm2, th2))
+    ) | (
+      (* Members decapsulate the adversary's encapsulations. *)
+      foreach id <= Nd do
+      Odecap(ca: ciphertext) :=
+        if defined(ct2) && ca = ct2 then yield else
+        let injbot(ssa) = decap(ca, skgen(seed)) in
+        return(ExternalInit(ssa, ca))
+    ))

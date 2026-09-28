@@ -1,0 +1,27 @@
+(* Scenario BATCH_AUTHORIZATION_UNSIGNED (sanity check): the verifier of
+   batch_authorization.pv checks the inclusion proof but not the
+   authorizer's signature of the root. *)
+
+free skAuth: skey [private].
+
+event Authorized(spkey).
+event Accepted(spkey).
+query pk: spkey; event(Accepted(pk)) ==> event(Authorized(pk)).
+
+process
+  out(c, spk(skAuth));
+  (
+    new skJ1: skey; new skJ2: skey; new ek1: key; new ek2: key;
+    let jr1 = (L_join, spk(skJ1), kempk(ek1)) in
+    let jr2 = (L_join, spk(skJ2), kempk(ek2)) in
+    event Authorized(spk(skJ1));
+    event Authorized(spk(skJ2));
+    let root = hash((L_batch, N2, hash(jr1), hash(jr2))) in
+    out(c, (jr1, jr2, root, sign(skAuth, (L_batch, N2, root))))
+  ) | (
+    !
+    in(c, (jr: bitstring, sib: bitstring, root: bitstring));
+    if root = hash((L_batch, N2, hash(jr), sib)) || root = hash((L_batch, N2, sib, hash(jr))) then
+    let (=L_join, pk: spkey, ek: kpk) = jr in
+    event Accepted(pk)
+  )

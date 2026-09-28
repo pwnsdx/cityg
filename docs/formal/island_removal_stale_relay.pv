@@ -1,0 +1,64 @@
+(* Scenario ISLAND_REMOVAL_STALE_RELAY (profile v0.5-draft, stage 1): the
+   removal of island_removal.pv, with a relay that seals the root secret
+   under the secret its island root had before the window.
+
+   A follows the window, but seals r2 under t0, the secret of i0 in epoch
+   1, instead of the one the window drew: the relay element of an island
+   whose root the window did not re-key, or of a relay that sealed before
+   it advanced its island path.
+
+   Expected: attack. M knows t0, opens the relay element, and with the init
+   secret of epoch 1 derives epoch 2. A relay seals under the secret of its
+   island root after the window (docs/specs-v0.5-draft.md, section 2.3),
+   which the window that removes a member re-keys. Reachable (sanity): D
+   accepts epoch 2. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event DAccepts(key).
+query es: key; event(DAccepts(es)).
+
+process
+  new lsA: key; new lsM: key; new lsB: key; new lsD: key;
+  new t0: key; new t1: key; new t2: key; new p1: key; new q1: key; new r1: key;
+  new es1: key;
+  let init1 = init_secret(es1) in
+  (* M's state of epoch 1, and the public keys. *)
+  out(c, (lsM, t0, p1, r1, es1));
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), leaf_pk(lsD), node_pk(t1), node_pk(t2), node_pk(q1)));
+  (* Window 2: M's path re-keyed. *)
+  new t0n: key; new w1: key; new w2: key; new w3: key;
+  let p2 = chain(t0n) in
+  let r2 = chain(p2) in
+  let gc2 = (N2, node_pk(t0n), node_pk(t1), node_pk(t2), node_pk(p2), node_pk(q1), node_pk(r2)) in
+  let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+  out(c, (wrap(leaf_pk(lsA), w1, t0n), wrap(node_pk(t1), w2, p2), wrap(node_pk(q1), w3, r2),
+          gc2, tag(es2, gc2)));
+  out(c, aenc(msg_key(es2), MA));
+  (
+    (* A: follows the window along its path, then relays for i0. *)
+    in(c, (wa: bitstring, g: bitstring, tg: bitstring));
+    let t = unwrap(leaf_sk(lsA), wa) in
+    let r = chain(chain(t)) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    out(c, senc(relay_key(t0, (N2, I0)), r))
+  ) | (
+    (* B: follows by refresh, relays for i1, and makes the flat element of
+       i2 with the key of the context it checked. *)
+    new wf: key;
+    in(c, (wb: bitstring, g: bitstring, tg: bitstring));
+    let r = up(up(t1, wrap_step(wb)), chain_step) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    let (=N2, k0: kpk, k1: kpk, k2: kpk, kp: kpk, kq: kpk, kr: kpk) = g in
+    out(c, (senc(relay_key(t1, (N2, I1)), r), wrap(k2, wf, r)))
+  ) | (
+    (* D: back online, takes the root secret from the flat element of i2. *)
+    in(c, (fl: bitstring, g: bitstring, tg: bitstring));
+    let r = unwrap(node_sk(t2), fl) in
+    let es = epoch_secret(joiner_secret(init1, r, g)) in
+    if tag(es, g) = tg then
+    event DAccepts(es)
+  )

@@ -1,0 +1,40 @@
+(* Control for witness_quorum.ocv: witnesses 3 and 4 are both dishonest,
+   more than the quorum of 3 out of 4 tolerates. Expected: not proved.
+   Checkpoints countersigned by witnesses: 3 signatures out of 4. Each
+   honest witness signs at most one checkpoint for the epoch; the server
+   chooses which one each of them sees. Witness 4 is dishonest: its signing
+   key goes to the adversary. Members A and B each accept a checkpoint that
+   carries valid signatures from 3 distinct witnesses. Query: they accept
+   the same checkpoint, so the server cannot fork them. *)
+
+type keyseed [large, fixed].
+type pkey [bounded].
+type skey [bounded].
+type signature [bounded].
+
+proba Psign.
+proba Pkeycoll.
+expand UF_CMA_proba_signature(keyseed, pkey, skey, bitstring, signature, skgen, pkgen, sign, check, Psign, Pkeycoll).
+
+letfun quorum(c: bitstring, p1: pkey, p2: pkey, p3: pkey, p4: pkey,
+              s1: signature, s2: signature, s3: signature, s4: signature) =
+  let ok1 = check(c, p1, s1) in let ok2 = check(c, p2, s2) in
+  let ok3 = check(c, p3, s3) in let ok4 = check(c, p4, s4) in
+  (ok1 && ok2 && ok3) || (ok1 && ok2 && ok4) || (ok1 && ok3 && ok4) || (ok2 && ok3 && ok4).
+
+event acceptedA(bitstring).
+event acceptedB(bitstring).
+
+query c1: bitstring, c2: bitstring; event(acceptedA(c1)) && event(acceptedB(c2)) ==> c1 = c2.
+
+process
+  Ostart() :=
+    r1 <-R keyseed; r2 <-R keyseed; r3 <-R keyseed; r4 <-R keyseed;
+    let pk1 = pkgen(r1) in let pk2 = pkgen(r2) in let pk3 = pkgen(r3) in let pk4 = pkgen(r4) in
+    return(pk1, pk2, pk3, pk4, skgen(r3), skgen(r4));
+    ((O1(m1: bitstring) := return(sign(m1, skgen(r1)))) |
+     (O2(m2: bitstring) := return(sign(m2, skgen(r2)))) |
+     (OA(ca: bitstring, a1: signature, a2: signature, a3: signature, a4: signature) :=
+        if quorum(ca, pk1, pk2, pk3, pk4, a1, a2, a3, a4) then event acceptedA(ca)) |
+     (OB(cb: bitstring, b1: signature, b2: signature, b3: signature, b4: signature) :=
+        if quorum(cb, pk1, pk2, pk3, pk4, b1, b2, b3, b4) then event acceptedB(cb)))

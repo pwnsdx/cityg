@@ -1,0 +1,30 @@
+(* Scenario ILOT_CITY_STICKY: the stale city of ilot_city_stale.pv, but M1
+   works with the server alone.
+
+   M1, removed by window 2, opens the window secret of window 3 with P's
+   old secret. It missed the window secret of window 2, which went to îlot
+   roots it does not know.
+
+   Expected: proved. Without the init secret of epoch 2, the window secret
+   of window 3 gives nothing: once a removed member misses one window, the
+   init chain keeps it out even if a later window secret reaches it. The
+   stale city is a danger only when removed members collude
+   (ilot_city_stale.pv). *)
+
+free M3: bitstring [private].
+query attacker(M3).
+
+process
+  new es1: key; new sk: key; new sj: key; new sl: key; new p1: key; new q1: key;
+  new sk2: key; new r2: key; new sl3: key; new q3: key; new r3: key;
+  new a1: key; new a2: key; new a3: key; new a4: key; new a5: key; new a6: key;
+  out(c, (es1, sk, p1));
+  out(c, (seal(node_pk(sk2), a1, N2, r2), seal(node_pk(sj), a2, N2, r2), seal(node_pk(sl), a3, N2, r2)));
+  let g2 = (N2, node_pk(sk2)) in
+  let es2 = epoch_secret(joiner_secret(init_secret(es1), commit_secret(r2), g2)) in
+  out(c, (seal(node_pk(sl3), a4, N3, q3), seal(node_pk(q3), a5, N3, r3), seal(node_pk(p1), a6, N3, r3)));
+  let g3 = (N3, node_pk(sl3), node_pk(q3)) in
+  let es3 = epoch_secret(joiner_secret(init_secret(es2), commit_secret(r3), g3)) in
+  (* The group contexts are public. *)
+  out(c, (g2, g3));
+  out(c, aenc(msg_key(es3), M3))

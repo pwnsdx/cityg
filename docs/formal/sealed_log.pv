@@ -1,0 +1,51 @@
+(* Scenario SEALED_LOG: the log of an epoch's messages, in the header of the
+   next seal (docs/specs-v0.5-draft.md section 4.8; the membership log of
+   section 4.10 works the same way).
+
+   In epoch 1, A and B each read a message the delivery service shows them
+   under the epoch's message key, which an insider M holds too: the service
+   can show them different messages. S seals window 2 with the log the
+   service gives it, which the group context and so the tag bind. A and B
+   check the message they read against the log before they accept epoch 2. *)
+
+(* The epoch-2 context each accepted, and the message it read in epoch 1. *)
+event ReadA(bitstring, bitstring).
+event ReadB(bitstring, bitstring).
+query x: bitstring, m1: bitstring, m2: bitstring;
+  event(ReadA(x, m1)) && event(ReadB(x, m2)) ==> m1 = m2.
+
+event Accepted(bitstring).
+query x: bitstring; event(Accepted(x)).
+
+process
+  new es1: key; new lsA: key; new lsB: key;
+  (* M, an insider, holds the secrets of epoch 1. *)
+  out(c, (es1, leaf_pk(lsA), leaf_pk(lsB)));
+  let init1 = init_secret(es1) in
+  (
+    (* S seals window 2 with the log the service gives it. *)
+    in(c, log: bitstring);
+    new r2: key; new qa: key; new qb: key;
+    let gc2 = (N2, log) in
+    let es2 = epoch_secret(joiner_secret(init1, r2, gc2)) in
+    out(c, (gc2, tag(es2, gc2), wrap(leaf_pk(lsA), qa, r2), wrap(leaf_pk(lsB), qb, r2)))
+  ) | (
+    in(c, ct: bitstring);
+    let m = adec(msg_key(es1), ct) in
+    in(c, (gc2: bitstring, tg: bitstring, w: bitstring));
+    let (=N2, log: bitstring) = gc2 in
+    if log = hash(ct) then
+    let es2 = epoch_secret(joiner_secret(init1, unwrap(leaf_sk(lsA), w), gc2)) in
+    if tag(es2, gc2) = tg then
+    event ReadA(gc2, m);
+    event Accepted(gc2)
+  ) | (
+    in(c, ct: bitstring);
+    let m = adec(msg_key(es1), ct) in
+    in(c, (gc2: bitstring, tg: bitstring, w: bitstring));
+    let (=N2, log: bitstring) = gc2 in
+    if log = hash(ct) then
+    let es2 = epoch_secret(joiner_secret(init1, unwrap(leaf_sk(lsB), w), gc2)) in
+    if tag(es2, gc2) = tg then
+    event ReadB(gc2, m)
+  )

@@ -1,0 +1,28 @@
+(* Scenario ILOT_ENTRANT_REMOVAL_WITHOUT_TOP: nobody is online, a removal
+   waits, and the joiner who enters alone does not renew the top.
+
+   M, a member of epoch 1, was removed while every member was offline: the
+   removal waits for a window. It knows the secrets of epoch 1, hence the
+   external key, and works with the server. J, admitted by an admin, seals
+   window 2 as in ilot_entrant_join.pv: X sealed to the external key of
+   epoch 1, epoch 2 from X alone. J sends MJ in epoch 2.
+
+   Expected: attack. M opens X with the external key it holds. A window
+   that applies a removal renews the top, even when an entrant seals it
+   alone (ilot_entrant_removal.pv). *)
+
+free skAdm: skey [private].
+
+free MJ: bitstring [private].
+query attacker(MJ).
+
+process
+  new es1: key; new skJ: skey; new x: key; new q: key;
+  out(c, (es1, spk(skAdm), spk(skJ)));
+  let admission = sign(skAdm, (L_join, spk(skJ))) in
+  let xi = seal(external_pk(es1), q, N2, x) in
+  let g2 = (N2, xi, spk(skJ)) in
+  let es2 = epoch_secret(joiner_secret(x, commit_secret(zero), g2)) in
+  let tg = tag(es2, g2) in
+  out(c, (spk(skJ), admission, xi, g2, tg, sign(skJ, (L_seal, g2, tg))));
+  out(c, aenc(msg_key(es2), MJ))

@@ -1,0 +1,2345 @@
+//! Members, joiners and returning members (docs/specs.md section 12).
+//!
+//! A [`Member`] keeps its leaf key, the secrets of its path, the root
+//! secret, the secrets of its epoch and the epoch's header: O(log N) state,
+//! whatever the size of the group. It follows the group window by window
+//! from [`Packet`]s, checking the confirmation tag (and, for windows an
+//! entrant sealed, the entrant's signature and admission). A member may
+//! follow its whole path, or only its island path and the top of its path
+//! (a relay element, a flat element or a refresh: E-15), or, cut off by a
+//! faulty task, by repair until its update (E-17); it then makes the relay
+//! and flat elements, and the repairs, the delivery service asks of it.
+//! Any member may
+//! commit a district, perform a city task or seal a window from the public
+//! state the delivery service shows it, once it has checked that state
+//! against its header; a sealer draws nothing (E-17).
+//!
+//! A [`Joiner`] enters from a checkpoint; a [`Returning`] member either
+//! jumps to the present with a welcome or re-enters its leaf. Both check
+//! the chain of seals from their anchor, and both can seal a window
+//! themselves when no member is online (E-7). A joiner may also perform a
+//! task of the window it enters, on the state its chain of seals gives
+//! (E-17).
+
+use std::collections::{BTreeMap, HashMap};
+
+use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
+
+use crate::authorizer::{AuthorizerCheckpoint, authorizer_pk_hash};
+use crate::card::{Card, CardKey, LeafKeys};
+use crate::commit::{
+    CityTask, DistrictCommit, EntrantInit, Genesis, Seal, SealBody, SealHeader, SealKind, SealProof,
+};
+use crate::crypto::{
+    Digest, Secret, Wrap, ZERO32, commit_secret, digest_eq, fresh_secret, kem_pk_hash, node_key,
+    task_hedge,
+};
+use crate::dispute::{Dispute, DisputeContent, DisputeStatement, classify};
+use crate::error::{CoreError, CoreResult};
+use crate::identity::DeviceIdentity;
+use crate::kem::KemSecret;
+use crate::membership::{self, MembershipLog};
+use crate::message::{
+    Delivered, Dropped, EpochMessages, Message, MessageLog, Received, sender_card,
+};
+use crate::objects::{
+    Admission, CatchUpRequest, ChangeKind, Checkpoint, CheckpointContent, GroupPolicy, Invite,
+    JoinRequest, PolicyTerms, ReEntryRequest, RemoveProposal, RepairRequest, Request,
+    UpdateRequest, Urgency, device_id, group_id,
+};
+use crate::packet::{Entry, EntrySteps, Packet, SealLink};
+use crate::rekey::{MemberPath, PathSecrets, Step, WindowIndex};
+use crate::roles::{
+    CityTaskInput, SealDraft, WelcomeKind, WindowTask, WindowWork, build_city_task, build_district,
+    finish_seal, with_city,
+};
+use crate::schedule::{
+    EpochSecrets, GroupContext, confirmed_transcript_hash, external_init, interim_transcript_hash,
+};
+use crate::top::{RelayContext, RelayElement, Repair, Top, flat_element, open_flat};
+use crate::tree::{
+    CityPart, Divisions, LeafNode, LeafProof, Occupancy, Overlay, ParentNode, Shape,
+};
+use crate::welcome::Welcome;
+use crate::window::{
+    EpochHeader, PublicState, Requests, WindowShape, check_city_tasks, check_districts,
+    check_sealer, district_roots, genesis_tree, joins_of,
+};
+
+/// A removal the delivery service recorded and has not applied yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingRemoval {
+    pub target: Occupancy,
+    pub recorded_ms: u64,
+    pub urgency: Urgency,
+}
+
+/// Catch-up requests of a window, by reference.
+pub type CatchUps = HashMap<Digest, CatchUpRequest>;
+
+/// The first level of a member's path that a window does not let it
+/// derive, with the path and the steps it walked.
+struct Fault {
+    path: MemberPath,
+    steps: EntrySteps,
+    level: u8,
+}
+
+/// What [`Member::process`] returns for a packet that names a leaf key the
+/// member neither holds nor requested: an update or a re-entry was signed
+/// with its device key without it. The member must treat that key as
+/// stolen, tell its user and propose its own removal (docs/specs.md section
+/// 12.2).
+pub const LEAF_TAKEN: CoreError = CoreError::Unauthorized("leaf key the member did not request");
+
+/// A member of the group.
+pub struct Member {
+    identity: DeviceIdentity,
+    /// The card the member signs its messages with
+    /// (docs/specs-v0.5-draft.md section 4.1).
+    card: CardKey,
+    occupancy: Occupancy,
+    path: MemberPath,
+    /// The root secret of the current epoch, which an island follower does
+    /// not hold in its path.
+    root: Secret,
+    header: EpochHeader,
+    previous: Option<EpochHeader>,
+    seal_hash: Digest,
+    secrets: EpochSecrets,
+    /// The message plane of the current epoch (docs/specs-v0.5-draft.md
+    /// sections 4.3 to 4.8).
+    messages: EpochMessages,
+    /// That of the previous epoch, until the member has read its messages.
+    previous_messages: Option<EpochMessages>,
+    /// The authorizer whose checkpoint the member requires before it
+    /// accepts a window (docs/specs-v0.5-draft.md section 4.9).
+    checkpoint_key: Option<Vec<u8>>,
+    /// The log of the changes of the window that created the current epoch
+    /// (section 4.10).
+    membership_log: MembershipLog,
+    pending_leaf: Option<KemSecret>,
+    /// The card drawn with the pending leaf key.
+    pending_card: Option<CardKey>,
+    /// It followed a window by repair, and holds no valid path until the
+    /// window of its update (docs/specs-v0.5-draft.md section 3.7).
+    repaired: bool,
+}
+
+impl core::fmt::Debug for Member {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Member")
+            .field("occupancy", &self.occupancy)
+            .field("epoch", &self.header.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Member {
+    /// Create a group: the creator at leaf 0, admin, in a tree of two leaves
+    /// with `divisions` (districts, islands and sub-cities, fixed at
+    /// genesis). An `open` group admits any device without admission (its
+    /// creator signs that policy at genesis); otherwise every join needs an
+    /// admission. Returns the creator and the genesis seal.
+    pub fn create(
+        identity: DeviceIdentity,
+        nonce: [u8; 32],
+        divisions: Divisions,
+        open: bool,
+        time_ms: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<(Self, Seal)> {
+        let shape = Shape::new(1, divisions)?;
+        let gid = group_id(identity.public_key(), &nonce)?;
+        let creator = Occupancy { leaf: 0, since: 0 };
+        let policy = if open {
+            Some(GroupPolicy::sign(
+                &gid,
+                &PolicyTerms::open(),
+                creator,
+                &identity,
+                rng,
+            )?)
+        } else {
+            None
+        };
+        let leaf_key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng);
+        let hedge = task_hedge(leaf_key.seed(), &gid, 0)?;
+        let root_secret = fresh_secret(&hedge, rng)?;
+        let root_pk = node_key(&root_secret)?.public_key();
+        let (tree, registry) = genesis_tree(
+            &gid,
+            divisions,
+            identity.public_key(),
+            LeafKeys {
+                encryption_key: &leaf_key.public_key(),
+                card: &card.card(),
+            },
+            &root_pk,
+            policy.as_ref(),
+        )?;
+        let body = SealBody {
+            policy: policy.as_ref().map(|policy| policy.encoded().to_vec()),
+            genesis: Some(Genesis {
+                nonce,
+                creator_pk: identity.public_key().to_vec(),
+                encryption_key: leaf_key.public_key(),
+                card: card.card(),
+                root_pk,
+            }),
+            ..SealBody::default()
+        };
+        let tree_hash = tree.tree_hash()?;
+        let registry_header = registry.header()?;
+        let membership_log = MembershipLog::of(&membership::genesis(
+            &gid,
+            identity.public_key(),
+            &card.card(),
+        )?)?;
+        let header = SealHeader {
+            gid,
+            epoch: 0,
+            prev_interim: ZERO32,
+            kind: SealKind::Genesis,
+            sealer: creator,
+            height: 1,
+            district_bits: shape.district_bits,
+            island_bits: shape.island_bits,
+            subcity_bits: shape.subcity_bits,
+            tree_hash,
+            registry_hash: registry_header.hash()?,
+            body_hash: body.hash()?,
+            time_ms,
+            message_log: MessageLog::empty()?,
+            membership_log,
+            entrant: None,
+        };
+        let seal_hash = header.hash()?;
+        let confirmed = confirmed_transcript_hash(&ZERO32, &seal_hash)?;
+        let context = GroupContext {
+            gid,
+            epoch: 0,
+            tree_hash,
+            registry_hash: header.registry_hash,
+            height: 1,
+            district_bits: shape.district_bits,
+            island_bits: shape.island_bits,
+            subcity_bits: shape.subcity_bits,
+            confirmed_transcript_hash: confirmed,
+        };
+        let commit = commit_secret(&root_secret)?;
+        let mut secrets = EpochSecrets::derive(&ZERO32, &commit, &context)?;
+        let tag = secrets.confirmation_tag(&confirmed)?;
+        let external_pk = secrets.external_key()?.public_key();
+        let messages = EpochMessages::new(&gid, 0, 1, creator.leaf, &*secrets.take_msg_secret()?)?;
+        let seal = Seal::sign(header, body, tag, external_pk.clone(), &identity, rng)?;
+        let mut path = MemberPath::new(0, leaf_key);
+        path.set_path(PathSecrets::at(
+            BTreeMap::from([(1, root_secret.clone())]),
+            0,
+        ));
+        let member = Self {
+            identity,
+            card,
+            occupancy: creator,
+            path,
+            root: root_secret,
+            header: EpochHeader {
+                gid,
+                epoch: 0,
+                shape,
+                tree_hash,
+                registry: registry_header,
+                interim: interim_transcript_hash(&confirmed, &tag)?,
+                external_pk,
+            },
+            previous: None,
+            seal_hash,
+            secrets,
+            messages,
+            previous_messages: None,
+            checkpoint_key: None,
+            membership_log,
+            pending_leaf: None,
+            pending_card: None,
+            repaired: false,
+        };
+        Ok((member, seal))
+    }
+
+    /// The member's occupancy.
+    #[must_use]
+    pub const fn occupancy(&self) -> Occupancy {
+        self.occupancy
+    }
+
+    /// The group.
+    #[must_use]
+    pub const fn gid(&self) -> &Digest {
+        &self.header.gid
+    }
+
+    /// The current epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.header.epoch
+    }
+
+    /// The header of the current epoch.
+    #[must_use]
+    pub const fn header(&self) -> &EpochHeader {
+        &self.header
+    }
+
+    /// The header of the previous epoch (what auditors check entries of the
+    /// last window against).
+    #[must_use]
+    pub const fn previous_header(&self) -> Option<&EpochHeader> {
+        self.previous.as_ref()
+    }
+
+    /// The member's device identity.
+    #[must_use]
+    pub const fn identity(&self) -> &DeviceIdentity {
+        &self.identity
+    }
+
+    /// Whether the member is an admin.
+    #[must_use]
+    pub fn is_admin(&self) -> bool {
+        self.header.registry.admins.contains_key(&self.occupancy)
+    }
+
+    /// `epoch_authenticator` of the current epoch (docs/specs-v0.5-draft.md
+    /// section 4.3): the same for every member of the epoch, so that two
+    /// members that compare it detect a fork.
+    #[must_use]
+    pub const fn epoch_authenticator(&self) -> &Digest {
+        self.messages.authenticator()
+    }
+
+    /// `Export_n(label, context, length)` of the current epoch, a secret for
+    /// the application.
+    pub fn export(
+        &self,
+        label: &str,
+        context: &[u8],
+        length: usize,
+    ) -> CoreResult<Zeroizing<Vec<u8>>> {
+        self.messages.export(label, context, length)
+    }
+
+    /// Send `application_data` in the current epoch, signed by the member's
+    /// card if its last signature is older than `T_BURST` or its burst is
+    /// due (docs/specs-v0.5-draft.md sections 4.5 and 4.6).
+    pub fn send(
+        &mut self,
+        application_data: &[u8],
+        now_ms: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Message> {
+        self.messages
+            .send(application_data, &self.card, now_ms, rng)
+    }
+
+    /// Whether the member should sign its burst now, alone if it has
+    /// nothing to send ([`Member::sign_burst`]).
+    #[must_use]
+    pub fn sign_due(&self, now_ms: u64) -> bool {
+        self.messages.sign_due(now_ms)
+    }
+
+    /// Sign the member's burst alone, if it has unsigned messages.
+    pub fn sign_burst(
+        &mut self,
+        now_ms: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Option<Message>> {
+        self.messages.sign_burst(&self.card, now_ms, rng)
+    }
+
+    fn messages_of(&mut self, epoch: u64) -> CoreResult<&mut EpochMessages> {
+        if epoch == self.messages.epoch() {
+            return Ok(&mut self.messages);
+        }
+        self.previous_messages
+            .as_mut()
+            .filter(|messages| messages.epoch() == epoch)
+            .ok_or(CoreError::Invalid(
+                "messages of an epoch the member does not read",
+            ))
+    }
+
+    /// Open a message of the current or of the previous epoch, and hold it
+    /// until a signature of its sender covers it.
+    pub fn open_message(&mut self, message: &Message, now_ms: u64) -> CoreResult<Received> {
+        self.messages_of(message.epoch)?.open(message, now_ms)
+    }
+
+    /// Deliver the ready bursts of the sender at `leaf` in `epoch`, checked
+    /// against its card, which `proof` shows in the tree of `proof_epoch`,
+    /// the current or the previous epoch (docs/specs-v0.5-draft.md section
+    /// 4.1).
+    pub fn authenticate(
+        &mut self,
+        epoch: u64,
+        leaf: u32,
+        proof: &LeafProof,
+        proof_epoch: u64,
+    ) -> CoreResult<Vec<Delivered>> {
+        if proof.index != leaf {
+            return Err(CoreError::Invalid("proof of another leaf"));
+        }
+        let header = if proof_epoch == self.header.epoch {
+            &self.header
+        } else {
+            self.previous
+                .as_ref()
+                .filter(|previous| previous.epoch == proof_epoch)
+                .ok_or(CoreError::Invalid(
+                    "proof of an epoch the member does not hold",
+                ))?
+        };
+        let card = sender_card(proof, &header.tree_hash, proof_epoch, epoch)?;
+        self.messages_of(epoch)?.authenticate(leaf, &card)
+    }
+
+    /// Drop the bursts that have waited for their signature longer than
+    /// `T_AUTH` and `delay_ms`, for the application to report.
+    pub fn drop_unsigned(&mut self, now_ms: u64, delay_ms: u64) -> Vec<Dropped> {
+        let mut dropped = self.messages.drop_unsigned(now_ms, delay_ms);
+        if let Some(previous) = &mut self.previous_messages {
+            dropped.extend(previous.drop_unsigned(now_ms, delay_ms));
+        }
+        dropped
+    }
+
+    /// The log of the previous epoch's messages, which the seal of the
+    /// current epoch carries: a member that read them all checks it with
+    /// [`MessageLog::check`], a sender its own messages' inclusion.
+    #[must_use]
+    pub fn sealed_log(&self) -> Option<MessageLog> {
+        self.previous_messages
+            .as_ref()
+            .and_then(EpochMessages::sealed_log)
+    }
+
+    /// Forget the previous epoch's message plane, once its messages are
+    /// read (docs/specs-v0.5-draft.md section 4.3).
+    pub fn forget_previous_messages(&mut self) {
+        self.previous_messages = None;
+    }
+
+    /// The log of the changes of the window that created the current epoch,
+    /// which its seal header carries: the member checks against it the
+    /// records the DS serves ([`MembershipLog::check`]), as MLS has every
+    /// member see every change (docs/specs-v0.5-draft.md section 4.10).
+    #[must_use]
+    pub const fn membership_log(&self) -> MembershipLog {
+        self.membership_log
+    }
+
+    /// The member's leaf key.
+    #[must_use]
+    pub fn leaf_public_key(&self) -> &[u8] {
+        self.path.leaf_public_key()
+    }
+
+    /// The devices the window that created the current epoch let in, with
+    /// their occupancies, checked against the seal the member accepted: in
+    /// an open group, every join is visible to whoever looks.
+    pub fn window_joins(
+        &self,
+        seal: &Seal,
+        commits: &[DistrictCommit],
+        requests: &Requests,
+    ) -> CoreResult<Vec<(Occupancy, Vec<u8>)>> {
+        if seal.header.hash()? != self.seal_hash {
+            return Err(CoreError::Invalid("seal of another epoch"));
+        }
+        joins_of(seal, commits, requests)
+    }
+
+    /// Whether the member holds its whole path, as a member that follows
+    /// every step of it does. An island follower holds its island path only,
+    /// until it refreshes (E-15).
+    #[must_use]
+    pub fn knows_path(&self) -> bool {
+        self.path.knows(self.header.shape.height)
+    }
+
+    /// Follow one window. [`LEAF_TAKEN`] means that someone else changed the
+    /// member's leaf with its device key.
+    ///
+    /// A packet without top gives every step of the member's path; the
+    /// member must hold its whole path, unless the window re-keyed nothing.
+    /// A packet with a top gives the steps up to the member's island root:
+    /// the member takes the root secret from the relay element or the flat
+    /// element of its island, and then holds only its island path, or from a
+    /// refresh, and then holds its whole path again.
+    pub fn process(&mut self, packet: &Packet) -> CoreResult<()> {
+        self.follow_window(packet, None)
+    }
+
+    /// Require, before accepting a window, the checkpoint of the epoch it
+    /// creates by the authorizer whose key is `authorizer_pk`, which the
+    /// registry must name (docs/specs-v0.5-draft.md section 4.9): no join
+    /// the authorizer did not authorize passes, even with the DS and a
+    /// committer in collusion. The member then follows windows with
+    /// [`Member::process_checkpointed`]; the requirement lapses if the
+    /// group leaves the authorized mode.
+    pub fn require_checkpoints(&mut self, authorizer_pk: Vec<u8>) -> CoreResult<()> {
+        if self.header.registry.authorizer != Some(authorizer_pk_hash(&authorizer_pk)?) {
+            return Err(CoreError::Invalid("the group names another authorizer"));
+        }
+        self.checkpoint_key = Some(authorizer_pk);
+        Ok(())
+    }
+
+    /// Follow a window as [`Member::process`] does, once the authorizer's
+    /// checkpoint of the epoch it creates checks: the member computes the
+    /// group context, the tag and the external key, and downloads the
+    /// signature alone.
+    pub fn process_checkpointed(
+        &mut self,
+        packet: &Packet,
+        checkpoint: &AuthorizerCheckpoint,
+    ) -> CoreResult<()> {
+        self.follow_window(packet, Some(checkpoint))
+    }
+
+    fn follow_window(
+        &mut self,
+        packet: &Packet,
+        checkpoint: Option<&AuthorizerCheckpoint>,
+    ) -> CoreResult<()> {
+        let header = &packet.header;
+        if header.gid != self.header.gid
+            || header.prev_interim != self.header.interim
+            || header.district_bits != self.header.shape.district_bits
+            || header.island_bits != self.header.shape.island_bits
+        {
+            return Err(CoreError::Invalid("packet for another epoch"));
+        }
+        if header.epoch != self.header.epoch + 1 {
+            return Err(CoreError::EpochMismatch {
+                expected: self.header.epoch + 1,
+                got: header.epoch,
+            });
+        }
+        let shape = self.header.shape.grown(header.height)?;
+        let registry = packet
+            .registry
+            .apply(&self.header.gid, &self.header.registry)?;
+        if registry.hash()? != header.registry_hash {
+            return Err(CoreError::Invalid("registry header"));
+        }
+        let init_prev: Secret = match (header.kind, &header.entrant, &packet.entrant) {
+            (SealKind::Member, None, None) => Zeroizing::new(*self.secrets.init_secret()),
+            (SealKind::Entrant, Some(init), Some(_)) => {
+                self.secrets.external_init_secret(&init.kem_output)?
+            }
+            _ => return Err(CoreError::Invalid("packet seal kind")),
+        };
+        let mut path = self.path.clone();
+        let mut leaf_changed = false;
+        if packet.leaf_key != kem_pk_hash(path.leaf_public_key())? {
+            let pending = self.pending_leaf.as_ref().ok_or(LEAF_TAKEN)?;
+            if packet.leaf_key != kem_pk_hash(&pending.public_key())? {
+                return Err(LEAF_TAKEN);
+            }
+            path.set_leaf_key(pending.clone());
+            leaf_changed = true;
+        }
+        let seal_hash = header.hash()?;
+        let confirmed = confirmed_transcript_hash(&self.header.interim, &seal_hash)?;
+        let interim = interim_transcript_hash(&confirmed, &packet.tag)?;
+        let (secrets, root) = self.follow_path(&path, shape, packet, &interim)?;
+        let context = GroupContext {
+            gid: self.header.gid,
+            epoch: header.epoch,
+            tree_hash: header.tree_hash,
+            registry_hash: header.registry_hash,
+            height: shape.height,
+            district_bits: shape.district_bits,
+            island_bits: shape.island_bits,
+            subcity_bits: shape.subcity_bits,
+            confirmed_transcript_hash: confirmed,
+        };
+        let commit = commit_secret(&root)?;
+        let mut epoch_secrets = EpochSecrets::derive(&init_prev, &commit, &context)?;
+        epoch_secrets.check_confirmation_tag(&confirmed, &packet.tag)?;
+        let external_pk = epoch_secrets.external_key()?.public_key();
+        if let Some(entrant) = &packet.entrant {
+            // The external key is public: the tag alone does not show that the
+            // window comes from an admitted entrant (E-7).
+            let proof = SealProof {
+                header: header.clone(),
+                tag: packet.tag,
+                external_pk: external_pk.clone(),
+                signature: entrant.signature.clone(),
+            };
+            entrant.evidence.verify(&self.header, &proof)?;
+        }
+        // The authorizer's checkpoint, if the member requires it; a window
+        // that names another authorizer brings its policy, and the key.
+        let checkpoint_key = match &self.checkpoint_key {
+            None => None,
+            Some(_) if registry.authorizer.is_none() => None,
+            Some(key) => {
+                let key = packet
+                    .registry
+                    .policy_object
+                    .as_ref()
+                    .and_then(GroupPolicy::authorizer_pk)
+                    .unwrap_or(key);
+                if registry.authorizer != Some(authorizer_pk_hash(key)?) {
+                    return Err(CoreError::Invalid("the group names another authorizer"));
+                }
+                let checkpoint = checkpoint.ok_or(CoreError::Invalid(
+                    "the authorizer's checkpoint is required",
+                ))?;
+                checkpoint.verify(&self.header.gid, key)?;
+                checkpoint.check_epoch(&context, &packet.tag, &external_pk)?;
+                Some(key.to_vec())
+            }
+        };
+        path.set_path(secrets);
+        if leaf_changed {
+            self.pending_leaf = None;
+            if let Some(card) = self.pending_card.take() {
+                self.card = card;
+            }
+        }
+        // A repair leaves no valid path; the window of an update re-keys it.
+        if matches!(packet.top, Some(Top::Repair(_))) {
+            self.repaired = true;
+        } else if leaf_changed {
+            self.repaired = false;
+        }
+        let next = EpochHeader {
+            gid: self.header.gid,
+            epoch: header.epoch,
+            shape,
+            tree_hash: header.tree_hash,
+            registry,
+            interim,
+            external_pk,
+        };
+        let messages = EpochMessages::new(
+            &self.header.gid,
+            header.epoch,
+            shape.height,
+            self.occupancy.leaf,
+            &*epoch_secrets.take_msg_secret()?,
+        )?;
+        // The seal closes the log of the epoch the member leaves.
+        let mut closed = core::mem::replace(&mut self.messages, messages);
+        closed.set_sealed_log(header.message_log);
+        self.previous_messages = Some(closed);
+        self.previous = Some(core::mem::replace(&mut self.header, next));
+        self.path = path;
+        self.root = root;
+        self.secrets = epoch_secrets;
+        self.seal_hash = seal_hash;
+        self.checkpoint_key = checkpoint_key;
+        self.membership_log = header.membership_log;
+        Ok(())
+    }
+
+    /// The path the member will hold after the window of `packet`, whose
+    /// epoch has the interim transcript hash `interim`, and the window's root
+    /// secret. Nothing is checked against the tag here.
+    fn follow_path(
+        &self,
+        path: &MemberPath,
+        shape: Shape,
+        packet: &Packet,
+        interim: &Digest,
+    ) -> CoreResult<(PathSecrets, Secret)> {
+        let gid = &self.header.gid;
+        let epoch = packet.header.epoch;
+        if let Some(Top::Repair(repair)) = &packet.top {
+            // A repair (docs/specs-v0.5-draft.md section 3.7): the root
+            // secret under the member's leaf key, and no path.
+            if !packet.path.is_empty() {
+                return Err(CoreError::Invalid("repair with a path"));
+            }
+            let root = repair.open(
+                gid,
+                epoch,
+                shape,
+                self.occupancy.leaf,
+                path.leaf_key(),
+                path.leaf_public_key(),
+            )?;
+            return Ok((PathSecrets::default(), root));
+        }
+        let Some(top) = &packet.top else {
+            if packet.path.is_empty() && shape == self.header.shape {
+                // The window re-keyed nothing: the root did not change.
+                return Ok((path.secrets().clone(), self.root.clone()));
+            }
+            let secrets = path.advance(shape.height, &packet.path, gid, epoch)?;
+            let root = secrets
+                .secret(shape.height)
+                .ok_or(CoreError::Invalid("unknown root secret"))?
+                .clone();
+            return Ok((secrets, root));
+        };
+        if !shape.has_islands() {
+            return Err(CoreError::Invalid("top of a tree without islands"));
+        }
+        let level = shape.island_level();
+        if packet.path.keys().any(|stepped| *stepped > level) {
+            return Err(CoreError::Invalid(
+                "island packet with steps above the island",
+            ));
+        }
+        let island = path.advance(level, &packet.path, gid, epoch)?;
+        let island_secret = island
+            .secret(level)
+            .ok_or(CoreError::Invalid("unknown island secret"))?;
+        let index = shape.island_of(self.occupancy.leaf);
+        match top {
+            Top::Relay(relay) => {
+                let context = RelayContext {
+                    gid: *gid,
+                    epoch,
+                    island_bits: shape.island_bits,
+                    island: index,
+                    interim: *interim,
+                };
+                let root = relay.open(&context, island_secret)?;
+                Ok((island, root))
+            }
+            Top::Flat(wrapped) => {
+                let root = open_flat(gid, epoch, shape, index, wrapped, island_secret)?;
+                Ok((island, root))
+            }
+            Top::Refresh(steps) => {
+                let whole = path.refresh(&island, level, shape.height, steps, gid)?;
+                let root = whole
+                    .secret(shape.height)
+                    .ok_or(CoreError::Invalid("unknown root secret"))?
+                    .clone();
+                Ok((whole, root))
+            }
+            Top::Repair(_) => Err(CoreError::Invalid("repair")),
+        }
+    }
+
+    /// Recover the levels of its path above its island root from the last
+    /// step of each (E-15), for the epoch the member is in: what an island
+    /// follower does before a role that needs its whole path (sealing a
+    /// window without a city). The recovered path must lead to the root
+    /// secret the member holds.
+    pub fn refresh(&mut self, steps: &EntrySteps) -> CoreResult<()> {
+        let shape = self.header.shape;
+        if self.knows_path() {
+            return Ok(());
+        }
+        let level = shape.island_level();
+        let island = self.path.secrets().up_to(level);
+        let whole = self
+            .path
+            .refresh(&island, level, shape.height, steps, &self.header.gid)?;
+        let root = whole
+            .secret(shape.height)
+            .ok_or(CoreError::Invalid("unknown root secret"))?;
+        if !digest_eq(root, &self.root) {
+            return Err(CoreError::Invalid("the refresh leads to another root"));
+        }
+        self.path.set_path(whole);
+        Ok(())
+    }
+
+    /// The relay element of the member's island for its epoch (E-15): the
+    /// root secret sealed under the secret of its island root, bound to the
+    /// interim transcript hash of the epoch the member accepted.
+    pub fn relay_element(&self) -> CoreResult<RelayElement> {
+        let shape = self.header.shape;
+        if !shape.has_islands() {
+            return Err(CoreError::Invalid(
+                "relay element in a tree without islands",
+            ));
+        }
+        let island_secret = self
+            .path
+            .secret(shape.island_level())
+            .ok_or(CoreError::Invalid("unknown island secret"))?;
+        let context = RelayContext {
+            gid: self.header.gid,
+            epoch: self.header.epoch,
+            island_bits: shape.island_bits,
+            island: shape.island_of(self.occupancy.leaf),
+            interim: self.header.interim,
+        };
+        RelayElement::seal(&context, island_secret, &self.root)
+    }
+
+    /// The flat elements of `islands` for the member's epoch (E-15): the
+    /// root secret wrapped to each island root. The keys come from `state`,
+    /// which is first checked against the member's header, so that no
+    /// secret goes to a key the delivery service chose.
+    pub fn flat_elements(
+        &self,
+        state: &PublicState,
+        islands: &[u32],
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Vec<Wrap>> {
+        state.check_against(&self.header)?;
+        let shape = self.header.shape;
+        let hedge = self.hedge(self.header.epoch)?;
+        islands
+            .iter()
+            .map(|island| {
+                let key = state
+                    .tree
+                    .parent(shape.island_root(*island))
+                    .ok_or(CoreError::Invalid("flat element for a blank island"))?;
+                flat_element(
+                    &self.header.gid,
+                    self.header.epoch,
+                    shape,
+                    *island,
+                    &key.encryption_key,
+                    &self.root,
+                    &hedge,
+                    rng,
+                )
+            })
+            .collect()
+    }
+
+    /// Request a new leaf key (post-compromise security): the next window
+    /// re-keys the member's path and every node it taints.
+    /// A fresh card goes with the new leaf key.
+    pub fn update_request(&mut self, rng: &mut impl CryptoRngCore) -> CoreResult<UpdateRequest> {
+        let key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng);
+        let request = UpdateRequest::sign(
+            &self.header.gid,
+            self.occupancy,
+            self.path.leaf_public_key(),
+            LeafKeys {
+                encryption_key: &key.public_key(),
+                card: &card.card(),
+            },
+            &self.identity,
+            rng,
+        )?;
+        self.pending_leaf = Some(key);
+        self.pending_card = Some(card);
+        Ok(request)
+    }
+
+    /// The member's card, which its leaf holds.
+    #[must_use]
+    pub fn card(&self) -> Card {
+        self.card.card()
+    }
+
+    /// Propose the removal of `target` (as an admin, or of oneself), urgent
+    /// or ordinary (E-16).
+    pub fn remove_proposal(
+        &self,
+        target: Occupancy,
+        urgency: Urgency,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<RemoveProposal> {
+        RemoveProposal::sign(
+            &self.header.gid,
+            target,
+            Some(self.occupancy),
+            urgency,
+            &self.identity,
+            rng,
+        )
+    }
+
+    fn require_admin(&self) -> CoreResult<()> {
+        if self.is_admin() {
+            Ok(())
+        } else {
+            Err(CoreError::Unauthorized("not an admin"))
+        }
+    }
+
+    /// Admit the device `device_pk` (as an admin).
+    pub fn admit(
+        &self,
+        device_pk: &[u8],
+        not_after_epoch: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Admission> {
+        self.require_admin()?;
+        let device = device_id(&self.header.gid, device_pk)?;
+        Admission::by_admin(
+            &self.header.gid,
+            &device,
+            not_after_epoch,
+            self.occupancy,
+            &self.identity,
+            rng,
+        )
+    }
+
+    /// Sign an invite for the key derived from `seed` (as an admin).
+    pub fn invite(
+        &self,
+        seed: &[u8; 32],
+        expires_at_ms: u64,
+        max_uses: u64,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Invite> {
+        self.require_admin()?;
+        Invite::sign(
+            &self.header.gid,
+            seed,
+            expires_at_ms,
+            max_uses,
+            self.occupancy,
+            &self.identity,
+            rng,
+        )
+    }
+
+    /// Sign a group policy (as an admin): how devices are admitted, with
+    /// the authorizer's key in an authorized group, and after how many
+    /// epochs without a key update a member may be evicted.
+    pub fn group_policy(
+        &self,
+        terms: &PolicyTerms,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<GroupPolicy> {
+        self.require_admin()?;
+        GroupPolicy::sign(&self.header.gid, terms, self.occupancy, &self.identity, rng)
+    }
+
+    /// Sign a checkpoint of the current epoch (as an admin).
+    pub fn checkpoint(&self, time_ms: u64, rng: &mut impl CryptoRngCore) -> CoreResult<Checkpoint> {
+        self.require_admin()?;
+        let header = &self.header;
+        Checkpoint::sign(
+            &header.gid,
+            &CheckpointContent {
+                epoch: header.epoch,
+                interim: header.interim,
+                tree_hash: header.tree_hash,
+                registry_hash: header.registry_hash()?,
+                height: header.shape.height,
+                district_bits: header.shape.district_bits,
+                island_bits: header.shape.island_bits,
+                subcity_bits: header.shape.subcity_bits,
+                external_pk_hash: kem_pk_hash(&header.external_pk)?,
+                time_ms,
+            },
+            self.occupancy,
+            &self.identity,
+            rng,
+        )
+    }
+
+    /// Commit district `district` of the window `task` (E-3): check the
+    /// state against the member's header, check the district's entries,
+    /// re-key, sign, and erase what was drawn.
+    pub fn commit_district(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+        district: u32,
+        requests: &Requests,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<DistrictCommit> {
+        state.check_against(&self.header)?;
+        if task.committers.get(&district) != Some(&self.occupancy) || task.entrant.is_some() {
+            return Err(CoreError::Unauthorized("not the district's committer"));
+        }
+        let window = task.window(state)?;
+        if window.affected.contains(&self.occupancy) {
+            return Err(CoreError::Unauthorized("committer changed by its window"));
+        }
+        let hedge = self.hedge(task.epoch)?;
+        let (commit, drawn) = build_district(
+            state,
+            &window,
+            district,
+            requests,
+            self.occupancy,
+            &self.identity,
+            &hedge,
+            rng,
+        )?;
+        drop(drawn);
+        Ok(commit)
+    }
+
+    /// Perform the city task of `part` (docs/specs-v0.5-draft.md section
+    /// 3.2): re-key the part over the new roots of the tier below, which
+    /// `work` shows, and sign. The member draws with its init secret as
+    /// hedge, and erases what it drew once the task is sent.
+    pub fn commit_city(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+        part: CityPart,
+        work: &WindowWork<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<CityTask> {
+        state.check_against(&self.header)?;
+        if task.city.get(&part) != Some(&self.occupancy) || task.entrant.is_some() {
+            return Err(CoreError::Unauthorized("not the city task's performer"));
+        }
+        let window = task.window(state)?;
+        if window.affected.contains(&self.occupancy) {
+            return Err(CoreError::Unauthorized("performer changed by its window"));
+        }
+        let (below, before) = work.base(state, &window, part)?;
+        let hedge = self.hedge(task.epoch)?;
+        let (city_task, drawn) = build_city_task(
+            &CityTaskInput {
+                state,
+                window: &window,
+                part,
+                below: &below,
+                before: &before,
+                performer: self.occupancy,
+            },
+            &self.identity,
+            &hedge,
+            rng,
+        )?;
+        drop(drawn);
+        Ok(city_task)
+    }
+
+    /// Seal the window `task` (E-1, E-17): check every district commit and
+    /// city task (signature, structure, taints), follow them along the
+    /// member's path to the new root secret, and sign the seal, with the
+    /// log of the current epoch's messages that the DS closed and gave it
+    /// (docs/specs-v0.5-draft.md section 4.8), which the sealer cannot
+    /// check. The sealer draws nothing; it must hold its whole path (an
+    /// island follower refreshes first).
+    pub fn seal(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+        work: &WindowWork<'_>,
+        message_log: MessageLog,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Seal> {
+        let (commits, requests) = (work.commits, work.requests);
+        state.check_against(&self.header)?;
+        if task.sealer != self.occupancy || task.entrant.is_some() {
+            return Err(CoreError::Unauthorized("not the window's sealer"));
+        }
+        let window = task.window(state)?;
+        let sealer = check_sealer(
+            state,
+            &window,
+            SealKind::Member,
+            self.occupancy,
+            None,
+            requests,
+        )?;
+        let delta = check_districts(state, &window, commits, requests, &sealer, false)?;
+        let roots = district_roots(window.shape, commits)?;
+        check_city_tasks(
+            state,
+            &window,
+            work.city_tasks,
+            &roots,
+            &delta,
+            &sealer,
+            requests,
+        )?;
+        let delta = with_city(delta, work.city_tasks);
+        let root_secret = if commits.is_empty() && window.shape == self.header.shape {
+            self.root.clone()
+        } else {
+            // The sealer follows the tasks along its own path, which it must
+            // hold whole.
+            if !self.knows_path() {
+                return Err(CoreError::Invalid("the sealer must refresh its path"));
+            }
+            let mut index = WindowIndex::default();
+            for commit in commits {
+                index.add(&commit.updates, &commit.wraps);
+            }
+            for city_task in work.city_tasks {
+                index.add(&city_task.updates, &city_task.wraps);
+            }
+            let steps = index.steps(self.occupancy.leaf, window.shape.height)?;
+            let secrets =
+                self.path
+                    .advance(window.shape.height, &steps, &state.gid, window.epoch)?;
+            // Each secret must be the one whose key the tasks publish: a
+            // wrap that opens to another would make it seal an epoch that
+            // is not the tree's (docs/specs-v0.5-draft.md section 3.5).
+            let nodes =
+                Overlay::new(&state.tree, window.shape, &delta)?.path_nodes(self.occupancy.leaf);
+            MemberPath::check_keys(&secrets, &nodes)?;
+            secrets
+                .secret(window.shape.height)
+                .ok_or(CoreError::Invalid("unknown root secret"))?
+                .clone()
+        };
+        let sealed = finish_seal(
+            SealDraft {
+                state,
+                window: &window,
+                commits,
+                requests,
+                sealer: &sealer,
+                entrant: None,
+                delta,
+                city_tasks: work.city_tasks,
+                policy: task.policy()?,
+                time_ms: task.time_ms,
+                message_log,
+                init_prev: self.secrets.init_secret(),
+                root_secret: &root_secret,
+            },
+            &self.identity,
+            rng,
+        )?;
+        Ok(sealed.seal)
+    }
+
+    /// Seal the welcomes the window owes and assigned to this member (E-6),
+    /// once the member follows the window. A join or a re-entry is welcomed
+    /// only if it is in a district commit of this member that the seal
+    /// lists; a catch-up only if its member is still in the group, with the
+    /// leaf the window did not change, and signed it for this window. A
+    /// catch-up's welcome is sealed to the member's leaf key too, taken from
+    /// the tree, so that its device key alone does not obtain the epoch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn welcomes(
+        &self,
+        state: &PublicState,
+        seal: &Seal,
+        commits: &[DistrictCommit],
+        task: &WindowTask,
+        requests: &Requests,
+        catch_ups: &CatchUps,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Vec<Welcome>> {
+        if seal.header.hash()? != self.seal_hash || seal.body.hash()? != seal.header.body_hash {
+            return Err(CoreError::Invalid("seal of another epoch"));
+        }
+        state.check_against(&self.header)?;
+        let hedge = self.hedge(self.header.epoch)?;
+        let mut welcomes = Vec::new();
+        for welcome in task
+            .welcomes
+            .iter()
+            .filter(|w| w.welcomer == self.occupancy)
+        {
+            let (init_key, leaf_key) = match welcome.kind {
+                WelcomeKind::CatchUp => {
+                    let request = catch_ups
+                        .get(&welcome.request)
+                        .filter(|request| request.reference() == welcome.request)
+                        .ok_or(CoreError::Invalid("missing catch-up request"))?;
+                    let leaf = state
+                        .tree
+                        .member(request.member)
+                        .ok_or(CoreError::Invalid("catch-up of a non-member"))?;
+                    if leaf.updated == self.header.epoch {
+                        return Err(CoreError::Invalid(
+                            "catch-up of a member the window changed",
+                        ));
+                    }
+                    request.verify(&self.header.gid, &seal.header.prev_interim, &leaf.device_pk)?;
+                    (
+                        request.init_key.as_slice(),
+                        Some(leaf.encryption_key.as_slice()),
+                    )
+                }
+                WelcomeKind::Join | WelcomeKind::ReEntry => {
+                    // A change of a district commit the seal lists: the
+                    // member's own, or a joiner's, which cannot welcome
+                    // (docs/specs-v0.5-draft.md section 3.4).
+                    let listed = commits.iter().any(|commit| {
+                        (commit.committer == self.occupancy
+                            || commit.committer.since == seal.header.epoch)
+                            && commit.changes.iter().any(|c| c.request == welcome.request)
+                            && seal
+                                .body
+                                .districts
+                                .contains(&(commit.district, commit.hash()))
+                    });
+                    if !listed {
+                        return Err(CoreError::Invalid("welcome for an entry not committed"));
+                    }
+                    let init_key = match (welcome.kind, requests.get(&welcome.request)) {
+                        (WelcomeKind::Join, Some(Request::Join(join))) => join.init_key.as_slice(),
+                        (WelcomeKind::ReEntry, Some(Request::ReEntry(re_entry))) => {
+                            re_entry.init_key.as_slice()
+                        }
+                        _ => return Err(CoreError::Invalid("missing request to welcome")),
+                    };
+                    (init_key, None)
+                }
+            };
+            welcomes.push(Welcome::seal(
+                &self.header.gid,
+                self.header.epoch,
+                &welcome.request,
+                init_key,
+                leaf_key,
+                self.secrets.joiner_secret(),
+                &hedge,
+                rng,
+            )?);
+        }
+        Ok(welcomes)
+    }
+
+    /// The hedge of what the member draws for the window of `epoch`: its
+    /// fresh secrets and the coins of its encapsulations
+    /// (docs/specs-v0.5-draft.md section 3.3).
+    fn hedge(&self, epoch: u64) -> CoreResult<Secret> {
+        task_hedge(self.path.leaf_key().seed(), &self.header.gid, epoch)
+    }
+
+    /// Whether the member followed a window by repair and has not yet asked
+    /// for the update that re-keys its path, which it MUST do at once
+    /// (docs/specs-v0.5-draft.md section 3.7).
+    #[must_use]
+    pub const fn needs_update(&self) -> bool {
+        self.repaired && self.pending_leaf.is_none()
+    }
+
+    /// A repair for the member at `leaf` (docs/specs-v0.5-draft.md section
+    /// 3.7): the root secret of the member's epoch, wrapped to that leaf's
+    /// key in the tree of the epoch, which it checks against its header.
+    pub fn repair(
+        &self,
+        state: &PublicState,
+        leaf: u32,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Repair> {
+        state.check_against(&self.header)?;
+        let target = state
+            .tree
+            .leaf(leaf)
+            .ok_or(CoreError::Invalid("repair for a blank leaf"))?;
+        let hedge = self.hedge(self.header.epoch)?;
+        Repair::make(
+            &self.header.gid,
+            self.header.epoch,
+            self.header.shape,
+            leaf,
+            &target.encryption_key,
+            &self.root,
+            &hedge,
+            rng,
+        )
+    }
+
+    /// Ask for a repair of the window of `packet`, which the member cannot
+    /// follow (docs/specs-v0.5-draft.md section 3.7). `packet` is its whole
+    /// packet, or its island packet with a refresh; `leaf` and `nodes` prove
+    /// the member's leaf and the published keys of its path against the
+    /// packet's tree hash. The request names the first level of the path
+    /// whose secret the window does not let the member derive: the service
+    /// blames the performer whose taint the node at that level bears.
+    pub fn repair_request(
+        &self,
+        packet: &Packet,
+        leaf: &LeafProof,
+        nodes: &[Option<ParentNode>],
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<RepairRequest> {
+        let fault = self.fault(packet, leaf, nodes)?;
+        let header = &packet.header;
+        RepairRequest::sign(
+            &self.header.gid,
+            header.epoch,
+            &header.hash()?,
+            self.occupancy,
+            fault.level,
+            &self.identity,
+            rng,
+        )
+    }
+
+    /// What the member disputes in the window of `packet`, which it cannot
+    /// follow (docs/specs-v0.5-draft.md section 3.8): the wrap at the first
+    /// level of its path that the window does not let it derive, found as
+    /// for [`Member::repair_request`], and the statement that holds about it,
+    /// which the member's prover proves with its key for the wrap's target.
+    /// A fault in a chained step, or in a step of an earlier window, names
+    /// no wrap of the window.
+    pub fn dispute_claim(
+        &self,
+        packet: &Packet,
+        leaf: &LeafProof,
+        nodes: &[Option<ParentNode>],
+    ) -> CoreResult<(Wrap, DisputeStatement)> {
+        let fault = self.fault(packet, leaf, nodes)?;
+        let epoch = packet.header.epoch;
+        let wrapped = match fault.steps.get(&fault.level) {
+            Some((made, Step::Wrap(wrapped))) if *made == epoch => wrapped,
+            _ => return Err(CoreError::Invalid("the fault names no wrap of the window")),
+        };
+        let published = |level: u8| {
+            nodes
+                .get(usize::from(level) - 1)
+                .and_then(Option::as_ref)
+                .map(|node| node.encryption_key.as_slice())
+                .ok_or(CoreError::Invalid("blank ancestor of a member"))
+        };
+        let (key, target_key) = if fault.level == 1 {
+            (
+                fault.path.leaf_key().clone(),
+                fault.path.leaf_public_key().to_vec(),
+            )
+        } else {
+            let below = fault
+                .path
+                .follow_steps(fault.level - 1, &fault.steps, &self.header.gid)?;
+            let secret = below
+                .secret(fault.level - 1)
+                .ok_or(CoreError::Invalid("unknown path secret"))?;
+            (node_key(secret)?, published(fault.level - 1)?.to_vec())
+        };
+        let node_key_published = published(fault.level)?;
+        let kind = classify(
+            &self.header.gid,
+            epoch,
+            wrapped,
+            &key,
+            &target_key,
+            node_key_published,
+        )?
+        .ok_or(CoreError::Invalid("the wrap gives its published key"))?;
+        let statement = DisputeStatement::new(
+            &self.header.gid,
+            epoch,
+            wrapped,
+            &target_key,
+            node_key_published,
+            kind,
+        )?;
+        Ok((wrapped.clone(), statement))
+    }
+
+    /// Sign a dispute of the window of `packet`: the wrap at `wrap_index`
+    /// of the task whose hash is `task`, and `proof`, a proof of `statement`
+    /// (docs/specs-v0.5-draft.md section 3.8).
+    pub fn dispute(
+        &self,
+        packet: &Packet,
+        task: Digest,
+        wrap_index: u32,
+        statement: &DisputeStatement,
+        proof: Vec<u8>,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Dispute> {
+        let header = &packet.header;
+        if header.gid != self.header.gid || header.epoch != self.header.epoch + 1 {
+            return Err(CoreError::Invalid("packet for another epoch"));
+        }
+        Dispute::sign(
+            DisputeContent {
+                gid: self.header.gid,
+                epoch: header.epoch,
+                seal_hash: header.hash()?,
+                member: self.occupancy,
+                task,
+                wrap_index,
+                kind: statement.kind,
+                proof,
+            },
+            &self.identity,
+            rng,
+        )
+    }
+
+    /// The first fault of the member's path in the window of `packet`,
+    /// checked against the published keys of its path, which `leaf` and
+    /// `nodes` prove against the packet's tree hash; `packet` is the
+    /// member's whole packet, or its island packet with a refresh.
+    fn fault(
+        &self,
+        packet: &Packet,
+        leaf: &LeafProof,
+        nodes: &[Option<ParentNode>],
+    ) -> CoreResult<Fault> {
+        let header = &packet.header;
+        if header.gid != self.header.gid
+            || header.prev_interim != self.header.interim
+            || header.epoch != self.header.epoch + 1
+        {
+            return Err(CoreError::Invalid("packet for another epoch"));
+        }
+        let shape = self.header.shape.grown(header.height)?;
+        leaf.verify(&header.tree_hash)?;
+        leaf.check_path(nodes)?;
+        let mut path = self.path.clone();
+        if packet.leaf_key != kem_pk_hash(path.leaf_public_key())? {
+            let pending = self.pending_leaf.as_ref().ok_or(LEAF_TAKEN)?;
+            if packet.leaf_key != kem_pk_hash(&pending.public_key())? {
+                return Err(LEAF_TAKEN);
+            }
+            path.set_leaf_key(pending.clone());
+        }
+        let proven = leaf
+            .leaf
+            .as_ref()
+            .filter(|_| leaf.index == self.occupancy.leaf)
+            .ok_or(CoreError::Invalid("leaf proof of another leaf"))?;
+        if proven.occupancy(leaf.index) != self.occupancy
+            || proven.encryption_key != path.leaf_public_key()
+        {
+            return Err(CoreError::Invalid("leaf proof of another member"));
+        }
+        let mut steps: EntrySteps = packet
+            .path
+            .iter()
+            .map(|(level, step)| (*level, (header.epoch, step.clone())))
+            .collect();
+        match &packet.top {
+            None => {}
+            Some(Top::Refresh(refresh)) => steps.extend(refresh.clone()),
+            Some(_) => return Err(CoreError::Invalid("a fault sought without a path")),
+        }
+        let level = path
+            .first_fault(shape.height, &steps, nodes, &self.header.gid)?
+            .ok_or(CoreError::Invalid("the window gives every key of the path"))?;
+        Ok(Fault { path, steps, level })
+    }
+
+    /// Whether the member may send in its epoch: not while an urgent
+    /// removal older than `window_urgent_ms` waits (E-7, E-16). Ordinary
+    /// removals wait for the next scheduled window without stopping anyone.
+    #[must_use]
+    pub fn may_send(&self, pending: &[PendingRemoval], now_ms: u64, window_urgent_ms: u64) -> bool {
+        !pending.iter().any(|removal| {
+            removal.urgency == Urgency::Urgent
+                && now_ms.saturating_sub(removal.recorded_ms) > window_urgent_ms
+        })
+    }
+
+    /// Ask to jump to the present (E-8): a welcome into the window that
+    /// follows the epoch whose interim transcript hash is `current_interim`.
+    /// The welcome is sealed to the new init key and to the member's leaf
+    /// key: the current one, or the pending one if a window the member
+    /// missed applied its update.
+    pub fn catch_up(
+        self,
+        current_interim: &Digest,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<(Returning, CatchUpRequest)> {
+        let init_key = KemSecret::generate(rng);
+        let request = CatchUpRequest::sign(
+            &self.header.gid,
+            self.occupancy,
+            current_interim,
+            &init_key.public_key(),
+            &self.identity,
+            rng,
+        )?;
+        let returning = Returning {
+            leaf_key: self.path_leaf_key(),
+            pending_leaf: self.pending_leaf,
+            card: self.card,
+            pending_card: self.pending_card,
+            identity: self.identity,
+            occupancy: self.occupancy,
+            init_key,
+            request: request.reference(),
+            anchor: self.header,
+            re_entry: false,
+        };
+        Ok((returning, request))
+    }
+
+    /// Ask to re-enter the member's leaf with a new leaf key (E-8), to be
+    /// welcomed by a member or to seal the window itself.
+    pub fn re_enter(self, rng: &mut impl CryptoRngCore) -> CoreResult<(Returning, ReEntryRequest)> {
+        let leaf_key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng);
+        let init_key = KemSecret::generate(rng);
+        let request = ReEntryRequest::sign(
+            &self.header.gid,
+            self.occupancy,
+            self.path.leaf_public_key(),
+            LeafKeys {
+                encryption_key: &leaf_key.public_key(),
+                card: &card.card(),
+            },
+            &init_key.public_key(),
+            &self.identity,
+            rng,
+        )?;
+        let returning = Returning {
+            identity: self.identity,
+            occupancy: self.occupancy,
+            leaf_key,
+            pending_leaf: None,
+            card,
+            pending_card: None,
+            init_key,
+            request: request.reference(),
+            anchor: self.header,
+            re_entry: true,
+        };
+        Ok((returning, request))
+    }
+
+    fn path_leaf_key(&self) -> KemSecret {
+        self.path.leaf_key().clone()
+    }
+}
+
+/// What an entrant produced when it sealed a window.
+pub struct EntrantSealed {
+    pub commits: Vec<DistrictCommit>,
+    pub city_tasks: Vec<CityTask>,
+    pub seal: Seal,
+    pub welcomes: Vec<Welcome>,
+    pub member: Member,
+}
+
+impl core::fmt::Debug for EntrantSealed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EntrantSealed")
+            .field("commits", &self.commits.len())
+            .field("welcomes", &self.welcomes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A device that asked to join.
+pub struct Joiner {
+    identity: DeviceIdentity,
+    leaf_key: KemSecret,
+    card: CardKey,
+    init_key: KemSecret,
+    request: JoinRequest,
+    anchor: EpochHeader,
+    /// The authorizer's key, for a joiner that trusts it: it may enter with
+    /// the authorizer's checkpoint instead of a chain of seals.
+    authorizer_pk: Option<Vec<u8>>,
+}
+
+impl core::fmt::Debug for Joiner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Joiner")
+            .field("anchor_epoch", &self.anchor.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Joiner {
+    /// A joiner anchored on `anchor` (a checkpointed epoch, E-10), with an
+    /// admission, or without one for an open group. Its request may enter
+    /// until epoch `not_after_epoch`.
+    pub fn new(
+        identity: DeviceIdentity,
+        admission: Option<&Admission>,
+        not_after_epoch: u64,
+        anchor: EpochHeader,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<Self> {
+        let leaf_key = KemSecret::generate(rng);
+        let card = CardKey::generate(rng);
+        let init_key = KemSecret::generate(rng);
+        let request = JoinRequest::sign(
+            &anchor.gid,
+            &identity,
+            LeafKeys {
+                encryption_key: &leaf_key.public_key(),
+                card: &card.card(),
+            },
+            &init_key.public_key(),
+            not_after_epoch,
+            admission,
+            rng,
+        )?;
+        Ok(Self {
+            identity,
+            leaf_key,
+            card,
+            init_key,
+            request,
+            anchor,
+            authorizer_pk: None,
+        })
+    }
+
+    /// Trust the authorizer whose key is `authorizer_pk` (from the joiner's
+    /// invitation, say): the joiner may then enter with its checkpoint of
+    /// the epoch it enters, instead of the chain of seals from its anchor
+    /// (docs/specs-v0.5-draft.md section 4.9).
+    pub fn trust_authorizer(&mut self, authorizer_pk: Vec<u8>) {
+        self.authorizer_pk = Some(authorizer_pk);
+    }
+
+    /// The join request.
+    #[must_use]
+    pub const fn request(&self) -> &JoinRequest {
+        &self.request
+    }
+
+    /// The epoch the joiner has checked up to.
+    #[must_use]
+    pub const fn anchor(&self) -> &EpochHeader {
+        &self.anchor
+    }
+
+    /// Check the chain of seals from the anchor forward.
+    pub fn follow(&mut self, links: &[SealLink]) -> CoreResult<()> {
+        self.anchor = follow_all(&self.anchor, links)?;
+        Ok(())
+    }
+
+    /// The occupancy the joiner takes in the window `task`, `[leaf, n]`:
+    /// that of its join among the window's changes.
+    pub fn occupancy_in(&self, task: &WindowTask) -> CoreResult<Occupancy> {
+        let reference = self.request.reference();
+        let change = task
+            .changes
+            .iter()
+            .find(|change| change.request == reference && change.kind == ChangeKind::Join)
+            .ok_or(CoreError::Invalid("join not in the window"))?;
+        Ok(Occupancy {
+            leaf: change.leaf,
+            since: task.epoch,
+        })
+    }
+
+    /// Commit district `district` of the window `task`, which the joiner
+    /// enters (docs/specs-v0.5-draft.md section 3.3). The joiner has followed
+    /// the chain of seals to the epoch before the window
+    /// ([`Joiner::follow`]); it checks the entries of the district, hedges
+    /// with its leaf seed, and erases what it drew once the commit is sent.
+    pub fn commit_district(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+        district: u32,
+        requests: &Requests,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<DistrictCommit> {
+        let (occupancy, window, hedge) = self.performer(state, task)?;
+        if task.committers.get(&district) != Some(&occupancy) {
+            return Err(CoreError::Unauthorized("not the district's committer"));
+        }
+        let (commit, drawn) = build_district(
+            state,
+            &window,
+            district,
+            requests,
+            occupancy,
+            &self.identity,
+            &hedge,
+            rng,
+        )?;
+        drop(drawn);
+        Ok(commit)
+    }
+
+    /// Perform the city task of `part` of the window `task`, which the
+    /// joiner enters (docs/specs-v0.5-draft.md sections 3.2 and 3.3), over
+    /// what `work` shows; as [`Joiner::commit_district`].
+    pub fn commit_city(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+        part: CityPart,
+        work: &WindowWork<'_>,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<CityTask> {
+        let (occupancy, window, hedge) = self.performer(state, task)?;
+        if task.city.get(&part) != Some(&occupancy) {
+            return Err(CoreError::Unauthorized("not the city task's performer"));
+        }
+        let (below, before) = work.base(state, &window, part)?;
+        let (city_task, drawn) = build_city_task(
+            &CityTaskInput {
+                state,
+                window: &window,
+                part,
+                below: &below,
+                before: &before,
+                performer: occupancy,
+            },
+            &self.identity,
+            &hedge,
+            rng,
+        )?;
+        drop(drawn);
+        Ok(city_task)
+    }
+
+    /// What a joiner checks before a task of the window `task`: the public
+    /// state against the last header of its chain of seals, a member window,
+    /// and its join among the window's changes. Returns its occupancy, the
+    /// window and the hedge of its secrets.
+    fn performer(
+        &self,
+        state: &PublicState,
+        task: &WindowTask,
+    ) -> CoreResult<(Occupancy, WindowShape, Secret)> {
+        state.check_against(&self.anchor)?;
+        if task.entrant.is_some() {
+            return Err(CoreError::Unauthorized("a task of an entrant window"));
+        }
+        let occupancy = self.occupancy_in(task)?;
+        let window = task.window(state)?;
+        let hedge = task_hedge(self.leaf_key.seed(), &state.gid, task.epoch)?;
+        Ok((occupancy, window, hedge))
+    }
+
+    /// Check an entry and open it without entering: a joiner that fails with
+    /// an entry by island asks for another (docs/specs-v0.5-draft.md section
+    /// 3.6).
+    pub fn check_entry(&self, entry: &Entry) -> CoreResult<()> {
+        self.open(entry).map(|_| ())
+    }
+
+    /// Enter the epoch a member sealed, with its welcome.
+    pub fn enter(self, entry: &Entry) -> CoreResult<Member> {
+        let (occupancy, opened) = self.open(entry)?;
+        opened.into_member(self.identity, occupancy, self.card)
+    }
+
+    fn open(&self, entry: &Entry) -> CoreResult<(Occupancy, Opened)> {
+        let occupancy = Occupancy {
+            leaf: entry.leaf.index,
+            since: entry.epoch()?,
+        };
+        let expected = self.leaf_key.public_key();
+        let card = self.card.card();
+        let admission_hash = self.request.token();
+        let opened = open_entry(
+            &EnterInput {
+                device_pk: self.identity.public_key(),
+                occupancy,
+                leaf_key: &self.leaf_key,
+                jump: false,
+                init_key: &self.init_key,
+                request: self.request.reference(),
+                anchor: &self.anchor,
+                authorizer_pk: self.authorizer_pk.as_deref(),
+                entry,
+            },
+            |leaf| {
+                leaf.encryption_key == expected
+                    && leaf.card == card
+                    && leaf.admission_hash == admission_hash
+            },
+        )?;
+        Ok((occupancy, opened))
+    }
+
+    /// Seal the window as its entrant (nobody online): commit every district,
+    /// seal with an external init and the message log the DS gave it, and
+    /// welcome the others.
+    pub fn seal_window(
+        self,
+        state: &PublicState,
+        task: &WindowTask,
+        requests: &Requests,
+        catch_ups: &CatchUps,
+        message_log: MessageLog,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<EntrantSealed> {
+        let reference = self.request.reference();
+        let leaf = task
+            .changes
+            .iter()
+            .find(|change| change.request == reference)
+            .ok_or(CoreError::Invalid("join not in the window"))?
+            .leaf;
+        seal_as_entrant(
+            EntrantInput {
+                identity: self.identity,
+                occupancy: Occupancy {
+                    leaf,
+                    since: task.epoch,
+                },
+                leaf_key: self.leaf_key,
+                card: self.card,
+                request: reference,
+                anchor: &self.anchor,
+                message_log,
+            },
+            state,
+            task,
+            requests,
+            catch_ups,
+            rng,
+        )
+    }
+}
+
+/// A member coming back after an absence (E-8).
+pub struct Returning {
+    identity: DeviceIdentity,
+    occupancy: Occupancy,
+    leaf_key: KemSecret,
+    /// For a jump, the leaf key of an update the member requested before it
+    /// left, which a window it missed may have applied.
+    pending_leaf: Option<KemSecret>,
+    card: CardKey,
+    /// The card drawn with the pending leaf key.
+    pending_card: Option<CardKey>,
+    init_key: KemSecret,
+    request: Digest,
+    anchor: EpochHeader,
+    re_entry: bool,
+}
+
+impl core::fmt::Debug for Returning {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Returning")
+            .field("occupancy", &self.occupancy)
+            .field("anchor_epoch", &self.anchor.epoch)
+            .field("re_entry", &self.re_entry)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Returning {
+    /// The member's occupancy.
+    #[must_use]
+    pub const fn occupancy(&self) -> Occupancy {
+        self.occupancy
+    }
+
+    /// The epoch the member has checked up to.
+    #[must_use]
+    pub const fn anchor(&self) -> &EpochHeader {
+        &self.anchor
+    }
+
+    /// Check the chain of seals from the anchor forward.
+    pub fn follow(&mut self, links: &[SealLink]) -> CoreResult<()> {
+        self.anchor = follow_all(&self.anchor, links)?;
+        Ok(())
+    }
+
+    /// Enter the present with a welcome: a jump (the leaf key is unchanged,
+    /// or the pending one if a window the member missed applied its update)
+    /// or a re-entry a member sealed (the new leaf key).
+    pub fn enter(self, entry: &Entry) -> CoreResult<Member> {
+        let (opened, pending) = self.open(entry)?;
+        let occupancy = self.occupancy;
+        let card = match self.pending_card {
+            Some(card) if pending => card,
+            _ => self.card,
+        };
+        opened.into_member(self.identity, occupancy, card)
+    }
+
+    /// Check an entry and open it without entering (docs/specs-v0.5-draft.md
+    /// section 3.6).
+    pub fn check_entry(&self, entry: &Entry) -> CoreResult<()> {
+        self.open(entry).map(|_| ())
+    }
+
+    /// Open an entry; says whether the leaf holds the pending leaf key.
+    fn open(&self, entry: &Entry) -> CoreResult<(Opened, bool)> {
+        let re_entry = self.re_entry;
+        let entry_epoch = entry
+            .links
+            .last()
+            .ok_or(CoreError::Invalid("entry without a seal"))?
+            .proof
+            .header
+            .epoch;
+        let in_tree = entry
+            .leaf
+            .leaf
+            .as_ref()
+            .map(|leaf| leaf.encryption_key.as_slice());
+        let (leaf_key, card, pending) = match (&self.pending_leaf, &self.pending_card) {
+            (Some(pending), Some(card))
+                if !re_entry && in_tree == Some(pending.public_key().as_slice()) =>
+            {
+                (pending, card, true)
+            }
+            _ => (&self.leaf_key, &self.card, false),
+        };
+        let expected = leaf_key.public_key();
+        let card = card.card();
+        let opened = open_entry(
+            &EnterInput {
+                device_pk: self.identity.public_key(),
+                occupancy: self.occupancy,
+                leaf_key,
+                jump: !re_entry,
+                init_key: &self.init_key,
+                request: self.request,
+                anchor: &self.anchor,
+                authorizer_pk: None,
+                entry,
+            },
+            |leaf| {
+                leaf.encryption_key == expected
+                    && leaf.card == card
+                    && (!re_entry || leaf.updated == entry_epoch)
+            },
+        )?;
+        Ok((opened, pending))
+    }
+
+    /// Seal the window as its entrant (a re-entry with nobody online).
+    pub fn seal_window(
+        self,
+        state: &PublicState,
+        task: &WindowTask,
+        requests: &Requests,
+        catch_ups: &CatchUps,
+        message_log: MessageLog,
+        rng: &mut impl CryptoRngCore,
+    ) -> CoreResult<EntrantSealed> {
+        if !self.re_entry {
+            return Err(CoreError::Invalid("a jump does not seal"));
+        }
+        seal_as_entrant(
+            EntrantInput {
+                identity: self.identity,
+                occupancy: self.occupancy,
+                leaf_key: self.leaf_key,
+                card: self.card,
+                request: self.request,
+                anchor: &self.anchor,
+                message_log,
+            },
+            state,
+            task,
+            requests,
+            catch_ups,
+            rng,
+        )
+    }
+}
+
+fn follow_all(anchor: &EpochHeader, links: &[SealLink]) -> CoreResult<EpochHeader> {
+    let mut header = anchor.clone();
+    for link in links {
+        header = header.follow(link)?;
+    }
+    Ok(header)
+}
+
+struct EnterInput<'a> {
+    device_pk: &'a [u8],
+    occupancy: Occupancy,
+    leaf_key: &'a KemSecret,
+    /// A jump: the welcome is sealed to the leaf key too.
+    jump: bool,
+    init_key: &'a KemSecret,
+    request: Digest,
+    anchor: &'a EpochHeader,
+    /// The authorizer's key, if the entrant trusts it for a checkpointed
+    /// entry.
+    authorizer_pk: Option<&'a [u8]>,
+    entry: &'a Entry,
+}
+
+/// What opening an entry gives: everything a member holds but its device
+/// key.
+struct Opened {
+    path: MemberPath,
+    root: Secret,
+    header: EpochHeader,
+    /// The header of the epoch before, unless the entry was checkpointed.
+    previous: Option<EpochHeader>,
+    /// The log of the changes of the window that created the epoch.
+    membership_log: MembershipLog,
+    seal_hash: Digest,
+    secrets: EpochSecrets,
+}
+
+impl Opened {
+    fn into_member(
+        mut self,
+        identity: DeviceIdentity,
+        occupancy: Occupancy,
+        card: CardKey,
+    ) -> CoreResult<Member> {
+        let messages = EpochMessages::new(
+            &self.header.gid,
+            self.header.epoch,
+            self.header.shape.height,
+            occupancy.leaf,
+            &*self.secrets.take_msg_secret()?,
+        )?;
+        Ok(Member {
+            identity,
+            card,
+            occupancy,
+            path: self.path,
+            root: self.root,
+            header: self.header,
+            previous: self.previous,
+            seal_hash: self.seal_hash,
+            secrets: self.secrets,
+            messages,
+            previous_messages: None,
+            checkpoint_key: None,
+            membership_log: self.membership_log,
+            pending_leaf: None,
+            pending_card: None,
+            repaired: false,
+        })
+    }
+}
+
+/// Check an entry and open it, without consuming the entrant: a client that
+/// fails with the relay element of its island asks for another entry.
+fn open_entry(
+    input: &EnterInput<'_>,
+    expected_leaf: impl Fn(&LeafNode) -> bool,
+) -> CoreResult<Opened> {
+    let entry = input.entry;
+    // The epoch it enters: by the chain of seals from the anchor, or by the
+    // checkpoint of an authorizer the entrant trusts (section 4.9).
+    let (header, previous, seal_hash, confirmed, tag, membership_log) = match &entry.checkpoint {
+        Some(checkpointed) => {
+            let authorizer_pk = input.authorizer_pk.ok_or(CoreError::Unauthorized(
+                "a checkpoint of an authorizer the entrant does not trust",
+            ))?;
+            if !entry.links.is_empty() {
+                return Err(CoreError::Invalid("entry with seals and a checkpoint"));
+            }
+            let (header, context) = checkpointed.header(&input.anchor.gid, authorizer_pk)?;
+            (
+                header,
+                None,
+                checkpointed.seal.hash()?,
+                context.confirmed_transcript_hash,
+                checkpointed.checkpoint.tag,
+                checkpointed.seal.membership_log,
+            )
+        }
+        None => {
+            let (last, before) = entry
+                .links
+                .split_last()
+                .ok_or(CoreError::Invalid("entry without a seal"))?;
+            let previous = follow_all(input.anchor, before)?;
+            let header = previous.follow(last)?;
+            let seal_hash = last.proof.header.hash()?;
+            let confirmed = confirmed_transcript_hash(&previous.interim, &seal_hash)?;
+            (
+                header,
+                Some(previous),
+                seal_hash,
+                confirmed,
+                last.proof.tag,
+                last.proof.header.membership_log,
+            )
+        }
+    };
+    entry.leaf.verify(&header.tree_hash)?;
+    let leaf = entry
+        .leaf
+        .leaf
+        .as_ref()
+        .ok_or(CoreError::Invalid("entry leaf"))?;
+    if entry.leaf.occupancy() != Some(input.occupancy)
+        || leaf.device_pk != input.device_pk
+        || !expected_leaf(leaf)
+    {
+        return Err(CoreError::Invalid("entry leaf"));
+    }
+    let mut path = MemberPath::new(input.occupancy.leaf, input.leaf_key.clone());
+    let shape = header.shape;
+    let (secrets, root) = match &entry.top {
+        None => {
+            entry.leaf.check_path(&entry.nodes)?;
+            let secrets = path.recover(shape.height, &entry.steps, &header.gid)?;
+            MemberPath::check_keys(&secrets, &entry.nodes)?;
+            let root = secrets
+                .secret(shape.height)
+                .ok_or(CoreError::Invalid("unknown root secret"))?
+                .clone();
+            (secrets, root)
+        }
+        Some(top) => {
+            // By island (docs/specs-v0.5-draft.md section 3.6): the path up
+            // to the island root, then the root secret from the top, whose
+            // key must be the root's.
+            let level = shape.island_level();
+            if !shape.has_islands() || entry.nodes.len() != usize::from(level) {
+                return Err(CoreError::Invalid("entry by island"));
+            }
+            entry.leaf.check_island_path(&entry.nodes, &top.root)?;
+            let secrets = path.recover(level, &entry.steps, &header.gid)?;
+            MemberPath::check_keys(&secrets, &entry.nodes)?;
+            let island_secret = secrets
+                .secret(level)
+                .ok_or(CoreError::Invalid("unknown island secret"))?;
+            let island = shape.island_of(input.occupancy.leaf);
+            let root = match &top.top {
+                Top::Relay(element) => element.open(
+                    &RelayContext {
+                        gid: header.gid,
+                        epoch: header.epoch,
+                        island_bits: shape.island_bits,
+                        island,
+                        interim: header.interim,
+                    },
+                    island_secret,
+                )?,
+                Top::Flat(wrapped) => open_flat(
+                    &header.gid,
+                    header.epoch,
+                    shape,
+                    island,
+                    wrapped,
+                    island_secret,
+                )?,
+                Top::Refresh(_) => {
+                    return Err(CoreError::Invalid("an entry by refresh carries its path"));
+                }
+                Top::Repair(_) => return Err(CoreError::Invalid("an entry by repair")),
+            };
+            if node_key(&root)?.public_key() != top.root.encryption_key {
+                return Err(CoreError::Invalid("entry root"));
+            }
+            (secrets, root)
+        }
+    };
+    let welcome = &entry.welcome;
+    if welcome.gid != header.gid
+        || welcome.epoch != header.epoch
+        || welcome.request != input.request
+    {
+        return Err(CoreError::Invalid("welcome for another entry"));
+    }
+    let joiner = welcome.open(input.init_key, input.jump.then(|| path.leaf_key()))?;
+    let secrets_of_epoch = EpochSecrets::from_joiner_secret(&joiner)?;
+    secrets_of_epoch
+        .check_confirmation_tag(&confirmed, &tag)
+        .map_err(|_| CoreError::Invalid("welcome does not match the seal"))?;
+    if secrets_of_epoch.external_key()?.public_key() != header.external_pk {
+        return Err(CoreError::Invalid("welcome does not match the seal"));
+    }
+    path.set_path(secrets);
+    Ok(Opened {
+        path,
+        root,
+        header,
+        previous,
+        membership_log,
+        seal_hash,
+        secrets: secrets_of_epoch,
+    })
+}
+
+struct EntrantInput<'a> {
+    identity: DeviceIdentity,
+    occupancy: Occupancy,
+    leaf_key: KemSecret,
+    card: CardKey,
+    request: Digest,
+    anchor: &'a EpochHeader,
+    /// The log of the anchor epoch's messages, which the DS gave the entrant.
+    message_log: MessageLog,
+}
+
+fn seal_as_entrant(
+    input: EntrantInput<'_>,
+    state: &PublicState,
+    task: &WindowTask,
+    requests: &Requests,
+    catch_ups: &CatchUps,
+    rng: &mut impl CryptoRngCore,
+) -> CoreResult<EntrantSealed> {
+    state.check_against(input.anchor)?;
+    if task.entrant != Some(input.request)
+        || task.sealer != input.occupancy
+        || task
+            .committers
+            .values()
+            .chain(task.city.values())
+            .any(|performer| *performer != input.occupancy)
+        || task.welcomes.iter().any(|w| w.welcomer != input.occupancy)
+    {
+        return Err(CoreError::Invalid("entrant task"));
+    }
+    let window = task.window(state)?;
+    let sealer = check_sealer(
+        state,
+        &window,
+        SealKind::Entrant,
+        input.occupancy,
+        Some(&input.request),
+        requests,
+    )?;
+    // Everything the entrant draws is hedged with its leaf seed
+    // (docs/specs-v0.5-draft.md section 3.3), the external init included.
+    let hedge = task_hedge(input.leaf_key.seed(), &state.gid, window.epoch)?;
+    let (kem_output, init_prev) =
+        external_init(&state.gid, window.epoch, &state.external_pk, &hedge, rng)?;
+    let mut commits = Vec::with_capacity(window.districts.len());
+    let mut path: BTreeMap<u8, Secret> = BTreeMap::new();
+    for district in &window.districts {
+        let (commit, drawn) = build_district(
+            state,
+            &window,
+            *district,
+            requests,
+            input.occupancy,
+            &input.identity,
+            &hedge,
+            rng,
+        )?;
+        path.extend(drawn.path_secrets(input.occupancy.leaf));
+        commits.push(commit);
+    }
+    let delta = check_districts(state, &window, &commits, requests, &sealer, false)?;
+    let mut city_tasks: Vec<CityTask> = Vec::with_capacity(window.parts.len());
+    for part in &window.parts {
+        let work = WindowWork {
+            commits: &commits,
+            city_tasks: &city_tasks,
+            requests,
+        };
+        let (below, before) = work.base(state, &window, *part)?;
+        let (city_task, drawn) = build_city_task(
+            &CityTaskInput {
+                state,
+                window: &window,
+                part: *part,
+                below: &below,
+                before: &before,
+                performer: input.occupancy,
+            },
+            &input.identity,
+            &hedge,
+            rng,
+        )?;
+        path.extend(drawn.path_secrets(input.occupancy.leaf));
+        city_tasks.push(city_task);
+    }
+    let root_secret = path
+        .get(&window.shape.height)
+        .ok_or(CoreError::Invalid("entrant without the root"))?
+        .clone();
+    let sealed = finish_seal(
+        SealDraft {
+            state,
+            window: &window,
+            commits: &commits,
+            requests,
+            sealer: &sealer,
+            entrant: Some(EntrantInit {
+                kem_output,
+                request: input.request,
+            }),
+            delta: with_city(delta, &city_tasks),
+            city_tasks: &city_tasks,
+            policy: task.policy()?,
+            time_ms: task.time_ms,
+            message_log: input.message_log,
+            init_prev: &init_prev,
+            root_secret: &root_secret,
+        },
+        &input.identity,
+        rng,
+    )?;
+    let mut welcomes = Vec::new();
+    for welcome in &task.welcomes {
+        if welcome.request == input.request {
+            continue;
+        }
+        let (init_key, leaf_key) = match (welcome.kind, requests.get(&welcome.request)) {
+            (WelcomeKind::Join, Some(Request::Join(join))) => (join.init_key.as_slice(), None),
+            (WelcomeKind::ReEntry, Some(Request::ReEntry(re_entry))) => {
+                (re_entry.init_key.as_slice(), None)
+            }
+            (WelcomeKind::CatchUp, _) => {
+                let request = catch_ups
+                    .get(&welcome.request)
+                    .filter(|request| request.reference() == welcome.request)
+                    .ok_or(CoreError::Invalid("missing catch-up request"))?;
+                if window.removed.contains(&request.member)
+                    || window
+                        .all_changes()
+                        .any(|change| change.leaf == request.member.leaf)
+                {
+                    return Err(CoreError::Invalid(
+                        "catch-up of a member the window changes",
+                    ));
+                }
+                let leaf = state
+                    .tree
+                    .member(request.member)
+                    .ok_or(CoreError::Invalid("catch-up of a non-member"))?;
+                request.verify(&state.gid, &state.interim, &leaf.device_pk)?;
+                (
+                    request.init_key.as_slice(),
+                    Some(leaf.encryption_key.as_slice()),
+                )
+            }
+            _ => return Err(CoreError::Invalid("missing request to welcome")),
+        };
+        if matches!(welcome.kind, WelcomeKind::Join | WelcomeKind::ReEntry)
+            && !window
+                .all_changes()
+                .any(|change| change.request == welcome.request)
+        {
+            return Err(CoreError::Invalid("welcome for an entry not in the window"));
+        }
+        welcomes.push(Welcome::seal(
+            &state.gid,
+            window.epoch,
+            &welcome.request,
+            init_key,
+            leaf_key,
+            sealed.secrets.joiner_secret(),
+            &hedge,
+            rng,
+        )?);
+    }
+    // The entrant's leaf changed, so the window re-keyed its whole path.
+    let mut member_path = MemberPath::new(input.occupancy.leaf, input.leaf_key);
+    member_path.set_path(PathSecrets::at(path, window.epoch));
+    let seal_hash = sealed.seal.header.hash()?;
+    let mut secrets = sealed.secrets;
+    let messages = EpochMessages::new(
+        &sealed.header.gid,
+        sealed.header.epoch,
+        sealed.header.shape.height,
+        input.occupancy.leaf,
+        &*secrets.take_msg_secret()?,
+    )?;
+    let member = Member {
+        identity: input.identity,
+        card: input.card,
+        occupancy: input.occupancy,
+        path: member_path,
+        root: root_secret,
+        header: sealed.header,
+        previous: Some(input.anchor.clone()),
+        seal_hash,
+        secrets,
+        messages,
+        previous_messages: None,
+        checkpoint_key: None,
+        membership_log: sealed.seal.header.membership_log,
+        pending_leaf: None,
+        pending_card: None,
+        repaired: false,
+    };
+    Ok(EntrantSealed {
+        commits,
+        city_tasks,
+        seal: sealed.seal,
+        welcomes,
+        member,
+    })
+}

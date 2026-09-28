@@ -1,0 +1,49 @@
+(* Scenario ILOT_ENTRANT_JOIN: nobody is online and a joiner enters alone,
+   in a window with no removal; the top is not renewed.
+
+   A is a member of epoch 1, offline. D was removed by window 1: it knows
+   the secrets of epoch 0, not those of epoch 1, whose window secret went
+   to îlots D was no longer in; it works with the server, which is the
+   network here. J, admitted by an admin, is the entrant of window 2: it
+   seals a fresh secret X to the external key of epoch 1 (the external
+   init), re-keys its own path in its îlot, derives epoch 2 from X alone
+   (the commit secret is a public constant, since no window secret is
+   drawn), and signs its seal. When A comes back, it checks J's admission
+   and J's signature of the seal, opens X with the external key of epoch 1,
+   derives epoch 2 and checks the tag. J and A send messages in epoch 2.
+
+   Expected: proved, both messages. Only members of epoch 1 can open X,
+   and A accepts only a window sealed by an admitted entrant. *)
+
+free skAdm: skey [private].
+
+free MJ, MA: bitstring [private].
+query attacker(MJ).
+query attacker(MA).
+
+process
+  new es0: key; new r1: key; new skJ: skey; new x: key; new q: key;
+  let g1 = (N1, zero) in
+  let es1 = epoch_secret(joiner_secret(init_secret(es0), commit_secret(r1), g1)) in
+  (* What D gives the server; the public keys. *)
+  out(c, (es0, spk(skAdm), spk(skJ), external_pk(es1)));
+  (
+    (* Entrant J. *)
+    let admission = sign(skAdm, (L_join, spk(skJ))) in
+    let xi = seal(external_pk(es1), q, N2, x) in
+    let g2 = (N2, xi, spk(skJ)) in
+    let es2 = epoch_secret(joiner_secret(x, commit_secret(zero), g2)) in
+    let tg = tag(es2, g2) in
+    out(c, (spk(skJ), admission, xi, g2, tg, sign(skJ, (L_seal, g2, tg))));
+    out(c, aenc(msg_key(es2), MJ))
+  ) | (
+    (* Member A, back online. *)
+    in(c, (pkJ: spkey, adm: bitstring, xi2: bitstring, g: bitstring, tg2: bitstring, sg: bitstring));
+    if checksign(spk(skAdm), (L_join, pkJ), adm) = true then
+    if checksign(pkJ, (L_seal, g, tg2), sg) = true then
+    let (=N2, =xi2, =pkJ) = g in
+    let x2 = open(external_sk(es1), N2, xi2) in
+    let es = epoch_secret(joiner_secret(x2, commit_secret(zero), g)) in
+    if tag(es, g) = tg2 then
+    out(c, aenc(msg_key(es), MA))
+  )

@@ -1,0 +1,22 @@
+(* Scenario SENDER_HIDDEN: the delivery service does not learn which member
+   sent a message.
+
+   Members A (leaf LA) and B (leaf LB) share the epoch secret; their sender
+   cards are public, in their leaves. One of them sends a message, framed as
+   an MLS PrivateMessage: the sender data (leaf, generation) is encrypted
+   under a key derived from the epoch's sender-data secret, with a fresh
+   nonce; the content and its card signature are encrypted under the
+   sender's key from the secret tree. The delivery service sees the result
+   and must not tell whether A or B sent it (observational equivalence
+   between the two). *)
+
+free cardA, cardB: skey [private].
+
+process
+  new es: key; new m: bitstring; new nonce: bitstring;
+  out(c, (spk(cardA), spk(cardB)));
+  let leaf = choice[LA, LB] in
+  let card = choice[cardA, cardB] in
+  let k_sender = kdf(es, L_sender_data) in
+  let k_msg = kdf(msg_key(es), leaf) in
+  out(c, (aenc(k_sender, (nonce, leaf)), aenc(k_msg, (m, sign(card, (L_card, m))))))

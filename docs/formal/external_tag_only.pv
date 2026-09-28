@@ -1,0 +1,34 @@
+(* Scenario EXTERNAL-TAG: the delivery service forges an epoch sealed "by an
+   entrant", for a member that checks only the confirmation tag.
+
+   A and B share epoch 1. Its external public key is public, as it must be
+   for entrants. An honest entrant J seals window 2; A accepts any window
+   whose wrap it can open and whose tag checks, deriving the init secret
+   from the external init, without checking who sealed it. *)
+
+free MA: bitstring [private].
+query attacker(MA).
+
+event AcceptedA(key).
+query es: key; event(AcceptedA(es)).
+
+process
+  new lsA: key; new lsB: key; new es1: key;
+  out(c, (leaf_pk(lsA), leaf_pk(lsB), external_pk(es1)));
+  (
+    new r2: key; new init_ext: key; new qa: key; new qb: key; new qx: key;
+    let ct = wrap(external_pk(es1), qx, init_ext) in
+    let gc2 = (N2, node_pk(r2), ct) in
+    let es2 = epoch_secret(joiner_secret(init_ext, r2, gc2)) in
+    out(c, (wrap(leaf_pk(lsA), qa, r2), wrap(leaf_pk(lsB), qb, r2), gc2, tag(es2, gc2)))
+  ) | (
+    in(c, (w: bitstring, gc2: bitstring, tg: bitstring));
+    let (=N2, pkr: kpk, ct: bitstring) = gc2 in
+    let r2 = unwrap(leaf_sk(lsA), w) in
+    if node_pk(r2) = pkr then
+    let init_ext = unwrap(external_sk(es1), ct) in
+    let es2 = epoch_secret(joiner_secret(init_ext, r2, gc2)) in
+    if tag(es2, gc2) = tg then
+    event AcceptedA(es2);
+    out(c, aenc(msg_key(es2), MA))
+  )

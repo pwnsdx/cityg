@@ -30,10 +30,10 @@ Related to #(issue number)
 
 Describe how you tested your changes:
 
-- [ ] All existing tests pass (`cargo test --all`)
+- [ ] All existing tests pass (`cargo test --workspace`)
 - [ ] Added new tests for new functionality
-- [ ] Manual testing performed (describe scenarios)
-- [ ] Server-blindness verification passed (`./scripts/verify_no_secrets.sh`)
+- [ ] Scale test run if the tree, the re-key or the delivery service changed (`cargo test -p cityg-core --release --test scale -- --ignored`)
+- [ ] Delivery-service blindness verification passed (`./scripts/verify_no_secrets.sh`)
 
 ## Documentation
 
@@ -55,10 +55,11 @@ Describe how you tested your changes:
 ## Protocol Changes
 
 - [ ] No protocol changes
-- [ ] Protocol specification updated (`docs/specs-unified-fs.md`)
-- [ ] Protocol docs updated (`docs/protocol/*.md`)
-- [ ] Backwards compatible
-- [ ] Breaking protocol change (requires coordination)
+- [ ] Specification updated first (`docs/specs.md`); new labels and contexts registered (section 17)
+- [ ] Design decision recorded in `docs/design.md` if the change affects one
+- [ ] Formal model updated if the key schedule, taints, removals, joins or entrants changed (`docs/formal/`)
+- [ ] Test vectors regenerated if an encoding or a derivation changed (`docs/vectors/`)
+- [ ] New profile version (any change to an encoding, label, context, algorithm or parameter)
 
 ## Performance Impact
 
